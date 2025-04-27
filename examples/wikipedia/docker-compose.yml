@@ -1,7 +1,7 @@
 version: "3.7"
 
 services:
-  repo:
+  workflows:
     build: "."
     volumes:
       - ".:/app"
@@ -10,7 +10,7 @@ services:
       PROJECT: project_1
       WORKSPACE: dev/two
       HOST: host.docker.internal:7070
-      MODULE: wikipedia.repo
+      MODULE: wikipedia.workflows
       VERSION: 1
     init: true
     extra_hosts:
