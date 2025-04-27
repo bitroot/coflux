@@ -48,7 +48,7 @@ defmodule Coflux.Orchestration.Server do
               # external_id -> session_id
               session_ids: %{},
 
-              # {repository, target} -> %{type, session_ids}
+              # {module, target} -> %{type, session_ids}
               targets: %{},
 
               # ref -> topic
@@ -249,12 +249,12 @@ defmodule Coflux.Orchestration.Server do
         state =
           case Runs.get_pending_executions_for_workspace(state.db, workspace_id) do
             {:ok, executions} ->
-              Enum.reduce(executions, state, fn {execution_id, _run_id, repository}, state ->
+              Enum.reduce(executions, state, fn {execution_id, _run_id, module}, state ->
                 case record_and_notify_result(
                        state,
                        execution_id,
                        :cancelled,
-                       repository
+                       module
                      ) do
                   {:ok, state} -> state
                   {:error, :already_recorded} -> state
@@ -363,12 +363,12 @@ defmodule Coflux.Orchestration.Server do
           :ok ->
             state =
               manifests
-              |> Enum.reduce(state, fn {repository, manifest}, state ->
+              |> Enum.reduce(state, fn {module, manifest}, state ->
                 state =
                   Enum.reduce(manifest.workflows, state, fn {target_name, target}, state ->
                     notify_listeners(
                       state,
-                      {:workflow, repository, target_name, workspace_id},
+                      {:workflow, module, target_name, workspace_id},
                       {:target, target}
                     )
                   end)
@@ -377,7 +377,7 @@ defmodule Coflux.Orchestration.Server do
                   Enum.reduce(manifest.sensors, state, fn {target_name, target}, state ->
                     notify_listeners(
                       state,
-                      {:sensor, repository, target_name, workspace_id},
+                      {:sensor, module, target_name, workspace_id},
                       {:target, target}
                     )
                   end)
@@ -385,14 +385,14 @@ defmodule Coflux.Orchestration.Server do
                 state
               end)
               |> notify_listeners(
-                {:repositories, workspace_id},
+                {:modules, workspace_id},
                 {:manifests, manifests}
               )
               |> notify_listeners(
                 {:targets, workspace_id},
                 {:manifests,
-                 Map.new(manifests, fn {repository_name, targets} ->
-                   {repository_name,
+                 Map.new(manifests, fn {module_name, targets} ->
+                   {module_name,
                     %{
                       workflows: MapSet.new(Map.keys(targets.workflows)),
                       sensors: MapSet.new(Map.keys(targets.sensors))
@@ -406,19 +406,19 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:archive_repository, workspace_name, repository_name}, _from, state) do
+  def handle_call({:archive_module, workspace_name, module_name}, _from, state) do
     case lookup_workspace_by_name(state, workspace_name) do
       {:error, error} ->
         {:reply, {:error, error}, state}
 
       {:ok, workspace_id, _} ->
-        case Manifests.archive_repository(state.db, workspace_id, repository_name) do
+        case Manifests.archive_module(state.db, workspace_id, module_name) do
           :ok ->
             state =
               state
               |> notify_listeners(
-                {:repositories, workspace_id},
-                {:manifest, repository_name, nil}
+                {:modules, workspace_id},
+                {:manifest, module_name, nil}
               )
               |> flush_notifications()
 
@@ -427,10 +427,10 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:get_workflow, workspace_name, repository, target_name}, _from, state) do
+  def handle_call({:get_workflow, workspace_name, module, target_name}, _from, state) do
     with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
          {:ok, workflow} <-
-           Manifests.get_latest_workflow(state.db, workspace_id, repository, target_name) do
+           Manifests.get_latest_workflow(state.db, workspace_id, module, target_name) do
       {:reply, {:ok, workflow}, state}
     else
       {:error, error} ->
@@ -590,7 +590,7 @@ defmodule Coflux.Orchestration.Server do
     {:reply, :ok, state}
   end
 
-  def handle_call({:start_run, repository, target_name, type, arguments, opts}, _from, state) do
+  def handle_call({:start_run, module, target_name, type, arguments, opts}, _from, state) do
     {:ok, parent} =
       case Keyword.get(opts, :parent_id) do
         nil ->
@@ -617,7 +617,7 @@ defmodule Coflux.Orchestration.Server do
 
     if workspace_id do
       {:ok, external_run_id, external_step_id, execution_id, state} =
-        schedule_run(state, repository, target_name, type, arguments, workspace_id, opts)
+        schedule_run(state, module, target_name, type, arguments, workspace_id, opts)
 
       send(self(), :tick)
       state = flush_notifications(state)
@@ -629,7 +629,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:schedule_step, parent_id, repository, target_name, type, arguments, opts},
+        {:schedule_step, parent_id, module, target_name, type, arguments, opts},
         _from,
         state
       ) do
@@ -643,7 +643,7 @@ defmodule Coflux.Orchestration.Server do
            state.db,
            run.id,
            parent_id,
-           repository,
+           module,
            target_name,
            type,
            arguments,
@@ -675,7 +675,7 @@ defmodule Coflux.Orchestration.Server do
               {:run, run.id},
               {:step, external_step_id,
                %{
-                 repository: repository,
+                 module: module,
                  target: target_name,
                  type: type,
                  parent_id: parent_id,
@@ -714,11 +714,11 @@ defmodule Coflux.Orchestration.Server do
             state =
               state
               |> notify_listeners(
-                {:repositories, workspace_id},
-                {:scheduled, repository, execution_id, execute_at}
+                {:modules, workspace_id},
+                {:scheduled, module, execution_id, execute_at}
               )
               |> notify_listeners(
-                {:repository, repository, workspace_id},
+                {:module, module, workspace_id},
                 {:scheduled, execution_id, target_name, run.external_id, external_step_id,
                  attempt, execute_after, created_at}
               )
@@ -734,7 +734,7 @@ defmodule Coflux.Orchestration.Server do
           state
           |> notify_listeners(
             {:targets, workspace_id},
-            {:step, repository, target_name, type, run.external_id, external_step_id, attempt}
+            {:step, module, target_name, type, run.external_id, external_step_id, attempt}
           )
           |> flush_notifications()
 
@@ -787,14 +787,14 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         executions,
         state,
-        fn {execution_id, repository, assigned_at, completed_at}, state ->
+        fn {execution_id, module, assigned_at, completed_at}, state ->
           if !completed_at do
             state =
               case record_and_notify_result(
                      state,
                      execution_id,
                      :cancelled,
-                     repository
+                     module
                    ) do
                 {:ok, state} -> state
                 {:error, :already_recorded} -> state
@@ -1062,7 +1062,7 @@ defmodule Coflux.Orchestration.Server do
     {:reply, {:ok, workspaces, ref}, state}
   end
 
-  def handle_call({:subscribe_repositories, workspace_id, pid}, _from, state) do
+  def handle_call({:subscribe_modules, workspace_id, pid}, _from, state) do
     case lookup_workspace_by_id(state, workspace_id) do
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -1083,14 +1083,14 @@ defmodule Coflux.Orchestration.Server do
         executions =
           Enum.reduce(executions, %{}, fn execution, executions ->
             executions
-            |> Map.put_new(execution.repository, {MapSet.new(), %{}})
-            |> Map.update!(execution.repository, fn {repo_executing, repo_scheduled} ->
+            |> Map.put_new(execution.module, {MapSet.new(), %{}})
+            |> Map.update!(execution.module, fn {module_executing, module_scheduled} ->
               if Enum.member?(executing, execution.execution_id) do
-                {MapSet.put(repo_executing, execution.execution_id), repo_scheduled}
+                {MapSet.put(module_executing, execution.execution_id), module_scheduled}
               else
-                {repo_executing,
+                {module_executing,
                  Map.put(
-                   repo_scheduled,
+                   module_scheduled,
                    execution.execution_id,
                    execution.execute_after || execution.created_at
                  )}
@@ -1099,20 +1099,20 @@ defmodule Coflux.Orchestration.Server do
           end)
 
         {:ok, ref, state} =
-          add_listener(state, {:repositories, workspace_id}, pid)
+          add_listener(state, {:modules, workspace_id}, pid)
 
         {:reply, {:ok, manifests, executions, ref}, state}
     end
   end
 
-  def handle_call({:subscribe_repository, repository, workspace_id, pid}, _from, state) do
+  def handle_call({:subscribe_module, module, workspace_id, pid}, _from, state) do
     case lookup_workspace_by_id(state, workspace_id) do
       {:error, error} ->
         {:reply, {:error, error}, state}
 
       {:ok, _} ->
-        {:ok, executions} = Runs.get_repository_executions(state.db, repository)
-        {:ok, ref, state} = add_listener(state, {:repository, repository, workspace_id}, pid)
+        {:ok, executions} = Runs.get_module_executions(state.db, module)
+        {:ok, ref, state} = add_listener(state, {:module, module, workspace_id}, pid)
         {:reply, {:ok, executions, ref}, state}
     end
   end
@@ -1217,21 +1217,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:subscribe_workflow, repository, target_name, workspace_id, pid},
+        {:subscribe_workflow, module, target_name, workspace_id, pid},
         _from,
         state
       ) do
     with {:ok, _} <- lookup_workspace_by_id(state, workspace_id),
          {:ok, workflow} <-
-           Manifests.get_latest_workflow(state.db, workspace_id, repository, target_name),
+           Manifests.get_latest_workflow(state.db, workspace_id, module, target_name),
          {:ok, instruction} <-
            if(workflow && workflow.instruction_id,
              do: Manifests.get_instruction(state.db, workflow.instruction_id),
              else: {:ok, nil}
            ),
-         {:ok, runs} = Runs.get_target_runs(state.db, repository, target_name, workspace_id) do
+         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, workspace_id) do
       {:ok, ref, state} =
-        add_listener(state, {:workflow, repository, target_name, workspace_id}, pid)
+        add_listener(state, {:workflow, module, target_name, workspace_id}, pid)
 
       {:reply, {:ok, workflow, instruction, runs, ref}, state}
     else
@@ -1241,21 +1241,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:subscribe_sensor, repository, target_name, workspace_id, pid},
+        {:subscribe_sensor, module, target_name, workspace_id, pid},
         _from,
         state
       ) do
     with {:ok, _} <- lookup_workspace_by_id(state, workspace_id),
          {:ok, sensor} <-
-           Manifests.get_latest_sensor(state.db, workspace_id, repository, target_name),
+           Manifests.get_latest_sensor(state.db, workspace_id, module, target_name),
          {:ok, instruction} <-
            if(sensor && sensor.instruction_id,
              do: Manifests.get_instruction(state.db, sensor.instruction_id),
              else: {:ok, nil}
            ),
-         {:ok, runs} = Runs.get_target_runs(state.db, repository, target_name, workspace_id) do
+         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, workspace_id) do
       {:ok, ref, state} =
-        add_listener(state, {:sensor, repository, target_name, workspace_id}, pid)
+        add_listener(state, {:sensor, module, target_name, workspace_id}, pid)
 
       {:reply, {:ok, sensor, instruction, runs, ref}, state}
     else
@@ -1325,7 +1325,7 @@ defmodule Coflux.Orchestration.Server do
 
             {step.external_id,
              %{
-               repository: step.repository,
+               module: step.module,
                target: step.target,
                type: step.type,
                parent_id: step.parent_id,
@@ -1406,11 +1406,11 @@ defmodule Coflux.Orchestration.Server do
         %{workflow: workflows, sensor: sensors},
         %{},
         fn {target_type, targets}, result ->
-          Enum.reduce(targets, result, fn {repository_name, target_names}, result ->
+          Enum.reduce(targets, result, fn {module_name, target_names}, result ->
             Enum.reduce(target_names, result, fn target_name, result ->
               put_in(
                 result,
-                [Access.key(repository_name, %{}), target_name],
+                [Access.key(module_name, %{}), target_name],
                 {target_type, nil}
               )
             end)
@@ -1422,11 +1422,11 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         steps,
         result,
-        fn {repository_name, target_name, target_type, run_external_id, step_external_id, attempt},
+        fn {module_name, target_name, target_type, run_external_id, step_external_id, attempt},
            result ->
           put_in(
             result,
-            [Access.key(repository_name, %{}), target_name],
+            [Access.key(module_name, %{}), target_name],
             {target_type, {run_external_id, step_external_id, attempt}}
           )
         end
@@ -1480,12 +1480,12 @@ defmodule Coflux.Orchestration.Server do
     state =
       executions_defer
       |> Enum.reverse()
-      |> Enum.reduce(state, fn {execution_id, defer_id, _run_id, repository}, state ->
+      |> Enum.reduce(state, fn {execution_id, defer_id, _run_id, module}, state ->
         case record_and_notify_result(
                state,
                execution_id,
                {:deferred, defer_id},
-               repository
+               module
              ) do
           {:ok, state} -> state
           {:error, :already_recorded} -> state
@@ -1580,7 +1580,7 @@ defmodule Coflux.Orchestration.Server do
                         )
                         |> send_session(
                           session_id,
-                          {:execute, execution.execution_id, execution.repository,
+                          {:execute, execution.execution_id, execution.module,
                            execution.target, arguments}
                         )
 
@@ -1590,7 +1590,7 @@ defmodule Coflux.Orchestration.Server do
                   state =
                     case schedule_run(
                            state,
-                           execution.repository,
+                           execution.module,
                            execution.target,
                            execution.type,
                            arguments,
@@ -1649,7 +1649,7 @@ defmodule Coflux.Orchestration.Server do
         {workspace_id,
          executions
          |> Enum.group_by(
-           fn {execution, _} -> execution.repository end,
+           fn {execution, _} -> execution.module end,
            fn {execution, _} -> execution.execution_id end
          )
          |> Map.new(fn {k, v} -> {k, MapSet.new(v)} end)}
@@ -1659,27 +1659,27 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(assigned_groups, state, fn {workspace_id, workspace_executions}, state ->
         notify_listeners(
           state,
-          {:repositories, workspace_id},
+          {:modules, workspace_id},
           {:assigned, workspace_executions}
         )
       end)
 
     state =
       Enum.reduce(assigned_groups, state, fn {workspace_id, workspace_executions}, state ->
-        Enum.reduce(workspace_executions, state, fn {repository, execution_ids}, state ->
-          repository_executions =
-            Enum.reduce(assigned, %{}, fn {execution, assigned_at}, repository_executions ->
+        Enum.reduce(workspace_executions, state, fn {module, execution_ids}, state ->
+          module_executions =
+            Enum.reduce(assigned, %{}, fn {execution, assigned_at}, module_executions ->
               if MapSet.member?(execution_ids, execution.execution_id) do
-                Map.put(repository_executions, execution.execution_id, assigned_at)
+                Map.put(module_executions, execution.execution_id, assigned_at)
               else
-                repository_executions
+                module_executions
               end
             end)
 
           notify_listeners(
             state,
-            {:repository, repository, workspace_id},
-            {:assigned, repository_executions}
+            {:module, module, workspace_id},
+            {:assigned, module_executions}
           )
         end)
       end)
@@ -1725,7 +1725,7 @@ defmodule Coflux.Orchestration.Server do
                     state.project_id,
                     state.workspaces[workspace_id].name,
                     agent_id,
-                    pool.repositories,
+                    pool.modules,
                     pool.provides,
                     Map.delete(pool.launcher, :type)
                   ],
@@ -2085,23 +2085,23 @@ defmodule Coflux.Orchestration.Server do
         Enum.reduce(
           session.targets,
           all_targets,
-          fn {repository_name, repository_targets}, all_targets ->
-            Enum.reduce(repository_targets, all_targets, fn target_name, all_targets ->
-              repository = Map.fetch!(all_targets, repository_name)
-              target = Map.fetch!(repository, target_name)
+          fn {module_name, module_targets}, all_targets ->
+            Enum.reduce(module_targets, all_targets, fn target_name, all_targets ->
+              module = Map.fetch!(all_targets, module_name)
+              target = Map.fetch!(module, target_name)
               target = Map.update!(target, :session_ids, &MapSet.delete(&1, session_id))
 
               if Enum.empty?(target.session_ids) do
-                repository = Map.delete(repository, target_name)
+                module = Map.delete(module, target_name)
 
-                if Enum.empty?(repository) do
-                  Map.delete(all_targets, repository_name)
+                if Enum.empty?(module) do
+                  Map.delete(all_targets, module_name)
                 else
-                  Map.put(all_targets, repository_name, repository)
+                  Map.put(all_targets, module_name, module)
                 end
               else
-                repository = Map.put(repository, target_name, target)
-                Map.put(all_targets, repository_name, repository)
+                module = Map.put(module, target_name, target)
+                Map.put(all_targets, module_name, module)
               end
             end)
           end
@@ -2157,14 +2157,14 @@ defmodule Coflux.Orchestration.Server do
         fn execution, {due, future, defer, defer_keys} ->
           defer_key =
             execution.defer_key &&
-              {execution.repository, execution.target, execution.workspace_id,
+              {execution.module, execution.target, execution.workspace_id,
                execution.defer_key}
 
           defer_id = defer_key && Map.get(defer_keys, defer_key)
 
           if defer_id do
             {due, future,
-             [{execution.execution_id, defer_id, execution.run_id, execution.repository} | defer],
+             [{execution.execution_id, defer_id, execution.run_id, execution.module} | defer],
              defer_keys}
           else
             defer_keys =
@@ -2186,12 +2186,12 @@ defmodule Coflux.Orchestration.Server do
     {executions_due, executions_future, executions_defer}
   end
 
-  defp schedule_run(state, repository, target_name, type, arguments, workspace_id, opts) do
+  defp schedule_run(state, module, target_name, type, arguments, workspace_id, opts) do
     cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
 
     case Runs.schedule_run(
            state.db,
-           repository,
+           module,
            target_name,
            type,
            arguments,
@@ -2215,23 +2215,23 @@ defmodule Coflux.Orchestration.Server do
           state
           |> notify_listeners(
             case type do
-              :workflow -> {:workflow, repository, target_name, workspace_id}
-              :sensor -> {:sensor, repository, target_name, workspace_id}
+              :workflow -> {:workflow, module, target_name, workspace_id}
+              :sensor -> {:sensor, module, target_name, workspace_id}
             end,
             {:run, external_run_id, created_at}
           )
           |> notify_listeners(
-            {:repositories, workspace_id},
-            {:scheduled, repository, execution_id, execute_at}
+            {:modules, workspace_id},
+            {:scheduled, module, execution_id, execute_at}
           )
           |> notify_listeners(
-            {:repository, repository, workspace_id},
+            {:module, module, workspace_id},
             {:scheduled, execution_id, target_name, external_run_id, external_step_id, attempt,
              execute_after, created_at}
           )
           |> notify_listeners(
             {:targets, workspace_id},
-            {:step, repository, target_name, type, external_run_id, external_step_id, attempt}
+            {:step, module, target_name, type, external_run_id, external_step_id, attempt}
           )
 
         {:ok, external_run_id, external_step_id, execution_id, state}
@@ -2247,7 +2247,7 @@ defmodule Coflux.Orchestration.Server do
 
     case Runs.rerun_step(state.db, step.id, workspace_id, execute_after, dependency_ids) do
       {:ok, execution_id, attempt, created_at} ->
-        {:ok, {run_repository, run_target}} = Runs.get_run_target(state.db, run.id)
+        {:ok, {run_module, run_target}} = Runs.get_run_target(state.db, run.id)
 
         execute_at = execute_after || created_at
 
@@ -2259,17 +2259,17 @@ defmodule Coflux.Orchestration.Server do
              execute_after}
           )
           |> notify_listeners(
-            {:repositories, workspace_id},
-            {:scheduled, step.repository, execution_id, execute_at}
+            {:modules, workspace_id},
+            {:scheduled, step.module, execution_id, execute_at}
           )
           |> notify_listeners(
-            {:repository, step.repository, workspace_id},
+            {:module, step.module, workspace_id},
             {:scheduled, execution_id, step.target, run.external_id, step.external_id, attempt,
              execute_after, created_at}
           )
           |> notify_listeners(
             {:targets, workspace_id},
-            {:step, step.repository, step.target, step.type, run.external_id, step.external_id,
+            {:step, step.module, step.target, step.type, run.external_id, step.external_id,
              attempt}
           )
 
@@ -2278,14 +2278,14 @@ defmodule Coflux.Orchestration.Server do
             :workflow ->
               notify_listeners(
                 state,
-                {:workflow, run_repository, run_target, workspace_id},
+                {:workflow, run_module, run_target, workspace_id},
                 {:run, run.external_id, run.created_at}
               )
 
             :sensor ->
               notify_listeners(
                 state,
-                {:sensor, run_repository, run_target, workspace_id},
+                {:sensor, run_module, run_target, workspace_id},
                 {:run, run.external_id, run.created_at}
               )
 
@@ -2308,14 +2308,14 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp resolve_execution(db, execution_id) do
-    {:ok, {external_run_id, external_step_id, step_attempt, repository, target}} =
+    {:ok, {external_run_id, external_step_id, step_attempt, module, target}} =
       Runs.get_run_by_execution(db, execution_id)
 
     %{
       run_id: external_run_id,
       step_id: external_step_id,
       attempt: step_attempt,
-      repository: repository,
+      module: module,
       target: target
     }
   end
@@ -2403,8 +2403,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # TODO: remove 'repository' argument?
-  defp record_and_notify_result(state, execution_id, result, repository) do
+  # TODO: remove 'module' argument?
+  defp record_and_notify_result(state, execution_id, result, module) do
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
     {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
 
@@ -2439,11 +2439,11 @@ defmodule Coflux.Orchestration.Server do
             end
           end)
           |> notify_listeners(
-            {:repositories, workspace_id},
-            {:completed, repository, execution_id}
+            {:modules, workspace_id},
+            {:completed, module, execution_id}
           )
           |> notify_listeners(
-            {:repository, repository, workspace_id},
+            {:module, module, workspace_id},
             {:completed, execution_id}
           )
 
@@ -2543,7 +2543,7 @@ defmodule Coflux.Orchestration.Server do
                  state,
                  execution_id,
                  result,
-                 step.repository
+                 step.module
                ) do
             {:ok, state} -> state
           end
@@ -2585,14 +2585,14 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp assign_targets(state, targets, session_id) do
-    Enum.reduce(targets, state, fn {repository, repository_targets}, state ->
-      Enum.reduce(repository_targets, state, fn {type, target_names}, state ->
+    Enum.reduce(targets, state, fn {module, module_targets}, state ->
+      Enum.reduce(module_targets, state, fn {type, target_names}, state ->
         Enum.reduce(target_names, state, fn target_name, state ->
           state
           |> update_in(
             [
               Access.key(:targets),
-              Access.key(repository, %{}),
+              Access.key(module, %{}),
               Access.key(target_name, %{type: nil, session_ids: MapSet.new()})
             ],
             fn target ->
@@ -2602,7 +2602,7 @@ defmodule Coflux.Orchestration.Server do
             end
           )
           |> update_in(
-            [Access.key(:sessions), session_id, :targets, Access.key(repository, MapSet.new())],
+            [Access.key(:sessions), session_id, :targets, Access.key(module, MapSet.new())],
             &MapSet.put(&1, target_name)
           )
         end)
@@ -2734,7 +2734,7 @@ defmodule Coflux.Orchestration.Server do
   defp choose_session(state, execution, requires) do
     target =
       state.targets
-      |> Map.get(execution.repository, %{})
+      |> Map.get(execution.module, %{})
       |> Map.get(execution.target)
 
     if target && target.type == execution.type do
@@ -2760,7 +2760,7 @@ defmodule Coflux.Orchestration.Server do
       state.pools
       |> Map.get(execution.workspace_id, %{})
       |> Map.filter(fn {_, pool} ->
-        pool.launcher && execution.repository in pool.repositories &&
+        pool.launcher && execution.module in pool.modules &&
           has_requirements?(pool.provides, requires)
       end)
 

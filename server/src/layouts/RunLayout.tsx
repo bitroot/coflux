@@ -150,11 +150,9 @@ export default function RunLayout() {
   );
   const run = useRun(projectId, runId, activeWorkspaceId);
   const initialStep = run && Object.values(run.steps).find((s) => !s.parentId);
-  useTitlePart(
-    initialStep && `${initialStep.target} (${initialStep.repository})`,
-  );
+  useTitlePart(initialStep && `${initialStep.target} (${initialStep.module})`);
   useSetActive(
-    initialStep && ["target", initialStep.repository, initialStep.target],
+    initialStep && ["target", initialStep.module, initialStep.target],
   );
   const { ref, width, height } = useResizeObserver<HTMLDivElement>();
   const detailWidth = Math.min(Math.max(window.innerWidth / 3, 400), 600);
@@ -169,7 +167,7 @@ export default function RunLayout() {
         >
           {initialStep.type == "sensor" ? (
             <SensorHeader
-              repository={initialStep.repository}
+              module={initialStep.module}
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}
@@ -178,7 +176,7 @@ export default function RunLayout() {
             />
           ) : initialStep.type == "workflow" ? (
             <WorkflowHeader
-              repository={initialStep.repository}
+              module={initialStep.module}
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}

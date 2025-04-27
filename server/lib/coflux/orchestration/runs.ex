@@ -12,7 +12,7 @@ defmodule Coflux.Orchestration.Runs do
         external_id,
         run_id,
         parent_id,
-        repository,
+        module,
         target,
         type,
         priority,
@@ -43,7 +43,7 @@ defmodule Coflux.Orchestration.Runs do
         s.external_id,
         s.run_id,
         s.parent_id,
-        s.repository,
+        s.module,
         s.target,
         s.type,
         s.priority,
@@ -96,16 +96,16 @@ defmodule Coflux.Orchestration.Runs do
            db,
            """
            WITH latest_executions AS (
-             SELECT s.repository, s.target, MAX(e.created_at) AS max_created_at
+             SELECT s.module, s.target, MAX(e.created_at) AS max_created_at
              FROM executions AS e
              INNER JOIN steps AS s ON s.id = e.step_id
              WHERE e.workspace_id = ?1
-             GROUP BY s.repository, s.target
+             GROUP BY s.module, s.target
            )
-           SELECT s.repository, s.target, s.type, r.external_id, s.external_id, e.attempt
+           SELECT s.module, s.target, s.type, r.external_id, s.external_id, e.attempt
            FROM executions AS e
            INNER JOIN steps AS s ON s.id = e.step_id
-           INNER JOIN latest_executions AS le ON s.repository = le.repository AND s.target = le.target AND e.created_at = le.max_created_at
+           INNER JOIN latest_executions AS le ON s.module = le.module AND s.target = le.target AND e.created_at = le.max_created_at
            INNER JOIN runs AS r ON r.id = s.run_id
            WHERE e.workspace_id = ?1
            """,
@@ -113,9 +113,9 @@ defmodule Coflux.Orchestration.Runs do
          ) do
       {:ok, rows} ->
         {:ok,
-         Enum.map(rows, fn {repository_name, target_name, target_type, run_external_id,
+         Enum.map(rows, fn {module_name, target_name, target_type, run_external_id,
                             step_external_id, attempt} ->
-           {repository_name, target_name, Utils.decode_step_type(target_type), run_external_id,
+           {module_name, target_name, Utils.decode_step_type(target_type), run_external_id,
             step_external_id, attempt}
          end)}
     end
@@ -123,7 +123,7 @@ defmodule Coflux.Orchestration.Runs do
 
   def schedule_run(
         db,
-        repository,
+        module,
         target,
         type,
         arguments,
@@ -145,7 +145,7 @@ defmodule Coflux.Orchestration.Runs do
           db,
           run_id,
           nil,
-          repository,
+          module,
           target,
           type,
           arguments,
@@ -164,7 +164,7 @@ defmodule Coflux.Orchestration.Runs do
         db,
         run_id,
         parent_id,
-        repository,
+        module,
         target,
         type,
         arguments,
@@ -179,7 +179,7 @@ defmodule Coflux.Orchestration.Runs do
         db,
         run_id,
         parent_id,
-        repository,
+        module,
         target,
         type,
         arguments,
@@ -245,7 +245,7 @@ defmodule Coflux.Orchestration.Runs do
          db,
          run_id,
          parent_id,
-         repository,
+         module,
          target,
          type,
          arguments,
@@ -264,7 +264,7 @@ defmodule Coflux.Orchestration.Runs do
     retries = Keyword.get(opts, :retries)
     requires = Keyword.get(opts, :requires) || %{}
 
-    memo_key = if memo, do: build_key(memo, arguments, "#{repository}:#{target}")
+    memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
 
     memoised_execution =
       if memo_key do
@@ -284,7 +284,7 @@ defmodule Coflux.Orchestration.Runs do
               build_key(
                 cache.params,
                 arguments,
-                cache.namespace || "#{repository}:#{target}",
+                cache.namespace || "#{module}:#{target}",
                 cache.version
               )
             end
@@ -306,7 +306,7 @@ defmodule Coflux.Orchestration.Runs do
 
           defer_key =
             if defer,
-              do: build_key(defer.params, arguments, "#{repository}:#{target}")
+              do: build_key(defer.params, arguments, "#{module}:#{target}")
 
           # TODO: validate parent belongs to run?
           {:ok, step_id, external_step_id} =
@@ -314,7 +314,7 @@ defmodule Coflux.Orchestration.Runs do
               db,
               run_id,
               if(!is_initial, do: parent_id),
-              repository,
+              module,
               target,
               type,
               priority,
@@ -465,7 +465,7 @@ defmodule Coflux.Orchestration.Runs do
         s.id AS step_id,
         s.run_id,
         run.external_id AS run_external_id,
-        s.repository,
+        s.module,
         s.target,
         s.type,
         s.wait_for,
@@ -494,7 +494,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_repository_executions(db, repository) do
+  def get_module_executions(db, module) do
     query(
       db,
       """
@@ -512,9 +512,9 @@ defmodule Coflux.Orchestration.Runs do
       INNER JOIN runs AS r ON r.id = s.run_id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
       LEFT JOIN results AS re ON re.execution_id = e.id
-      WHERE s.repository = ?1 AND re.created_at IS NULL
+      WHERE s.module = ?1 AND re.created_at IS NULL
       """,
-      {repository}
+      {module}
     )
   end
 
@@ -522,7 +522,7 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT e.id, s.run_id, s.repository
+      SELECT e.id, s.run_id, s.module
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
       LEFT JOIN results AS r ON r.execution_id = e.id
@@ -556,7 +556,7 @@ defmodule Coflux.Orchestration.Runs do
         INNER JOIN steps AS s ON s.parent_id = d.execution_id
         INNER JOIN executions AS e ON e.step_id = s.id
       )
-      SELECT e.id, s.repository, a.created_at, r.created_at
+      SELECT e.id, s.module, a.created_at, r.created_at
       FROM descendants AS d
       INNER JOIN executions AS e ON e.id = d.execution_id
       INNER JOIN steps AS s ON s.id = e.step_id
@@ -567,7 +567,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_target_runs(db, repository, target, workspace_id, limit \\ 50) do
+  def get_target_runs(db, module, target, workspace_id, limit \\ 50) do
     query(
       db,
       """
@@ -575,11 +575,11 @@ defmodule Coflux.Orchestration.Runs do
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
-      WHERE s.repository = ?1 AND s.target = ?2 AND s.parent_id IS NULL AND e.workspace_id = ?3
+      WHERE s.module = ?1 AND s.target = ?2 AND s.parent_id IS NULL AND e.workspace_id = ?3
       ORDER BY r.created_at DESC
       LIMIT ?4
       """,
-      {repository, target, workspace_id, limit}
+      {module, target, workspace_id, limit}
     )
   end
 
@@ -613,7 +613,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.external_id, s.external_id, e.attempt, s.repository, s.target
+      SELECT r.external_id, s.external_id, e.attempt, s.module, s.target
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
       INNER JOIN runs AS r ON r.id = s.run_id
@@ -641,7 +641,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT repository, target
+      SELECT module, target
       FROM steps
       WHERE run_id = ?1 AND parent_id IS NULL
       """,
@@ -658,7 +658,7 @@ defmodule Coflux.Orchestration.Runs do
         external_id,
         run_id,
         parent_id,
-        repository,
+        module,
         target,
         type,
         priority,
@@ -895,7 +895,7 @@ defmodule Coflux.Orchestration.Runs do
          db,
          run_id,
          parent_id,
-         repository,
+         module,
          target,
          type,
          priority,
@@ -916,7 +916,7 @@ defmodule Coflux.Orchestration.Runs do
                external_id: external_id,
                run_id: run_id,
                parent_id: parent_id,
-               repository: repository,
+               module: module,
                target: target,
                type: Utils.encode_step_type(type),
                priority: priority,

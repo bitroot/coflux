@@ -91,7 +91,7 @@ defmodule Coflux.Topics.Pool do
   defp build_pool(pool) do
     if pool do
       %{
-        repositories: pool.repositories,
+        modules: pool.modules,
         provides: pool.provides,
         # TODO: include launcher ID?
         launcher: if(pool.launcher, do: build_launcher(pool.launcher))

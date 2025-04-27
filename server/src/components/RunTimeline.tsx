@@ -146,9 +146,7 @@ export default function RunTimeline({ runId, run }: Props) {
                 hoveredClassName="ring-2 ring-slate-300"
               >
                 <span className="font-mono">{step.target}</span>{" "}
-                <span className="text-slate-500 text-sm">
-                  ({step.repository})
-                </span>
+                <span className="text-slate-500 text-sm">({step.module})</span>
               </StepLink>
             </div>
             <div className="flex-1 flex ml-2 pl-3 pr-1 border-x border-slate-200">

@@ -16,17 +16,17 @@ export function useWorkspaces(projectId: string | undefined) {
   return workspaces;
 }
 
-export function useRepositories(
+export function useModules(
   projectId: string | undefined,
   workspaceId: string | undefined,
 ) {
-  const [repositories] = useTopic<Record<string, models.Repository>>(
+  const [modules] = useTopic<Record<string, models.Module>>(
     "projects",
     projectId,
-    "repositories",
+    "modules",
     workspaceId,
   );
-  return repositories;
+  return modules;
 }
 
 export function usePools(
@@ -69,7 +69,7 @@ export function useSessions(
 
 export function useWorkflow(
   projectId: string | undefined,
-  repository: string | undefined,
+  moduleName: string | undefined,
   targetName: string | undefined,
   workspaceId: string | undefined,
 ) {
@@ -77,7 +77,7 @@ export function useWorkflow(
     "projects",
     projectId,
     "workflows",
-    repository,
+    moduleName,
     targetName,
     workspaceId,
   );
@@ -86,7 +86,7 @@ export function useWorkflow(
 
 export function useSensor(
   projectId: string | undefined,
-  repository: string | undefined,
+  module: string | undefined,
   targetName: string | undefined,
   workspaceId: string | undefined,
 ) {
@@ -94,7 +94,7 @@ export function useSensor(
     "projects",
     projectId,
     "sensors",
-    repository,
+    module,
     targetName,
     workspaceId,
   );
@@ -103,14 +103,14 @@ export function useSensor(
 
 export function useExecutions(
   projectId: string | undefined,
-  repositoryName: string | undefined,
+  moduleName: string | undefined,
   workspaceId: string | undefined,
 ) {
   const [executions] = useTopic<Record<string, models.QueuedExecution>>(
     "projects",
     projectId,
-    "repositories",
-    repositoryName,
+    "modules",
+    moduleName,
     workspaceId,
   );
   return executions;

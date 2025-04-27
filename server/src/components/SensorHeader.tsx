@@ -43,7 +43,7 @@ function StopResumeButton({
 }
 
 type Props = {
-  repository: string | undefined;
+  module: string | undefined;
   target: string | undefined;
   projectId: string;
   runId?: string;
@@ -52,7 +52,7 @@ type Props = {
 };
 
 export default function SensorHeader({
-  repository,
+  module,
   target,
   projectId,
   runId,
@@ -61,7 +61,7 @@ export default function SensorHeader({
 }: Props) {
   const navigate = useNavigate();
   const [runDialogOpen, setRunDialogOpen] = useState(false);
-  const sensor = useSensor(projectId, repository, target, activeWorkspaceId);
+  const sensor = useSensor(projectId, module, target, activeWorkspaceId);
   const run = useRun(projectId, runId, activeWorkspaceId);
   const handleRunSubmit = useCallback(
     (arguments_: ["json", string][]) => {
@@ -69,7 +69,7 @@ export default function SensorHeader({
       return api
         .startSensor(
           projectId,
-          repository!,
+          module!,
           target!,
           activeWorkspaceName!,
           arguments_,
@@ -86,7 +86,7 @@ export default function SensorHeader({
           );
         });
     },
-    [navigate, projectId, repository, target, activeWorkspaceName, sensor],
+    [navigate, projectId, module, target, activeWorkspaceName, sensor],
   );
   const initialStepId =
     run && Object.keys(run.steps).find((stepId) => !run.steps[stepId].parentId);
@@ -118,7 +118,7 @@ export default function SensorHeader({
     <div className="p-5 flex justify-between gap-2 items-start">
       <div className="flex flex-col gap-2">
         <div className="flex items-baseline gap-1">
-          <span className="text-slate-400">{repository}</span>
+          <span className="text-slate-400">{module}</span>
           <span className="text-slate-400">/</span>
           <IconCpu
             size={26}
@@ -159,7 +159,7 @@ export default function SensorHeader({
             {activeWorkspaceId && sensor.parameters && (
               <RunDialog
                 projectId={projectId}
-                repository={repository}
+                module={module}
                 target={target}
                 parameters={sensor.parameters}
                 instruction={sensor.instruction}

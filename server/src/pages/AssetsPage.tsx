@@ -57,7 +57,7 @@ export default function AssetsPage() {
                     >
                       <span className="font-mono">{step.target}</span>{" "}
                       <span className="text-slate-500 text-sm">
-                        ({step.repository})
+                        ({step.module})
                       </span>
                     </StepLink>
                   </td>

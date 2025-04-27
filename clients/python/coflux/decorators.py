@@ -154,7 +154,7 @@ class Target(t.Generic[P, T]):
         fn: t.Callable[P, T],
         type: models.TargetType,
         *,
-        repository: str | None = None,
+        module: str | None = None,
         name: str | None = None,
         wait: bool | t.Iterable[str] | str = False,
         cache: bool | float | dt.timedelta = False,
@@ -171,7 +171,7 @@ class Target(t.Generic[P, T]):
     ):
         self._fn = fn
         self._name = name or fn.__name__
-        self._repository = repository or fn.__module__
+        self._module = module or fn.__module__
         self._definition = _build_definition(
             type,
             fn,
@@ -208,7 +208,7 @@ class Target(t.Generic[P, T]):
         try:
             return context.submit(
                 self._definition.type,
-                self._repository,
+                self._module,
                 self._name,
                 args,
                 wait_for=self._definition.wait_for,
@@ -332,7 +332,7 @@ def workflow(
 
 
 def stub(
-    repository: str,
+    module: str,
     *,
     name: str | None = None,
     type: t.Literal["workflow", "task"] = "task",
@@ -351,7 +351,7 @@ def stub(
         return Target(
             fn,
             type,
-            repository=repository,
+            module=module,
             name=name,
             wait=wait,
             cache=cache,

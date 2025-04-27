@@ -41,12 +41,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:register_manifests, workspace_name, manifests})
   end
 
-  def archive_repository(project_id, workspace_name, repository_name) do
-    call_server(project_id, {:archive_repository, workspace_name, repository_name})
+  def archive_module(project_id, workspace_name, module_name) do
+    call_server(project_id, {:archive_module, workspace_name, module_name})
   end
 
-  def get_workflow(project_id, workspace_name, repository, target_name) do
-    call_server(project_id, {:get_workflow, workspace_name, repository, target_name})
+  def get_workflow(project_id, workspace_name, module, target_name) do
+    call_server(project_id, {:get_workflow, workspace_name, module, target_name})
   end
 
   def start_session(project_id, workspace_name, agent_id, provides, concurrency, pid) do
@@ -64,14 +64,14 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:declare_targets, session_id, targets})
   end
 
-  def start_run(project_id, repository, target, type, arguments, opts \\ []) do
-    call_server(project_id, {:start_run, repository, target, type, arguments, opts})
+  def start_run(project_id, module, target, type, arguments, opts \\ []) do
+    call_server(project_id, {:start_run, module, target, type, arguments, opts})
   end
 
-  def schedule_step(project_id, parent_id, repository, target, type, arguments, opts \\ []) do
+  def schedule_step(project_id, parent_id, module, target, type, arguments, opts \\ []) do
     call_server(
       project_id,
-      {:schedule_step, parent_id, repository, target, type, arguments, opts}
+      {:schedule_step, parent_id, module, target, type, arguments, opts}
     )
   end
 
@@ -125,12 +125,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_workspaces, pid})
   end
 
-  def subscribe_repositories(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_repositories, workspace_id, pid})
+  def subscribe_modules(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_modules, workspace_id, pid})
   end
 
-  def subscribe_repository(project_id, repository, workspace_id, pid) do
-    call_server(project_id, {:subscribe_repository, repository, workspace_id, pid})
+  def subscribe_module(project_id, module, workspace_id, pid) do
+    call_server(project_id, {:subscribe_module, module, workspace_id, pid})
   end
 
   def subscribe_pools(project_id, workspace_id, pid) do
@@ -145,12 +145,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_sessions, workspace_id, pid})
   end
 
-  def subscribe_workflow(project_id, repository, target, workspace_id, pid) do
-    call_server(project_id, {:subscribe_workflow, repository, target, workspace_id, pid})
+  def subscribe_workflow(project_id, module, target, workspace_id, pid) do
+    call_server(project_id, {:subscribe_workflow, module, target, workspace_id, pid})
   end
 
-  def subscribe_sensor(project_id, repository, target, workspace_id, pid) do
-    call_server(project_id, {:subscribe_sensor, repository, target, workspace_id, pid})
+  def subscribe_sensor(project_id, module, target, workspace_id, pid) do
+    call_server(project_id, {:subscribe_sensor, module, target, workspace_id, pid})
   end
 
   def subscribe_run(project_id, run_id, pid) do

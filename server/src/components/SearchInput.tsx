@@ -34,12 +34,12 @@ type Run = {
 
 type Match = (
   | {
-      type: "repository";
+      type: "module";
       name: string;
     }
   | {
       type: "workflow" | "sensor" | "task";
-      repository: string;
+      module: string;
       name: string;
       run: Run | null;
     }
@@ -175,39 +175,39 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
           <div className="p-1">
             {matches.map((match, index) => (
               <Fragment key={index}>
-                {match.type == "repository" ? (
+                {match.type == "module" ? (
                   <MatchOption
                     icon={IconBox}
                     name={match.name}
-                    href={`/projects/${projectId}/repositories/${match.name}?workspace=${workspaceName}`}
+                    href={`/projects/${projectId}/modules/${match.name}?workspace=${workspaceName}`}
                   />
                 ) : match.type == "workflow" ? (
                   <MatchOption
                     icon={IconSubtask}
                     name={match.name}
-                    hint={match.repository}
+                    hint={match.module}
                     href={
                       match.run
                         ? buildRunUrl(projectId, workspaceName!, match.run)
-                        : `/projects/${projectId}/workflows/${match.repository}/${match.name}?workspace=${workspaceName}`
+                        : `/projects/${projectId}/workflows/${match.module}/${match.name}?workspace=${workspaceName}`
                     }
                   />
                 ) : match.type == "sensor" ? (
                   <MatchOption
                     icon={IconCpu}
                     name={match.name}
-                    hint={match.repository}
+                    hint={match.module}
                     href={
                       match.run
                         ? buildRunUrl(projectId, workspaceName!, match.run)
-                        : `/projects/${projectId}/sensors/${match.repository}/${match.name}?workspace=${workspaceName}`
+                        : `/projects/${projectId}/sensors/${match.module}/${match.name}?workspace=${workspaceName}`
                     }
                   />
                 ) : match.type == "task" && match.run ? (
                   <MatchOption
                     icon={IconPoint}
                     name={match.name}
-                    hint={match.repository}
+                    hint={match.module}
                     href={buildRunUrl(projectId, workspaceName!, match.run)}
                   />
                 ) : null}

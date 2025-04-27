@@ -6,7 +6,7 @@ defmodule Coflux.Orchestration.Manifests do
   def register_manifests(db, workspace_id, manifests) do
     with_transaction(db, fn ->
       manifest_ids =
-        Map.new(manifests, fn {repository, manifest} ->
+        Map.new(manifests, fn {module, manifest} ->
           {:ok, manifest_id} =
             if manifest do
               hash = hash_manifest(manifest)
@@ -102,7 +102,7 @@ defmodule Coflux.Orchestration.Manifests do
               {:ok, nil}
             end
 
-          {repository, manifest_id}
+          {module, manifest_id}
         end)
 
       {:ok, current_manifest_ids} = get_latest_manifest_ids(db, workspace_id)
@@ -113,10 +113,10 @@ defmodule Coflux.Orchestration.Manifests do
         insert_many(
           db,
           :workspace_manifests,
-          {:workspace_id, :repository, :manifest_id, :created_at},
-          Enum.reduce(manifest_ids, [], fn {repository, manifest_id}, result ->
-            if manifest_id != Map.get(current_manifest_ids, repository) do
-              [{workspace_id, repository, manifest_id, now} | result]
+          {:workspace_id, :module, :manifest_id, :created_at},
+          Enum.reduce(manifest_ids, [], fn {module, manifest_id}, result ->
+            if manifest_id != Map.get(current_manifest_ids, module) do
+              [{workspace_id, module, manifest_id, now} | result]
             else
               result
             end
@@ -127,14 +127,14 @@ defmodule Coflux.Orchestration.Manifests do
     end)
   end
 
-  def archive_repository(db, workspace_id, repository_name) do
+  def archive_module(db, workspace_id, module_name) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
       {:ok, _} =
         insert_one(db, :workspace_manifests, %{
           workspace_id: workspace_id,
-          repository: repository_name,
+          module: module_name,
           manifest_id: nil,
           created_at: now
         })
@@ -147,15 +147,15 @@ defmodule Coflux.Orchestration.Manifests do
     case query(
            db,
            """
-           SELECT wm.repository, wm.manifest_id
+           SELECT wm.module, wm.manifest_id
            FROM workspace_manifests wm
            JOIN (
-               SELECT repository, MAX(created_at) AS latest_created_at
+               SELECT module, MAX(created_at) AS latest_created_at
                FROM workspace_manifests
                WHERE workspace_id = ?1
-               GROUP BY repository
+               GROUP BY module
            ) AS latest
-           ON wm.repository = latest.repository AND wm.created_at = latest.latest_created_at
+           ON wm.module = latest.module AND wm.created_at = latest.latest_created_at
            WHERE wm.workspace_id = ?1
            """,
            {workspace_id}
@@ -169,11 +169,11 @@ defmodule Coflux.Orchestration.Manifests do
     case get_latest_manifest_ids(db, workspace_id) do
       {:ok, manifest_ids} ->
         manifests =
-          Enum.reduce(manifest_ids, %{}, fn {repository, manifest_id}, result ->
+          Enum.reduce(manifest_ids, %{}, fn {module, manifest_id}, result ->
             if manifest_id do
               {:ok, workflows} = get_manifest_workflows(db, manifest_id)
               {:ok, sensors} = get_manifest_sensors(db, manifest_id)
-              Map.put(result, repository, %{workflows: workflows, sensors: sensors})
+              Map.put(result, module, %{workflows: workflows, sensors: sensors})
             else
               result
             end
@@ -183,18 +183,18 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  def get_latest_workflow(db, workspace_id, repository, target_name) do
+  def get_latest_workflow(db, workspace_id, module, target_name) do
     case query_one(
            db,
            """
            SELECT w.parameter_set_id, w.instruction_id, w.wait_for, w.cache_config_id, w.defer_params, w.delay, w.retry_limit, w.retry_delay_min, w.retry_delay_max, w.requires_tag_set_id
            FROM workspace_manifests AS wm
            LEFT JOIN workflows AS w ON w.manifest_id = wm.manifest_id
-           WHERE wm.workspace_id = ?1 AND wm.repository = ?2 AND w.name = ?3
+           WHERE wm.workspace_id = ?1 AND wm.module = ?2 AND w.name = ?3
            ORDER BY wm.created_at DESC
            LIMIT 1
            """,
-           {workspace_id, repository, target_name}
+           {workspace_id, module, target_name}
          ) do
       {:ok, nil} ->
         {:ok, nil}
@@ -218,18 +218,18 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  def get_latest_sensor(db, workspace_id, repository, target_name) do
+  def get_latest_sensor(db, workspace_id, module, target_name) do
     case query_one(
            db,
            """
            SELECT s.parameter_set_id, s.instruction_id, s.requires_tag_set_id
            FROM workspace_manifests AS wm
            LEFT JOIN sensors AS s ON s.manifest_id = wm.manifest_id
-           WHERE wm.workspace_id = ?1 AND wm.repository = ?2 AND s.name = ?3
+           WHERE wm.workspace_id = ?1 AND wm.module = ?2 AND s.name = ?3
            ORDER BY wm.created_at DESC
            LIMIT 1
            """,
-           {workspace_id, repository, target_name}
+           {workspace_id, module, target_name}
          ) do
       {:ok, nil} ->
         {:ok, nil}
@@ -303,7 +303,7 @@ defmodule Coflux.Orchestration.Manifests do
     case query(
            db,
            """
-           SELECT DISTINCT wm.repository, w.name
+           SELECT DISTINCT wm.module, w.name
            FROM workspace_manifests AS wm
            INNER JOIN manifests AS m on m.id = wm.manifest_id
            INNER JOIN workflows AS w ON w.manifest_id = m.id
@@ -313,10 +313,10 @@ defmodule Coflux.Orchestration.Manifests do
          ) do
       {:ok, rows} ->
         {:ok,
-         Enum.reduce(rows, %{}, fn {repository, target_name}, result ->
+         Enum.reduce(rows, %{}, fn {module, target_name}, result ->
            result
-           |> Map.put_new(repository, MapSet.new())
-           |> Map.update!(repository, &MapSet.put(&1, target_name))
+           |> Map.put_new(module, MapSet.new())
+           |> Map.update!(module, &MapSet.put(&1, target_name))
          end)}
     end
   end
@@ -325,7 +325,7 @@ defmodule Coflux.Orchestration.Manifests do
     case query(
            db,
            """
-           SELECT DISTINCT wm.repository, s.name
+           SELECT DISTINCT wm.module, s.name
            FROM workspace_manifests AS wm
            INNER JOIN manifests AS m on m.id = wm.manifest_id
            INNER JOIN sensors AS s ON s.manifest_id = m.id
@@ -335,10 +335,10 @@ defmodule Coflux.Orchestration.Manifests do
          ) do
       {:ok, rows} ->
         {:ok,
-         Enum.reduce(rows, %{}, fn {repository, target_name}, result ->
+         Enum.reduce(rows, %{}, fn {module, target_name}, result ->
            result
-           |> Map.put_new(repository, MapSet.new())
-           |> Map.update!(repository, &MapSet.put(&1, target_name))
+           |> Map.put_new(module, MapSet.new())
+           |> Map.update!(module, &MapSet.put(&1, target_name))
          end)}
     end
   end

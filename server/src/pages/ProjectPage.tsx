@@ -5,7 +5,7 @@ import { findKey } from "lodash";
 
 import { randomName } from "../utils";
 import CodeBlock from "../components/CodeBlock";
-import { useWorkspaces, useProjects, useRepositories } from "../topics";
+import { useWorkspaces, useProjects, useModules } from "../topics";
 import {
   Disclosure,
   DisclosureButton,
@@ -66,7 +66,7 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
   const workspaces = useWorkspaces(projectId);
   const workspaceName = workspaceId && workspaces?.[workspaceId].name;
   const exampleWorkspaceName = useMemo(() => randomName(), []);
-  const exampleRepositoryName = `${packageName}.repo`;
+  const exampleModuleName = `${packageName}.workflows`;
   const anyWorkspaces =
     workspaces &&
     Object.values(workspaces).filter((e) => e.state != "archived").length > 0;
@@ -103,14 +103,14 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
                 </p>
               </Hint>
             </Step>
-            <Step title="Initialise an empty repository">
+            <Step title="Initialise an empty module">
               <CodeBlock
                 className="bg-slate-100"
                 prompt="$"
                 code={[
                   `mkdir -p ${packageName}`,
                   `touch ${packageName}/__init__.py`,
-                  `touch ${packageName}/repo.py`,
+                  `touch ${packageName}/workflows.py`,
                 ]}
               />
             </Step>
@@ -118,23 +118,22 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
               <CodeBlock
                 className="bg-slate-100"
                 prompt="$"
-                code={[`coflux agent --dev ${exampleRepositoryName}`]}
+                code={[`coflux agent --dev ${exampleModuleName}`]}
               />
               <Hint>
                 <p>
                   The <code className="bg-slate-100">--dev</code> flag enables
-                  file watching and automatic repository registration
-                  (equivalent to <code className="bg-slate-100">--reload</code>{" "}
-                  and <code className="bg-slate-100">--register</code>) - the
-                  agent will automatically restart when changes to the source
-                  code are detected, and automtically register workflow
-                  definitions.
+                  file watching and automatic module registration (equivalent to{" "}
+                  <code className="bg-slate-100">--reload</code> and{" "}
+                  <code className="bg-slate-100">--register</code>) - the agent
+                  will automatically restart when changes to the source code are
+                  detected, and automtically register workflow definitions.
                 </p>
               </Hint>
             </Step>
-            <Step title="Add a workflow to your repository">
+            <Step title="Add a workflow to your module">
               <CodeBlock
-                header={`${packageName}/repo.py`}
+                header={`${packageName}/workflows.py`}
                 className="bg-slate-100"
                 code={[
                   "import coflux as cf",
@@ -170,12 +169,12 @@ export default function ProjectPage() {
     workspaces,
     (e) => e.name == workspaceName && e.state != "archived",
   );
-  const repositories = useRepositories(projectId, workspaceId);
+  const modules = useModules(projectId, workspaceId);
   if (
     projectId &&
     (!workspaceName ||
-      (repositories &&
-        !Object.values(repositories).some(
+      (modules &&
+        !Object.values(modules).some(
           (r) => r.workflows.length || r.sensors.length,
         )))
   ) {

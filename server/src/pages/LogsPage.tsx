@@ -37,7 +37,7 @@ function StepIdentifier({ runId, run, executionId }: StepIdentifierProps) {
         hoveredClassName="ring-2 ring-slate-300"
       >
         <span className="font-mono">{step.target}</span>{" "}
-        <span className="text-slate-500 text-sm">({step.repository})</span>
+        <span className="text-slate-500 text-sm">({step.module})</span>
       </StepLink>
     );
   } else {

@@ -311,19 +311,19 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["archive_repository"]) do
+  defp handle(req, "POST", ["archive_module"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
         workspace_name: "workspaceName",
-        repository_name: "repositoryName"
+        module_name: "moduleName"
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_repository(
+      case Orchestration.archive_module(
              arguments.project_id,
              arguments.workspace_name,
-             arguments.repository_name
+             arguments.module_name
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -337,10 +337,10 @@ defmodule Coflux.Handlers.Api do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     workspace_name = get_query_param(qs, "workspace")
-    repository = get_query_param(qs, "repository")
+    module = get_query_param(qs, "module")
     target_name = get_query_param(qs, "target")
 
-    case Orchestration.get_workflow(project_id, workspace_name, repository, target_name) do
+    case Orchestration.get_workflow(project_id, workspace_name, module, target_name) do
       {:ok, nil} ->
         json_error_response(req, "not_found", status: 404)
 
@@ -355,7 +355,7 @@ defmodule Coflux.Handlers.Api do
         req,
         %{
           project_id: "projectId",
-          repository: "repository",
+          module: "module",
           target: "target",
           workspace_name: "workspaceName",
           arguments: {"arguments", &parse_arguments/1}
@@ -373,7 +373,7 @@ defmodule Coflux.Handlers.Api do
     if Enum.empty?(errors) do
       case Orchestration.start_run(
              arguments.project_id,
-             arguments.repository,
+             arguments.module,
              arguments.target,
              :workflow,
              arguments.arguments,
@@ -404,7 +404,7 @@ defmodule Coflux.Handlers.Api do
         req,
         %{
           project_id: "projectId",
-          repository: "repository",
+          module: "module",
           target: "target",
           workspace_name: "workspaceName",
           arguments: {"arguments", &parse_arguments/1}
@@ -417,7 +417,7 @@ defmodule Coflux.Handlers.Api do
     if Enum.empty?(errors) do
       case Orchestration.start_run(
              arguments.project_id,
-             arguments.repository,
+             arguments.module,
              arguments.target,
              :sensor,
              arguments.arguments,
@@ -537,7 +537,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp is_valid_repository_pattern?(pattern) do
+  defp is_valid_module_pattern?(pattern) do
     cond do
       not is_binary(pattern) ->
         false
@@ -571,10 +571,10 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_repositories(value) do
+  defp parse_modules(value) do
     value = List.wrap(value)
 
-    if Enum.all?(value, &is_valid_repository_pattern?/1) do
+    if Enum.all?(value, &is_valid_module_pattern?/1) do
       {:ok, value}
     else
       {:error, :invalid}
@@ -653,7 +653,7 @@ defmodule Coflux.Handlers.Api do
       is_map(value) ->
         Enum.reduce_while(
           [
-            {"repositories", &parse_repositories/1, :repositories, []},
+            {"modules", &parse_modules/1, :modules, []},
             {"provides", &parse_tag_set/1, :provides, %{}},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
@@ -741,7 +741,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  def is_valid_repository_name?(value) do
+  def is_valid_module_name?(value) do
     is_valid_string?(value, max_length: 100, regex: ~r/^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)*$/i)
   end
 
@@ -975,11 +975,11 @@ defmodule Coflux.Handlers.Api do
 
   defp parse_manifests(value) do
     if is_map(value) do
-      Enum.reduce_while(value, {:ok, %{}}, fn {repository, manifest}, {:ok, result} ->
-        if is_valid_repository_name?(repository) do
+      Enum.reduce_while(value, {:ok, %{}}, fn {module, manifest}, {:ok, result} ->
+        if is_valid_module_name?(module) do
           case parse_manifest(manifest) do
             {:ok, parsed} ->
-              {:cont, {:ok, Map.put(result, repository, parsed)}}
+              {:cont, {:ok, Map.put(result, module, parsed)}}
 
             {:error, error} ->
               {:halt, {:error, error}}

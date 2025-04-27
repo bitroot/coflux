@@ -74,13 +74,13 @@ class Agent:
         self._execution_manager.abort_all()
 
     async def _handle_execute(self, *args) -> None:
-        (execution_id, repository, target_name, arguments) = args
+        (execution_id, module_name, target_name, arguments) = args
         print(f"Handling execute '{target_name}' ({execution_id})...")
-        target = self._targets[repository][target_name][1].__name__
+        target = self._targets[module_name][target_name][1].__name__
         arguments = [_parse_value(a) for a in arguments]
         loop = asyncio.get_running_loop()
         self._execution_manager.execute(
-            execution_id, repository, target, arguments, self._server_host, loop
+            execution_id, module_name, target, arguments, self._server_host, loop
         )
 
     async def _handle_abort(self, *args) -> None:
@@ -119,9 +119,9 @@ class Agent:
                 async with websockets.connect(url) as websocket:
                     print("Connected.")
                     targets: dict[str, dict[models.TargetType, list[str]]] = {}
-                    for repository, repository_targets in self._targets.items():
-                        for target_name, (target, _) in repository_targets.items():
-                            targets.setdefault(repository, {}).setdefault(
+                    for module, module_targets in self._targets.items():
+                        for target_name, (target, _) in module_targets.items():
+                            targets.setdefault(module, {}).setdefault(
                                 target.type, []
                             ).append(target_name)
                     coros = [

@@ -473,9 +473,7 @@ function Header({
           <div className="flex items-center gap-2">
             <div className="flex items-baseline flex-wrap gap-1 leading-tight">
               <div className="flex items-baseline gap-1">
-                <span className="text-slate-400 text-sm">
-                  {step.repository}
-                </span>
+                <span className="text-slate-400 text-sm">{step.module}</span>
                 <span className="text-slate-400">/</span>
               </div>
               <span className="flex items-baseline gap-1">
@@ -748,7 +746,7 @@ function DependenciesSection({ execution }: DependenciesSectionProps) {
                       {dependency.execution.target}
                     </span>{" "}
                     <span className="text-slate-500">
-                      ({dependency.execution.repository})
+                      ({dependency.execution.module})
                     </span>
                   </StepLink>
                 </li>
@@ -813,7 +811,7 @@ function RelationsSection({
             hoveredClassName="ring-2 ring-slate-300"
           >
             <span className="font-mono">{step.target}</span>{" "}
-            <span className="text-slate-500">({step.repository})</span>
+            <span className="text-slate-500">({step.module})</span>
           </StepLink>
         ) : run.parent ? (
           <StepLink
@@ -824,7 +822,7 @@ function RelationsSection({
             hoveredClassName="ring-2 ring-slate-300"
           >
             <span className="font-mono">{run.parent.target}</span>{" "}
-            <span className="text-slate-500">({run.parent.repository})</span>
+            <span className="text-slate-500">({run.parent.module})</span>
           </StepLink>
         ) : (
           <p className="italic">None</p>
@@ -846,7 +844,7 @@ function RelationsSection({
                     hoveredClassName="ring-2 ring-slate-300"
                   >
                     <span className="font-mono">{step.target}</span>{" "}
-                    <span className="text-slate-500">({step.repository})</span>
+                    <span className="text-slate-500">({step.module})</span>
                   </StepLink>
                 </li>
               );
@@ -994,9 +992,7 @@ function DeferredSection({ result }: DeferredSectionProps) {
             hoveredClassName="ring-2 ring-slate-300"
           >
             <span className="font-mono">{result.execution.target}</span>{" "}
-            <span className="text-slate-500">
-              ({result.execution.repository})
-            </span>
+            <span className="text-slate-500">({result.execution.module})</span>
           </StepLink>
         </p>
       )}
@@ -1022,9 +1018,7 @@ function CachedSection({ result }: CachedSectionProps) {
           hoveredClassName="ring-2"
         >
           <span className="font-mono">{result.execution.target}</span>{" "}
-          <span className="text-slate-500">
-            ({result.execution.repository})
-          </span>
+          <span className="text-slate-500">({result.execution.module})</span>
         </StepLink>
       </p>
     </div>
@@ -1049,9 +1043,7 @@ function SpawnedSection({ result }: SpawnedSectionProps) {
           hoveredClassName="ring-2"
         >
           <span className="font-mono">{result.execution.target}</span>{" "}
-          <span className="text-slate-500">
-            ({result.execution.repository})
-          </span>
+          <span className="text-slate-500">({result.execution.module})</span>
         </StepLink>
       </p>
     </div>

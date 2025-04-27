@@ -18,7 +18,7 @@ def _get_channel() -> execution.Channel:
 
 def submit(
     type: models.TargetType,
-    repository: str,
+    module: str,
     target: str,
     arguments: tuple[t.Any, ...],
     *,
@@ -33,7 +33,7 @@ def submit(
 ) -> models.Execution[t.Any]:
     return _get_channel().submit_execution(
         type,
-        repository,
+        module,
         target,
         arguments,
         wait_for=(wait_for or set()),

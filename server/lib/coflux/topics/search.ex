@@ -20,20 +20,20 @@ defmodule Coflux.Topics.Search do
 
   defp process_notification(topic, {:manifests, targets}) do
     update_in(topic.state.targets, fn existing ->
-      Enum.reduce(targets, existing, fn {repository_name, repository_targets}, existing ->
+      Enum.reduce(targets, existing, fn {module_name, module_targets}, existing ->
         Enum.reduce(
           %{workflows: :workflow, sensors: :sensor},
           existing,
           fn {key, target_type}, existing ->
-            repository_targets
+            module_targets
             |> Map.fetch!(key)
             |> Enum.reduce(existing, fn target_name, existing ->
-              existing_target = get_in(existing, [repository_name, target_name])
+              existing_target = get_in(existing, [module_name, target_name])
 
               if !existing_target || elem(existing_target, 0) != target_type do
                 put_in(
                   existing,
-                  [Access.key(repository_name, %{}), target_name],
+                  [Access.key(module_name, %{}), target_name],
                   {target_type, nil}
                 )
               else
@@ -48,12 +48,12 @@ defmodule Coflux.Topics.Search do
 
   defp process_notification(
          topic,
-         {:step, repository, target_name, target_type, external_run_id, external_step_id, attempt}
+         {:step, module, target_name, target_type, external_run_id, external_step_id, attempt}
        ) do
     update_in(topic.state.targets, fn targets ->
       put_in(
         targets,
-        [Access.key(repository, %{}), target_name],
+        [Access.key(module, %{}), target_name],
         {target_type, {external_run_id, external_step_id, attempt}}
       )
     end)
@@ -83,22 +83,22 @@ defmodule Coflux.Topics.Search do
   end
 
   defp generate_candidates(targets) do
-    Enum.flat_map(targets, fn {repository_name, repository} ->
-      repository_name_parts = [repository_name | String.split(repository_name, ["_", "."])]
+    Enum.flat_map(targets, fn {module_name, module} ->
+      module_name_parts = [module_name | String.split(module_name, ["_", "."])]
 
-      repository
+      module
       |> Enum.map(fn {target_name, {target_type, latest_run}} ->
         target_name_parts = [target_name | String.split(target_name, "_")]
 
         target_parts =
-          repository_name_parts
+          module_name_parts
           |> Enum.concat(target_name_parts)
           |> Enum.reject(&(&1 == ""))
           |> Enum.uniq()
 
-        {{target_type, repository_name, target_name, latest_run}, target_parts}
+        {{target_type, module_name, target_name, latest_run}, target_parts}
       end)
-      |> Enum.concat([{{:repository, repository_name}, repository_name_parts}])
+      |> Enum.concat([{{:module, module_name}, module_name_parts}])
     end)
   end
 
@@ -122,13 +122,13 @@ defmodule Coflux.Topics.Search do
 
   defp build_match(match) do
     case match do
-      {:repository, repository_name} ->
+      {:module, module_name} ->
         %{
-          type: "repository",
-          name: repository_name
+          type: "module",
+          name: module_name
         }
 
-      {type, repository_name, target_name, latest_run} when type in [:workflow, :sensor, :task] ->
+      {type, module_name, target_name, latest_run} when type in [:workflow, :sensor, :task] ->
         run =
           case latest_run do
             {run_id, step_id, attempt} -> %{runId: run_id, stepId: step_id, attempt: attempt}
@@ -137,7 +137,7 @@ defmodule Coflux.Topics.Search do
 
         %{
           type: Atom.to_string(type),
-          repository: repository_name,
+          module: module_name,
           name: target_name,
           run: run
         }

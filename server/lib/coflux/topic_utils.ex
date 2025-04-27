@@ -60,7 +60,7 @@ defmodule Coflux.TopicUtils do
       runId: execution.run_id,
       stepId: execution.step_id,
       attempt: execution.attempt,
-      repository: execution.repository,
+      module: execution.module,
       target: execution.target
     }
   end

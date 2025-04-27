@@ -46,25 +46,25 @@ function Target({ url, icon: Icon, name, isActive }: TargetProps) {
   );
 }
 
-type RepositoryHeaderProps = {
-  repositoryName: string;
-  repository: models.Repository;
+type ModuleHeaderProps = {
+  moduleName: string;
+  module: models.Module;
   isActive: boolean;
   projectId: string;
   workspaceName: string;
   now: DateTime<true>;
 };
 
-function RepositoryHeader({
-  repositoryName,
-  repository,
+function ModuleHeader({
+  moduleName,
+  module,
   isActive,
   projectId,
   workspaceName,
   now,
-}: RepositoryHeaderProps) {
-  const nextDueDiff = repository.nextDueAt
-    ? DateTime.fromMillis(repository.nextDueAt).diff(now, [
+}: ModuleHeaderProps) {
+  const nextDueDiff = module.nextDueAt
+    ? DateTime.fromMillis(module.nextDueAt).diff(now, [
         "days",
         "hours",
         "minutes",
@@ -74,7 +74,7 @@ function RepositoryHeader({
   return (
     <Link
       to={buildUrl(
-        `/projects/${projectId}/repositories/${encodeURIComponent(repositoryName)}`,
+        `/projects/${projectId}/modules/${encodeURIComponent(moduleName)}`,
         { workspace: workspaceName },
       )}
       className={classNames(
@@ -84,7 +84,7 @@ function RepositoryHeader({
     >
       <div className="flex items-center py-1 px-1 gap-2">
         <h2 className="font-bold uppercase text-slate-400 text-sm">
-          {repositoryName}
+          {moduleName}
         </h2>
         {nextDueDiff && nextDueDiff.toMillis() < -1000 ? (
           <span
@@ -101,18 +101,16 @@ function RepositoryHeader({
               }
             />
           </span>
-        ) : repository.executing ? (
-          <span
-            title={`${pluralise(repository.executing, "execution")} running`}
-          >
+        ) : module.executing ? (
+          <span title={`${pluralise(module.executing, "execution")} running`}>
             <IconInnerShadowTopLeft
               size={16}
               className="text-cyan-400 animate-spin"
             />
           </span>
-        ) : repository.scheduled ? (
+        ) : module.scheduled ? (
           <span
-            title={`${pluralise(repository.scheduled, "execution")} scheduled${
+            title={`${pluralise(module.scheduled, "execution")} scheduled${
               nextDueDiff
                 ? ` (${nextDueDiff.rescale().toHuman({ unitDisplay: "narrow" })})`
                 : ""
@@ -126,26 +124,22 @@ function RepositoryHeader({
   );
 }
 
-type RepositoryMenuProps = {
+type ModuleMenuProps = {
   projectId: string;
   workspaceName: string;
-  repositoryName: string;
+  moduleName: string;
 };
 
-function RepositoryMenu({
-  projectId,
-  workspaceName,
-  repositoryName,
-}: RepositoryMenuProps) {
+function ModuleMenu({ projectId, workspaceName, moduleName }: ModuleMenuProps) {
   const handleArchiveClick = useCallback(() => {
     if (
       confirm(
-        `Are you sure you want to archive '${repositoryName}'? It will be hidden until it's re-registered.`,
+        `Are you sure you want to archive '${moduleName}'? It will be hidden until it's re-registered.`,
       )
     ) {
-      api.archiveRepository(projectId, workspaceName, repositoryName);
+      api.archiveModule(projectId, workspaceName, moduleName);
     }
-  }, [projectId, workspaceName, repositoryName]);
+  }, [projectId, workspaceName, moduleName]);
   return (
     <Menu>
       <MenuButton className="text-slate-600 p-1 hover:bg-slate-200 rounded">
@@ -164,7 +158,7 @@ function RepositoryMenu({
             <span className="shrink-0 text-slate-400">
               <IconTrash size={16} strokeWidth={1.5} />
             </span>
-            <span className="flex-1">Archive repository</span>
+            <span className="flex-1">Archive module</span>
           </button>
         </MenuItem>
       </MenuItems>
@@ -175,44 +169,44 @@ function RepositoryMenu({
 type Props = {
   projectId: string;
   workspaceName: string;
-  activeRepository: string | undefined;
+  activeModule: string | undefined;
   activeTarget: string | undefined;
-  repositories: Record<string, models.Repository>;
+  modules: Record<string, models.Module>;
 };
 
 export default function TargetsList({
   projectId,
   workspaceName,
-  activeRepository,
+  activeModule,
   activeTarget,
-  repositories,
+  modules,
 }: Props) {
   const now = useNow(500);
   return (
     <div className="px-3 py-1">
-      {sortBy(Object.entries(repositories), ([name, _]) => name).map(
-        ([repositoryName, repository]) => (
-          <div key={repositoryName} className="py-2">
+      {sortBy(Object.entries(modules), ([name, _]) => name).map(
+        ([moduleName, module]) => (
+          <div key={moduleName} className="py-2">
             <div className="flex gap-1 sticky top-0 bg-slate-100 py-1">
-              <RepositoryHeader
-                repositoryName={repositoryName}
-                repository={repository}
-                isActive={activeRepository == repositoryName && !activeTarget}
+              <ModuleHeader
+                moduleName={moduleName}
+                module={module}
+                isActive={activeModule == moduleName && !activeTarget}
                 projectId={projectId}
                 workspaceName={workspaceName}
                 now={now}
               />
-              <RepositoryMenu
+              <ModuleMenu
                 projectId={projectId}
                 workspaceName={workspaceName}
-                repositoryName={repositoryName}
+                moduleName={moduleName}
               />
             </div>
-            {repository.workflows.length || repository.sensors.length ? (
+            {module.workflows.length || module.sensors.length ? (
               <ul>
-                {repository.workflows.toSorted().map((name) => {
+                {module.workflows.toSorted().map((name) => {
                   const isActive =
-                    activeRepository == repositoryName && activeTarget == name;
+                    activeModule == moduleName && activeTarget == name;
                   return (
                     <Target
                       key={name}
@@ -220,7 +214,7 @@ export default function TargetsList({
                       icon={IconSubtask}
                       url={buildUrl(
                         `/projects/${projectId}/workflows/${encodeURIComponent(
-                          repositoryName,
+                          moduleName,
                         )}/${name}`,
                         { workspace: workspaceName },
                       )}
@@ -228,9 +222,9 @@ export default function TargetsList({
                     />
                   );
                 })}
-                {repository.sensors.map((name) => {
+                {module.sensors.map((name) => {
                   const isActive =
-                    activeRepository == repositoryName && activeTarget == name;
+                    activeModule == moduleName && activeTarget == name;
                   return (
                     <Target
                       key={name}
@@ -238,7 +232,7 @@ export default function TargetsList({
                       icon={IconCpu}
                       url={buildUrl(
                         `/projects/${projectId}/sensors/${encodeURIComponent(
-                          repositoryName,
+                          moduleName,
                         )}/${name}`,
                         { workspace: workspaceName },
                       )}

@@ -66,15 +66,15 @@ export function resumeWorkspace(projectId: string, workspaceId: string) {
   return post("resume_workspace", { projectId, workspaceId });
 }
 
-export function archiveRepository(
+export function archiveModule(
   projectId: string,
   workspaceName: string,
-  repositoryName: string,
+  moduleName: string,
 ) {
-  return post("archive_repository", {
+  return post("archive_module", {
     projectId,
     workspaceName,
-    repositoryName,
+    moduleName,
   });
 }
 
@@ -104,7 +104,7 @@ export function resumeAgent(
 
 export function submitWorkflow(
   projectId: string,
-  repository: string,
+  module: string,
   target: string,
   workspaceName: string,
   arguments_: ["json", string][],
@@ -131,7 +131,7 @@ export function submitWorkflow(
   return post("submit_workflow", {
     ...options,
     projectId,
-    repository,
+    module,
     target,
     workspaceName,
     arguments: arguments_,
@@ -140,7 +140,7 @@ export function submitWorkflow(
 
 export function startSensor(
   projectId: string,
-  repository: string,
+  module: string,
   target: string,
   workspaceName: string,
   arguments_: ["json", string][],
@@ -151,7 +151,7 @@ export function startSensor(
   return post("start_sensor", {
     ...options,
     projectId,
-    repository,
+    module,
     target,
     workspaceName,
     arguments: arguments_,

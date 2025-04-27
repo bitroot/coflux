@@ -87,7 +87,7 @@ class RecordErrorRequest(t.NamedTuple):
 
 
 class SubmitExecutionRequest(t.NamedTuple):
-    repository: str
+    module: str
     target: str
     type: models.TargetType
     arguments: list[models.Value]
@@ -279,7 +279,7 @@ class Channel:
     def submit_execution(
         self,
         type: models.TargetType,
-        repository: str,
+        module: str,
         target: str,
         arguments: tuple[t.Any, ...],
         *,
@@ -305,7 +305,7 @@ class Channel:
         ]
         execution_id = self._request(
             SubmitExecutionRequest(
-                repository,
+                module,
                 target,
                 type,
                 serialised_arguments,
@@ -766,7 +766,7 @@ class Execution:
     def _handle_request(self, request_id, request):
         match request:
             case SubmitExecutionRequest(
-                repository,
+                module,
                 target,
                 type,
                 arguments,
@@ -784,7 +784,7 @@ class Execution:
                 self._server_request(
                     "submit",
                     (
-                        repository,
+                        module,
                         target,
                         type,
                         _json_safe_arguments(arguments),

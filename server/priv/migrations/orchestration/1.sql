@@ -85,7 +85,7 @@ CREATE TABLE workspaces (
 
 CREATE TABLE workspace_manifests (
   workspace_id INTEGER NOT NULL,
-  repository TEXT NOT NULL,
+  module TEXT NOT NULL,
   manifest_id INTEGER,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
@@ -130,7 +130,7 @@ CREATE TABLE pool_definitions (
   FOREIGN KEY (provides_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE pool_definition_repositories (
+CREATE TABLE pool_definition_modules (
   pool_definition_id INTEGER NOT NULL,
   pattern TEXT NOT NULL,
   FOREIGN KEY (pool_definition_id) REFERENCES pool_definitions ON DELETE CASCADE
@@ -218,7 +218,7 @@ CREATE TABLE steps (
   external_id TEXT NOT NULL UNIQUE,
   run_id INTEGER NOT NULL,
   parent_id INTEGER, -- TODO: remove?
-  repository TEXT NOT NULL,
+  module TEXT NOT NULL,
   target TEXT NOT NULL,
   type INTEGER NOT NULL,
   priority INTEGER NOT NULL, -- TODO: move to executions?

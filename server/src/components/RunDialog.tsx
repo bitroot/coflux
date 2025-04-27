@@ -47,7 +47,7 @@ function Argument({ parameter, value, error, onChange }: ArgumentProps) {
 
 type Props = {
   projectId: string;
-  repository: string | undefined;
+  module: string | undefined;
   target: string | undefined;
   parameters: models.Parameter[];
   instruction: string | null;
@@ -59,7 +59,7 @@ type Props = {
 
 export default function RunDialog({
   projectId,
-  repository,
+  module,
   target,
   parameters,
   instruction,
@@ -101,7 +101,7 @@ export default function RunDialog({
       title={
         <div className="flex justify-between items-start font-normal text-base px-6 pt-6">
           <div className="flex flex-col">
-            <span className="text-slate-400 text-sm">{repository} /</span>
+            <span className="text-slate-400 text-sm">{module} /</span>
             <span className="font-mono font-bold text-xl leading-tight">
               {target}
             </span>

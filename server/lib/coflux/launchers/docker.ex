@@ -1,12 +1,12 @@
 defmodule Coflux.DockerLauncher do
-  def launch(project_id, workspace_name, agent_id, repositories, provides, config \\ %{}) do
+  def launch(project_id, workspace_name, agent_id, modules, provides, config \\ %{}) do
     # TODO: option to configure docker host/socket?
     # TODO: option to configure coflux host?
     with {:ok, %{"Id" => container_id}} <-
            create_container(%{
              "Image" => Map.fetch!(config, :image),
              "HostConfig" => %{"NetworkMode" => "host"},
-             "Cmd" => repositories,
+             "Cmd" => modules,
              "Env" => [
                "COFLUX_HOST=localhost:7777",
                "COFLUX_WORKSPACE=#{workspace_name}",
