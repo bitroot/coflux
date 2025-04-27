@@ -5,7 +5,7 @@ import { findKey } from "lodash";
 
 import { randomName } from "../utils";
 import CodeBlock from "../components/CodeBlock";
-import { useEnvironments, useProjects, useRepositories } from "../topics";
+import { useWorkspaces, useProjects, useRepositories } from "../topics";
 import {
   Disclosure,
   DisclosureButton,
@@ -56,21 +56,21 @@ function Step({ title, children }: StepProps) {
 
 type GettingStartedProps = {
   projectId: string;
-  environmentId: string | undefined;
+  workspaceId: string | undefined;
 };
 
-function GettingStarted({ projectId, environmentId }: GettingStartedProps) {
+function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
   const projects = useProjects();
   const project = (projectId && projects && projects[projectId]) || undefined;
   const packageName = generatePackageName(project?.name);
-  const environments = useEnvironments(projectId);
-  const environmentName = environmentId && environments?.[environmentId].name;
-  const exampleEnvironmentName = useMemo(() => randomName(), []);
+  const workspaces = useWorkspaces(projectId);
+  const workspaceName = workspaceId && workspaces?.[workspaceId].name;
+  const exampleWorkspaceName = useMemo(() => randomName(), []);
   const exampleRepositoryName = `${packageName}.repo`;
-  const anyEnvironments =
-    environments &&
-    Object.values(environments).filter((e) => e.state != "archived").length > 0;
-  if (anyEnvironments) {
+  const anyWorkspaces =
+    workspaces &&
+    Object.values(workspaces).filter((e) => e.state != "archived").length > 0;
+  if (anyWorkspaces) {
     return (
       <div className="overflow-auto">
         <div className="bg-slate-50 border border-slate-100 rounded-lg mx-auto my-6 w-2/3 p-3 text-slate-600">
@@ -91,7 +91,7 @@ function GettingStarted({ projectId, environmentId }: GettingStartedProps) {
                 className="bg-slate-100"
                 prompt="$"
                 code={[
-                  `coflux configure \\\n  --host=${window.location.host} \\\n  --project=${projectId} \\\n  --environment=${environmentName || exampleEnvironmentName}`,
+                  `coflux configure \\\n  --host=${window.location.host} \\\n  --project=${projectId} \\\n  --workspace=${workspaceName || exampleWorkspaceName}`,
                 ]}
               />
               <Hint>
@@ -164,24 +164,22 @@ function GettingStarted({ projectId, environmentId }: GettingStartedProps) {
 export default function ProjectPage() {
   const { project: projectId } = useParams();
   const [searchParams] = useSearchParams();
-  const environmentName = searchParams.get("environment") || undefined;
-  const environments = useEnvironments(projectId);
-  const environmentId = findKey(
-    environments,
-    (e) => e.name == environmentName && e.state != "archived",
+  const workspaceName = searchParams.get("workspace") || undefined;
+  const workspaces = useWorkspaces(projectId);
+  const workspaceId = findKey(
+    workspaces,
+    (e) => e.name == workspaceName && e.state != "archived",
   );
-  const repositories = useRepositories(projectId, environmentId);
+  const repositories = useRepositories(projectId, workspaceId);
   if (
     projectId &&
-    (!environmentName ||
+    (!workspaceName ||
       (repositories &&
         !Object.values(repositories).some(
           (r) => r.workflows.length || r.sensors.length,
         )))
   ) {
-    return (
-      <GettingStarted projectId={projectId} environmentId={environmentId} />
-    );
+    return <GettingStarted projectId={projectId} workspaceId={workspaceId} />;
   } else {
     return <div></div>;
   }

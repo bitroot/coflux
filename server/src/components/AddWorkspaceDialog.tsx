@@ -15,23 +15,23 @@ import { randomName } from "../utils";
 function translateError(error: string | undefined) {
   switch (error) {
     case "invalid":
-      return "Invalid environment name";
+      return "Invalid workspace name";
     case "exists":
-      return "Environment already exists";
+      return "Workspace already exists";
     default:
       return error;
   }
 }
 
 type Props = {
-  environments: Record<string, models.Environment>;
+  workspaces: Record<string, models.Workspace>;
   open: boolean;
   hideCancel?: boolean;
   onClose: () => void;
 };
 
-export default function AddEnvironmentDialog({
-  environments,
+export default function AddWorkspaceDialog({
+  workspaces,
   open,
   hideCancel,
   onClose,
@@ -48,9 +48,9 @@ export default function AddEnvironmentDialog({
       setAdding(true);
       setErrors(undefined);
       api
-        .createEnvironment(activeProjectId!, name, baseId)
+        .createWorkspace(activeProjectId!, name, baseId)
         .then(() => {
-          navigate(`/projects/${activeProjectId}?environment=${name}`);
+          navigate(`/projects/${activeProjectId}?workspace=${name}`);
           setName(randomName());
           setBaseId(null);
           onClose();
@@ -69,26 +69,23 @@ export default function AddEnvironmentDialog({
     },
     [navigate, name, baseId],
   );
-  const environmentNames = Object.entries(environments)
+  const workspaceNames = Object.entries(workspaces)
     .filter(([_, e]) => e.status != "archived")
     .reduce((acc, [id, e]) => ({ ...acc, [id]: e.name }), {});
   return (
     <Dialog
-      title="Add environment"
+      title="Add workspace"
       open={open}
       onClose={onClose}
       className="p-6 max-w-lg"
     >
       {errors && (
         <Alert variant="warning">
-          <p>Failed to create environment. Please check errors below.</p>
+          <p>Failed to create workspace. Please check errors below.</p>
         </Alert>
       )}
       <form onSubmit={handleSubmit}>
-        <Field
-          label="Environment name"
-          error={translateError(errors?.environment)}
-        >
+        <Field label="Workspace name" error={translateError(errors?.workspace)}>
           <Input
             type="text"
             value={name}
@@ -96,9 +93,9 @@ export default function AddEnvironmentDialog({
             onChange={setName}
           />
         </Field>
-        <Field label="Base environment" error={translateError(errors?.base)}>
+        <Field label="Base workspace" error={translateError(errors?.base)}>
           <Select
-            options={environmentNames}
+            options={workspaceNames}
             empty="(None)"
             size="md"
             value={baseId}

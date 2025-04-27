@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useEnvironments, usePool } from "../topics";
+import { useWorkspaces, usePool } from "../topics";
 import { findKey, sortBy, omitBy } from "lodash";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { IconLayoutGrid, IconBrandDocker } from "@tabler/icons-react";
@@ -14,24 +14,19 @@ import { DateTime } from "luxon";
 
 type AgentRowProps = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   agentId: string;
   agent: models.Agent;
 };
 
-function AgentRow({
-  projectId,
-  environmentName,
-  agentId,
-  agent,
-}: AgentRowProps) {
+function AgentRow({ projectId, workspaceName, agentId, agent }: AgentRowProps) {
   const handleStopClick = useCallback(() => {
-    api.stopAgent(projectId, environmentName, agentId).catch(() => {
+    api.stopAgent(projectId, workspaceName, agentId).catch(() => {
       alert("Failed to stop agent. Please try again.");
     });
-  }, [projectId, environmentName, agentId]);
+  }, [projectId, workspaceName, agentId]);
   const handleResumeClick = useCallback(() => {
-    api.resumeAgent(projectId, environmentName, agentId).catch(() => {
+    api.resumeAgent(projectId, workspaceName, agentId).catch(() => {
       alert("Failed to resume agent. Please try again.");
     });
   }, []);
@@ -87,14 +82,14 @@ function AgentRow({
 
 type AgentsTableProps = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   title: string;
   agents: Record<string, models.Agent>;
 };
 
 function AgentsTable({
   projectId,
-  environmentName,
+  workspaceName,
   title,
   agents,
 }: AgentsTableProps) {
@@ -124,7 +119,7 @@ function AgentsTable({
               <AgentRow
                 key={agentId}
                 projectId={projectId}
-                environmentName={environmentName}
+                workspaceName={workspaceName}
                 agentId={agentId}
                 agent={agent}
               />
@@ -159,14 +154,14 @@ function LauncherType({ launcher }: LauncherTypeProps) {
 export default function PoolPage() {
   const { project: projectId, pool: poolName } = useParams();
   const [searchParams] = useSearchParams();
-  const environmentName = searchParams.get("environment") || undefined;
-  const environments = useEnvironments(projectId);
-  const environmentId = findKey(
-    environments,
-    (e) => e.name == environmentName && e.state != "archived",
+  const workspaceName = searchParams.get("workspace") || undefined;
+  const workspaces = useWorkspaces(projectId);
+  const workspaceId = findKey(
+    workspaces,
+    (e) => e.name == workspaceName && e.state != "archived",
   );
 
-  const pool = usePool(projectId, environmentId, poolName);
+  const pool = usePool(projectId, workspaceId, poolName);
   useSetActive(poolName ? ["pool", poolName] : undefined);
 
   if (!pool) {
@@ -188,7 +183,7 @@ export default function PoolPage() {
             <div className="p-5 flex-1 flex flex-col gap-6 overflow-auto">
               <AgentsTable
                 projectId={projectId!}
-                environmentName={environmentName!}
+                workspaceName={workspaceName!}
                 title="Agents"
                 agents={activeAgents}
               />

@@ -1,6 +1,6 @@
 defmodule Coflux.Topics.Workflow do
   use Topical.Topic,
-    route: ["projects", :project_id, "workflows", :repository, :target, :environment_id]
+    route: ["projects", :project_id, "workflows", :repository, :target, :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -8,13 +8,13 @@ defmodule Coflux.Topics.Workflow do
     project_id = Keyword.fetch!(params, :project_id)
     repository = Keyword.fetch!(params, :repository)
     target_name = Keyword.fetch!(params, :target)
-    environment_id = String.to_integer(Keyword.fetch!(params, :environment_id))
+    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
 
     case Orchestration.subscribe_workflow(
            project_id,
            repository,
            target_name,
-           environment_id,
+           workspace_id,
            self()
          ) do
       {:ok, workflow, instruction, runs, ref} ->

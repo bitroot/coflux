@@ -5,24 +5,24 @@ import { Navigate, useParams, useSearchParams } from "react-router-dom";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { buildUrl } from "../utils";
 import Loading from "../components/Loading";
-import { useEnvironments, useWorkflow } from "../topics";
+import { useWorkspaces, useWorkflow } from "../topics";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 
 export default function WorkflowPage() {
   const { project: projectId, repository, target: targetName } = useParams();
   const [searchParams] = useSearchParams();
-  const activeEnvironmentName = searchParams.get("environment") || undefined;
-  const environments = useEnvironments(projectId);
-  const activeEnvironmentId = findKey(
-    environments,
-    (e) => e.name == activeEnvironmentName && e.state != "archived",
+  const activeWorkspaceName = searchParams.get("workspace") || undefined;
+  const workspaces = useWorkspaces(projectId);
+  const activeWorkspaceId = findKey(
+    workspaces,
+    (e) => e.name == activeWorkspaceName && e.state != "archived",
   );
   const workflow = useWorkflow(
     projectId,
     repository,
     targetName,
-    activeEnvironmentId,
+    activeWorkspaceId,
   );
   useTitlePart(`${targetName} (${repository})`);
   useSetActive(
@@ -40,7 +40,7 @@ export default function WorkflowPage() {
         <Navigate
           replace
           to={buildUrl(`/projects/${projectId}/runs/${latestRunId}`, {
-            environment: activeEnvironmentName,
+            workspace: activeWorkspaceName,
           })}
         />
       );
@@ -51,8 +51,8 @@ export default function WorkflowPage() {
             repository={repository}
             target={targetName}
             projectId={projectId!}
-            activeEnvironmentId={activeEnvironmentId}
-            activeEnvironmentName={activeEnvironmentName}
+            activeWorkspaceId={activeWorkspaceId}
+            activeWorkspaceName={activeWorkspaceName}
           />
           <div className="p-4 flex-1 flex flex-col gap-2 items-center justify-center text-center text-slate-300">
             <h1 className="text-2xl">This workflow hasn't been run yet</h1>

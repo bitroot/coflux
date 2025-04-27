@@ -8,7 +8,7 @@ import Loading from "../components/Loading";
 import RepositoryQueue from "../components/RepositoryQueue";
 import useNow from "../hooks/useNow";
 import { useSetActive } from "../layouts/ProjectLayout";
-import { useEnvironments, useExecutions } from "../topics";
+import { useWorkspaces, useExecutions } from "../topics";
 import { findKey } from "lodash";
 
 function splitExecutions(
@@ -46,13 +46,13 @@ function splitExecutions(
 export default function RepositoryPage() {
   const { project: projectId, repository: repositoryName } = useParams();
   const [searchParams] = useSearchParams();
-  const environmentName = searchParams.get("environment") || undefined;
-  const environments = useEnvironments(projectId);
-  const environmentId = findKey(
-    environments,
-    (e) => e.name == environmentName && e.state != "archived",
+  const workspaceName = searchParams.get("workspace") || undefined;
+  const workspaces = useWorkspaces(projectId);
+  const workspaceId = findKey(
+    workspaces,
+    (e) => e.name == workspaceName && e.state != "archived",
   );
-  const executions = useExecutions(projectId, repositoryName, environmentId);
+  const executions = useExecutions(projectId, repositoryName, workspaceId);
   useTitlePart(repositoryName);
   useSetActive(repositoryName ? ["repository", repositoryName] : undefined);
   const now = useNow(500);
@@ -77,7 +77,7 @@ export default function RepositoryPage() {
         <div className="flex-1 flex gap-2 min-h-0">
           <RepositoryQueue
             projectId={projectId!}
-            environmentName={environmentName!}
+            workspaceName={workspaceName!}
             title="Executing"
             executions={executing}
             now={now}
@@ -85,7 +85,7 @@ export default function RepositoryPage() {
           />
           <RepositoryQueue
             projectId={projectId!}
-            environmentName={environmentName!}
+            workspaceName={workspaceName!}
             title="Due"
             executions={overdue}
             now={now}
@@ -93,7 +93,7 @@ export default function RepositoryPage() {
           />
           <RepositoryQueue
             projectId={projectId!}
-            environmentName={environmentName!}
+            workspaceName={workspaceName!}
             title="Scheduled"
             executions={scheduled}
             now={now}

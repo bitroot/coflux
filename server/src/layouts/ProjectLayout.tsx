@@ -13,7 +13,7 @@ import { findKey } from "lodash";
 import TargetsList from "../components/TargetsList";
 import { useTitlePart } from "../components/TitleContext";
 import {
-  useEnvironments,
+  useWorkspaces,
   usePools,
   useProjects,
   useRepositories,
@@ -26,19 +26,19 @@ import { buildUrl } from "../utils";
 
 type SidebarProps = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   active: Active;
 };
 
-function Sidebar({ projectId, environmentName, active }: SidebarProps) {
-  const environments = useEnvironments(projectId);
-  const environmentId = findKey(
-    environments,
-    (e) => e.name == environmentName && e.state != "archived",
+function Sidebar({ projectId, workspaceName, active }: SidebarProps) {
+  const workspaces = useWorkspaces(projectId);
+  const workspaceId = findKey(
+    workspaces,
+    (e) => e.name == workspaceName && e.state != "archived",
   );
-  const repositories = useRepositories(projectId, environmentId);
-  const pools = usePools(projectId, environmentId);
-  const sessions = useSessions(projectId, environmentId);
+  const repositories = useRepositories(projectId, workspaceId);
+  const pools = usePools(projectId, workspaceId);
+  const sessions = useSessions(projectId, workspaceId);
   return (
     <div className="w-[30%] max-w-[350px] min-w-[200px] bg-slate-100 text-slate-400 border-r border-slate-200 flex-none flex flex-col">
       <div className="flex-1 flex flex-col min-h-0">
@@ -49,7 +49,7 @@ function Sidebar({ projectId, environmentName, active }: SidebarProps) {
                 <div className="flex-1 overflow-auto min-h-0">
                   <TargetsList
                     projectId={projectId}
-                    environmentName={environmentName}
+                    workspaceName={workspaceName}
                     activeRepository={
                       active?.[0] == "repository" || active?.[0] == "target"
                         ? active?.[1]
@@ -79,7 +79,7 @@ function Sidebar({ projectId, environmentName, active }: SidebarProps) {
             <AgentsList
               pools={pools}
               projectId={projectId}
-              environmentName={environmentName}
+              workspaceName={workspaceName}
               activePool={active?.[0] == "pool" ? active?.[1] : undefined}
               sessions={sessions}
             />
@@ -103,35 +103,35 @@ type OutletContext = {
 export default function ProjectLayout() {
   const { project: projectId } = useParams();
   const [searchParams] = useSearchParams();
-  const environmentName = searchParams.get("environment") || undefined;
+  const workspaceName = searchParams.get("workspace") || undefined;
   const [active, setActive] = useState<Active>();
   const projects = useProjects();
   const project = (projectId && projects && projects[projectId]) || undefined;
   const navigate = useNavigate();
   const location = useLocation();
   useTitlePart(
-    project && environmentName && `${project.name} (${environmentName})`,
+    project && workspaceName && `${project.name} (${workspaceName})`,
   );
   useEffect(() => {
-    if (projectId && !environmentName) {
+    if (projectId && !workspaceName) {
       // TODO: handle error
-      api.getEnvironments(projectId).then((environments) => {
-        // TODO: better way to choose environment
-        const defaultEnvironmentName = Object.values(environments)[0].name;
+      api.getWorkspaces(projectId).then((workspaces) => {
+        // TODO: better way to choose workspace
+        const defaultWorkspaceName = Object.values(workspaces)[0].name;
         navigate(
-          buildUrl(location.pathname, { environment: defaultEnvironmentName }),
+          buildUrl(location.pathname, { workspace: defaultWorkspaceName }),
           { replace: true },
         );
       });
     }
-  }, [navigate, location, projectId, environmentName]);
+  }, [navigate, location, projectId, workspaceName]);
   return (
     <Fragment>
-      <Header projectId={projectId!} activeEnvironmentName={environmentName} />
+      <Header projectId={projectId!} activeWorkspaceName={workspaceName} />
       <div className="flex-1 flex min-h-0 bg-white overflow-hidden">
         <Sidebar
           projectId={projectId!}
-          environmentName={environmentName!}
+          workspaceName={workspaceName!}
           active={active}
         />
         <div className="flex-1 flex flex-col min-w-0">

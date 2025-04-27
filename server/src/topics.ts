@@ -7,62 +7,62 @@ export function useProjects() {
   return projects;
 }
 
-export function useEnvironments(projectId: string | undefined) {
-  const [environments] = useTopic<Record<string, models.Environment>>(
+export function useWorkspaces(projectId: string | undefined) {
+  const [workspaces] = useTopic<Record<string, models.Workspace>>(
     "projects",
     projectId,
-    "environments",
+    "workspaces",
   );
-  return environments;
+  return workspaces;
 }
 
 export function useRepositories(
   projectId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [repositories] = useTopic<Record<string, models.Repository>>(
     "projects",
     projectId,
     "repositories",
-    environmentId,
+    workspaceId,
   );
   return repositories;
 }
 
 export function usePools(
   projectId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [pools] = useTopic<models.Pools>(
     "projects",
     projectId,
     "pools",
-    environmentId,
+    workspaceId,
   );
   return pools;
 }
 
 export function usePool(
   projectId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
   poolName: string | undefined,
 ) {
   const [pool] = useTopic<{
     pool: models.Pool | null;
     agents: Record<string, models.Agent>;
-  }>("projects", projectId, "pools", environmentId, poolName);
+  }>("projects", projectId, "pools", workspaceId, poolName);
   return pool;
 }
 
 export function useSessions(
   projectId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [sessions] = useTopic<Record<string, models.Session>>(
     "projects",
     projectId,
     "sessions",
-    environmentId,
+    workspaceId,
   );
   return sessions;
 }
@@ -71,7 +71,7 @@ export function useWorkflow(
   projectId: string | undefined,
   repository: string | undefined,
   targetName: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [target] = useTopic<models.Workflow>(
     "projects",
@@ -79,7 +79,7 @@ export function useWorkflow(
     "workflows",
     repository,
     targetName,
-    environmentId,
+    workspaceId,
   );
   return target;
 }
@@ -88,7 +88,7 @@ export function useSensor(
   projectId: string | undefined,
   repository: string | undefined,
   targetName: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [target] = useTopic<models.Sensor>(
     "projects",
@@ -96,7 +96,7 @@ export function useSensor(
     "sensors",
     repository,
     targetName,
-    environmentId,
+    workspaceId,
   );
   return target;
 }
@@ -104,14 +104,14 @@ export function useSensor(
 export function useExecutions(
   projectId: string | undefined,
   repositoryName: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [executions] = useTopic<Record<string, models.QueuedExecution>>(
     "projects",
     projectId,
     "repositories",
     repositoryName,
-    environmentId,
+    workspaceId,
   );
   return executions;
 }
@@ -119,14 +119,14 @@ export function useExecutions(
 export function useRun(
   projectId: string | undefined,
   runId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [run] = useTopic<models.Run>(
     "projects",
     projectId,
     "runs",
     runId,
-    environmentId,
+    workspaceId,
   );
   return run;
 }
@@ -134,7 +134,7 @@ export function useRun(
 export function useLogs(
   projectId: string | undefined,
   runId: string | undefined,
-  environmentId: string | undefined,
+  workspaceId: string | undefined,
 ) {
   const [logs] = useTopic<models.LogMessage[]>(
     "projects",
@@ -142,7 +142,7 @@ export function useLogs(
     "runs",
     runId,
     "logs",
-    environmentId,
+    workspaceId,
   );
   return logs;
 }

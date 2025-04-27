@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useState } from "react";
-import { useEnvironments, useProjects } from "../topics";
+import { useWorkspaces, useProjects } from "../topics";
 import { findKey } from "lodash";
 import Logo from "./Logo";
 import {
@@ -10,7 +10,7 @@ import {
   IconPlayerPlayFilled,
 } from "@tabler/icons-react";
 import ProjectSelector from "./ProjectSelector";
-import EnvironmentSelector from "./EnvironmentSelector";
+import WorkspaceSelector from "./WorkspaceSelector";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import SearchInput from "./SearchInput";
 import * as api from "../api";
@@ -18,28 +18,28 @@ import * as models from "../models";
 
 type PlayPauseButtonProps = {
   projectId: string;
-  environmentId: string;
-  environment: models.Environment;
+  workspaceId: string;
+  workspace: models.Workspace;
 };
 
 function PlayPauseButton({
   projectId,
-  environmentId,
-  environment,
+  workspaceId,
+  workspace,
 }: PlayPauseButtonProps) {
-  const { state } = environment;
+  const { state } = workspace;
   const handleClick = useCallback(() => {
     // TODO: handle error
     if (state == "active") {
-      api.pauseEnvironment(projectId, environmentId);
+      api.pauseWorkspace(projectId, workspaceId);
     } else if (state == "paused") {
-      api.resumeEnvironment(projectId, environmentId);
+      api.resumeWorkspace(projectId, workspaceId);
     }
-  }, [environmentId, state]);
+  }, [workspaceId, state]);
   return state == "active" ? (
     <button
       className="text-slate-100 bg-cyan-800/30 rounded p-1 hover:bg-cyan-800/60"
-      title="Pause environment"
+      title="Pause workspace"
       onClick={handleClick}
     >
       <IconPlayerPauseFilled size={16} />
@@ -47,7 +47,7 @@ function PlayPauseButton({
   ) : state == "paused" ? (
     <button
       className="text-slate-100 bg-cyan-800/30 rounded p-1 hover:bg-cyan-800/60"
-      title="Resume environment"
+      title="Resume workspace"
       onClick={handleClick}
     >
       <IconPlayerPlayFilled size={16} className="animate-pulse" />
@@ -57,18 +57,18 @@ function PlayPauseButton({
 
 type Props = {
   projectId?: string;
-  activeEnvironmentName?: string;
+  activeWorkspaceName?: string;
 };
 
-export default function Header({ projectId, activeEnvironmentName }: Props) {
+export default function Header({ projectId, activeWorkspaceName }: Props) {
   const projects = useProjects();
-  const environments = useEnvironments(projectId);
+  const workspaces = useWorkspaces(projectId);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const handleSettingsClose = useCallback(() => setSettingsOpen(false), []);
   const handleSettingsClick = useCallback(() => setSettingsOpen(true), []);
-  const activeEnvironmentId = findKey(
-    environments,
-    (e) => e.name == activeEnvironmentName && e.state != "archived",
+  const activeWorkspaceId = findKey(
+    workspaces,
+    (e) => e.name == activeWorkspaceName && e.state != "archived",
   );
   return (
     <div className="flex p-3 items-center justify-between gap-5 h-14">
@@ -86,18 +86,18 @@ export default function Header({ projectId, activeEnvironmentName }: Props) {
                 size={16}
                 className="text-white/40 shrink-0"
               />
-              {projectId && environments && (
+              {projectId && workspaces && (
                 <Fragment>
-                  <EnvironmentSelector
+                  <WorkspaceSelector
                     projectId={projectId}
-                    environments={environments}
-                    activeEnvironmentId={activeEnvironmentId}
+                    workspaces={workspaces}
+                    activeWorkspaceId={activeWorkspaceId}
                   />
-                  {activeEnvironmentId && (
+                  {activeWorkspaceId && (
                     <PlayPauseButton
                       projectId={projectId}
-                      environmentId={activeEnvironmentId}
-                      environment={environments[activeEnvironmentId]}
+                      workspaceId={activeWorkspaceId}
+                      workspace={workspaces[activeWorkspaceId]}
                     />
                   )}
                 </Fragment>
@@ -109,11 +109,11 @@ export default function Header({ projectId, activeEnvironmentName }: Props) {
       <div className="flex items-center gap-1">
         {projectId && (
           <Fragment>
-            {activeEnvironmentId && (
+            {activeWorkspaceId && (
               <Fragment>
                 <SearchInput
                   projectId={projectId}
-                  environmentId={activeEnvironmentId}
+                  workspaceId={activeWorkspaceId}
                 />
                 <IconMinusVertical
                   size={16}

@@ -134,9 +134,9 @@ def my_task():
     # ...
 ```
 
-## Environment inheritance
+## Workspace inheritance
 
-The inheritance of environments effects caching - refer to [the explanation on the concepts page](/concepts#environment-inheritance).
+The inheritance of workspaces effects caching - refer to [the explanation on the concepts page](/concepts#workspace-inheritance).
 
 ## Forcing execution
 
@@ -146,9 +146,8 @@ If you need to re-evaluate a task that's cached, you can do so by 're-running' t
 
 To summarise, the requirements for a cache hit (i.e., for a previous result to be reused, instead of executing a step) are that:
 
-1. The result must be in the same environment, or an ancestral environment, within the same project.
+1. The result must be in the same workspace, or an ancestral workspace, within the same project.
 2. The result must also have had caching enabled.
 3. The cache key and namespace (as described above) must match.
 4. The result must not have failed (i.e., either it was successful, it's scheduled, or it's in progress).
 5. The time of the result must be within the maximum age, if specified.
-

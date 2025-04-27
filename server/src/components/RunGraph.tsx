@@ -25,7 +25,7 @@ import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
 import buildGraph, { Graph, Edge } from "../graph";
-import EnvironmentLabel from "./EnvironmentLabel";
+import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
 import { truncatePath } from "../utils";
 import AssetLink from "./AssetLink";
@@ -136,7 +136,7 @@ type StepNodeProps = {
   runId: string;
   isActive: boolean;
   isStale: boolean;
-  runEnvironmentId: string;
+  runWorkspaceId: string;
 };
 
 function StepNode({
@@ -147,7 +147,7 @@ function StepNode({
   runId,
   isActive,
   isStale,
-  runEnvironmentId,
+  runWorkspaceId,
 }: StepNodeProps) {
   const execution = step.executions[attempt];
   const { isHovered } = useHoverContext();
@@ -206,12 +206,12 @@ function StepNode({
               >
                 {step.target}
               </span>
-              {execution && execution.environmentId != runEnvironmentId && (
-                <EnvironmentLabel
+              {execution && execution.workspaceId != runWorkspaceId && (
+                <WorkspaceLabel
                   projectId={projectId}
-                  environmentId={execution.environmentId}
+                  workspaceId={execution.workspaceId}
                   size="sm"
-                  warning="This execution ran in a different environment"
+                  warning="This execution ran in a different workspace"
                   compact
                 />
               )}
@@ -423,7 +423,7 @@ type Props = {
   height: number;
   activeStepId: string | undefined;
   activeAttempt: number | undefined;
-  runEnvironmentId: string;
+  runWorkspaceId: string;
 };
 
 export default function RunGraph({
@@ -434,7 +434,7 @@ export default function RunGraph({
   height: containerHeight,
   activeStepId,
   activeAttempt,
-  runEnvironmentId,
+  runWorkspaceId,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [offsetOverride, setOffsetOverride] = useState<[number, number]>();
@@ -600,7 +600,7 @@ export default function RunGraph({
                         activeStepId,
                         activeAttempt,
                       )}
-                      runEnvironmentId={runEnvironmentId}
+                      runWorkspaceId={runWorkspaceId}
                     />
                   ) : node.type == "asset" ? (
                     <AssetNode

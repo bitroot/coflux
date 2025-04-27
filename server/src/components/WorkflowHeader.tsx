@@ -8,7 +8,7 @@ import RunSelector from "./RunSelector";
 import Button from "./common/Button";
 import { buildUrl } from "../utils";
 import RunDialog from "./RunDialog";
-import EnvironmentLabel from "./EnvironmentLabel";
+import WorkspaceLabel from "./WorkspaceLabel";
 import { useRun, useWorkflow } from "../topics";
 import { maxBy, minBy } from "lodash";
 
@@ -39,8 +39,8 @@ type Props = {
   target: string | undefined;
   projectId: string;
   runId?: string;
-  activeEnvironmentId: string | undefined;
-  activeEnvironmentName: string | undefined;
+  activeWorkspaceId: string | undefined;
+  activeWorkspaceName: string | undefined;
 };
 
 export default function WorkflowHeader({
@@ -48,8 +48,8 @@ export default function WorkflowHeader({
   target,
   projectId,
   runId,
-  activeEnvironmentId,
-  activeEnvironmentName,
+  activeWorkspaceId,
+  activeWorkspaceName,
 }: Props) {
   const navigate = useNavigate();
   const [runDialogOpen, setRunDialogOpen] = useState(false);
@@ -57,9 +57,9 @@ export default function WorkflowHeader({
     projectId,
     repository,
     target,
-    activeEnvironmentId,
+    activeWorkspaceId,
   );
-  const run = useRun(projectId, runId, activeEnvironmentId);
+  const run = useRun(projectId, runId, activeWorkspaceId);
   const handleRunSubmit = useCallback(
     (arguments_: ["json", string][]) => {
       const configuration = workflow!.configuration!;
@@ -71,7 +71,7 @@ export default function WorkflowHeader({
           projectId,
           repository!,
           target!,
-          activeEnvironmentName!,
+          activeWorkspaceName!,
           arguments_,
           {
             waitFor: configuration.waitFor,
@@ -86,12 +86,12 @@ export default function WorkflowHeader({
           setRunDialogOpen(false);
           navigate(
             buildUrl(`/projects/${projectId}/runs/${runId}`, {
-              environment: activeEnvironmentName,
+              workspace: activeWorkspaceName,
             }),
           );
         });
     },
-    [navigate, projectId, repository, target, activeEnvironmentName, workflow],
+    [navigate, projectId, repository, target, activeWorkspaceName, workflow],
   );
   const initialStepId =
     run &&
@@ -115,8 +115,7 @@ export default function WorkflowHeader({
     setRunDialogOpen(true);
   }, []);
   const handleRunDialogClose = useCallback(() => setRunDialogOpen(false), []);
-  const runEnvironmentId =
-    run?.steps[initialStepId!].executions[1].environmentId;
+  const runWorkspaceId = run?.steps[initialStepId!].executions[1].workspaceId;
   const isRunning =
     run &&
     Object.values(run.steps).some((s) =>
@@ -142,14 +141,14 @@ export default function WorkflowHeader({
               runs={workflow?.runs}
               projectId={projectId}
               runId={runId}
-              activeEnvironmentName={activeEnvironmentName}
+              activeWorkspaceName={activeWorkspaceName}
             />
 
-            {runEnvironmentId && runEnvironmentId != activeEnvironmentId && (
-              <EnvironmentLabel
+            {runWorkspaceId && runWorkspaceId != activeWorkspaceId && (
+              <WorkspaceLabel
                 projectId={projectId}
-                environmentId={runEnvironmentId}
-                warning="This run is from a different environment"
+                workspaceId={runWorkspaceId}
+                warning="This run is from a different workspace"
               />
             )}
             {isRunning && <CancelButton onCancel={handleCancel} />}
@@ -162,18 +161,18 @@ export default function WorkflowHeader({
             <Button
               onClick={handleRunClick}
               left={<IconBolt size={16} />}
-              disabled={!activeEnvironmentId || !workflow.parameters}
+              disabled={!activeWorkspaceId || !workflow.parameters}
             >
               Run...
             </Button>
-            {activeEnvironmentId && workflow.parameters && (
+            {activeWorkspaceId && workflow.parameters && (
               <RunDialog
                 projectId={projectId}
                 repository={repository}
                 target={target}
                 parameters={workflow.parameters}
                 instruction={workflow.instruction}
-                activeEnvironmentId={activeEnvironmentId}
+                activeWorkspaceId={activeWorkspaceId}
                 open={runDialogOpen}
                 onRun={handleRunSubmit}
                 onClose={handleRunDialogClose}

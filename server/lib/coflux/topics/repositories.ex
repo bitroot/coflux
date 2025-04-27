@@ -1,14 +1,14 @@
 defmodule Coflux.Topics.Repositories do
-  use Topical.Topic, route: ["projects", :project_id, "repositories", :environment_id]
+  use Topical.Topic, route: ["projects", :project_id, "repositories", :workspace_id]
 
   alias Coflux.Orchestration
 
   def init(params) do
     project_id = Keyword.fetch!(params, :project_id)
-    environment_id = String.to_integer(Keyword.fetch!(params, :environment_id))
+    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
 
     {:ok, manifests, executions, ref} =
-      Orchestration.subscribe_repositories(project_id, environment_id, self())
+      Orchestration.subscribe_repositories(project_id, workspace_id, self())
 
     value =
       Map.new(manifests, fn {repository, manifest} ->

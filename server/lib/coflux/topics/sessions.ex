@@ -1,13 +1,13 @@
 defmodule Coflux.Topics.Sessions do
-  use Topical.Topic, route: ["projects", :project_id, "sessions", :environment_id]
+  use Topical.Topic, route: ["projects", :project_id, "sessions", :workspace_id]
 
   alias Coflux.Orchestration
 
   def init(params) do
     project_id = Keyword.fetch!(params, :project_id)
-    environment_id = String.to_integer(Keyword.fetch!(params, :environment_id))
+    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
 
-    {:ok, sessions, ref} = Orchestration.subscribe_sessions(project_id, environment_id, self())
+    {:ok, sessions, ref} = Orchestration.subscribe_sessions(project_id, workspace_id, self())
 
     sessions =
       Map.new(sessions, fn {session_id, session} ->

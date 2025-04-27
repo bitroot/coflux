@@ -2,7 +2,7 @@ export type Project = {
   name: string;
 };
 
-export type Environment = {
+export type Workspace = {
   name: string;
   baseId: string | null;
   state: "active" | "paused" | "archived";
@@ -166,7 +166,7 @@ export type Child = {
 
 export type Execution = {
   executionId: string;
-  environmentId: string;
+  workspaceId: string;
   createdAt: number;
   executeAfter: number | null;
   assignedAt: number | null;

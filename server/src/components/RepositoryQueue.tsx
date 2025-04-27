@@ -7,7 +7,7 @@ import classNames from "classnames";
 
 type Props = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   title: string;
   titleClassName?: string;
   executions: Record<string, models.QueuedExecution>;
@@ -17,7 +17,7 @@ type Props = {
 
 export default function RepositoryQueue({
   projectId,
-  environmentName,
+  workspaceName,
   title,
   titleClassName,
   executions,
@@ -62,7 +62,7 @@ export default function RepositoryQueue({
                         to={buildUrl(
                           `/projects/${projectId}/runs/${execution.runId}/graph`,
                           {
-                            environment: environmentName,
+                            workspace: workspaceName,
                             step: execution.stepId,
                             attempt: execution.attempt,
                           },

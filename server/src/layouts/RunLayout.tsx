@@ -18,7 +18,7 @@ import StepDetail from "../components/StepDetail";
 import usePrevious from "../hooks/usePrevious";
 import { buildUrl } from "../utils";
 import Loading from "../components/Loading";
-import { useEnvironments, useRun } from "../topics";
+import { useWorkspaces, useRun } from "../topics";
 import HoverContext from "../components/HoverContext";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
@@ -57,7 +57,7 @@ type DetailPanelProps = {
   attemptNumber: number | undefined;
   run: models.Run;
   projectId: string;
-  activeEnvironmentId: string;
+  activeWorkspaceId: string;
   className?: string;
   width: number;
   activeTab: number;
@@ -70,7 +70,7 @@ function DetailPanel({
   attemptNumber,
   run,
   projectId,
-  activeEnvironmentId,
+  activeWorkspaceId,
   className,
   width,
   activeTab,
@@ -81,8 +81,8 @@ function DetailPanel({
   const stepIdOrPrevious = stepId || previousStepId;
   const attemptNumberOrPrevious = attemptNumber || previousAttemptNumber;
   const handleRerunStep = useCallback(
-    (stepId: string, environmentName: string) => {
-      return api.rerunStep(projectId, stepId, environmentName);
+    (stepId: string, workspaceName: string) => {
+      return api.rerunStep(projectId, stepId, workspaceName);
     },
     [projectId],
   );
@@ -114,7 +114,7 @@ function DetailPanel({
               attempt={attemptNumberOrPrevious || 1}
               run={run}
               projectId={projectId}
-              activeEnvironmentId={activeEnvironmentId}
+              activeWorkspaceId={activeWorkspaceId}
               className="flex-1 w-full"
               onRerunStep={handleRerunStep}
               activeTab={activeTab}
@@ -140,15 +140,15 @@ export default function RunLayout() {
   const activeAttemptNumber = searchParams.has("attempt")
     ? parseInt(searchParams.get("attempt")!, 10)
     : undefined;
-  const activeEnvironmentName = searchParams.get("environment") || undefined;
+  const activeWorkspaceName = searchParams.get("workspace") || undefined;
   const activeTab = parseInt(searchParams.get("tab") || "", 10) || 0;
   const maximised = !!searchParams.get("maximised");
-  const environments = useEnvironments(projectId);
-  const activeEnvironmentId = findKey(
-    environments,
-    (e) => e.name == activeEnvironmentName && e.state != "archived",
+  const workspaces = useWorkspaces(projectId);
+  const activeWorkspaceId = findKey(
+    workspaces,
+    (e) => e.name == activeWorkspaceName && e.state != "archived",
   );
-  const run = useRun(projectId, runId, activeEnvironmentId);
+  const run = useRun(projectId, runId, activeWorkspaceId);
   const initialStep = run && Object.values(run.steps).find((s) => !s.parentId);
   useTitlePart(
     initialStep && `${initialStep.target} (${initialStep.repository})`,
@@ -173,8 +173,8 @@ export default function RunLayout() {
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}
-              activeEnvironmentId={activeEnvironmentId}
-              activeEnvironmentName={activeEnvironmentName}
+              activeWorkspaceId={activeWorkspaceId}
+              activeWorkspaceName={activeWorkspaceName}
             />
           ) : initialStep.type == "workflow" ? (
             <WorkflowHeader
@@ -182,8 +182,8 @@ export default function RunLayout() {
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}
-              activeEnvironmentId={activeEnvironmentId}
-              activeEnvironmentName={activeEnvironmentName}
+              activeWorkspaceId={activeWorkspaceId}
+              activeWorkspaceName={activeWorkspaceName}
             />
           ) : null}
           <div className="grow flex flex-col">
@@ -212,7 +212,7 @@ export default function RunLayout() {
             attemptNumber={activeAttemptNumber}
             run={run}
             projectId={projectId!}
-            activeEnvironmentId={activeEnvironmentId!}
+            activeWorkspaceId={activeWorkspaceId!}
             className={classNames(
               maximised
                 ? "fixed inset-0 px-10 py-10 bg-black/40"

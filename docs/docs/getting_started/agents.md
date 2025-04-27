@@ -18,7 +18,7 @@ Use the `configure` command to populate a configuration. This isn't necessary, b
 coflux configure
 ```
 
-You will be prompted to enter the host (`localhost:7777`), the project ID, and the environment name.
+You will be prompted to enter the host (`localhost:7777`), the project ID, and the workspace name.
 
 ## Run
 

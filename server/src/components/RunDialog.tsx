@@ -7,7 +7,7 @@ import Input from "./common/Input";
 import Button from "./common/Button";
 import { RequestError } from "../api";
 import Alert from "./common/Alert";
-import EnvironmentLabel from "./EnvironmentLabel";
+import WorkspaceLabel from "./WorkspaceLabel";
 import { micromark } from "micromark";
 
 function translateArgumentError(error: string | undefined) {
@@ -51,7 +51,7 @@ type Props = {
   target: string | undefined;
   parameters: models.Parameter[];
   instruction: string | null;
-  activeEnvironmentId: string;
+  activeWorkspaceId: string;
   open: boolean;
   onRun: (arguments_: ["json", string][]) => Promise<void>;
   onClose: () => void;
@@ -63,7 +63,7 @@ export default function RunDialog({
   target,
   parameters,
   instruction,
-  activeEnvironmentId,
+  activeWorkspaceId,
   open,
   onRun,
   onClose,
@@ -106,9 +106,9 @@ export default function RunDialog({
               {target}
             </span>
           </div>
-          <EnvironmentLabel
+          <WorkspaceLabel
             projectId={projectId}
-            environmentId={activeEnvironmentId}
+            workspaceId={activeWorkspaceId}
           />
         </div>
       }
