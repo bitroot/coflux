@@ -2,7 +2,7 @@
 
 Triggering runs on demand may suit some use cases, but often you'll want to be able to react to events occurring in your system. As well as tasks and steps, Coflux provides another target type: sensors. These can be used to monitor a database, watch a file system, or listen to a queue. They provide flexibility to subscribe to events, or poll a resource.
 
-Sensors are also defined in a repository, along with workflows and tasks, and hosted by your agent:
+Sensors are defined in a module, along with workflows and tasks, and hosted by your agent:
 
 ```python
 import coflux as cf
@@ -40,4 +40,3 @@ def ticker(interval: int = 300, last_tick: float | None = None):
 ```
 
 This will call `my_workflow` every five minutes. The use of checkpointing means that if the agent gets restarted, the interval shouldn't get interrupted (subject to the time and duration of the restart).
-

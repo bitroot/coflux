@@ -1,6 +1,6 @@
 # 4. Starting agents
 
-Repositories are hosted by _agents_ - each agent can have its own package dependencies, and be deployed within your infrastructure as needed - for example one agent could be deployed on an on-premise bare-metal server with a GPU, and another agent could be deployed as a Docker image on an auto-scaling cloud cluster.
+Modules are hosted by _agents_ - each agent can have its own package dependencies, and be deployed within your infrastructure as needed - for example one agent could be deployed on an on-premise bare-metal server with a GPU, and another agent could be deployed as a Docker image on an auto-scaling cloud cluster.
 
 An agent is a process that's responsible for executing the code required by your workflow - it will:
 

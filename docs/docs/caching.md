@@ -104,10 +104,10 @@ def my_task(c, b2, a):
 
 ## Cache namespaces
 
-Each cache key is considered within a namespace. By default this namespace consists of the repository name and the task name (in the format `repository:target`). In some cases it might be necessary to override this namespace. For example, if you need to rename a function (or repository), but you want to retain the cache:
+Each cache key is considered within a namespace. By default this namespace consists of the module name and the task name (in the format `module:target`). In some cases it might be necessary to override this namespace. For example, if you need to rename a function (or module), but you want to retain the cache:
 
 ```python
-@cf.task(cache=True, cache_namespace="example1.repo:task_name")
+@cf.task(cache=True, cache_namespace="example1.workflows:task_name")
 def new_task_name():
     ...
 ```

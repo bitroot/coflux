@@ -1,23 +1,23 @@
 # Stubs
 
-A stub allows you to define a reference to a step that's in another repository (in a separate codebase). It's like 'importing' an external task.
+A stub allows you to define a reference to a step that's in another module (in a separate codebase) by its name. Using stubs can make it easier to separate 3rd-party dependencies since you don't need to `import` the target module into into the module you're calling it from.
 
-For example, given an `other.repo` repository with a random number generator:
+For example, given an `other.workflows` module with a random number generator:
 
 ```python
-# other/repo.py
+# other/workflows.py
 
 @cf.task()
 def random_int(max: int) -> int:
     return random.randint(1, max)
 ```
 
-Another repository could reference this function with a stub, and then call it:
+Another module could reference this function with a stub, and then call it:
 
 ```python
-# example/repo.py
+# example/workflows.py
 
-@cf.stub("other.repo")
+@cf.stub("other.workflows")
 def random_int(max: int) -> int:
     ...
 
@@ -34,8 +34,7 @@ def roll_die():
 When you call the stub in the context of a workflow, the function itself won't be executed, so the body of the function isn't important. However, being able to implement the function is useful when you want to be able to run your code outside of the context of a workflow. For example, as part of a test, you could return some dummy data.
 
 ```python
-@cf.stub("other.repo")
+@cf.stub("other.workflows")
 def random_int(max: int) -> int:
     return 4  # dummy value for testing
 ```
-

@@ -25,7 +25,7 @@ def print_greeting(name: str):
 
 This defines a `print_greeting` workflow, which takes a `name` as an argument. When run, it calls the `build_greeting` task, passing through the name argument. Once it has the result from the task, the result gets printed.
 
-Workflows are defined in _repositories_. Typically these are Python modules, but they can alternatively be loaded from a Python script, which this guide will demonstrate.
+Workflows are defined in _modules_. Typically these are Python modules, but they can alternatively be loaded from a Python script, which this guide will demonstrate.
 
 Put the workflow above into `hello.py`.
 
