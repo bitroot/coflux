@@ -40,19 +40,19 @@ import StepLink from "./StepLink";
 import AssetLink from "./AssetLink";
 import { getAssetMetadata } from "../assets";
 import AssetIcon from "./AssetIcon";
-import EnvironmentLabel from "./EnvironmentLabel";
-import { useEnvironments, useLogs } from "../topics";
+import WorkspaceLabel from "./WorkspaceLabel";
+import { useWorkspaces, useLogs } from "../topics";
 import Tabs, { Tab } from "./common/Tabs";
 import Select from "./common/Select";
 import Value from "./Value";
 import TagSet from "./TagSet";
 
-function getRunEnvironmentId(run: models.Run) {
+function getRunWorkspaceId(run: models.Run) {
   const initialStepId = minBy(
     Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
     (stepId) => run.steps[stepId].createdAt,
   )!;
-  return run.steps[initialStepId].executions[1].environmentId;
+  return run.steps[initialStepId].executions[1].workspaceId;
 }
 
 type ExecutionStatusProps = {
@@ -110,7 +110,7 @@ function getNextPrevious(
 
 type NextPreviousButtonProps = {
   direction: "next" | "previous";
-  activeEnvironmentName: string | undefined;
+  activeWorkspaceName: string | undefined;
   stepId: string;
   currentAttempt: number;
   executions: Record<number, models.Execution>;
@@ -120,7 +120,7 @@ type NextPreviousButtonProps = {
 
 function NextPreviousButton({
   direction,
-  activeEnvironmentName,
+  activeWorkspaceName,
   stepId,
   currentAttempt,
   executions,
@@ -142,7 +142,7 @@ function NextPreviousButton({
     return (
       <Link
         to={buildUrl(location.pathname, {
-          environment: activeEnvironmentName,
+          workspace: activeWorkspaceName,
           step: stepId,
           attempt,
           tab: activeTab,
@@ -183,7 +183,7 @@ function AttemptSelectorOption({
 
 type AttemptSelectorProps = {
   selected: number;
-  activeEnvironmentName: string | undefined;
+  activeWorkspaceName: string | undefined;
   stepId: string;
   step: models.Step;
   activeTab: number;
@@ -192,7 +192,7 @@ type AttemptSelectorProps = {
 
 function AttemptSelector({
   selected,
-  activeEnvironmentName,
+  activeWorkspaceName,
   stepId,
   step,
   activeTab,
@@ -203,7 +203,7 @@ function AttemptSelector({
     <div className="flex shadow-sm">
       <NextPreviousButton
         direction="previous"
-        activeEnvironmentName={activeEnvironmentName}
+        activeWorkspaceName={activeWorkspaceName}
         stepId={stepId}
         currentAttempt={selected}
         executions={step.executions}
@@ -233,7 +233,7 @@ function AttemptSelector({
                 <MenuItem key={attempt}>
                   <Link
                     to={buildUrl(location.pathname, {
-                      environment: activeEnvironmentName,
+                      workspace: activeWorkspaceName,
                       step: stepId,
                       attempt,
                       tab: activeTab,
@@ -258,7 +258,7 @@ function AttemptSelector({
       </Menu>
       <NextPreviousButton
         direction="next"
-        activeEnvironmentName={activeEnvironmentName}
+        activeWorkspaceName={activeWorkspaceName}
         stepId={stepId}
         currentAttempt={selected}
         executions={step.executions}
@@ -269,23 +269,23 @@ function AttemptSelector({
   );
 }
 
-function getEnvironmentDescendantIds(
-  environments: Record<string, models.Environment>,
+function getWorkspaceDescendantIds(
+  workspaces: Record<string, models.Workspace>,
   parentId: string | null,
 ): string[] {
-  return Object.entries(environments)
+  return Object.entries(workspaces)
     .filter(([_, e]) => e.baseId == parentId && e.state != "archived")
-    .flatMap(([environmentId]) => [
-      environmentId,
-      ...getEnvironmentDescendantIds(environments, environmentId),
+    .flatMap(([workspaceId]) => [
+      workspaceId,
+      ...getWorkspaceDescendantIds(workspaces, workspaceId),
     ]);
 }
 
-function getEnvironmentOptions(
-  environments: Record<string, models.Environment>,
+function getWorkspaceOptions(
+  workspaces: Record<string, models.Workspace>,
   parentId: string,
 ) {
-  return [parentId, ...getEnvironmentDescendantIds(environments, parentId)];
+  return [parentId, ...getWorkspaceDescendantIds(workspaces, parentId)];
 }
 
 function getBaseExecution(step: models.Step, run: models.Run) {
@@ -304,44 +304,43 @@ type RerunButtonProps = {
   run: models.Run;
   stepId: string;
   step: models.Step;
-  executionEnvironmentId: string;
-  environments: Record<string, models.Environment> | undefined;
-  onRerunStep: (stepId: string, environmentName: string) => Promise<any>;
+  executionWorkspaceId: string;
+  workspaces: Record<string, models.Workspace> | undefined;
+  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
 };
 
 function RerunButton({
   run,
   stepId,
   step,
-  executionEnvironmentId,
-  environments,
+  executionWorkspaceId,
+  workspaces,
   onRerunStep,
 }: RerunButtonProps) {
   const [rerunning, setRerunning] = useState(false);
-  const baseEnvironmentId = getBaseExecution(step, run).environmentId;
-  const [environmentId, setEnvironmentId] = useState<string | null>(
-    executionEnvironmentId,
+  const baseWorkspaceId = getBaseExecution(step, run).workspaceId;
+  const [workspaceId, setWorkspaceId] = useState<string | null>(
+    executionWorkspaceId,
   );
-  const childEnvironmentIds =
-    environments && getEnvironmentOptions(environments, baseEnvironmentId);
-  const environmentOptions = (childEnvironmentIds || []).reduce(
-    (acc, environmentId) => ({
+  const childWorkspaceIds =
+    workspaces && getWorkspaceOptions(workspaces, baseWorkspaceId);
+  const workspaceOptions = (childWorkspaceIds || []).reduce(
+    (acc, workspaceId) => ({
       ...acc,
-      [environmentId]: environments![environmentId].name,
+      [workspaceId]: workspaces![workspaceId].name,
     }),
     {},
   );
   const handleRerunClick = useCallback(
     (close: () => void) => {
-      const environmentName =
-        environments![environmentId || baseEnvironmentId].name;
+      const workspaceName = workspaces![workspaceId || baseWorkspaceId].name;
       setRerunning(true);
-      onRerunStep(stepId, environmentName).finally(() => {
+      onRerunStep(stepId, workspaceName).finally(() => {
         setRerunning(false);
         close();
       });
     },
-    [environments, environmentId, onRerunStep, stepId],
+    [workspaces, workspaceId, onRerunStep, stepId],
   );
   return (
     <div className="flex shadow-sm relative">
@@ -367,9 +366,9 @@ function RerunButton({
               <div className="absolute border-b-[10px] border-b-white border-x-transparent border-x-[10px] top-[-10px] right-[30px] w-[20px] h-[10px]"></div>
               <div className="flex items-center gap-1">
                 <Select
-                  options={environmentOptions}
-                  value={environmentId}
-                  onChange={setEnvironmentId}
+                  options={workspaceOptions}
+                  value={workspaceId}
+                  onChange={setWorkspaceId}
                   className="flex-1"
                 />
                 <Button
@@ -389,39 +388,39 @@ function RerunButton({
 
 type HeaderProps = {
   projectId: string;
-  activeEnvironmentId: string;
-  runEnvironmentId: string;
+  activeWorkspaceId: string;
+  runWorkspaceId: string;
   run: models.Run;
   stepId: string;
   step: models.Step;
   attempt: number;
-  environments: Record<string, models.Environment> | undefined;
+  workspaces: Record<string, models.Workspace> | undefined;
   activeTab: number;
   maximised: boolean;
-  onRerunStep: (stepId: string, environmentName: string) => Promise<any>;
+  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
 };
 
 function Header({
   projectId,
-  activeEnvironmentId,
-  runEnvironmentId,
+  activeWorkspaceId,
+  runWorkspaceId,
   run,
   stepId,
   step,
   attempt,
-  environments,
+  workspaces,
   activeTab,
   maximised,
   onRerunStep,
 }: HeaderProps) {
-  const activeEnvironmentName = environments?.[activeEnvironmentId].name;
+  const activeWorkspaceName = workspaces?.[activeWorkspaceId].name;
   const navigate = useNavigate();
   const location = useLocation();
   const changeAttempt = useCallback(
-    (attempt: number, environmentName?: string) => {
+    (attempt: number, workspaceName?: string) => {
       navigate(
         buildUrl(location.pathname, {
-          environment: environmentName || activeEnvironmentName,
+          workspace: workspaceName || activeWorkspaceName,
           step: stepId,
           attempt,
           tab: activeTab,
@@ -429,22 +428,22 @@ function Header({
         }),
       );
     },
-    [stepId, activeEnvironmentName, navigate, location, activeTab, maximised],
+    [stepId, activeWorkspaceName, navigate, location, activeTab, maximised],
   );
   const handleRerunStep = useCallback(
-    (stepId: string, environmentName: string) => {
-      return onRerunStep(stepId, environmentName).then(({ attempt }) => {
+    (stepId: string, workspaceName: string) => {
+      return onRerunStep(stepId, workspaceName).then(({ attempt }) => {
         // TODO: wait for attempt to be synced to topic
-        changeAttempt(attempt, environmentName);
+        changeAttempt(attempt, workspaceName);
       });
     },
     [changeAttempt],
   );
-  const executionEnvironmentId = step.executions[attempt]?.environmentId;
+  const executionWorkspaceId = step.executions[attempt]?.workspaceId;
   const handleMaximiseClick = useCallback(() => {
     navigate(
       buildUrl(location.pathname, {
-        environment: activeEnvironmentName,
+        workspace: activeWorkspaceName,
         step: stepId,
         attempt,
         tab: activeTab,
@@ -454,7 +453,7 @@ function Header({
   }, [
     navigate,
     location,
-    activeEnvironmentName,
+    activeWorkspaceName,
     stepId,
     attempt,
     activeTab,
@@ -463,10 +462,10 @@ function Header({
   const handleCloseClick = useCallback(() => {
     navigate(
       buildUrl(location.pathname, {
-        environment: activeEnvironmentName,
+        workspace: activeWorkspaceName,
       }),
     );
-  }, [navigate, location, activeEnvironmentName]);
+  }, [navigate, location, activeWorkspaceName]);
   return (
     <div className="p-4 flex items-start">
       <div className="flex-1 flex flex-col gap-2">
@@ -504,8 +503,8 @@ function Header({
               run={run}
               stepId={stepId}
               step={step}
-              executionEnvironmentId={executionEnvironmentId}
-              environments={environments}
+              executionWorkspaceId={executionWorkspaceId}
+              workspaces={workspaces}
               onRerunStep={handleRerunStep}
             />
             <Button
@@ -535,17 +534,17 @@ function Header({
         <div className="flex flex-wrap items-center gap-2">
           <AttemptSelector
             selected={attempt}
-            activeEnvironmentName={activeEnvironmentName}
+            activeWorkspaceName={activeWorkspaceName}
             stepId={stepId}
             activeTab={activeTab}
             maximised={maximised}
             step={step}
           />
-          {executionEnvironmentId != runEnvironmentId && (
-            <EnvironmentLabel
+          {executionWorkspaceId != runWorkspaceId && (
+            <WorkspaceLabel
               projectId={projectId}
-              environmentId={executionEnvironmentId}
-              warning="This execution ran in a different environment"
+              workspaceId={executionWorkspaceId}
+              warning="This execution ran in a different workspace"
             />
           )}
         </div>
@@ -1171,16 +1170,16 @@ type LogsSectionProps = {
   projectId: string;
   runId: string;
   execution: models.Execution;
-  activeEnvironmentId: string;
+  activeWorkspaceId: string;
 };
 
 function LogsSection({
   projectId,
   runId,
   execution,
-  activeEnvironmentId,
+  activeWorkspaceId,
 }: LogsSectionProps) {
-  const logs = useLogs(projectId, runId, activeEnvironmentId);
+  const logs = useLogs(projectId, runId, activeWorkspaceId);
   const executionLogs =
     logs && logs.filter((l) => l[0] == execution.executionId);
   const scheduledAt = DateTime.fromMillis(
@@ -1223,10 +1222,10 @@ type Props = {
   attempt: number;
   run: models.Run;
   projectId: string;
-  activeEnvironmentId: string;
+  activeWorkspaceId: string;
   className?: string;
   style?: CSSProperties;
-  onRerunStep: (stepId: string, environmentName: string) => Promise<any>;
+  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
   activeTab: number;
   maximised: boolean;
 };
@@ -1237,7 +1236,7 @@ export default function StepDetail({
   attempt,
   run,
   projectId,
-  activeEnvironmentId,
+  activeWorkspaceId,
   className,
   style,
   onRerunStep,
@@ -1246,16 +1245,16 @@ export default function StepDetail({
 }: Props) {
   const step = run.steps[stepId];
   const execution: models.Execution | undefined = step.executions[attempt];
-  const runEnvironmentId = getRunEnvironmentId(run);
+  const runWorkspaceId = getRunWorkspaceId(run);
   const navigate = useNavigate();
   const location = useLocation();
-  const environments = useEnvironments(projectId);
-  const activeEnvironmentName = environments?.[activeEnvironmentId].name;
+  const workspaces = useWorkspaces(projectId);
+  const activeWorkspaceName = workspaces?.[activeWorkspaceId].name;
   const handleTabChange = useCallback(
     (tab: number) => {
       navigate(
         buildUrl(location.pathname, {
-          environment: activeEnvironmentName,
+          workspace: activeWorkspaceName,
           step: stepId,
           attempt,
           tab,
@@ -1263,19 +1262,19 @@ export default function StepDetail({
         }),
       );
     },
-    [navigate, location, activeEnvironmentName, stepId, attempt],
+    [navigate, location, activeWorkspaceName, stepId, attempt],
   );
   return (
     <div className={classNames("flex flex-col", className)} style={style}>
       <Header
         projectId={projectId}
-        activeEnvironmentId={activeEnvironmentId}
-        runEnvironmentId={runEnvironmentId}
+        activeWorkspaceId={activeWorkspaceId}
+        runWorkspaceId={runWorkspaceId}
         run={run}
         stepId={stepId}
         step={step}
         attempt={attempt}
-        environments={environments}
+        workspaces={workspaces}
         onRerunStep={onRerunStep}
         activeTab={activeTab}
         maximised={maximised}
@@ -1325,7 +1324,7 @@ export default function StepDetail({
               projectId={projectId}
               runId={runId}
               execution={execution}
-              activeEnvironmentId={activeEnvironmentId}
+              activeWorkspaceId={activeWorkspaceId}
             />
           )}
         </StepDetailTab>

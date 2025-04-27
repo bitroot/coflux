@@ -51,7 +51,7 @@ type RepositoryHeaderProps = {
   repository: models.Repository;
   isActive: boolean;
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   now: DateTime<true>;
 };
 
@@ -60,7 +60,7 @@ function RepositoryHeader({
   repository,
   isActive,
   projectId,
-  environmentName,
+  workspaceName,
   now,
 }: RepositoryHeaderProps) {
   const nextDueDiff = repository.nextDueAt
@@ -75,7 +75,7 @@ function RepositoryHeader({
     <Link
       to={buildUrl(
         `/projects/${projectId}/repositories/${encodeURIComponent(repositoryName)}`,
-        { environment: environmentName },
+        { workspace: workspaceName },
       )}
       className={classNames(
         "flex-1 rounded-md",
@@ -128,13 +128,13 @@ function RepositoryHeader({
 
 type RepositoryMenuProps = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   repositoryName: string;
 };
 
 function RepositoryMenu({
   projectId,
-  environmentName,
+  workspaceName,
   repositoryName,
 }: RepositoryMenuProps) {
   const handleArchiveClick = useCallback(() => {
@@ -143,9 +143,9 @@ function RepositoryMenu({
         `Are you sure you want to archive '${repositoryName}'? It will be hidden until it's re-registered.`,
       )
     ) {
-      api.archiveRepository(projectId, environmentName, repositoryName);
+      api.archiveRepository(projectId, workspaceName, repositoryName);
     }
-  }, [projectId, environmentName, repositoryName]);
+  }, [projectId, workspaceName, repositoryName]);
   return (
     <Menu>
       <MenuButton className="text-slate-600 p-1 hover:bg-slate-200 rounded">
@@ -174,7 +174,7 @@ function RepositoryMenu({
 
 type Props = {
   projectId: string;
-  environmentName: string;
+  workspaceName: string;
   activeRepository: string | undefined;
   activeTarget: string | undefined;
   repositories: Record<string, models.Repository>;
@@ -182,7 +182,7 @@ type Props = {
 
 export default function TargetsList({
   projectId,
-  environmentName,
+  workspaceName,
   activeRepository,
   activeTarget,
   repositories,
@@ -199,12 +199,12 @@ export default function TargetsList({
                 repository={repository}
                 isActive={activeRepository == repositoryName && !activeTarget}
                 projectId={projectId}
-                environmentName={environmentName}
+                workspaceName={workspaceName}
                 now={now}
               />
               <RepositoryMenu
                 projectId={projectId}
-                environmentName={environmentName}
+                workspaceName={workspaceName}
                 repositoryName={repositoryName}
               />
             </div>
@@ -222,7 +222,7 @@ export default function TargetsList({
                         `/projects/${projectId}/workflows/${encodeURIComponent(
                           repositoryName,
                         )}/${name}`,
-                        { environment: environmentName },
+                        { workspace: workspaceName },
                       )}
                       isActive={isActive}
                     />
@@ -240,7 +240,7 @@ export default function TargetsList({
                         `/projects/${projectId}/sensors/${encodeURIComponent(
                           repositoryName,
                         )}/${name}`,
-                        { environment: environmentName },
+                        { workspace: workspaceName },
                       )}
                       isActive={isActive}
                     />

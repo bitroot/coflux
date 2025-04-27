@@ -79,7 +79,7 @@ def _load_repositories(
 
 def _register_manifests(
     project_id: str,
-    environment_name: str,
+    workspace_name: str,
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
 ) -> None:
@@ -152,7 +152,7 @@ def _register_manifests(
         "register_manifests",
         json={
             "projectId": project_id,
-            "environmentName": environment_name,
+            "workspaceName": workspace_name,
             "manifests": manifests,
         },
     )
@@ -161,7 +161,7 @@ def _register_manifests(
 def _init(
     *modules: types.ModuleType | str,
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     provides: dict[str, list[str]],
     serialiser_configs: list[config.SerialiserConfig],
@@ -174,11 +174,11 @@ def _init(
     try:
         targets = _load_repositories(list(modules))
         if register:
-            _register_manifests(project, environment, host, targets)
+            _register_manifests(project, workspace, host, targets)
 
         with Agent(
             project,
-            environment,
+            workspace,
             host,
             provides,
             serialiser_configs,
@@ -273,11 +273,11 @@ def _load_config() -> config.Config:
     prompt=True,
 )
 @click.option(
-    "environment",
-    "-e",
-    "--environment",
-    help="Environment name",
-    default=_load_config().environment,
+    "workspace",
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    default=_load_config().workspace,
     show_default=True,
     prompt=True,
 )
@@ -292,7 +292,7 @@ def _load_config() -> config.Config:
 def configure(
     host: str | None,
     project: str | None,
-    environment: str | None,
+    workspace: str | None,
 ):
     """
     Populate/update the configuration file.
@@ -303,7 +303,7 @@ def configure(
     path = _config_path()
     data = _read_config(path)
     data["project"] = project
-    data["environment"] = environment
+    data["workspace"] = workspace
     data.setdefault("server", {})["host"] = host
     _write_config(path, data)
 
@@ -315,7 +315,7 @@ def configure(
 @cli.group()
 def env():
     """
-    Manage environments.
+    Manage workspaces.
     """
     pass
 
@@ -341,7 +341,7 @@ def env():
 )
 @click.option(
     "--base",
-    help="The base environment to inherit from",
+    help="The base workspace to inherit from",
 )
 @click.argument("name")
 def env_create(
@@ -351,15 +351,15 @@ def env_create(
     name: str,
 ):
     """
-    Creates an environment within the project.
+    Creates an workspace within the project.
     """
     base_id = None
     if base:
-        environments = _api_request(
-            "GET", host, "get_environments", params={"project": project}
+        workspaces = _api_request(
+            "GET", host, "get_workspaces", params={"project": project}
         )
-        environment_ids_by_name = {e["name"]: id for id, e in environments.items()}
-        base_id = environment_ids_by_name.get(base)
+        workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+        base_id = workspace_ids_by_name.get(base)
         if not base_id:
             click.BadOptionUsage("base", "Not recognised")
 
@@ -367,14 +367,14 @@ def env_create(
     _api_request(
         "POST",
         host,
-        "create_environment",
+        "create_workspace",
         json={
             "projectId": project,
             "name": name,
             "baseId": base_id,
         },
     )
-    click.secho(f"Created environment '{name}'.", fg="green")
+    click.secho(f"Created workspace '{name}'.", fg="green")
 
 
 @env.command("update")
@@ -388,11 +388,11 @@ def env_create(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="The (current) name of the environment",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="The (current) name of the workspace",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -407,45 +407,45 @@ def env_create(
 )
 @click.option(
     "--name",
-    help="The new name of the environment",
+    help="The new name of the workspace",
 )
 @click.option(
     "--base",
-    help="The new base environment to inherit from",
+    help="The new base workspace to inherit from",
 )
 @click.option(
     "--no-base",
     is_flag=True,
-    help="Unset the base environment",
+    help="Unset the base workspace",
 )
 def env_update(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     name: str | None,
     base: str | None,
     no_base: bool,
 ):
     """
-    Updates an environment within the project.
+    Updates a workspace within the project.
     """
-    environments = _api_request(
-        "GET", host, "get_environments", params={"project": project}
+    workspaces = _api_request(
+        "GET", host, "get_workspaces", params={"project": project}
     )
-    environment_ids_by_name = {e["name"]: id for id, e in environments.items()}
-    environment_id = environment_ids_by_name.get(environment)
-    if not environment_id:
-        raise click.BadOptionUsage("environment", "Not recognised")
+    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+    workspace_id = workspace_ids_by_name.get(workspace)
+    if not workspace_id:
+        raise click.BadOptionUsage("workspace", "Not recognised")
 
     base_id = None
     if base:
-        base_id = environment_ids_by_name.get(base)
+        base_id = workspace_ids_by_name.get(base)
         if not base_id:
             raise click.BadOptionUsage("base", "Not recognised")
 
     payload = {
         "projectId": project,
-        "environmentId": environment_id,
+        "workspaceId": workspace_id,
     }
     if name is not None:
         payload["name"] = name
@@ -456,9 +456,9 @@ def env_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_environment", json=payload)
+    _api_request("POST", host, "update_workspace", json=payload)
 
-    click.secho(f"Updated environment '{name or environment}'.", fg="green")
+    click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
 
 
 @env.command("archive")
@@ -472,11 +472,11 @@ def env_update(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -491,30 +491,30 @@ def env_update(
 )
 def env_archive(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
 ):
     """
-    Archives an environment.
+    Archives an workspace.
     """
-    environments = _api_request(
-        "GET", host, "get_environments", params={"project": project}
+    workspaces = _api_request(
+        "GET", host, "get_workspaces", params={"project": project}
     )
-    environment_ids_by_name = {e["name"]: id for id, e in environments.items()}
-    environment_id = environment_ids_by_name.get(environment)
-    if not environment_id:
-        raise click.BadOptionUsage("environment", "Not recognised")
+    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+    workspace_id = workspace_ids_by_name.get(workspace)
+    if not workspace_id:
+        raise click.BadOptionUsage("workspace", "Not recognised")
 
     _api_request(
         "POST",
         host,
-        "archive_environment",
+        "archive_workspace",
         json={
             "projectId": project,
-            "environmentId": environment_id,
+            "workspaceId": workspace_id,
         },
     )
-    click.secho(f"Archived environment '{environment}'.", fg="green")
+    click.secho(f"Archived workspace '{workspace}'.", fg="green")
 
 @cli.group()
 def pools():
@@ -534,11 +534,11 @@ def pools():
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -576,7 +576,7 @@ def pools():
 @click.argument("name")
 def pools_update(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     repositories: tuple[str, ...],
     provides: tuple[str, ...] | None,
@@ -602,7 +602,7 @@ def pools_update(
         "update_pool",
         json={
             "projectId": project,
-            "environmentName": environment,
+            "workspaceName": workspace,
             "poolName": name,
             "pool": pool
         },
@@ -620,11 +620,11 @@ def pools_update(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -640,7 +640,7 @@ def pools_update(
 @click.argument("name")
 def pools_delete(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     name: str
 ):
@@ -653,7 +653,7 @@ def pools_delete(
         "update_pool",
         json={
             "projectId": project,
-            "environmentName": environment,
+            "workspaceName": workspace,
             "poolName": name,
             "pool": None
         },
@@ -671,11 +671,11 @@ def pools_delete(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -691,7 +691,7 @@ def pools_delete(
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     module_name: tuple[str, ...],
 ) -> None:
@@ -705,7 +705,7 @@ def register(
     if not module_name:
         raise click.ClickException("No module(s) specified.")
     targets = _load_repositories(list(module_name))
-    _register_manifests(project, environment, host, targets)
+    _register_manifests(project, workspace, host, targets)
     click.secho("Repository manifests registered.", fg="green")
 
 
@@ -720,11 +720,11 @@ def register(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    envvar="COFLUX_ENVIRONMENT",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    envvar="COFLUX_WORKSPACE",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -778,7 +778,7 @@ def register(
 @click.argument("module_name", nargs=-1)
 def agent(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     provides: tuple[str, ...] | None,
     launch: str | None,
@@ -802,7 +802,7 @@ def agent(
     args = (*module_name,)
     kwargs = {
         "project": project,
-        "environment": environment,
+        "workspace": workspace,
         "host": host,
         "provides": provides_,
         "serialiser_configs": config and config.serialisers,
@@ -836,10 +836,10 @@ def agent(
     required=True,
 )
 @click.option(
-    "-e",
-    "--environment",
-    help="Environment name",
-    default=_load_config().environment,
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    default=_load_config().workspace,
     show_default=True,
     required=True,
 )
@@ -856,7 +856,7 @@ def agent(
 @click.argument("argument", nargs=-1)
 def submit(
     project: str,
-    environment: str,
+    workspace: str,
     host: str,
     repository: str,
     target: str,
@@ -872,7 +872,7 @@ def submit(
         "get_workflow",
         params={
             "project": project,
-            "environment": environment,
+            "workspace": workspace,
             "repository": repository,
             "target": target,
         },
@@ -887,7 +887,7 @@ def submit(
         "submit_workflow",
         json={
             "projectId": project,
-            "environmentName": environment,
+            "workspaceName": workspace,
             "repository": repository,
             "target": target,
             "arguments": [["json", a] for a in argument],

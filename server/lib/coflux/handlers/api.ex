@@ -33,24 +33,24 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_environments"]) do
+  defp handle(req, "GET", ["get_workspaces"]) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
 
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
-        case Orchestration.get_environments(project_id) do
-          {:ok, environments} ->
+        case Orchestration.get_workspaces(project_id) do
+          {:ok, workspaces} ->
             json_response(
               req,
-              Map.new(environments, fn {environment_id, environment} ->
+              Map.new(workspaces, fn {workspace_id, workspace} ->
                 base_id =
-                  if environment.base_id,
-                    do: Integer.to_string(environment.base_id)
+                  if workspace.base_id,
+                    do: Integer.to_string(workspace.base_id)
 
-                {environment_id,
+                {workspace_id,
                  %{
-                   "name" => environment.name,
+                   "name" => workspace.name,
                    "baseId" => base_id
                  }}
               end)
@@ -62,7 +62,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["create_environment"]) do
+  defp handle(req, "POST", ["create_workspace"]) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -76,13 +76,13 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.create_environment(
+      case Orchestration.create_workspace(
              arguments.project_id,
              arguments.name,
              arguments[:base_id]
            ) do
-        {:ok, environment_id} ->
-          json_response(req, %{id: environment_id})
+        {:ok, workspace_id} ->
+          json_response(req, %{id: workspace_id})
 
         {:error, errors} ->
           errors =
@@ -98,13 +98,13 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["update_environment"]) do
+  defp handle(req, "POST", ["update_workspace"]) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
         %{
           project_id: "projectId",
-          environment_id: {"environmentId", &parse_numeric_id/1}
+          workspace_id: {"workspaceId", &parse_numeric_id/1}
         },
         %{
           name: "name",
@@ -113,9 +113,9 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.update_environment(
+      case Orchestration.update_workspace(
              arguments.project_id,
-             arguments.environment_id,
+             arguments.workspace_id,
              Map.take(arguments, [:name, :base_id])
            ) do
         :ok ->
@@ -138,17 +138,17 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["pause_environment"]) do
+  defp handle(req, "POST", ["pause_workspace"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_id: {"environmentId", &parse_numeric_id/1}
+        workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.pause_environment(
+      case Orchestration.pause_workspace(
              arguments.project_id,
-             arguments.environment_id
+             arguments.workspace_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -161,17 +161,17 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["resume_environment"]) do
+  defp handle(req, "POST", ["resume_workspace"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_id: {"environmentId", &parse_numeric_id/1}
+        workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_environment(
+      case Orchestration.resume_workspace(
              arguments.project_id,
-             arguments.environment_id
+             arguments.workspace_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -184,24 +184,24 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["archive_environment"]) do
+  defp handle(req, "POST", ["archive_workspace"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_id: {"environmentId", &parse_numeric_id/1}
+        workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_environment(
+      case Orchestration.archive_workspace(
              arguments.project_id,
-             arguments.environment_id
+             arguments.workspace_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
 
         {:error, :descendants} ->
           json_error_response(req, "bad_request",
-            details: %{"environmentId" => "has_dependencies"}
+            details: %{"workspaceId" => "has_dependencies"}
           )
 
         {:error, :not_found} ->
@@ -216,7 +216,7 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         pool_name: {"poolName", &parse_pool_name/1},
         pool: {"pool", &parse_pool/1}
       })
@@ -224,7 +224,7 @@ defmodule Coflux.Handlers.Api do
     if Enum.empty?(errors) do
       case Orchestration.update_pool(
              arguments.project_id,
-             arguments.environment_name,
+             arguments.workspace_name,
              arguments.pool_name,
              arguments.pool
            ) do
@@ -243,14 +243,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         agent_id: {"agentId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
       case Orchestration.stop_agent(
              arguments.project_id,
-             arguments.environment_name,
+             arguments.workspace_name,
              arguments.agent_id
            ) do
         :ok ->
@@ -268,14 +268,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         agent_id: {"agentId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
       case Orchestration.resume_agent(
              arguments.project_id,
-             arguments.environment_name,
+             arguments.workspace_name,
              arguments.agent_id
            ) do
         :ok ->
@@ -293,14 +293,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         manifests: {"manifests", &parse_manifests/1}
       })
 
     if Enum.empty?(errors) do
       case Orchestration.register_manifests(
              arguments.project_id,
-             arguments.environment_name,
+             arguments.workspace_name,
              arguments.manifests
            ) do
         :ok ->
@@ -315,14 +315,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         repository_name: "repositoryName"
       })
 
     if Enum.empty?(errors) do
       case Orchestration.archive_repository(
              arguments.project_id,
-             arguments.environment_name,
+             arguments.workspace_name,
              arguments.repository_name
            ) do
         :ok ->
@@ -336,11 +336,11 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "GET", ["get_workflow"]) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
-    environment_name = get_query_param(qs, "environment")
+    workspace_name = get_query_param(qs, "workspace")
     repository = get_query_param(qs, "repository")
     target_name = get_query_param(qs, "target")
 
-    case Orchestration.get_workflow(project_id, environment_name, repository, target_name) do
+    case Orchestration.get_workflow(project_id, workspace_name, repository, target_name) do
       {:ok, nil} ->
         json_error_response(req, "not_found", status: 404)
 
@@ -357,7 +357,7 @@ defmodule Coflux.Handlers.Api do
           project_id: "projectId",
           repository: "repository",
           target: "target",
-          environment_name: "environmentName",
+          workspace_name: "workspaceName",
           arguments: {"arguments", &parse_arguments/1}
         },
         %{
@@ -377,7 +377,7 @@ defmodule Coflux.Handlers.Api do
              arguments.target,
              :workflow,
              arguments.arguments,
-             environment: arguments.environment_name,
+             workspace: arguments.workspace_name,
              execute_after: arguments[:execute_after],
              wait_for: arguments[:wait_for],
              cache: arguments[:cache],
@@ -406,7 +406,7 @@ defmodule Coflux.Handlers.Api do
           project_id: "projectId",
           repository: "repository",
           target: "target",
-          environment_name: "environmentName",
+          workspace_name: "workspaceName",
           arguments: {"arguments", &parse_arguments/1}
         },
         %{
@@ -421,7 +421,7 @@ defmodule Coflux.Handlers.Api do
              arguments.target,
              :sensor,
              arguments.arguments,
-             environment: arguments.environment_name,
+             workspace: arguments.workspace_name,
              requires: arguments[:requires]
            ) do
         {:ok, run_id, step_id, execution_id} ->
@@ -463,7 +463,7 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        environment_name: "environmentName",
+        workspace_name: "workspaceName",
         step_id: "stepId"
       })
 
@@ -471,13 +471,13 @@ defmodule Coflux.Handlers.Api do
       case Orchestration.rerun_step(
              arguments.project_id,
              arguments.step_id,
-             arguments.environment_name
+             arguments.workspace_name
            ) do
         {:ok, execution_id, attempt} ->
           json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
 
-        {:error, :environment_invalid} ->
-          json_error_response(req, "bad_request", details: %{"environment" => "invalid"})
+        {:error, :workspace_invalid} ->
+          json_error_response(req, "bad_request", details: %{"workspace" => "invalid"})
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -488,12 +488,12 @@ defmodule Coflux.Handlers.Api do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     # TODO: handle parse error
-    {:ok, environment_id} = parse_numeric_id(get_query_param(qs, "environmentId"))
+    {:ok, workspace_id} = parse_numeric_id(get_query_param(qs, "workspaceId"))
     query = get_query_param(qs, "query")
 
     case Topical.execute(
            Coflux.TopicalRegistry,
-           ["projects", project_id, "search", environment_id],
+           ["projects", project_id, "search", workspace_id],
            "query",
            {query}
          ) do
@@ -763,7 +763,7 @@ defmodule Coflux.Handlers.Api do
              Enum.reduce_while(value, {:ok, []}, fn parameter, {:ok, result} ->
                case parse_parameter(parameter) do
                  {:ok, parsed} -> {:cont, {:ok, [parsed | result]}}
-                 {:error, error} -> {:halt, {:error, error}}
+                 # {:error, error} -> {:halt, {:error, error}}
                end
              end) do
         {:ok, Enum.reverse(backwards)}

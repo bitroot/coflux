@@ -23,7 +23,7 @@ import {
   useState,
 } from "react";
 import * as api from "../api";
-import { useEnvironments } from "../topics";
+import { useWorkspaces } from "../topics";
 import { Link, useNavigate } from "react-router-dom";
 
 type Run = {
@@ -69,17 +69,17 @@ function MatchOption({ icon: Icon, name, hint, href }: MatchOptionProps) {
   );
 }
 
-function buildRunUrl(projectId: string, environmentName: string, run: Run) {
-  return `/projects/${projectId}/runs/${run.runId}?environment=${environmentName}&step=${run.stepId}&attempt=${run.attempt}`;
+function buildRunUrl(projectId: string, workspaceName: string, run: Run) {
+  return `/projects/${projectId}/runs/${run.runId}?workspace=${workspaceName}&step=${run.stepId}&attempt=${run.attempt}`;
 }
 
 type Props = {
   projectId: string;
-  environmentId: string;
+  workspaceId: string;
 };
 
-export default function SearchInput({ projectId, environmentId }: Props) {
-  const environments = useEnvironments(projectId);
+export default function SearchInput({ projectId, workspaceId }: Props) {
+  const workspaces = useWorkspaces(projectId);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController>();
@@ -111,14 +111,14 @@ export default function SearchInput({ projectId, environmentId }: Props) {
     [navigate],
   );
   const performSearch = useCallback(
-    (projectId: string, environmentId: string, query: string) => {
+    (projectId: string, workspaceId: string, query: string) => {
       abortControllerRef.current?.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
       setError(undefined);
       setLoading(true);
       api
-        .search(projectId, environmentId, query)
+        .search(projectId, workspaceId, query)
         .then((data) => setMatches(data.matches))
         .catch(setError)
         .finally(() => setLoading(false));
@@ -134,15 +134,15 @@ export default function SearchInput({ projectId, environmentId }: Props) {
     if (query) {
       setLoading(true);
       debounceTimeoutRef.current = setTimeout(() => {
-        performSearch(projectId, environmentId, query);
+        performSearch(projectId, workspaceId, query);
       }, 200);
     } else {
       abortControllerRef.current?.abort();
       setLoading(false);
       setMatches(undefined);
     }
-  }, [projectId, environmentId, query, performSearch]);
-  const environmentName = environments?.[environmentId].name;
+  }, [projectId, workspaceId, query, performSearch]);
+  const workspaceName = workspaces?.[workspaceId].name;
   return (
     <Combobox immediate onChange={handleChange}>
       <div className="flex items-center py-1 mr-1 gap-2 bg-slate-100/90 hover:bg-slate-100 rounded-lg flex-1 max-w-56 text-left text-cyan-900 text-sm relative">
@@ -179,7 +179,7 @@ export default function SearchInput({ projectId, environmentId }: Props) {
                   <MatchOption
                     icon={IconBox}
                     name={match.name}
-                    href={`/projects/${projectId}/repositories/${match.name}?environment=${environmentName}`}
+                    href={`/projects/${projectId}/repositories/${match.name}?workspace=${workspaceName}`}
                   />
                 ) : match.type == "workflow" ? (
                   <MatchOption
@@ -188,8 +188,8 @@ export default function SearchInput({ projectId, environmentId }: Props) {
                     hint={match.repository}
                     href={
                       match.run
-                        ? buildRunUrl(projectId, environmentName!, match.run)
-                        : `/projects/${projectId}/workflows/${match.repository}/${match.name}?environment=${environmentName}`
+                        ? buildRunUrl(projectId, workspaceName!, match.run)
+                        : `/projects/${projectId}/workflows/${match.repository}/${match.name}?workspace=${workspaceName}`
                     }
                   />
                 ) : match.type == "sensor" ? (
@@ -199,8 +199,8 @@ export default function SearchInput({ projectId, environmentId }: Props) {
                     hint={match.repository}
                     href={
                       match.run
-                        ? buildRunUrl(projectId, environmentName!, match.run)
-                        : `/projects/${projectId}/sensors/${match.repository}/${match.name}?environment=${environmentName}`
+                        ? buildRunUrl(projectId, workspaceName!, match.run)
+                        : `/projects/${projectId}/sensors/${match.repository}/${match.name}?workspace=${workspaceName}`
                     }
                   />
                 ) : match.type == "task" && match.run ? (
@@ -208,7 +208,7 @@ export default function SearchInput({ projectId, environmentId }: Props) {
                     icon={IconPoint}
                     name={match.name}
                     hint={match.repository}
-                    href={buildRunUrl(projectId, environmentName!, match.run)}
+                    href={buildRunUrl(projectId, workspaceName!, match.run)}
                   />
                 ) : null}
               </Fragment>

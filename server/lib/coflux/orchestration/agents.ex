@@ -81,7 +81,7 @@ defmodule Coflux.Orchestration.Agents do
              l.created_at,
              p.id,
              p.name,
-             p.environment_id,
+             p.workspace_id,
              (SELECT ls.state
                FROM agent_states AS ls
                WHERE ls.agent_id = l.id
@@ -108,8 +108,8 @@ defmodule Coflux.Orchestration.Agents do
         {:ok,
          Enum.map(
            rows,
-           fn {agent_id, created_at, pool_id, pool_name, environment_id, state, data} ->
-             {agent_id, created_at, pool_id, pool_name, environment_id, decode_state(state),
+           fn {agent_id, created_at, pool_id, pool_name, workspace_id, state, data} ->
+             {agent_id, created_at, pool_id, pool_name, workspace_id, decode_state(state),
               if(data, do: :erlang.binary_to_term(data))}
            end
          )}

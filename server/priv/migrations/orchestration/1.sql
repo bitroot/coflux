@@ -79,39 +79,39 @@ CREATE TABLE sensors (
   FOREIGN KEY (parameter_set_id) REFERENCES parameter_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE environments (
+CREATE TABLE workspaces (
   id INTEGER PRIMARY KEY
 ) STRICT;
 
-CREATE TABLE environment_manifests (
-  environment_id INTEGER NOT NULL,
+CREATE TABLE workspace_manifests (
+  workspace_id INTEGER NOT NULL,
   repository TEXT NOT NULL,
   manifest_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE environment_states (
-  environment_id INTEGER NOT NULL,
+CREATE TABLE workspace_states (
+  workspace_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: archived
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE environment_names (
-  environment_id INTEGER NOT NULL,
+CREATE TABLE workspace_names (
+  workspace_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE environment_bases (
-  environment_id INTEGER NOT NULL,
+CREATE TABLE workspace_bases (
+  workspace_id INTEGER NOT NULL,
   base_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE,
-  FOREIGN KEY (base_id) REFERENCES environments ON DELETE CASCADE
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
+  FOREIGN KEY (base_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE launchers (
@@ -138,11 +138,11 @@ CREATE TABLE pool_definition_repositories (
 
 CREATE TABLE pools (
   id INTEGER PRIMARY KEY,
-  environment_id INTEGER NOT NULL,
+  workspace_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   pool_definition_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (pool_definition_id) REFERENCES pool_definitions ON DELETE RESTRICT
 ) STRICT;
 
@@ -195,11 +195,11 @@ CREATE TABLE agent_deactivations (
 CREATE TABLE sessions (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
-  environment_id INTEGER NOT NULL,
+  workspace_id INTEGER NOT NULL,
   agent_id INTEGER,
   provides_tag_set_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (agent_id) REFERENCES agents ON DELETE RESTRICT,
   FOREIGN KEY (provides_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
@@ -254,12 +254,12 @@ CREATE TABLE executions (
   id INTEGER PRIMARY KEY,
   step_id INTEGER NOT NULL,
   attempt INTEGER NOT NULL,
-  environment_id INTEGER NOT NULL,
+  workspace_id INTEGER NOT NULL,
   execute_after INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE (step_id, attempt),
   FOREIGN KEY (step_id) REFERENCES steps ON DELETE CASCADE,
-  FOREIGN KEY (environment_id) REFERENCES environments ON DELETE CASCADE
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE assets (

@@ -1,9 +1,9 @@
 import { ReactNode } from "react";
 import classNames from "classnames";
 import { IconExclamationCircle } from "@tabler/icons-react";
-import { useEnvironments } from "../topics";
+import { useWorkspaces } from "../topics";
 
-function classNameForEnvironment(
+function classNameForWorkspace(
   name: string | undefined,
   interactive: boolean | undefined,
 ) {
@@ -27,7 +27,7 @@ function classNameForEnvironment(
 
 type Props = {
   projectId: string;
-  environmentId: string;
+  workspaceId: string;
   size?: "sm" | "md";
   interactive?: boolean;
   warning?: string;
@@ -35,17 +35,17 @@ type Props = {
   compact?: boolean;
 };
 
-export default function EnvironmentLabel({
+export default function WorkspaceLabel({
   projectId,
-  environmentId,
+  workspaceId,
   size,
   interactive,
   warning,
   accessory,
   compact,
 }: Props) {
-  const environments = useEnvironments(projectId);
-  const environment = environments?.[environmentId];
+  const workspaces = useWorkspaces(projectId);
+  const workspace = workspaces?.[workspaceId];
   return (
     <span
       className={classNames(
@@ -53,7 +53,7 @@ export default function EnvironmentLabel({
         size == "sm"
           ? "px-1 py-px rounded-md h-5"
           : "px-1.5 py-0.5 rounded-lg h-6",
-        classNameForEnvironment(environment?.name, interactive),
+        classNameForWorkspace(workspace?.name, interactive),
       )}
       title={warning}
     >
@@ -68,10 +68,10 @@ export default function EnvironmentLabel({
           className={classNames(
             "whitespace-nowrap overflow-hidden text-ellipsis",
             size == "sm" ? "px-px text-xs" : "px-0.5 text-sm",
-            environment?.state == "archived" && "line-through opacity-50",
+            workspace?.state == "archived" && "line-through opacity-50",
           )}
         >
-          {environment?.name}
+          {workspace?.name}
         </span>
       )}
       {accessory}

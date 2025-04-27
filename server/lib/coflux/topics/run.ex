@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Run do
-  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :environment_id]
+  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -8,7 +8,7 @@ defmodule Coflux.Topics.Run do
   def init(params) do
     project_id = Keyword.fetch!(params, :project_id)
     external_run_id = Keyword.fetch!(params, :run_id)
-    environment_id = String.to_integer(Keyword.fetch!(params, :environment_id))
+    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
 
     case Orchestration.subscribe_run(
            project_id,
@@ -19,7 +19,7 @@ defmodule Coflux.Topics.Run do
         {:error, :not_found}
 
       {:ok, run, parent, steps, _ref} ->
-        run_environment_id =
+        run_workspace_id =
           steps
           |> Map.values()
           |> Enum.reject(& &1.parent_id)
@@ -27,15 +27,15 @@ defmodule Coflux.Topics.Run do
           |> Map.fetch!(:executions)
           |> Map.values()
           |> Enum.min_by(& &1.created_at)
-          |> Map.fetch!(:environment_id)
+          |> Map.fetch!(:workspace_id)
 
-        environment_ids = Enum.uniq([run_environment_id, environment_id])
+        workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
 
         {:ok,
-         Topic.new(build_run(run, parent, steps, environment_ids), %{
+         Topic.new(build_run(run, parent, steps, workspace_ids), %{
            project_id: project_id,
            external_run_id: external_run_id,
-           environment_ids: environment_ids
+           workspace_ids: workspace_ids
          })}
     end
   end
@@ -45,8 +45,8 @@ defmodule Coflux.Topics.Run do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:step, external_step_id, step, environment_id}) do
-    if environment_id in topic.state.environment_ids do
+  defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
+    if workspace_id in topic.state.workspace_ids do
       Topic.set(topic, [:steps, external_step_id], %{
         repository: step.repository,
         target: step.target,
@@ -67,15 +67,15 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:execution, step_id, attempt, execution_id, environment_id, created_at, execute_after}
+         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after}
        ) do
-    if environment_id in topic.state.environment_ids do
+    if workspace_id in topic.state.workspace_ids do
       Topic.set(
         topic,
         [:steps, step_id, :executions, Integer.to_string(attempt)],
         %{
           executionId: Integer.to_string(execution_id),
-          environmentId: Integer.to_string(environment_id),
+          workspaceId: Integer.to_string(workspace_id),
           createdAt: created_at,
           executeAfter: execute_after,
           assignedAt: nil,
@@ -166,7 +166,7 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp build_run(run, parent, steps, environment_ids) do
+  defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
       parent: if(parent, do: build_execution(parent)),
@@ -175,7 +175,7 @@ defmodule Coflux.Topics.Run do
         |> Enum.filter(fn {_, step} ->
           step.executions
           |> Map.values()
-          |> Enum.any?(&(&1.environment_id in environment_ids))
+          |> Enum.any?(&(&1.workspace_id in workspace_ids))
         end)
         |> Map.new(fn {step_id, step} ->
           {step_id,
@@ -193,13 +193,13 @@ defmodule Coflux.Topics.Run do
              executions:
                step.executions
                |> Enum.filter(fn {_, execution} ->
-                 execution.environment_id in environment_ids
+                 execution.workspace_id in workspace_ids
                end)
                |> Map.new(fn {attempt, execution} ->
                  {Integer.to_string(attempt),
                   %{
                     executionId: Integer.to_string(execution.execution_id),
-                    environmentId: Integer.to_string(execution.environment_id),
+                    workspaceId: Integer.to_string(execution.workspace_id),
                     createdAt: execution.created_at,
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
