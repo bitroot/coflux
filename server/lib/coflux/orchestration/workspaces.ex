@@ -408,13 +408,13 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp hash_pool_definition(launcher_id, provides_tag_set_id, repositories) do
+  defp hash_pool_definition(launcher_id, provides_tag_set_id, modules) do
     data =
       Enum.intersperse(
         [
           if(launcher_id, do: Integer.to_string(launcher_id), else: ""),
           Integer.to_string(provides_tag_set_id),
-          Enum.join(Enum.sort(repositories), "\n")
+          Enum.join(Enum.sort(modules), "\n")
         ],
         0
       )
@@ -423,7 +423,7 @@ defmodule Coflux.Orchestration.Workspaces do
   end
 
   defp get_or_create_pool_definition(db, pool) do
-    repositories = Map.get(pool, :repositories, [])
+    modules = Map.get(pool, :modules, [])
     provides = Map.get(pool, :provides, %{})
     launcher = Map.get(pool, :launcher)
 
@@ -441,7 +441,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
       end
 
-    hash = hash_pool_definition(launcher_id, provides_tag_set_id, repositories)
+    hash = hash_pool_definition(launcher_id, provides_tag_set_id, modules)
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->
@@ -458,9 +458,9 @@ defmodule Coflux.Orchestration.Workspaces do
         {:ok, _} =
           insert_many(
             db,
-            :pool_definition_repositories,
+            :pool_definition_modules,
             {:pool_definition_id, :pattern},
-            Enum.map(repositories, fn pattern ->
+            Enum.map(modules, fn pattern ->
               {pool_definition_id, pattern}
             end)
           )
@@ -533,12 +533,12 @@ defmodule Coflux.Orchestration.Workspaces do
             %{}
           end
 
-        repositories =
+        modules =
           case query(
                  db,
                  """
                  SELECT pattern
-                 FROM pool_definition_repositories
+                 FROM pool_definition_modules
                  WHERE pool_definition_id = ?1
                  """,
                  {pool_definition_id}
@@ -551,7 +551,7 @@ defmodule Coflux.Orchestration.Workspaces do
         {:ok,
          %{
            provides: provides,
-           repositories: repositories,
+           modules: modules,
            launcher: launcher
          }}
 

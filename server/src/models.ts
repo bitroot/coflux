@@ -52,7 +52,7 @@ export type Sensor = {
   runs: Record<string, Pick<Run, "createdAt">>;
 };
 
-export type Repository = {
+export type Module = {
   workflows: string[];
   sensors: string[];
   executing: number;
@@ -64,7 +64,7 @@ export type ExecutionReference = {
   runId: string;
   stepId: string;
   attempt: number;
-  repository: string;
+  module: string;
   target: string;
 };
 
@@ -179,7 +179,7 @@ export type Execution = {
 };
 
 export type Step = {
-  repository: string;
+  module: string;
   target: string;
   type: "task" | "workflow" | "sensor";
   parentId: string | null;
@@ -223,7 +223,7 @@ export type Agent = {
 
 // TODO: rename 'PoolDefinition'?
 export type Pool = {
-  repositories: string[];
+  modules: string[];
   provides: TagSet;
   launcher: { type: "docker"; image: string } | null;
 };

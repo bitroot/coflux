@@ -19,7 +19,7 @@ import {
   LogsPage,
   WorkflowPage,
   SensorPage,
-  RepositoryPage,
+  ModulePage,
   PoolPage,
 } from "./pages";
 import NewProjectDialog from "./components/NewProjectDialog";
@@ -59,17 +59,14 @@ export default function App() {
               </Route>
               <Route path=":project" element={<ProjectLayout />}>
                 <Route index={true} element={<ProjectPage />} />
-                <Route
-                  path="repositories/:repository"
-                  element={<RepositoryPage />}
-                />
+                <Route path="modules/:module" element={<ModulePage />} />
                 <Route path="pools/:pool" element={<PoolPage />} />
                 <Route
-                  path="workflows/:repository/:target"
+                  path="workflows/:module/:target"
                   element={<WorkflowPage />}
                 />
                 <Route
-                  path="sensors/:repository/:target"
+                  path="sensors/:module/:target"
                   element={<SensorPage />}
                 />
                 <Route path="runs/:run" element={<RunLayout />}>

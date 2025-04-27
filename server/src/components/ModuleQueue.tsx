@@ -15,7 +15,7 @@ type Props = {
   emptyText: string;
 };
 
-export default function RepositoryQueue({
+export default function ModuleQueue({
   projectId,
   workspaceName,
   title,

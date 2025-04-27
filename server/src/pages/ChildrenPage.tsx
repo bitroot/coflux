@@ -99,7 +99,7 @@ export default function ChildrenPage() {
                                     {step.target}
                                   </span>{" "}
                                   <span className="text-slate-500 text-xs">
-                                    ({step.repository})
+                                    ({step.module})
                                   </span>
                                 </StepLink>
                               </td>

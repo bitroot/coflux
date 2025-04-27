@@ -13,4 +13,4 @@ RUN poetry install --no-interaction --no-ansi
 
 COPY . ./
 
-ENTRYPOINT ["coflux", "agent", "slackbot.repo"]
+ENTRYPOINT ["coflux", "agent", "slackbot.workflows"]

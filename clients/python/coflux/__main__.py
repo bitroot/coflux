@@ -53,7 +53,7 @@ def _parse_provides(argument: tuple[str, ...] | None) -> dict[str, list[str]]:
     return result
 
 
-def _load_repository(
+def _load_module(
     module: types.ModuleType,
 ) -> dict[str, tuple[models.Target, t.Callable]]:
     attrs = (getattr(module, k) for k in dir(module))
@@ -64,7 +64,7 @@ def _load_repository(
     }
 
 
-def _load_repositories(
+def _load_modules(
     modules: list[types.ModuleType | str],
 ) -> dict[str, dict[str, tuple[models.Target, t.Callable]]]:
     if os.getcwd() not in sys.path:
@@ -73,7 +73,7 @@ def _load_repositories(
     for module in list(modules):
         if isinstance(module, str):
             module = loader.load_module(module)
-        targets[module.__name__] = _load_repository(module)
+        targets[module.__name__] = _load_module(module)
     return targets
 
 
@@ -84,7 +84,7 @@ def _register_manifests(
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
 ) -> None:
     manifests = {
-        repository: {
+        module: {
             "workflows": {
                 workflow_name: {
                     "parameters": [
@@ -143,7 +143,7 @@ def _register_manifests(
                 if definition.type == "sensor"
             },
         }
-        for repository, target in targets.items()
+        for module, target in targets.items()
     }
     # TODO: handle response?
     _api_request(
@@ -172,7 +172,7 @@ def _init(
     register: bool,
 ) -> None:
     try:
-        targets = _load_repositories(list(modules))
+        targets = _load_modules(list(modules))
         if register:
             _register_manifests(project, workspace, host, targets)
 
@@ -552,10 +552,10 @@ def pools():
     required=True,
 )
 @click.option(
-    "repositories",
-    "-r",
-    "--repository",
-    help="Repositories to be hosted by agents in the pool",
+    "modules",
+    "-m",
+    "--module",
+    help="Modules to be hosted by agents in the pool",
     multiple=True,
     required=True,
 )
@@ -578,7 +578,7 @@ def pools_update(
     project: str,
     workspace: str,
     host: str,
-    repositories: tuple[str, ...],
+    modules: tuple[str, ...],
     provides: tuple[str, ...] | None,
     launcher: t.Literal["docker"] | None,
     image: str | None,
@@ -592,7 +592,7 @@ def pools_update(
     if launcher == "docker":
         launcher_ = {"type": "docker", "image": image}
     pool = {
-        "repositories": list(repositories),
+        "modules": list(modules),
         "provides": provides_,
         "launcher": launcher_
     }
@@ -696,7 +696,7 @@ def register(
     module_name: tuple[str, ...],
 ) -> None:
     """
-    Register repositories with the server.
+    Register modules with the server.
 
     Paths to scripts can be passed instead of module names.
 
@@ -704,9 +704,9 @@ def register(
     """
     if not module_name:
         raise click.ClickException("No module(s) specified.")
-    targets = _load_repositories(list(module_name))
+    targets = _load_modules(list(module_name))
     _register_manifests(project, workspace, host, targets)
-    click.secho("Repository manifests registered.", fg="green")
+    click.secho("Manifest(s) registered.", fg="green")
 
 
 @cli.command("agent")
@@ -767,7 +767,7 @@ def register(
     "--register",
     is_flag=True,
     default=False,
-    help="Automatically register repositories",
+    help="Automatically register modules",
 )
 @click.option(
     "--dev",
@@ -791,7 +791,7 @@ def agent(
     """
     Start an agent.
 
-    Loads the specified modules as repositories. Paths to scripts can be passed instead of module names.
+    Hosts the specified modules. Paths to scripts can be passed instead of module names.
 
     Options will be loaded from the configuration file, unless overridden as arguments (or environment variables).
     """
@@ -851,14 +851,14 @@ def agent(
     show_default=True,
     required=True,
 )
-@click.argument("repository")
+@click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
 def submit(
     project: str,
     workspace: str,
     host: str,
-    repository: str,
+    module: str,
     target: str,
     argument: tuple[str, ...],
 ) -> None:
@@ -873,7 +873,7 @@ def submit(
         params={
             "project": project,
             "workspace": workspace,
-            "repository": repository,
+            "module": module,
             "target": target,
         },
     )
@@ -888,7 +888,7 @@ def submit(
         json={
             "projectId": project,
             "workspaceName": workspace,
-            "repository": repository,
+            "module": module,
             "target": target,
             "arguments": [["json", a] for a in argument],
             "waitFor": workflow["waitFor"],

@@ -35,7 +35,7 @@ function CancelButton({ onCancel }: CancelButtonProps) {
 }
 
 type Props = {
-  repository: string | undefined;
+  module: string | undefined;
   target: string | undefined;
   projectId: string;
   runId?: string;
@@ -44,7 +44,7 @@ type Props = {
 };
 
 export default function WorkflowHeader({
-  repository,
+  module,
   target,
   projectId,
   runId,
@@ -53,12 +53,7 @@ export default function WorkflowHeader({
 }: Props) {
   const navigate = useNavigate();
   const [runDialogOpen, setRunDialogOpen] = useState(false);
-  const workflow = useWorkflow(
-    projectId,
-    repository,
-    target,
-    activeWorkspaceId,
-  );
+  const workflow = useWorkflow(projectId, module, target, activeWorkspaceId);
   const run = useRun(projectId, runId, activeWorkspaceId);
   const handleRunSubmit = useCallback(
     (arguments_: ["json", string][]) => {
@@ -69,7 +64,7 @@ export default function WorkflowHeader({
       return api
         .submitWorkflow(
           projectId,
-          repository!,
+          module!,
           target!,
           activeWorkspaceName!,
           arguments_,
@@ -91,7 +86,7 @@ export default function WorkflowHeader({
           );
         });
     },
-    [navigate, projectId, repository, target, activeWorkspaceName, workflow],
+    [navigate, projectId, module, target, activeWorkspaceName, workflow],
   );
   const initialStepId =
     run &&
@@ -125,7 +120,7 @@ export default function WorkflowHeader({
     <div className="p-5 flex justify-between gap-2 items-start">
       <div className="flex flex-col gap-2">
         <div className="flex items-baseline gap-1">
-          <span className="text-slate-400">{repository}</span>
+          <span className="text-slate-400">{module}</span>
           <span className="text-slate-400">/</span>
           <IconSubtask
             size={26}
@@ -168,7 +163,7 @@ export default function WorkflowHeader({
             {activeWorkspaceId && workflow.parameters && (
               <RunDialog
                 projectId={projectId}
-                repository={repository}
+                module={module}
                 target={target}
                 parameters={workflow.parameters}
                 instruction={workflow.instruction}

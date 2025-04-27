@@ -64,7 +64,7 @@ defmodule Coflux.Handlers.Agent do
 
       "submit" ->
         [
-          repository,
+          module,
           target,
           type,
           arguments,
@@ -82,7 +82,7 @@ defmodule Coflux.Handlers.Agent do
           case Orchestration.schedule_step(
                  state.project_id,
                  parent_id,
-                 repository,
+                 module,
                  target,
                  parse_type(type),
                  Enum.map(arguments, &parse_value/1),
@@ -306,10 +306,10 @@ defmodule Coflux.Handlers.Agent do
     {[], state}
   end
 
-  def websocket_info({:execute, execution_id, repository, target, arguments}, state) do
+  def websocket_info({:execute, execution_id, module, target, arguments}, state) do
     arguments = Enum.map(arguments, &compose_value/1)
     state = Map.update!(state, :execution_ids, &MapSet.put(&1, execution_id))
-    {[command_message("execute", [execution_id, repository, target, arguments])], state}
+    {[command_message("execute", [execution_id, module, target, arguments])], state}
   end
 
   def websocket_info({:result, request_id, result}, state) do
@@ -413,9 +413,9 @@ defmodule Coflux.Handlers.Agent do
 
   def parse_targets(targets) do
     # TODO: validate
-    Map.new(targets, fn {repository_name, repository_targets} ->
-      {repository_name,
-       Map.new(repository_targets, fn {type, target_names} ->
+    Map.new(targets, fn {module_name, module_targets} ->
+      {module_name,
+       Map.new(module_targets, fn {type, target_names} ->
          {parse_type(type), target_names}
        end)}
     end)

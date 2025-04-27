@@ -10,7 +10,11 @@ import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 
 export default function WorkflowPage() {
-  const { project: projectId, repository, target: targetName } = useParams();
+  const {
+    project: projectId,
+    module: moduleName,
+    target: targetName,
+  } = useParams();
   const [searchParams] = useSearchParams();
   const activeWorkspaceName = searchParams.get("workspace") || undefined;
   const workspaces = useWorkspaces(projectId);
@@ -20,13 +24,13 @@ export default function WorkflowPage() {
   );
   const workflow = useWorkflow(
     projectId,
-    repository,
+    moduleName,
     targetName,
     activeWorkspaceId,
   );
-  useTitlePart(`${targetName} (${repository})`);
+  useTitlePart(`${targetName} (${moduleName})`);
   useSetActive(
-    repository && targetName ? ["target", repository, targetName] : undefined,
+    moduleName && targetName ? ["target", moduleName, targetName] : undefined,
   );
   if (!workflow) {
     return <Loading />;
@@ -48,7 +52,7 @@ export default function WorkflowPage() {
       return (
         <Fragment>
           <WorkflowHeader
-            repository={repository}
+            module={moduleName}
             target={targetName}
             projectId={projectId!}
             activeWorkspaceId={activeWorkspaceId}

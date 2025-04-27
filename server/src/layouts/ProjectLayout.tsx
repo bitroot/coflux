@@ -16,7 +16,7 @@ import {
   useWorkspaces,
   usePools,
   useProjects,
-  useRepositories,
+  useModules,
   useSessions,
 } from "../topics";
 import Header from "../components/Header";
@@ -36,7 +36,7 @@ function Sidebar({ projectId, workspaceName, active }: SidebarProps) {
     workspaces,
     (e) => e.name == workspaceName && e.state != "archived",
   );
-  const repositories = useRepositories(projectId, workspaceId);
+  const modules = useModules(projectId, workspaceId);
   const pools = usePools(projectId, workspaceId);
   const sessions = useSessions(projectId, workspaceId);
   return (
@@ -44,21 +44,21 @@ function Sidebar({ projectId, workspaceName, active }: SidebarProps) {
       <div className="flex-1 flex flex-col min-h-0">
         <div className="flex-1 flex flex-col min-h-0 divide-y divide-slate-200">
           <div className="flex-1 flex flex-col overflow-auto">
-            {repositories ? (
-              Object.keys(repositories).length ? (
+            {modules ? (
+              Object.keys(modules).length ? (
                 <div className="flex-1 overflow-auto min-h-0">
                   <TargetsList
                     projectId={projectId}
                     workspaceName={workspaceName}
-                    activeRepository={
-                      active?.[0] == "repository" || active?.[0] == "target"
+                    activeModule={
+                      active?.[0] == "module" || active?.[0] == "target"
                         ? active?.[1]
                         : undefined
                     }
                     activeTarget={
                       active?.[0] == "target" ? active?.[2] : undefined
                     }
-                    repositories={repositories}
+                    modules={modules}
                   />
                 </div>
               ) : (
@@ -91,7 +91,7 @@ function Sidebar({ projectId, workspaceName, active }: SidebarProps) {
 }
 
 type Active =
-  | ["repository", string]
+  | ["module", string]
   | ["target", string, string]
   | ["pool", string]
   | undefined;

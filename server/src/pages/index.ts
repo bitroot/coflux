@@ -9,5 +9,5 @@ export { default as WorkflowPage } from "./WorkflowPage";
 export { default as SensorPage } from "./SensorPage";
 export { default as LogsPage } from "./LogsPage";
 export { default as ChildrenPage } from "./ChildrenPage";
-export { default as RepositoryPage } from "./RepositoryPage";
+export { default as ModulePage } from "./ModulePage";
 export { default as PoolPage } from "./PoolPage";

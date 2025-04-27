@@ -194,7 +194,7 @@ function StepNode({
                 isDeferred ? "text-slate-300" : "text-slate-400",
               )}
             >
-              {step.repository} /
+              {step.module} /
             </span>
             <span className="flex gap-1 items-center">
               <span

@@ -5,7 +5,7 @@ import { DateTime } from "luxon";
 import * as models from "../models";
 import { useTitlePart } from "../components/TitleContext";
 import Loading from "../components/Loading";
-import RepositoryQueue from "../components/RepositoryQueue";
+import ModuleQueue from "../components/ModuleQueue";
 import useNow from "../hooks/useNow";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { useWorkspaces, useExecutions } from "../topics";
@@ -43,8 +43,8 @@ function splitExecutions(
   );
 }
 
-export default function RepositoryPage() {
-  const { project: projectId, repository: repositoryName } = useParams();
+export default function ModulePage() {
+  const { project: projectId, module: moduleName } = useParams();
   const [searchParams] = useSearchParams();
   const workspaceName = searchParams.get("workspace") || undefined;
   const workspaces = useWorkspaces(projectId);
@@ -52,9 +52,9 @@ export default function RepositoryPage() {
     workspaces,
     (e) => e.name == workspaceName && e.state != "archived",
   );
-  const executions = useExecutions(projectId, repositoryName, workspaceId);
-  useTitlePart(repositoryName);
-  useSetActive(repositoryName ? ["repository", repositoryName] : undefined);
+  const executions = useExecutions(projectId, moduleName, workspaceId);
+  useTitlePart(moduleName);
+  useSetActive(moduleName ? ["module", moduleName] : undefined);
   const now = useNow(500);
   if (!executions) {
     return <Loading />;
@@ -69,13 +69,11 @@ export default function RepositoryPage() {
               strokeWidth={1.5}
               className="text-slate-400 mr-1"
             />
-            <span className="text-xl font-bold font-mono">
-              {repositoryName}
-            </span>
+            <span className="text-xl font-bold font-mono">{moduleName}</span>
           </h1>
         </div>
         <div className="flex-1 flex gap-2 min-h-0">
-          <RepositoryQueue
+          <ModuleQueue
             projectId={projectId!}
             workspaceName={workspaceName!}
             title="Executing"
@@ -83,7 +81,7 @@ export default function RepositoryPage() {
             now={now}
             emptyText="No executions running"
           />
-          <RepositoryQueue
+          <ModuleQueue
             projectId={projectId!}
             workspaceName={workspaceName!}
             title="Due"
@@ -91,7 +89,7 @@ export default function RepositoryPage() {
             now={now}
             emptyText="No executions due"
           />
-          <RepositoryQueue
+          <ModuleQueue
             projectId={projectId!}
             workspaceName={workspaceName!}
             title="Scheduled"

@@ -48,7 +48,7 @@ defmodule Coflux.Topics.Run do
   defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
     if workspace_id in topic.state.workspace_ids do
       Topic.set(topic, [:steps, external_step_id], %{
-        repository: step.repository,
+        module: step.module,
         target: step.target,
         type: step.type,
         parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
@@ -180,7 +180,7 @@ defmodule Coflux.Topics.Run do
         |> Map.new(fn {step_id, step} ->
           {step_id,
            %{
-             repository: step.repository,
+             module: step.module,
              target: step.target,
              type: step.type,
              parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),

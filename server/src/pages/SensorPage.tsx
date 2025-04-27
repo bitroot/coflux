@@ -10,7 +10,11 @@ import { useTitlePart } from "../components/TitleContext";
 import SensorHeader from "../components/SensorHeader";
 
 export default function SensorPage() {
-  const { project: projectId, repository, target: targetName } = useParams();
+  const {
+    project: projectId,
+    module: moduleName,
+    target: targetName,
+  } = useParams();
   const [searchParams] = useSearchParams();
   const activeWorkspaceName = searchParams.get("workspace") || undefined;
   const workspaces = useWorkspaces(projectId);
@@ -20,13 +24,13 @@ export default function SensorPage() {
   );
   const sensor = useSensor(
     projectId,
-    repository,
+    moduleName,
     targetName,
     activeWorkspaceId,
   );
-  useTitlePart(`${targetName} (${repository})`);
+  useTitlePart(`${targetName} (${moduleName})`);
   useSetActive(
-    repository && targetName ? ["target", repository, targetName] : undefined,
+    moduleName && targetName ? ["target", moduleName, targetName] : undefined,
   );
   if (!sensor) {
     return <Loading />;
@@ -48,7 +52,7 @@ export default function SensorPage() {
       return (
         <Fragment>
           <SensorHeader
-            repository={repository}
+            module={moduleName}
             target={targetName}
             projectId={projectId!}
             activeWorkspaceId={activeWorkspaceId}

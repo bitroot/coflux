@@ -192,11 +192,11 @@ export default function PoolPage() {
               <div className="p-5 max-w-[400px] min-w-[200px] w-[30%] border-l border-slate-200 flex flex-col gap-3">
                 <div>
                   <h3 className="uppercase text-sm font-bold text-slate-400">
-                    Repositories
+                    Modules
                   </h3>
                   <ul className="list-disc ml-5 marker:text-slate-600">
-                    {pool.pool.repositories.map((repository) => (
-                      <li key={repository}>{repository}</li>
+                    {pool.pool.modules.map((module) => (
+                      <li key={module}>{module}</li>
                     ))}
                   </ul>
                 </div>
