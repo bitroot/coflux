@@ -313,14 +313,14 @@ def configure(
 
 
 @cli.group()
-def env():
+def workspace():
     """
     Manage workspaces.
     """
     pass
 
 
-@env.command("create")
+@workspace.command("create")
 @click.option(
     "-p",
     "--project",
@@ -344,7 +344,7 @@ def env():
     help="The base workspace to inherit from",
 )
 @click.argument("name")
-def env_create(
+def workspace_create(
     project: str,
     host: str,
     base: str | None,
@@ -377,7 +377,7 @@ def env_create(
     click.secho(f"Created workspace '{name}'.", fg="green")
 
 
-@env.command("update")
+@workspace.command("update")
 @click.option(
     "-p",
     "--project",
@@ -418,7 +418,7 @@ def env_create(
     is_flag=True,
     help="Unset the base workspace",
 )
-def env_update(
+def workspace_update(
     project: str,
     workspace: str,
     host: str,
@@ -461,7 +461,7 @@ def env_update(
     click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
 
 
-@env.command("archive")
+@workspace.command("archive")
 @click.option(
     "-p",
     "--project",
@@ -489,7 +489,7 @@ def env_update(
     show_default=True,
     required=True,
 )
-def env_archive(
+def workspace_archive(
     project: str,
     workspace: str,
     host: str,
