@@ -313,14 +313,14 @@ def configure(
 
 
 @cli.group()
-def workspace():
+def workspaces():
     """
     Manage workspaces.
     """
     pass
 
 
-@workspace.command("create")
+@workspaces.command("create")
 @click.option(
     "-p",
     "--project",
@@ -344,7 +344,7 @@ def workspace():
     help="The base workspace to inherit from",
 )
 @click.argument("name")
-def workspace_create(
+def workspaces_create(
     project: str,
     host: str,
     base: str | None,
@@ -377,7 +377,7 @@ def workspace_create(
     click.secho(f"Created workspace '{name}'.", fg="green")
 
 
-@workspace.command("update")
+@workspaces.command("update")
 @click.option(
     "-p",
     "--project",
@@ -418,7 +418,7 @@ def workspace_create(
     is_flag=True,
     help="Unset the base workspace",
 )
-def workspace_update(
+def workspaces_update(
     project: str,
     workspace: str,
     host: str,
@@ -461,7 +461,7 @@ def workspace_update(
     click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
 
 
-@workspace.command("archive")
+@workspaces.command("archive")
 @click.option(
     "-p",
     "--project",
@@ -489,7 +489,7 @@ def workspace_update(
     show_default=True,
     required=True,
 )
-def workspace_archive(
+def workspaces_archive(
     project: str,
     workspace: str,
     host: str,
@@ -517,13 +517,13 @@ def workspace_archive(
     click.secho(f"Archived workspace '{workspace}'.", fg="green")
 
 @cli.group()
-def pool():
+def pools():
     """
     Manage pools.
     """
     pass
 
-@pool.command("update")
+@pools.command("update")
 @click.option(
     "-p",
     "--project",
@@ -574,7 +574,7 @@ def pool():
     help="The Docker image. Only valid for --launcher=docker.",
 )
 @click.argument("name")
-def pool_update(
+def pools_update(
     project: str,
     workspace: str,
     host: str,
@@ -609,7 +609,7 @@ def pool_update(
     )
 
 
-@pool.command("delete")
+@pools.command("delete")
 @click.option(
     "-p",
     "--project",
@@ -638,7 +638,7 @@ def pool_update(
     required=True,
 )
 @click.argument("name")
-def pool_delete(
+def pools_delete(
     project: str,
     workspace: str,
     host: str,
