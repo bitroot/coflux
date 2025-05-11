@@ -517,13 +517,13 @@ def workspace_archive(
     click.secho(f"Archived workspace '{workspace}'.", fg="green")
 
 @cli.group()
-def pools():
+def pool():
     """
     Manage pools.
     """
     pass
 
-@pools.command("update")
+@pool.command("update")
 @click.option(
     "-p",
     "--project",
@@ -574,7 +574,7 @@ def pools():
     help="The Docker image. Only valid for --launcher=docker.",
 )
 @click.argument("name")
-def pools_update(
+def pool_update(
     project: str,
     workspace: str,
     host: str,
@@ -609,7 +609,7 @@ def pools_update(
     )
 
 
-@pools.command("delete")
+@pool.command("delete")
 @click.option(
     "-p",
     "--project",
@@ -638,7 +638,7 @@ def pools_update(
     required=True,
 )
 @click.argument("name")
-def pools_delete(
+def pool_delete(
     project: str,
     workspace: str,
     host: str,
