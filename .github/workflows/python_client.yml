@@ -68,7 +68,7 @@ jobs:
           r = httpx.get(f"https://pypi.org/pypi/coflux/{version}/json")
           assert r.status_code in (200, 404), f"unexpected status code: {r.status_code}"
           published = "false" if r.status_code == 404 else "true"
-          
+
           with Path(os.environ["GITHUB_OUTPUT"]).open('a') as f:
               f.write(f"version={version}\n")
               f.write(f"published={published}\n")

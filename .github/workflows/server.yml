@@ -2,7 +2,7 @@ name: Server
 
 on:
   push:
-    paths: [server/**]
+    paths: [server/**, frontend/**]
 
 env:
   REGISTRY: ghcr.io
@@ -51,7 +51,6 @@ jobs:
       - name: Build/push image
         uses: docker/build-push-action@v5
         with:
-          context: server
           push: ${{ github.ref == 'refs/heads/main' && steps.pushed.outputs.pushed == 'false' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
