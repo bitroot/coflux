@@ -1,4 +1,4 @@
-import { isNil, mapValues, omitBy } from "lodash";
+import { isNil, mapValues, omitBy, toString } from "lodash";
 
 export function buildUrl(
   path: string,
@@ -6,8 +6,8 @@ export function buildUrl(
 ) {
   const queryString = new URLSearchParams(
     mapValues(omitBy(params, isNil), toString),
-  ).toString();
-  return `${path}${queryString ? "?" + queryString : ""}`;
+  );
+  return `${path}${queryString.size ? `?${queryString}` : ""}`;
 }
 
 export function pluralise(count: number, singular: string, plural?: string) {
