@@ -6,7 +6,7 @@ on:
       - server/**
       - frontend/**
       - Dockerfile
-      - .github/actions/server.yml
+      - .github/workflows/server.yml
 
 env:
   REGISTRY: ghcr.io
