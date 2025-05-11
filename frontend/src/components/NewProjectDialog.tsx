@@ -18,9 +18,7 @@ function translateProjectNameError(error: string | undefined) {
   }
 }
 
-type Props = {};
-
-export default function NewProjectDialog({}: Props) {
+export default function NewProjectDialog() {
   const [projectName, setProjectName] = useState("My Project");
   const [errors, setErrors] = useState<Record<string, string>>();
   const [creating, setCreating] = useState(false);

@@ -86,7 +86,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
-  const [error, setError] = useState<any>();
+  const [error, setError] = useState<unknown>();
   const [matches, setMatches] = useState<Match[]>();
   const handleQueryChange = useCallback(
     (ev: ChangeEvent<HTMLInputElement>) => setQuery(ev.target.value),
@@ -128,7 +128,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
   useEffect(() => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [handleKeyDown]);
   useEffect(() => {
     clearTimeout(debounceTimeoutRef.current);
     if (query) {

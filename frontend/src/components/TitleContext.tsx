@@ -9,7 +9,7 @@ import {
 } from "react";
 
 const Context = createContext<Dispatch<SetStateAction<string[]>> | undefined>(
-  undefined
+  undefined,
 );
 
 export function useTitlePart(part: string | undefined) {
@@ -25,7 +25,7 @@ export function useTitlePart(part: string | undefined) {
         setParts((parts) => parts.slice(0, -1));
       };
     }
-  }, [part]);
+  }, [part, setParts]);
 }
 
 function buildTitle(appName: string, parts: string[]) {

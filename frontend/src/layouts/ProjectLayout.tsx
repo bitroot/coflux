@@ -144,8 +144,12 @@ export default function ProjectLayout() {
 
 export function useSetActive(active: Active) {
   const { setActive } = useOutletContext<OutletContext>();
-  useEffect(() => {
-    setActive(active);
-    return () => setActive(undefined);
-  }, [setActive, JSON.stringify(active)]);
+  useEffect(
+    () => {
+      setActive(active);
+      return () => setActive(undefined);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [setActive, JSON.stringify(active)],
+  );
 }

@@ -29,7 +29,7 @@ import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
 import { truncatePath } from "../utils";
 import AssetLink from "./AssetLink";
-import { isEqual, maxBy } from "lodash";
+import { isEqual } from "lodash";
 
 function classNameForExecution(execution: models.Execution) {
   const result =
@@ -552,8 +552,9 @@ export default function RunGraph({
                 (from.type == "parent" &&
                   from.parent &&
                   isHovered({ runId: from.parent.runId })) ||
-                (from.type == "child" && isHovered({ runId: from.runId })) ||
-                (to.type == "child" && isHovered({ runId: to.runId })) ||
+                (from.type == "child" &&
+                  isHovered({ runId: from.child.runId })) ||
+                (to.type == "child" && isHovered({ runId: to.child.runId })) ||
                 (from.type == "step" && isHovered({ stepId: from.stepId })) ||
                 (to.type == "step" && isHovered({ stepId: to.stepId })) ||
                 (to.type == "asset" && isHovered({ assetId: to.assetId })) ||

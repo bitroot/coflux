@@ -25,7 +25,7 @@ async function handleResponse(res: Response) {
   }
 }
 
-async function post(name: string, data: Record<string, any>) {
+async function post(name: string, data: Record<string, unknown>) {
   const res = await fetch(`/api/${name}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -34,7 +34,7 @@ async function post(name: string, data: Record<string, any>) {
   return await handleResponse(res);
 }
 
-async function get(name: string, params?: Record<string, any>) {
+async function get(name: string, params?: Record<string, string>) {
   const queryString =
     params &&
     toPairs(params)
@@ -162,7 +162,7 @@ export function rerunStep(
   projectId: string,
   stepId: string,
   workspaceName: string,
-) {
+): Promise<{ attempt: number }> {
   return post("rerun_step", { projectId, stepId, workspaceName });
 }
 

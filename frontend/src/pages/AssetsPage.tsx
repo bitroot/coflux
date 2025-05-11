@@ -43,43 +43,41 @@ export default function AssetsPage() {
       {assets.length ? (
         <table className="w-full">
           <tbody className="divide-y divide-slate-100">
-            {assets.map(
-              ([stepId, step, attempt, _execution, assetId, asset]) => (
-                <tr key={assetId}>
-                  <td className="p-1">
-                    <StepLink
-                      runId={runId!}
-                      stepId={stepId}
-                      attempt={attempt}
-                      className="block max-w-full rounded truncate leading-none text-sm ring-offset-1 w-40"
-                      activeClassName="ring-2 ring-cyan-400"
-                      hoveredClassName="ring-2 ring-slate-300"
-                    >
-                      <span className="font-mono">{step.target}</span>{" "}
-                      <span className="text-slate-500 text-sm">
-                        ({step.module})
-                      </span>
-                    </StepLink>
-                  </td>
-                  <td className="p-1">
-                    <AssetLink
-                      asset={asset}
-                      projectId={projectId!}
-                      assetId={assetId}
-                      className="flex items-start gap-1 whitespace-nowrap"
-                    >
-                      <AssetIcon asset={asset} size={18} className="mt-1" />
-                      {asset.path + (asset.type == 1 ? "/" : "")}
-                    </AssetLink>
-                  </td>
-                  <td className="p-1">
-                    <span className="text-slate-500 text-sm whitespace-nowrap">
-                      {getAssetMetadata(asset).join(", ")}
+            {assets.map(([stepId, step, attempt, , assetId, asset]) => (
+              <tr key={assetId}>
+                <td className="p-1">
+                  <StepLink
+                    runId={runId!}
+                    stepId={stepId}
+                    attempt={attempt}
+                    className="block max-w-full rounded truncate leading-none text-sm ring-offset-1 w-40"
+                    activeClassName="ring-2 ring-cyan-400"
+                    hoveredClassName="ring-2 ring-slate-300"
+                  >
+                    <span className="font-mono">{step.target}</span>{" "}
+                    <span className="text-slate-500 text-sm">
+                      ({step.module})
                     </span>
-                  </td>
-                </tr>
-              ),
-            )}
+                  </StepLink>
+                </td>
+                <td className="p-1">
+                  <AssetLink
+                    asset={asset}
+                    projectId={projectId!}
+                    assetId={assetId}
+                    className="flex items-start gap-1 whitespace-nowrap"
+                  >
+                    <AssetIcon asset={asset} size={18} className="mt-1" />
+                    {asset.path + (asset.type == 1 ? "/" : "")}
+                  </AssetLink>
+                </td>
+                <td className="p-1">
+                  <span className="text-slate-500 text-sm whitespace-nowrap">
+                    {getAssetMetadata(asset).join(", ")}
+                  </span>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       ) : (

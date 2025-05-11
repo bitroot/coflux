@@ -10,7 +10,7 @@ import * as models from "../models";
 function iconForAsset(asset: models.Asset) {
   switch (asset.type) {
     case 0:
-      const type = asset.metadata["type"];
+      const type = asset.metadata["type"] as undefined | string;
       switch (type?.split("/")[0]) {
         case "text":
           return IconFileText;

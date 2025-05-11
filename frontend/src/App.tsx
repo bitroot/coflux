@@ -29,14 +29,19 @@ function NotFound() {
   return <p>Not found</p>;
 }
 
-type Provider<P = {}> = [ComponentType<P>, P];
+type Provider<P extends object = object> = [ComponentType<P>, P];
 
-type ProvidersProps = {
-  providers: Provider<any>[];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ProvidersProps<Ps extends Provider<any>[]> = {
+  providers: [...Ps];
   children: ReactNode;
 };
 
-function Providers({ providers, children }: ProvidersProps) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function Providers<Ps extends Provider<any>[]>({
+  providers,
+  children,
+}: ProvidersProps<Ps>) {
   return providers.reduceRight(
     (acc, [Provider, props]) => <Provider {...props}>{acc}</Provider>,
     children,

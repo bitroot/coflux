@@ -184,7 +184,7 @@ export default function TargetsList({
   const now = useNow(500);
   return (
     <div className="px-3 py-1">
-      {sortBy(Object.entries(modules), ([name, _]) => name).map(
+      {sortBy(Object.entries(modules), ([name]) => name).map(
         ([moduleName, module]) => (
           <div key={moduleName} className="py-2">
             <div className="flex gap-1 sticky top-0 bg-slate-100 py-1">

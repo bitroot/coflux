@@ -85,6 +85,7 @@ function PreviewDialog({
             href={assetUrl(projectId, assetId, path)}
             className="flex flex-col items-center hover:bg-slate-100 rounded-md px-3 py-1"
             target="_blank"
+            rel="noreferrer"
           >
             <IconDownload size={30} />
             {size !== undefined && humanSize(size)}
@@ -193,7 +194,7 @@ function DirectoryBrowser({
   const [entries, setEntries] = useState<Entry[]>();
   const [directory, setDirectory] = useState("");
   const [entry, setEntry] = useState<Entry>();
-  const [error, setError] = useState<any>();
+  const [error, setError] = useState<unknown>();
   const previousEntry = usePrevious(entry);
   useEffect(() => {
     if (open) {
@@ -211,7 +212,7 @@ function DirectoryBrowser({
         .then(setEntries)
         .catch(setError);
     }
-  }, [projectId, assetId, open || !!entries]);
+  }, [projectId, assetId, open]);
   const handleSelect = useCallback(
     (path: string) => {
       if (path == "" || path.endsWith("/")) {
@@ -231,7 +232,7 @@ function DirectoryBrowser({
           <div>
             {asset.path}/{" "}
             <span className="text-slate-500 font-normal text-lg">
-              ({pluralise(asset.metadata["count"], "file")})
+              ({pluralise(asset.metadata["count"] as number, "file")})
             </span>
           </div>
         }
@@ -299,7 +300,7 @@ export default function AssetLink({
     () => setHovered({ assetId }),
     [setHovered, assetId],
   );
-  const handleMouseOut = useCallback(() => setHovered(undefined), []);
+  const handleMouseOut = useCallback(() => setHovered(undefined), [setHovered]);
   const blobStoresSetting = useSetting(projectId, "blobStores");
   const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
   return (
@@ -309,8 +310,8 @@ export default function AssetLink({
           open={open}
           projectId={projectId}
           assetId={assetId}
-          type={asset.metadata["type"]}
-          size={asset.metadata["size"]}
+          type={asset.metadata["type"] as string}
+          size={asset.metadata["size"] as number}
           onClose={handleClose}
         />
       ) : asset.type == 1 ? (
@@ -330,6 +331,7 @@ export default function AssetLink({
           isHovered({ assetId }) && hoveredClassName,
         )}
         target="_blank"
+        rel="noreferrer"
         onClick={handleLinkClick}
         onMouseOver={handleMouseOver}
         onMouseOut={handleMouseOut}

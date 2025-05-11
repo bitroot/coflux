@@ -29,7 +29,7 @@ function AgentRow({ projectId, workspaceName, agentId, agent }: AgentRowProps) {
     api.resumeAgent(projectId, workspaceName, agentId).catch(() => {
       alert("Failed to resume agent. Please try again.");
     });
-  }, []);
+  }, [projectId, workspaceName, agentId]);
   const startingAt = DateTime.fromMillis(agent.startingAt);
   return (
     <tr className="border-b border-slate-100">
@@ -114,7 +114,7 @@ function AgentsTable({
           <tbody className="[&_td]:py-1">
             {sortBy(
               Object.entries(agents),
-              ([_, agent]) => -agent.startingAt,
+              ([, agent]) => -agent.startingAt,
             ).map(([agentId, agent]) => (
               <AgentRow
                 key={agentId}

@@ -231,7 +231,7 @@ type LoadBlobLinkProps = {
 
 function LoadBlobLink({ value, projectId }: LoadBlobLinkProps) {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<any>();
+  const [error, setError] = useState<unknown>();
   const blobStoresSetting = useSetting(projectId, "blobStores");
   const handleLoadClick = useCallback(() => {
     setError(undefined);
@@ -247,7 +247,7 @@ function LoadBlobLink({ value, projectId }: LoadBlobLinkProps) {
       })
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [value.key]);
+  }, [value.key, blobStoresSetting]);
   return loading ? (
     <span className="italic text-slate-500 text-sm">Loading...</span>
   ) : error ? (
@@ -286,7 +286,7 @@ export default function Value({
   className,
   block,
 }: ValueProps) {
-  const [_, setCount] = useState(0);
+  const [, setCount] = useState(0);
   const handleUnloadClick = useCallback(() => {
     if (value.type == "blob") {
       sessionStorage.removeItem(`blobs.${value.key}`);
@@ -298,7 +298,7 @@ export default function Value({
   useEffect(() => {
     window.addEventListener("storage", handleStorageEvent);
     return () => window.removeEventListener("storage", handleStorageEvent);
-  }, []);
+  }, [handleStorageEvent]);
   return (
     <span
       className={classNames(

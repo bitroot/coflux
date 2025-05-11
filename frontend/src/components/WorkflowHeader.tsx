@@ -2,7 +2,6 @@ import { useCallback, useState } from "react";
 import { IconBolt, IconSubtask } from "@tabler/icons-react";
 import { useNavigate } from "react-router-dom";
 
-import * as models from "../models";
 import * as api from "../api";
 import RunSelector from "./RunSelector";
 import Button from "./common/Button";

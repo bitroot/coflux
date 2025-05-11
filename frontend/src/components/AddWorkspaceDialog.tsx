@@ -67,10 +67,10 @@ export default function AddWorkspaceDialog({
           setAdding(false);
         });
     },
-    [navigate, name, baseId],
+    [navigate, name, baseId, activeProjectId, onClose],
   );
   const workspaceNames = Object.entries(workspaces)
-    .filter(([_, e]) => e.status != "archived")
+    .filter(([, e]) => e.state != "archived")
     .reduce((acc, [id, e]) => ({ ...acc, [id]: e.name }), {});
   return (
     <Dialog

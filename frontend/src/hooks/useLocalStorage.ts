@@ -7,6 +7,7 @@ export default function useLocalStorage<T>(
   const [count, setCount] = useState(0);
 
   const value = useMemo<T>(() => {
+    void count;
     const json = localStorage.getItem(key);
     return json !== null ? JSON.parse(json) : undefined;
   }, [key, count]);

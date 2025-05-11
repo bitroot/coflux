@@ -214,19 +214,17 @@ export default function buildGraph(
         };
       }
 
-      Object.entries(execution.dependencies).forEach(
-        ([dependencyId, dependency]) => {
-          if (dependency.execution.runId == runId) {
-            edges[`${dependency.execution.stepId}-${stepId}`] = {
-              from: dependency.execution.stepId,
-              to: stepId,
-              type: "dependency",
-            };
-          } else {
-            // TODO: ?
-          }
-        },
-      );
+      Object.entries(execution.dependencies).forEach(([, dependency]) => {
+        if (dependency.execution.runId == runId) {
+          edges[`${dependency.execution.stepId}-${stepId}`] = {
+            from: dependency.execution.stepId,
+            to: stepId,
+            type: "dependency",
+          };
+        } else {
+          // TODO: ?
+        }
+      });
       execution.children.forEach((child) => {
         const childAttempt = getStepAttempt(run, stepAttempts, child.stepId);
         const childExecution =

@@ -274,7 +274,7 @@ function getWorkspaceDescendantIds(
   parentId: string | null,
 ): string[] {
   return Object.entries(workspaces)
-    .filter(([_, e]) => e.baseId == parentId && e.state != "archived")
+    .filter(([, e]) => e.baseId == parentId && e.state != "archived")
     .flatMap(([workspaceId]) => [
       workspaceId,
       ...getWorkspaceDescendantIds(workspaces, workspaceId),
@@ -306,7 +306,7 @@ type RerunButtonProps = {
   step: models.Step;
   executionWorkspaceId: string;
   workspaces: Record<string, models.Workspace> | undefined;
-  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
+  onRerunStep: (stepId: string, workspaceName: string) => Promise<unknown>;
 };
 
 function RerunButton({
@@ -340,7 +340,7 @@ function RerunButton({
         close();
       });
     },
-    [workspaces, workspaceId, onRerunStep, stepId],
+    [workspaces, workspaceId, baseWorkspaceId, onRerunStep, stepId],
   );
   return (
     <div className="flex shadow-sm relative">
@@ -397,7 +397,10 @@ type HeaderProps = {
   workspaces: Record<string, models.Workspace> | undefined;
   activeTab: number;
   maximised: boolean;
-  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
+  onRerunStep: (
+    stepId: string,
+    workspaceName: string,
+  ) => Promise<{ attempt: number }>;
 };
 
 function Header({
@@ -437,7 +440,7 @@ function Header({
         changeAttempt(attempt, workspaceName);
       });
     },
-    [changeAttempt],
+    [changeAttempt, onRerunStep],
   );
   const executionWorkspaceId = step.executions[attempt]?.workspaceId;
   const handleMaximiseClick = useCallback(() => {
@@ -1217,7 +1220,10 @@ type Props = {
   activeWorkspaceId: string;
   className?: string;
   style?: CSSProperties;
-  onRerunStep: (stepId: string, workspaceName: string) => Promise<any>;
+  onRerunStep: (
+    stepId: string,
+    workspaceName: string,
+  ) => Promise<{ attempt: number }>;
   activeTab: number;
   maximised: boolean;
 };
@@ -1254,7 +1260,7 @@ export default function StepDetail({
         }),
       );
     },
-    [navigate, location, activeWorkspaceName, stepId, attempt],
+    [navigate, location, activeWorkspaceName, stepId, attempt, maximised],
   );
   return (
     <div className={classNames("flex flex-col", className)} style={style}>

@@ -7,7 +7,7 @@ type Props = {
 
 export default function Logo({ width = 75, height = 30 }: Props) {
   return (
-    <Link to="/" className="block flex items-center">
+    <Link to="/" className="flex items-center">
       <svg
         width={width}
         height={height}

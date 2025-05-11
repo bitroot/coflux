@@ -25,7 +25,7 @@ function traverseWorkspaces(
   depth: number = 0,
 ): [string, models.Workspace, number][] {
   return Object.entries(workspaces)
-    .filter(([_, e]) => e.baseId == parentId && e.state != "archived")
+    .filter(([, e]) => e.baseId == parentId && e.state != "archived")
     .flatMap(([workspaceId, workspace]) => [
       [workspaceId, workspace, depth],
       ...traverseWorkspaces(workspaces, workspaceId, depth + 1),

@@ -1,10 +1,12 @@
-import { isNil, omitBy } from "lodash";
+import { isNil, mapValues, omitBy } from "lodash";
 
 export function buildUrl(
   path: string,
   params?: Record<string, string | number | null | undefined>,
 ) {
-  const queryString = new URLSearchParams(omitBy(params, isNil)).toString();
+  const queryString = new URLSearchParams(
+    mapValues(omitBy(params, isNil), toString),
+  ).toString();
   return `${path}${queryString ? "?" + queryString : ""}`;
 }
 
@@ -18,7 +20,7 @@ export function choose(values: string[]): string {
 }
 
 export function humanSize(size: number) {
-  var i = size == 0 ? 0 : Math.floor(Math.log(size) / Math.log(1024));
+  const i = size == 0 ? 0 : Math.floor(Math.log(size) / Math.log(1024));
   return [
     Number((size / Math.pow(1024, i)).toFixed(2)),
     ["bytes", "kB", "MB", "GB", "TB"][i],

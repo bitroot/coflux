@@ -35,7 +35,7 @@ function PlayPauseButton({
     } else if (state == "paused") {
       api.resumeWorkspace(projectId, workspaceId);
     }
-  }, [workspaceId, state]);
+  }, [projectId, workspaceId, state]);
   return state == "active" ? (
     <button
       className="text-slate-100 bg-cyan-800/30 rounded p-1 hover:bg-cyan-800/60"

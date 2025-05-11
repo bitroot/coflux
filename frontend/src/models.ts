@@ -73,7 +73,7 @@ export type Asset = {
   path: string;
   blobKey: string;
   size: number;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 };
 
 export type Reference =
@@ -82,7 +82,7 @@ export type Reference =
       format: string;
       blobKey: string;
       size: number;
-      metadata: Record<string, any>;
+      metadata: Record<string, unknown>;
     }
   | {
       type: "execution";
@@ -212,10 +212,10 @@ export type LogMessage = [
 export type Agent = {
   startingAt: number;
   startedAt?: number;
-  startError?: any;
+  startError?: unknown;
   stoppingAt?: number;
   stoppedAt?: number;
-  stopError?: any;
+  stopError?: unknown;
   deactivatedAt?: number;
   state: "active" | "paused" | "draining";
   connected: boolean | null;

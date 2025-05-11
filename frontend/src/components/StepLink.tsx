@@ -43,7 +43,7 @@ export default function StepLink({
     () => setHovered({ stepId, attempt }),
     [setHovered, stepId, attempt],
   );
-  const handleMouseOut = useCallback(() => setHovered(undefined), []);
+  const handleMouseOut = useCallback(() => setHovered(undefined), [setHovered]);
   // TODO: better way to determine current page (and run)
   const parts = location.pathname.split("/");
   const page = parts[4] == runId && parts.length == 6 ? parts[5] : undefined;
