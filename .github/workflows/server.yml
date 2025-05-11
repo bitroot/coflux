@@ -2,13 +2,42 @@ name: Server
 
 on:
   push:
-    paths: [server/**]
+    paths:
+      - server/**
+      - frontend/**
+      - Dockerfile
+      - .github/workflows/server.yml
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: frontend/
+
+      - name: Run prettier
+        run: npm run prettier
+        working-directory: frontend/
+
+      - name: Run eslint
+        run: npm run eslint
+        working-directory: frontend/
+
   build_push:
     runs-on: ubuntu-latest
     concurrency:
@@ -16,6 +45,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+    needs: check
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,6 +56,9 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Get version
         id: version
@@ -51,10 +84,11 @@ jobs:
       - name: Build/push image
         uses: docker/build-push-action@v5
         with:
-          context: server
           push: ${{ github.ref == 'refs/heads/main' && steps.pushed.outputs.pushed == 'false' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Release
         if: github.ref == 'refs/heads/main' && steps.pushed.outputs.pushed == 'false'
