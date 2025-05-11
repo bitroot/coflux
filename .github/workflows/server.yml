@@ -28,11 +28,11 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Prettier
+      - name: Run prettier
         run: npm run prettier
         working-directory: frontend/
 
-      - name: ESLint
+      - name: Run eslint
         run: npm run eslint
         working-directory: frontend/
 
