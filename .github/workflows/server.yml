@@ -2,7 +2,11 @@ name: Server
 
 on:
   push:
-    paths: [server/**, frontend/**]
+    paths:
+      - server/**
+      - frontend/**
+      - Dockerfile
+      - .github/actions/server.yml
 
 env:
   REGISTRY: ghcr.io
@@ -19,7 +23,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "npm"
+          cache: npm
 
       - name: Install
         run: npm ci
