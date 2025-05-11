@@ -24,8 +24,14 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v3
 
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
       - name: Install
-        run: npm install
+        run: npm ci
 
       - name: Build
         run: npm run build
