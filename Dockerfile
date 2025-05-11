@@ -1,4 +1,4 @@
-FROM node:18.19 AS npm_build
+FROM node:20 AS npm_build
 WORKDIR /app
 
 COPY frontend/package.json frontend/package-lock.json ./
