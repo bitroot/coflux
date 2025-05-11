@@ -84,6 +84,8 @@ jobs:
           push: ${{ github.ref == 'refs/heads/main' && steps.pushed.outputs.pushed == 'false' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Release
         if: github.ref == 'refs/heads/main' && steps.pushed.outputs.pushed == 'false'
