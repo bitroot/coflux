@@ -3,7 +3,7 @@ const postCssPlugin = require("esbuild-style-plugin");
 require("esbuild")
   .context({
     entryPoints: ["src/main.ts"],
-    outfile: "priv/static/app.js",
+    outfile: "../server/priv/static/app.js",
     bundle: true,
     minify: process.argv.includes("--minify"),
     plugins: [

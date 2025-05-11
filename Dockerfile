@@ -1,26 +1,28 @@
-FROM node:18.19 as npm_build
+FROM node:18.19 AS npm_build
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 
-COPY esbuild.js tailwind.config.js tsconfig.json ./
-COPY src src/
-RUN npm run build -- --minify
+# COPY frontend/esbuild.js frontend/tailwind.config.js frontend/tsconfig.json ./
+# COPY frontend/src src/
+COPY frontend/ ./
+RUN npm run build
 
 
-FROM elixir:1.15.7 as mix_build
+FROM elixir:1.15.7 AS mix_build
 WORKDIR /app
 
 RUN mix local.hex --force && \
-  mix local.rebar --force
+    mix local.rebar --force
 
-COPY mix.exs mix.lock VERSION ./
+COPY server/mix.exs server/mix.lock server/VERSION ./
 RUN mix deps.get --only prod
 
-COPY lib lib/
-COPY priv priv/
-COPY --from=npm_build /app/priv/static priv/static/
+# COPY server/lib lib/
+# COPY server/priv priv/
+COPY server/ ./
+COPY --from=npm_build /app/out/ priv/static/
 
 RUN MIX_ENV=prod mix release
 
@@ -33,7 +35,7 @@ ENV COFLUX_DATA_DIR=${data_dir}
 RUN mkdir ${data_dir}
 
 RUN apt-get update -y && apt-get install -y libstdc++6 openssl libncurses5 locales \
-  && apt-get clean && rm -f /var/lib/apt/lists/*_*
+    && apt-get clean && rm -f /var/lib/apt/lists/*_*
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
