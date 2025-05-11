@@ -7,7 +7,9 @@
     "build": "npm run build:js && npm run build:css",
     "dev:js": "esbuild src/main.ts --bundle --outfile=../server/priv/static/app.js --watch",
     "dev:css": "tailwindcss --output=../server/priv/static/app.css --watch",
-    "dev": "concurrently \"npm run dev:js\" \"npm run dev:css\""
+    "dev": "concurrently \"npm run dev:js\" \"npm run dev:css\"",
+    "prettier": "prettier --check src/",
+    "eslint": "eslint src/"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.688.0",

@@ -9,6 +9,20 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: action/checkout@v4
+
+      - name: Prettier
+        run: npm run prettier
+        working-directory: frontend/
+
+      - name: ESLint
+        run: npm run eslint
+        working-directory: frontend/
+
   build_push:
     runs-on: ubuntu-latest
     concurrency:
@@ -16,6 +30,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+    needs: check
     steps:
       - name: Checkout
         uses: actions/checkout@v4
