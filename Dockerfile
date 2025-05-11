@@ -4,8 +4,6 @@ WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
-# COPY frontend/esbuild.js frontend/tailwind.config.js frontend/tsconfig.json ./
-# COPY frontend/src src/
 COPY frontend/ ./
 RUN npm run build
 
@@ -19,8 +17,6 @@ RUN mix local.hex --force && \
 COPY server/mix.exs server/mix.lock server/VERSION ./
 RUN mix deps.get --only prod
 
-# COPY server/lib lib/
-# COPY server/priv priv/
 COPY server/ ./
 COPY --from=npm_build /app/out/ priv/static/
 
