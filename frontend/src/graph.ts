@@ -54,28 +54,46 @@ export type Graph = {
   edges: Record<string, Edge>;
 };
 
-function chooseStepAttempts(
+function findParentStep(
+  run: models.Run,
+  stepId: string,
+): [string, number] | undefined {
+  const parentStepId = Object.keys(run.steps).find((sId) =>
+    Object.values(run.steps[sId].executions).some((e) =>
+      e.children.some((c) => c.stepId == stepId),
+    ),
+  );
+  const attemptStr =
+    parentStepId &&
+    Object.keys(run.steps[parentStepId].executions).find((attempt) =>
+      run.steps[parentStepId].executions[attempt].children.some(
+        (c) => c.stepId == stepId,
+      ),
+    );
+  if (parentStepId && attemptStr) {
+    return [parentStepId, parseInt(attemptStr, 10)];
+  } else {
+    return undefined;
+  }
+}
+
+function resolvePath(
   run: models.Run,
   activeStepId: string | undefined,
   activeAttempt: number | undefined,
-) {
-  const stepAttempts: Record<string, number | undefined> = {};
+): Record<string, number> {
+  const stepAttempts: Record<string, number> = {};
   if (activeStepId) {
-    stepAttempts[activeStepId] = activeAttempt;
+    if (activeAttempt) {
+      stepAttempts[activeStepId] = activeAttempt;
+    }
     const process = (stepId: string) => {
-      Object.keys(run.steps).forEach((sId) => {
-        if (!(sId in stepAttempts)) {
-          Object.entries(run.steps[sId].executions).forEach(
-            ([attempt, execution]) => {
-              if (execution.children.some((c) => c.stepId == stepId)) {
-                // TODO: keep as string?
-                stepAttempts[sId] = parseInt(attempt, 10);
-                process(sId);
-              }
-            },
-          );
-        }
-      });
+      const parent = findParentStep(run, stepId);
+      if (parent) {
+        const [parentStepId, parentAttempt] = parent;
+        stepAttempts[parentStepId] = parentAttempt;
+        process(parentStepId);
+      }
     };
     process(activeStepId);
   }
@@ -140,7 +158,7 @@ export default function buildGraph(
   activeStepId: string | undefined,
   activeAttempt: number | undefined,
 ): Promise<Graph> {
-  const stepAttempts = chooseStepAttempts(run, activeStepId, activeAttempt);
+  const stepAttempts = resolvePath(run, activeStepId, activeAttempt);
 
   const initialStepId = minBy(
     Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
