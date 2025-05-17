@@ -1,7 +1,4 @@
-CREATE TABLE tag_sets (
-  id INTEGER PRIMARY KEY,
-  hash BLOB NOT NULL UNIQUE
-) STRICT;
+CREATE TABLE tag_sets (id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE) STRICT;
 
 CREATE TABLE tag_set_items (
   tag_set_id INTEGER NOT NULL,
@@ -10,10 +7,7 @@ CREATE TABLE tag_set_items (
   FOREIGN KEY (tag_set_id) REFERENCES tag_sets ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE parameter_sets (
-  id INTEGER PRIMARY KEY,
-  hash BLOB NOT NULL UNIQUE
-) STRICT;
+CREATE TABLE parameter_sets (id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE) STRICT;
 
 CREATE TABLE parameter_set_items (
   parameter_set_id INTEGER NOT NULL,
@@ -21,14 +15,11 @@ CREATE TABLE parameter_set_items (
   name TEXT NOT NULL,
   default_ TEXT,
   annotation TEXT,
-  PRIMARY KEY (parameter_set_id, position)
+  PRIMARY KEY (parameter_set_id, position),
   FOREIGN KEY (parameter_set_id) REFERENCES parameter_sets ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE manifests (
-  id INTEGER PRIMARY KEY,
-  hash BLOB NOT NULL UNIQUE
-) STRICT;
+CREATE TABLE manifests (id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE) STRICT;
 
 CREATE TABLE instructions (
   id INTEGER PRIMARY KEY,
@@ -79,9 +70,7 @@ CREATE TABLE sensors (
   FOREIGN KEY (parameter_set_id) REFERENCES parameter_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE workspaces (
-  id INTEGER PRIMARY KEY
-) STRICT;
+CREATE TABLE workspaces (id INTEGER PRIMARY KEY) STRICT;
 
 CREATE TABLE workspace_manifests (
   workspace_id INTEGER NOT NULL,
@@ -159,7 +148,10 @@ CREATE TABLE agent_launch_results (
   error TEXT,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (agent_id) REFERENCES agents,
-  CHECK (data IS NULL OR error IS NULL)
+  CHECK (
+    data IS NULL
+    OR error IS NULL
+  )
 ) STRICT;
 
 CREATE TABLE agent_states (
@@ -238,7 +230,10 @@ CREATE TABLE steps (
   FOREIGN KEY (requires_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE UNIQUE INDEX steps_initial_step ON steps (run_id) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX steps_initial_step ON steps (run_id)
+WHERE
+  parent_id IS NULL;
+
 CREATE INDEX steps_cache_key ON steps (cache_key);
 
 CREATE TABLE step_arguments (
@@ -279,7 +274,7 @@ CREATE TABLE asset_metadata (
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE execution_assets(
+CREATE TABLE execution_assets (
   execution_id INTEGER NOT NULL,
   asset_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
@@ -324,7 +319,7 @@ CREATE TABLE asset_dependencies (
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE checkpoints(
+CREATE TABLE checkpoints (
   id INTEGER PRIMARY KEY,
   execution_id INTEGER NOT NULL,
   sequence INTEGER NOT NULL,
@@ -333,7 +328,7 @@ CREATE TABLE checkpoints(
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE checkpoint_arguments(
+CREATE TABLE checkpoint_arguments (
   checkpoint_id INTEGER NOT NULL,
   position INTEGER NOT NULL,
   value_id INTEGER NOT NULL,
@@ -356,10 +351,7 @@ CREATE TABLE blobs (
   size INTEGER NOT NULL
 ) STRICT;
 
-CREATE TABLE fragment_formats (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE
-) STRICT;
+CREATE TABLE fragment_formats (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT;
 
 CREATE TABLE fragments (
   id INTEGER PRIMARY KEY,
@@ -398,7 +390,9 @@ CREATE TABLE value_references (
   FOREIGN KEY (fragment_id) REFERENCES fragments ON DELETE RESTRICT,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE RESTRICT,
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE RESTRICT,
-  CHECK ((fragment_id IS NOT NULL) + (execution_id IS NOT NULL) + (asset_id IS NOT NULL) = 1)
+  CHECK (
+    (fragment_id IS NOT NULL) + (execution_id IS NOT NULL) + (asset_id IS NOT NULL) = 1
+  )
 ) STRICT;
 
 CREATE TABLE errors (
@@ -408,7 +402,7 @@ CREATE TABLE errors (
   message TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE error_frames(
+CREATE TABLE error_frames (
   error_id INTEGER NOT NULL,
   depth INTEGER NOT NULL,
   file TEXT NOT NULL,
@@ -432,14 +426,42 @@ CREATE TABLE results (
   FOREIGN KEY (successor_id) REFERENCES executions ON DELETE RESTRICT,
   CHECK (
     CASE type
-      WHEN 0 THEN error_id AND NOT value_id
-      WHEN 1 THEN value_id AND NOT (successor_id OR error_id)
-      WHEN 2 THEN NOT (error_id OR value_id)
-      WHEN 3 THEN NOT (error_id OR successor_id OR value_id)
-      WHEN 4 THEN successor_id AND NOT (error_id OR value_id)
-      WHEN 5 THEN successor_id AND NOT (error_id OR value_id)
-      WHEN 6 THEN successor_id AND NOT (error_id OR value_id)
-      WHEN 7 THEN successor_id AND NOT (error_id OR value_id)
+      WHEN 0 THEN error_id
+      AND NOT value_id
+      WHEN 1 THEN value_id
+      AND NOT (
+        successor_id
+        OR error_id
+      )
+      WHEN 2 THEN NOT (
+        error_id
+        OR value_id
+      )
+      WHEN 3 THEN NOT (
+        error_id
+        OR successor_id
+        OR value_id
+      )
+      WHEN 4 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+      )
+      WHEN 5 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+      )
+      WHEN 6 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+      )
+      WHEN 7 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+      )
       ELSE FALSE
     END
   )
@@ -461,12 +483,12 @@ CREATE TABLE messages (
   FOREIGN KEY (template_id) REFERENCES message_templates ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE message_labels(
+CREATE TABLE message_labels (
   id INTEGER PRIMARY KEY,
   label TEXT NOT NULL UNIQUE
 ) STRICT;
 
-CREATE TABLE message_values(
+CREATE TABLE message_values (
   message_id INTEGER NOT NULL,
   label_id INTEGER NOT NULL,
   value_id INTEGER NOT NULL,
