@@ -47,6 +47,10 @@ def submit(
     )
 
 
+def group(name: str | None = None):
+    return _get_channel().group(name)
+
+
 def suspense(timeout: float | None):
     return _get_channel().suspense(timeout)
 

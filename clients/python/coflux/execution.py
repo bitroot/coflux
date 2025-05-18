@@ -29,6 +29,7 @@ T = t.TypeVar("T")
 
 _channel_context: t.Optional["Channel"] = None
 _timeout: ContextVar[float | None] = ContextVar("timeout", default=None)
+_group_id: ContextVar[int | None] = ContextVar("group_id", default=None)
 
 
 class Timeout(Exception):
@@ -91,6 +92,7 @@ class SubmitExecutionRequest(t.NamedTuple):
     target: str
     type: models.TargetType
     arguments: list[models.Value]
+    group_id: int | None
     wait_for: set[int]
     cache: models.Cache | None
     defer: models.Defer | None
@@ -123,6 +125,12 @@ class SuspendRequest(t.NamedTuple):
 
 class CancelExecutionRequest(t.NamedTuple):
     execution_id: int
+
+
+class RegisterGroupRequest(t.NamedTuple):
+    execution_id: int
+    group_id: int
+    name: str | None
 
 
 class RecordCheckpointRequest(t.NamedTuple):
@@ -209,7 +217,7 @@ def counter():
 class Channel:
     def __init__(
         self,
-        execution_id: str,
+        execution_id: int,
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
@@ -221,6 +229,7 @@ class Channel:
         self._request_id = counter()
         self._requests: dict[int, Future[t.Any]] = {}
         self._cache: dict[t.Any, Future[t.Any]] = {}
+        self._groups: list[str | None] = []
         self._running = True
         self._exit_stack = contextlib.ExitStack()
         self._blob_manager = blobs.Manager(blob_store_configs, server_host)
@@ -309,6 +318,7 @@ class Channel:
                 target,
                 type,
                 serialised_arguments,
+                _group_id.get(),
                 wait_for or set(),
                 cache,
                 defer,
@@ -323,6 +333,21 @@ class Channel:
             lambda: self._cancel_execution(execution_id),
             execution_id,
         )
+
+    @contextmanager
+    def group(self, name: str | None):
+        group_id = self._create_group(name)
+        token = _group_id.set(group_id)
+        try:
+            yield
+        finally:
+            _group_id.reset(token)
+
+    def _create_group(self, name: str | None) -> int:
+        group_id = len(self._groups)
+        self._groups.append(name)
+        self._notify(RegisterGroupRequest(self._execution_id, group_id, name))
+        return group_id
 
     @contextmanager
     def suspense(self, timeout: float | None):
@@ -524,7 +549,7 @@ def _execute(
     module_name: str,
     target_name: str,
     arguments: list[models.Value],
-    execution_id: str,
+    execution_id: int,
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
     blob_store_configs: list[config.BlobStoreConfig],
@@ -624,7 +649,7 @@ def _parse_result(result: t.Any) -> models.Result:
 class Execution:
     def __init__(
         self,
-        execution_id: str,
+        execution_id: int,
         module: str,
         target: str,
         arguments: list[t.Any],
@@ -751,6 +776,8 @@ class Execution:
             case CancelExecutionRequest(execution_id):
                 # TODO: pass reference to self?
                 self._server_notify("cancel", (execution_id,))
+            case RegisterGroupRequest(execution_id, group_id, name):
+                self._server_notify("register_group", (execution_id, group_id, name))
             case RecordCheckpointRequest(arguments):
                 self._server_notify(
                     "record_checkpoint",
@@ -770,6 +797,7 @@ class Execution:
                 target,
                 type,
                 arguments,
+                group_id,
                 wait_for,
                 cache,
                 defer,
@@ -789,6 +817,7 @@ class Execution:
                         type,
                         _json_safe_arguments(arguments),
                         self._id,
+                        group_id,
                         list(wait_for),
                         cache and cache._asdict(),
                         defer and defer._asdict(),
@@ -855,7 +884,7 @@ class Manager:
         self._serialiser_configs = serialiser_configs
         self._blob_threshold = blob_threshold
         self._blob_store_configs = blob_store_configs
-        self._executions: dict[str, Execution] = {}
+        self._executions: dict[int, Execution] = {}
         self._last_heartbeat_sent = None
 
     async def _declare_targets(
@@ -892,7 +921,7 @@ class Manager:
 
     def execute(
         self,
-        execution_id: str,
+        execution_id: int,
         module: str,
         target: str,
         arguments: list[models.Value],
@@ -930,7 +959,7 @@ class Manager:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result()
 
-    def abort(self, execution_id: str, timeout: int = 5) -> bool:
+    def abort(self, execution_id: int, timeout: int = 5) -> bool:
         execution = self._executions.get(execution_id)
         if not execution:
             return False
