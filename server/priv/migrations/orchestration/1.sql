@@ -283,14 +283,24 @@ CREATE TABLE execution_assets (
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE groups (
+  execution_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  name TEXT,
+  PRIMARY KEY (execution_id, group_id),
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
+) STRICT;
+
 -- TODO: add 'type' (e.g., 'regular', memoised)
 CREATE TABLE children (
   parent_id INTEGER NOT NULL,
   child_id INTEGER NOT NULL,
+  group_id INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (parent_id, child_id),
   FOREIGN KEY (parent_id) REFERENCES executions ON DELETE CASCADE,
-  FOREIGN KEY (child_id) REFERENCES executions ON DELETE CASCADE
+  FOREIGN KEY (child_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (parent_id, group_id) REFERENCES groups ON DELETE SET NULL
 ) STRICT;
 
 CREATE TABLE assignments (

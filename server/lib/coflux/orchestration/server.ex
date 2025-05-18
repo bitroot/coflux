@@ -662,6 +662,7 @@ defmodule Coflux.Orchestration.Server do
          memo_hit: memo_hit,
          child_added: child_added
        }} ->
+        group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
         execute_after = Keyword.get(opts, :execute_after)
         requires = Keyword.get(opts, :requires) || %{}
@@ -701,7 +702,7 @@ defmodule Coflux.Orchestration.Server do
             notify_listeners(
               state,
               {:run, run.id},
-              {:child, parent_id, {external_step_id, attempt}}
+              {:child, parent_id, {external_step_id, attempt, group_id}}
             )
           else
             state
@@ -739,6 +740,23 @@ defmodule Coflux.Orchestration.Server do
           |> flush_notifications()
 
         {:reply, {:ok, run.external_id, external_step_id, execution_id}, state}
+    end
+  end
+
+  def handle_call({:register_group, parent_id, group_id, name}, _from, state) do
+    {:ok, run_id} = Runs.get_execution_run_id(state.db, parent_id)
+
+    case Runs.create_group(state.db, parent_id, group_id, name) do
+      :ok ->
+        state =
+          state
+          |> notify_listeners(
+            {:run, run_id},
+            {:group, parent_id, group_id, name}
+          )
+          |> flush_notifications()
+
+        {:reply, :ok, state}
     end
   end
 
@@ -1280,6 +1298,7 @@ defmodule Coflux.Orchestration.Server do
         {:ok, run_dependencies} = Runs.get_run_dependencies(state.db, run.id)
         {:ok, run_children} = Runs.get_run_children(state.db, run.id)
         {:ok, log_counts} = Observations.get_counts_for_run(state.db, run.id)
+        {:ok, groups} = Runs.get_groups_for_run(state.db, run.id)
 
         cache_configs =
           steps
@@ -1329,6 +1348,7 @@ defmodule Coflux.Orchestration.Server do
                target: step.target,
                type: step.type,
                parent_id: step.parent_id,
+               group_id: step.group_id,
                cache_config:
                  if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
                cache_key: step.cache_key,
@@ -1342,6 +1362,12 @@ defmodule Coflux.Orchestration.Server do
                  |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
                                 created_at, assigned_at} ->
                    {result, completed_at} = Map.fetch!(results, execution_id)
+
+                   execution_groups =
+                     groups
+                     |> Enum.filter(fn {execution_id, _, _} -> execution_id == execution_id end)
+                     |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
+
                    # TODO: load assets in one query
                    {:ok, asset_ids} = Results.get_assets_for_execution(state.db, execution_id)
                    assets = Map.new(asset_ids, &{&1, resolve_asset(state.db, &1)})
@@ -1362,6 +1388,7 @@ defmodule Coflux.Orchestration.Server do
                       execute_after: execute_after,
                       assigned_at: assigned_at,
                       completed_at: completed_at,
+                      groups: execution_groups,
                       assets: assets,
                       dependencies: dependencies,
                       result: result,
@@ -1580,8 +1607,8 @@ defmodule Coflux.Orchestration.Server do
                         )
                         |> send_session(
                           session_id,
-                          {:execute, execution.execution_id, execution.module,
-                           execution.target, arguments}
+                          {:execute, execution.execution_id, execution.module, execution.target,
+                           arguments}
                         )
 
                       {state, [{execution, assigned_at} | assigned], unassigned}
@@ -2035,7 +2062,7 @@ defmodule Coflux.Orchestration.Server do
       !workspace.base_id ->
         false
 
-          workspace.base_id == maybe_ancestor_id ->
+      workspace.base_id == maybe_ancestor_id ->
         true
 
       true ->
@@ -2157,8 +2184,7 @@ defmodule Coflux.Orchestration.Server do
         fn execution, {due, future, defer, defer_keys} ->
           defer_key =
             execution.defer_key &&
-              {execution.module, execution.target, execution.workspace_id,
-               execution.defer_key}
+              {execution.module, execution.target, execution.workspace_id, execution.defer_key}
 
           defer_id = defer_key && Map.get(defer_keys, defer_key)
 

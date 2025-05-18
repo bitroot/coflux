@@ -80,6 +80,7 @@ defmodule Coflux.Topics.Run do
           executeAfter: execute_after,
           assignedAt: nil,
           completedAt: nil,
+          groups: %{},
           assets: %{},
           dependencies: %{},
           children: [],
@@ -90,6 +91,12 @@ defmodule Coflux.Topics.Run do
     else
       topic
     end
+  end
+
+  defp process_notification(topic, {:group, execution_id, group_id, name}) do
+    update_execution(topic, execution_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:groups, Integer.to_string(group_id)], name)
+    end)
   end
 
   defp process_notification(topic, {:asset, execution_id, asset_id, asset}) do
@@ -204,6 +211,7 @@ defmodule Coflux.Topics.Run do
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
                     completedAt: execution.completed_at,
+                    groups: execution.groups,
                     assets:
                       Map.new(execution.assets, fn {asset_id, asset} ->
                         {Integer.to_string(asset_id), build_asset(asset)}
@@ -281,8 +289,8 @@ defmodule Coflux.Topics.Run do
     end
   end
 
-  defp build_child({external_step_id, attempt}) do
-    %{stepId: external_step_id, attempt: attempt}
+  defp build_child({external_step_id, attempt, group_id}) do
+    %{stepId: external_step_id, attempt: attempt, groupId: group_id}
   end
 
   defp build_cache_config(cache_config) do
