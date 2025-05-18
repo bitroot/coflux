@@ -1348,7 +1348,6 @@ defmodule Coflux.Orchestration.Server do
                target: step.target,
                type: step.type,
                parent_id: step.parent_id,
-               group_id: step.group_id,
                cache_config:
                  if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
                cache_key: step.cache_key,
