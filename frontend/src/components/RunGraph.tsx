@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useState,
   PointerEvent as ReactPointerEvent,
@@ -19,19 +18,21 @@ import {
   IconAlertCircle,
   IconStackPop,
   IconStackPush,
+  IconChevronDown,
 } from "@tabler/icons-react";
 
 import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
-import buildGraph, { Graph, Edge } from "../graph";
+import buildGraph, { Graph, Edge, Group } from "../graph";
 import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
 import { truncatePath } from "../utils";
 import AssetLink from "./AssetLink";
-import { isEqual } from "lodash";
+import { countBy, isEqual } from "lodash";
+import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
 
-function classNameForExecution(execution: models.Execution) {
+function getExecutionStatus(execution: models.Execution) {
   const result =
     execution.result?.type == "deferred" ||
     execution.result?.type == "cached" ||
@@ -42,20 +43,40 @@ function classNameForExecution(execution: models.Execution) {
     execution.result?.type == "cached" ||
     execution.result?.type == "deferred"
   ) {
-    return "border-slate-200 bg-slate-50";
+    return "deferred";
   } else if (!result && !execution?.assignedAt) {
-    // TODO: handle spawned/etc case
-    return "border-blue-200 bg-blue-50";
+    return "assigning";
   } else if (!result) {
-    return "border-blue-400 bg-blue-100";
+    return "running";
   } else if (result.type == "error") {
-    return "border-red-400 bg-red-100";
+    return "errored";
   } else if (result.type == "abandoned" || result.type == "cancelled") {
-    return "border-yellow-400 bg-yellow-100";
+    return "aborted";
   } else if (result.type == "suspended") {
-    return "border-slate-200 bg-slate-50";
+    return "suspended";
   } else {
-    return "border-slate-400 bg-slate-100";
+    return "completed";
+  }
+}
+
+function classNameForExecutionStatus(
+  status: ReturnType<typeof getExecutionStatus>,
+) {
+  switch (status) {
+    case "deferred":
+      return "border-slate-200 bg-slate-50";
+    case "assigning":
+      return "border-blue-200 bg-blue-50";
+    case "running":
+      return "border-blue-400 bg-blue-100";
+    case "errored":
+      return "border-red-400 bg-red-100";
+    case "aborted":
+      return "border-yellow-400 bg-yellow-100";
+    case "suspended":
+      return "border-slate-200 bg-slate-50";
+    case "completed":
+      return "border-slate-400 bg-slate-100";
   }
 }
 
@@ -155,7 +176,7 @@ function StepNode({
     execution?.result?.type == "cached" ||
     execution?.result?.type == "deferred";
   return (
-    <Fragment>
+    <div className="relative h-[50px]">
       {Object.keys(step.executions).length > 1 && (
         <div
           className={classNames(
@@ -175,7 +196,8 @@ function StepNode({
         attempt={attempt}
         className={classNames(
           "absolute w-full h-full flex-1 flex gap-2 items-center border rounded px-2 py-1 ring-offset-2",
-          execution && classNameForExecution(execution),
+          execution &&
+            classNameForExecutionStatus(getExecutionStatus(execution)),
           isStale && "border-opacity-40",
         )}
         activeClassName="ring ring-cyan-400"
@@ -248,7 +270,7 @@ function StepNode({
           </span>
         ) : null}
       </StepLink>
-    </Fragment>
+    </div>
   );
 }
 
@@ -347,6 +369,88 @@ function ChildNode({ child }: ChildNodeProps) {
         {child.runId}
       </span>
     </StepLink>
+  );
+}
+
+type GroupHeaderProps = {
+  group: Group;
+  activeStepId: string;
+  runId: string;
+};
+
+function GroupHeader({ group, activeStepId, runId }: GroupHeaderProps) {
+  return (
+    <div className="flex items-center justify-between">
+      <div className="text-slate-500 text-sm">{group.name}</div>
+      <Menu>
+        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md bg-slate-100 hover:bg-slate-200">
+          {Object.keys(group.steps).indexOf(activeStepId) + 1} of{" "}
+          {Object.keys(group.steps).length}
+          <IconChevronDown size={16} className="opacity-50" />
+        </MenuButton>
+        <MenuItems
+          transition
+          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+          anchor={{ to: "bottom start", gap: 2, padding: 20 }}
+        >
+          {Object.entries(group.steps).map(([stepId, attempt]) => (
+            <MenuItem key={stepId}>
+              <StepLink
+                runId={runId}
+                stepId={stepId}
+                attempt={attempt}
+                className={classNames(
+                  "p-1 cursor-pointer rounded flex items-center gap-1 data-[active]:bg-slate-100",
+                  stepId == activeStepId && "font-bold",
+                )}
+              >
+                {stepId}
+              </StepLink>
+            </MenuItem>
+          ))}
+        </MenuItems>
+      </Menu>
+    </div>
+  );
+}
+
+type GroupFooterProps = {
+  group: Group;
+  run: models.Run;
+};
+
+function GroupFooter({ group, run }: GroupFooterProps) {
+  const executions = Object.entries(group.steps).map(
+    ([stepId, attempt]) => run.steps[stepId].executions[attempt],
+  );
+  const counts = countBy(executions, getExecutionStatus);
+  return (
+    <div className="flex justify-end gap-1">
+      {(
+        [
+          "running",
+          "completed",
+          "deferred",
+          "suspended",
+          "aborted",
+          "errored",
+        ] as ReturnType<typeof getExecutionStatus>[]
+      ).map(
+        (status) =>
+          !!counts[status] && (
+            <span
+              key={status}
+              className={classNames(
+                "px-1 rounded text-xs text-slate-600",
+                classNameForExecutionStatus(status),
+              )}
+              title={`${counts[status]} ${status}`}
+            >
+              {counts[status]}
+            </span>
+          ),
+      )}
+    </div>
   );
 }
 
@@ -591,22 +695,34 @@ export default function RunGraph({
                   {node.type == "parent" ? (
                     <ParentNode parent={node.parent} />
                   ) : node.type == "step" ? (
-                    <StepNode
-                      projectId={projectId}
-                      stepId={node.stepId}
-                      step={node.step}
-                      attempt={node.attempt}
-                      runId={runId}
-                      isActive={node.stepId == activeStepId}
-                      isStale={isStepStale(
-                        node.stepId,
-                        node.attempt,
-                        run,
-                        activeStepId,
-                        activeAttempt,
+                    <div className="flex-1 flex flex-col justify-center gap-2">
+                      {node.group && (
+                        <GroupHeader
+                          group={node.group}
+                          activeStepId={node.group.activeStepId}
+                          runId={runId}
+                        />
                       )}
-                      runWorkspaceId={runWorkspaceId}
-                    />
+                      <StepNode
+                        projectId={projectId}
+                        stepId={node.stepId}
+                        step={node.step}
+                        attempt={node.attempt}
+                        runId={runId}
+                        isActive={node.stepId == activeStepId}
+                        isStale={isStepStale(
+                          node.stepId,
+                          node.attempt,
+                          run,
+                          activeStepId,
+                          activeAttempt,
+                        )}
+                        runWorkspaceId={runWorkspaceId}
+                      />
+                      {node.group && (
+                        <GroupFooter group={node.group} run={run} />
+                      )}
+                    </div>
                   ) : node.type == "asset" ? (
                     <AssetNode
                       projectId={projectId}
