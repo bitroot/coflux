@@ -23,5 +23,6 @@ $ iex -S mix
 And build the frontend with:
 
 ``` bash
-$ npm run watch
+$ cd ../frontend
+$ npm run dev
 ```
