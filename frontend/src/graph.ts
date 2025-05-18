@@ -141,9 +141,7 @@ function traverseRun(
     group: Group | null,
   ) => void,
   group: Group | null = null,
-  seen: Record<string, true> = {},
 ) {
-  const newSeen: Record<string, true> = { ...seen, [stepId]: true };
   const attempt = getStepAttempt(run, stepAttempts, stepId);
   if (attempt) {
     const execution = run.steps[stepId].executions[attempt];
@@ -169,7 +167,7 @@ function traverseRun(
       callback(stepId, attempt, children, group);
 
       children.forEach((child) => {
-        if (!(child.stepId in seen)) {
+        if (run.steps[child.stepId].parentId == execution.executionId) {
           const group = !isNil(child.groupId)
             ? {
                 name: execution.groups[child.groupId],
@@ -186,8 +184,9 @@ function traverseRun(
             child.stepId,
             callback,
             group,
-            newSeen,
           );
+        } else {
+          // TODO: ?
         }
       });
     }
@@ -375,7 +374,7 @@ export default function buildGraph(
         height,
       })),
       edges: Object.entries(edges)
-        .filter(([, { from, to }]) => from in nodes && to in nodes)
+        .filter(([, { from, to }]) => from in nodes && to in nodes) // TODO: remove?
         .map(([id, { from, to }]) => ({
           id,
           sources: [from],
