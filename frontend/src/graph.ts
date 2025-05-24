@@ -252,7 +252,6 @@ function buildChildren(
       id: groupId!,
       layoutOptions: {
         "elk.padding": "[left=15, top=40, right=15, bottom=15]",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "40",
       },
       children: Object.entries(nodes)
         .filter(([, node]) => node.groupId == groupId)
@@ -473,28 +472,31 @@ export default function buildGraph(
   );
 
   return new ELK()
-    .layout({
-      id: "root",
-      layoutOptions: {
-        "elk.layered.spacing.nodeNodeBetweenLayers": "40",
-        "elk.layered.considerModelOrder.strategy": "PREFER_NODES",
-        "elk.layered.considerModelOrder.crossingCounterNodeInfluence": "1",
-        "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-        "elk.hierarchyHandling": "INCLUDE_CHILDREN",
-        "elk.json.shapeCoords": "ROOT",
-        "elk.json.edgeCoords": "ROOT",
+    .layout<ElkNode>(
+      {
+        id: "root",
+        children: buildChildren(nodes),
+        edges: Object.entries(edges)
+          .filter(([, { from, to }]) => from in nodes && to in nodes) // TODO: remove?
+          .map(([id, { from, to }]) => {
+            return {
+              id,
+              sources: [from],
+              targets: [to],
+            };
+          }),
       },
-      children: buildChildren(nodes),
-      edges: Object.entries(edges)
-        .filter(([, { from, to }]) => from in nodes && to in nodes) // TODO: remove?
-        .map(([id, { from, to }]) => {
-          return {
-            id,
-            sources: [from],
-            targets: [to],
-          };
-        }),
-    })
+      {
+        layoutOptions: {
+          "elk.layered.spacing.nodeNodeBetweenLayers": "40",
+          "elk.layered.crossingMinimization.forceNodeModelOrder": "true",
+          "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+          "elk.hierarchyHandling": "INCLUDE_CHILDREN",
+          "elk.json.shapeCoords": "ROOT",
+          "elk.json.edgeCoords": "ROOT",
+        },
+      },
+    )
     .then((graph) => {
       return {
         nodes: extractNodes(graph, nodes),
