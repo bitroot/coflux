@@ -241,7 +241,7 @@ function buildChildren(
     ...groupIds.map((groupId) => ({
       id: groupId!,
       layoutOptions: {
-        "elk.padding": "[left=15, top=40, right=15, bottom=30]",
+        "elk.padding": "[left=15, top=40, right=15, bottom=15]",
         "elk.layered.spacing.nodeNodeBetweenLayers": "40",
       },
       children: Object.entries(nodes)

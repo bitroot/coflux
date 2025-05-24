@@ -375,13 +375,44 @@ function ChildNode({ child }: ChildNodeProps) {
 type GroupHeaderProps = {
   group: Group;
   runId: string;
+  run: models.Run;
 };
 
-function GroupHeader({ group, runId }: GroupHeaderProps) {
+function GroupHeader({ group, runId, run }: GroupHeaderProps) {
+  const executions = Object.entries(group.steps).map(
+    ([stepId, attempt]) => run.steps[stepId].executions[attempt],
+  );
+  const counts = countBy(executions, getExecutionStatus);
   return (
-    <div className="flex items-center justify-between gap-2">
-      <div className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis">
+    <div className="flex items-center gap-2">
+      <div className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis flex-1">
         {group.name}
+      </div>
+      <div className="flex gap-1 bg-white rounded-md p-0.5">
+        {(
+          [
+            "running",
+            "completed",
+            "deferred",
+            "suspended",
+            "aborted",
+            "errored",
+          ] as ReturnType<typeof getExecutionStatus>[]
+        ).map(
+          (status) =>
+            !!counts[status] && (
+              <span
+                key={status}
+                className={classNames(
+                  "px-1 rounded text-xs text-slate-600",
+                  classNameForExecutionStatus(status),
+                )}
+                title={`${counts[status]} ${status}`}
+              >
+                ×{counts[status]}
+              </span>
+            ),
+        )}
       </div>
       <Menu>
         <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md border border-slate-300 bg-white shadow-sm hover:bg-slate-100 whitespace-nowrap">
@@ -410,48 +441,6 @@ function GroupHeader({ group, runId }: GroupHeaderProps) {
           ))}
         </MenuItems>
       </Menu>
-    </div>
-  );
-}
-
-type GroupFooterProps = {
-  group: Group;
-  run: models.Run;
-};
-
-function GroupFooter({ group, run }: GroupFooterProps) {
-  const executions = Object.entries(group.steps).map(
-    ([stepId, attempt]) => run.steps[stepId].executions[attempt],
-  );
-  const counts = countBy(executions, getExecutionStatus);
-  return (
-    <div className="flex justify-end">
-      <div className="flex gap-1 bg-white rounded-md p-0.5">
-        {(
-          [
-            "running",
-            "completed",
-            "deferred",
-            "suspended",
-            "aborted",
-            "errored",
-          ] as ReturnType<typeof getExecutionStatus>[]
-        ).map(
-          (status) =>
-            !!counts[status] && (
-              <span
-                key={status}
-                className={classNames(
-                  "px-1 rounded text-xs text-slate-600",
-                  classNameForExecutionStatus(status),
-                )}
-                title={`${counts[status]} ${status}`}
-              >
-                ×{counts[status]}
-              </span>
-            ),
-        )}
-      </div>
     </div>
   );
 }
@@ -663,7 +652,7 @@ export default function RunGraph({
               <rect
                 key={id}
                 width={group.width}
-                height={group.height - 20}
+                height={group.height - 12}
                 x={group.x + marginX}
                 y={group.y + marginY + 12}
                 rx={2}
@@ -702,7 +691,7 @@ export default function RunGraph({
             Object.entries(graph.groups).map(([id, group]) => (
               <div
                 key={id}
-                className="absolute flex flex-col px-4 justify-between"
+                className="absolute flex flex-col px-4"
                 style={{
                   left: group.x + marginX,
                   top: group.y + marginY,
@@ -710,8 +699,7 @@ export default function RunGraph({
                   height: group.height,
                 }}
               >
-                <GroupHeader group={group} runId={runId} />
-                <GroupFooter group={group} run={run} />
+                <GroupHeader group={group} runId={runId} run={run} />
               </div>
             ))}
           {graph &&
