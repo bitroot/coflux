@@ -1,13 +1,21 @@
-import ELK from "elkjs/lib/elk.bundled.js";
-import { isNil, max, minBy } from "lodash";
+import ELK, { ElkNode } from "elkjs/lib/elk.bundled.js";
+import { isNil, max, minBy, uniq } from "lodash";
 
 import * as models from "./models";
 import { truncatePath } from "./utils";
 
-export type Group = {
+type BaseGroup = {
+  id: string;
   name: string | null;
   steps: Record<string, number>;
   activeStepId: string;
+};
+
+export type Group = BaseGroup & {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
 };
 
 type BaseNode = (
@@ -16,7 +24,6 @@ type BaseNode = (
       step: models.Step;
       stepId: string;
       attempt: number;
-      group: Group | null;
     }
   | {
       type: "parent";
@@ -40,6 +47,7 @@ type BaseNode = (
 ) & {
   width: number;
   height: number;
+  groupId: string | null;
 };
 
 export type Node = BaseNode & {
@@ -47,11 +55,14 @@ export type Node = BaseNode & {
   y: number;
 };
 
-export type Edge = {
+type BaseEdge = {
   from: string;
   to: string;
-  path: { x: number; y: number }[];
   type: "dependency" | "child" | "parent" | "asset";
+};
+
+export type Edge = BaseEdge & {
+  path: { x: number; y: number }[];
 };
 
 export type Graph = {
@@ -59,6 +70,7 @@ export type Graph = {
   height: number;
   nodes: Record<string, Node>;
   edges: Record<string, Edge>;
+  groups: Record<string, Group>;
 };
 
 function findParentStep(
@@ -138,9 +150,10 @@ function traverseRun(
     stepId: string,
     attempt: number,
     children: models.Child[],
-    group: Group | null,
+    group: BaseGroup | null,
   ) => void,
-  group: Group | null = null,
+  group: BaseGroup | null = null,
+  seen: Record<string, true> = {},
 ) {
   const attempt = getStepAttempt(run, stepAttempts, stepId);
   if (attempt) {
@@ -165,28 +178,29 @@ function traverseRun(
         });
 
       callback(stepId, attempt, children, group);
+      seen[stepId] = true;
 
       children.forEach((child) => {
-        if (run.steps[child.stepId].parentId == execution.executionId) {
-          const group = !isNil(child.groupId)
+        if (!(child.stepId in seen)) {
+          const childGroup = !isNil(child.groupId)
             ? {
+                id: `${stepId}-${child.groupId}`,
                 name: execution.groups[child.groupId],
                 steps: execution.children
                   .filter((c) => c.groupId === child.groupId)
                   .reduce((acc, c) => ({ ...acc, [c.stepId]: c.attempt }), {}),
                 activeStepId: child.stepId,
               }
-            : null;
+            : group;
           traverseRun(
             run,
             groupSteps,
             stepAttempts,
             child.stepId,
             callback,
-            group,
+            childGroup,
+            seen,
           );
-        } else {
-          // TODO: ?
         }
       });
     }
@@ -211,6 +225,84 @@ function truncateList<T>(array: T[], limit: number): [T[], T[]] {
   }
 }
 
+function buildChildren(
+  nodes: Record<string, Omit<Node, "x" | "y">>,
+): ElkNode[] {
+  const groupIds = uniq(
+    Object.values(nodes)
+      .map((n) => n.groupId)
+      .filter((id) => id),
+  );
+
+  return [
+    ...Object.entries(nodes)
+      .filter(([, node]) => !node.groupId)
+      .map(([id, { width, height }]) => ({ id, width, height })),
+    ...groupIds.map((groupId) => ({
+      id: groupId!,
+      layoutOptions: {
+        "elk.padding": "[left=15, top=40, right=15, bottom=30]",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "40",
+      },
+      children: Object.entries(nodes)
+        .filter(([, node]) => node.groupId == groupId)
+        .map(([id, { width, height }]) => ({ id, width, height })),
+    })),
+  ];
+}
+
+function extractNodes(
+  graph: ElkNode,
+  nodes: Record<string, Omit<Node, "x" | "y">>,
+): Record<string, Node> {
+  return (graph.children || []).reduce((result, child) => {
+    const node = { ...nodes[child.id], x: child.x!, y: child.y! };
+    return {
+      ...result,
+      ...extractNodes(child, nodes),
+      [child.id]: node,
+    };
+  }, {});
+}
+
+function extractEdges(
+  graph: ElkNode,
+  edges: Record<string, Omit<Edge, "path">>,
+) {
+  return (graph.edges || []).reduce((result, edge) => {
+    if (edge.sections) {
+      // TODO: support multiple sections?
+      const { startPoint, bendPoints, endPoint } = edge.sections[0];
+      const path = [startPoint, ...(bendPoints || []), endPoint];
+      const edge_ = { ...edges[edge.id], path };
+      return { ...result, [edge.id]: edge_ };
+    } else {
+      // TODO: ?
+      return result;
+    }
+  }, {});
+}
+
+function extractGroups(graph: ElkNode, groups: Record<string, BaseGroup>) {
+  return Object.entries(groups).reduce((acc, [id, group]) => {
+    const child = graph.children?.find((c) => c.id == id);
+    if (child) {
+      return {
+        ...acc,
+        [id]: {
+          ...group,
+          x: child.x,
+          y: child.y,
+          width: child.width,
+          height: child.height,
+        },
+      };
+    } else {
+      return acc;
+    }
+  }, {});
+}
+
 export default function buildGraph(
   run: models.Run,
   runId: string,
@@ -229,11 +321,13 @@ export default function buildGraph(
   )!;
 
   const nodes: Record<string, BaseNode> = {};
-  const edges: Record<string, Omit<Edge, "path">> = {};
+  const edges: Record<string, BaseEdge> = {};
+  const groups: Record<string, BaseGroup> = {};
 
   nodes[run.parent?.runId || "start"] = {
     type: "parent",
     parent: run.parent || null,
+    groupId: null,
     width: run.parent ? 100 : 30,
     height: 30,
   };
@@ -252,17 +346,20 @@ export default function buildGraph(
       stepId: string,
       attempt: number,
       children: models.Child[],
-      group: Group | null,
+      group: BaseGroup | null,
     ) => {
+      if (group && !(group.id in groups)) {
+        groups[group.id] = group;
+      }
       const step = run.steps[stepId];
       nodes[stepId] = {
         type: "step",
         step,
         stepId,
         attempt,
-        group,
+        groupId: group?.id || null,
         width: 160,
-        height: group ? 120 : 50,
+        height: 50,
       };
       const execution = step.executions[attempt];
       const [assets, rest] = truncateList(Object.entries(execution.assets), 3);
@@ -273,6 +370,7 @@ export default function buildGraph(
           stepId,
           assetId,
           asset,
+          groupId: group?.id || null,
           width: Math.min(getTextWidth(text) + 32, 140),
           height: 20,
         };
@@ -289,6 +387,7 @@ export default function buildGraph(
           type: "assets",
           stepId,
           assetIds: rest.map(([id]) => id),
+          groupId: group?.id || null,
           width: Math.min(getTextWidth(text) + 14, 100),
           height: 20,
         };
@@ -336,18 +435,21 @@ export default function buildGraph(
         result?.type == "spawned"
       ) {
         if (result.execution.runId != runId) {
-          const childId = `${result.execution.runId}/${result.execution.stepId}`;
-          nodes[childId] = {
-            type: "child",
-            child: result.execution,
-            width: 100,
-            height: 30,
-          };
-          edges[`${childId}-${stepId}`] = {
-            from: childId,
-            to: stepId,
-            type: "dependency",
-          };
+          if (result.type == "spawned") {
+            const childId = `${result.execution.runId}/${result.execution.stepId}`;
+            nodes[childId] = {
+              type: "child",
+              child: result.execution,
+              groupId: group?.id || null,
+              width: 100,
+              height: 30,
+            };
+            edges[`${childId}-${stepId}`] = {
+              from: childId,
+              to: stepId,
+              type: "dependency",
+            };
+          }
         } else {
           const childStepId = result.execution.stepId;
           edges[`${childStepId}-${stepId}`] = {
@@ -364,38 +466,30 @@ export default function buildGraph(
     .layout({
       id: "root",
       layoutOptions: {
-        "elk.spacing.nodeNode": "20",
-        "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "40",
+        "elk.layered.considerModelOrder.strategy": "PREFER_NODES",
+        "elk.layered.considerModelOrder.crossingCounterNodeInfluence": "1",
+        "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+        "elk.hierarchyHandling": "INCLUDE_CHILDREN",
+        "elk.json.shapeCoords": "ROOT",
+        "elk.json.edgeCoords": "ROOT",
       },
-      children: Object.entries(nodes).map(([id, { width, height }]) => ({
-        id,
-        width,
-        height,
-      })),
+      children: buildChildren(nodes),
       edges: Object.entries(edges)
         .filter(([, { from, to }]) => from in nodes && to in nodes) // TODO: remove?
-        .map(([id, { from, to }]) => ({
-          id,
-          sources: [from],
-          targets: [to],
-        })),
+        .map(([id, { from, to }]) => {
+          return {
+            id,
+            sources: [from],
+            targets: [to],
+          };
+        }),
     })
     .then((graph) => {
-      const nodes_ = graph.children!.reduce((result, child) => {
-        const node = { ...nodes[child.id], x: child.x!, y: child.y! };
-        return { ...result, [child.id]: node };
-      }, {});
-      const edges_ = graph.edges!.reduce((result, edge) => {
-        // TODO: support multiple sections?
-        const { startPoint, bendPoints, endPoint } = edge.sections![0];
-        const path = [startPoint, ...(bendPoints || []), endPoint];
-        const edge_ = { ...edges[edge.id], path };
-        return { ...result, [edge.id]: edge_ };
-      }, {});
-
       return {
-        nodes: nodes_,
-        edges: edges_,
+        nodes: extractNodes(graph, nodes),
+        edges: extractEdges(graph, edges),
+        groups: extractGroups(graph, groups),
         width: graph.width!,
         height: graph.height!,
       };

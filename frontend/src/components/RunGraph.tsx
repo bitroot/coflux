@@ -374,24 +374,24 @@ function ChildNode({ child }: ChildNodeProps) {
 
 type GroupHeaderProps = {
   group: Group;
-  activeStepId: string;
   runId: string;
 };
 
-function GroupHeader({ group, activeStepId, runId }: GroupHeaderProps) {
+function GroupHeader({ group, runId }: GroupHeaderProps) {
   return (
-    <div className="flex items-center justify-between">
-      <div className="text-slate-500 text-sm">{group.name}</div>
+    <div className="flex items-center justify-between gap-2">
+      <div className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis">
+        {group.name}
+      </div>
       <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md bg-slate-100 hover:bg-slate-200">
-          {Object.keys(group.steps).indexOf(activeStepId) + 1} of{" "}
-          {Object.keys(group.steps).length}
+        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md border border-slate-300 bg-white shadow-sm hover:bg-slate-100 whitespace-nowrap">
+          {group.activeStepId}
           <IconChevronDown size={16} className="opacity-50" />
         </MenuButton>
         <MenuItems
           transition
           className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
-          anchor={{ to: "bottom start", gap: 2, padding: 20 }}
+          anchor={{ to: "top start", gap: 2, padding: 20 }}
         >
           {Object.entries(group.steps).map(([stepId, attempt]) => (
             <MenuItem key={stepId}>
@@ -401,7 +401,7 @@ function GroupHeader({ group, activeStepId, runId }: GroupHeaderProps) {
                 attempt={attempt}
                 className={classNames(
                   "p-1 cursor-pointer rounded flex items-center gap-1 data-[active]:bg-slate-100",
-                  stepId == activeStepId && "font-bold",
+                  stepId == group.activeStepId && "font-bold",
                 )}
               >
                 {stepId}
@@ -425,31 +425,33 @@ function GroupFooter({ group, run }: GroupFooterProps) {
   );
   const counts = countBy(executions, getExecutionStatus);
   return (
-    <div className="flex justify-end gap-1">
-      {(
-        [
-          "running",
-          "completed",
-          "deferred",
-          "suspended",
-          "aborted",
-          "errored",
-        ] as ReturnType<typeof getExecutionStatus>[]
-      ).map(
-        (status) =>
-          !!counts[status] && (
-            <span
-              key={status}
-              className={classNames(
-                "px-1 rounded text-xs text-slate-600",
-                classNameForExecutionStatus(status),
-              )}
-              title={`${counts[status]} ${status}`}
-            >
-              {counts[status]}
-            </span>
-          ),
-      )}
+    <div className="flex justify-end">
+      <div className="flex gap-1 bg-white rounded-md p-0.5">
+        {(
+          [
+            "running",
+            "completed",
+            "deferred",
+            "suspended",
+            "aborted",
+            "errored",
+          ] as ReturnType<typeof getExecutionStatus>[]
+        ).map(
+          (status) =>
+            !!counts[status] && (
+              <span
+                key={status}
+                className={classNames(
+                  "px-1 rounded text-xs text-slate-600",
+                  classNameForExecutionStatus(status),
+                )}
+                title={`${counts[status]} ${status}`}
+              >
+                ×{counts[status]}
+              </span>
+            ),
+        )}
+      </div>
     </div>
   );
 }
@@ -656,6 +658,18 @@ export default function RunGraph({
               <circle cx={10} cy={10} r={0.5} className="fill-slate-400" />
             </pattern>
           </defs>
+          {graph &&
+            Object.entries(graph.groups).map(([id, group]) => (
+              <rect
+                key={id}
+                width={group.width}
+                height={group.height - 20}
+                x={group.x + marginX}
+                y={group.y + marginY + 12}
+                rx={2}
+                fill="rgba(148, 163, 184, 0.05)"
+              />
+            ))}
           <rect width="100%" height="100%" fill="url(#grid)" />
           {graph &&
             Object.entries(graph.edges).flatMap(([edgeId, edge]) => {
@@ -685,6 +699,22 @@ export default function RunGraph({
         </svg>
         <div className="absolute">
           {graph &&
+            Object.entries(graph.groups).map(([id, group]) => (
+              <div
+                key={id}
+                className="absolute flex flex-col px-4 justify-between"
+                style={{
+                  left: group.x + marginX,
+                  top: group.y + marginY,
+                  width: group.width,
+                  height: group.height,
+                }}
+              >
+                <GroupHeader group={group} runId={runId} />
+                <GroupFooter group={group} run={run} />
+              </div>
+            ))}
+          {graph &&
             Object.entries(graph.nodes).map(([nodeId, node]) => {
               return (
                 <div
@@ -701,13 +731,6 @@ export default function RunGraph({
                     <ParentNode parent={node.parent} />
                   ) : node.type == "step" ? (
                     <div className="flex-1 flex flex-col justify-center gap-2">
-                      {node.group && (
-                        <GroupHeader
-                          group={node.group}
-                          activeStepId={node.group.activeStepId}
-                          runId={runId}
-                        />
-                      )}
                       <StepNode
                         projectId={projectId}
                         stepId={node.stepId}
@@ -724,9 +747,6 @@ export default function RunGraph({
                         )}
                         runWorkspaceId={runWorkspaceId}
                       />
-                      {node.group && (
-                        <GroupFooter group={node.group} run={run} />
-                      )}
                     </div>
                   ) : node.type == "asset" ? (
                     <AssetNode
