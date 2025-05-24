@@ -319,10 +319,9 @@ export default function buildGraph(
               (d) => d.execution.stepId == child.stepId,
             )
           ) {
-            // TODO: switch direction?
-            edges[`${stepId}-${child.stepId}`] = {
-              from: stepId,
-              to: child.stepId,
+            edges[`${child.stepId}-${stepId}`] = {
+              from: child.stepId,
+              to: stepId,
               type: "child",
             };
           }
