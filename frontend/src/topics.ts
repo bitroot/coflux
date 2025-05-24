@@ -121,14 +121,14 @@ export function useRun(
   runId: string | undefined,
   workspaceId: string | undefined,
 ) {
-  const [run] = useTopic<models.Run>(
+  const [run, { loading }] = useTopic<models.Run>(
     "projects",
     projectId,
     "runs",
     runId,
     workspaceId,
   );
-  return run;
+  return loading ? undefined : run;
 }
 
 export function useLogs(
