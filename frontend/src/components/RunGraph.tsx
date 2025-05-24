@@ -8,7 +8,7 @@ import {
 } from "react";
 import classNames from "classnames";
 import {
-  IconArrowUpRight,
+  IconArrowUpLeft,
   IconBolt,
   IconClock,
   IconArrowDownRight,
@@ -364,7 +364,7 @@ function ChildNode({ child }: ChildNodeProps) {
       className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
       hoveredClassName="ring ring-slate-400"
     >
-      <IconArrowUpRight size={20} className="text-slate-400" />
+      <IconArrowUpLeft size={20} className="text-slate-400" />
       <span className="text-slate-500 font-bold flex-1 text-end">
         {child.runId}
       </span>

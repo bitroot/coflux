@@ -238,8 +238,8 @@ export default function buildGraph(
     height: 30,
   };
   edges["start"] = {
-    from: run.parent?.runId || "start",
-    to: initialStepId,
+    from: initialStepId,
+    to: run.parent?.runId || "start",
     type: "parent",
   };
 
