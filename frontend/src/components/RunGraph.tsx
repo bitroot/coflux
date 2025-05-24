@@ -519,6 +519,26 @@ function calculateMargins(
   return [marginX, marginY];
 }
 
+function useGraph(
+  run: models.Run,
+  runId: string,
+  activeStepId: string | undefined,
+  activeAttempt: number | undefined,
+) {
+  const [graph, setGraph] = useState<Graph>();
+  useEffect(() => {
+    buildGraph(run, runId, activeStepId, activeAttempt)
+      .then(setGraph)
+      .catch((e) => {
+        setGraph(undefined);
+        // TODO: handle error
+        console.error(e);
+      });
+  }, [run, runId, activeStepId, activeAttempt]);
+  // return graph?.runId == runId ? graph : undefined;
+  return graph;
+}
+
 type Props = {
   projectId: string;
   runId: string;
@@ -545,16 +565,7 @@ export default function RunGraph({
   const [dragging, setDragging] = useState<[number, number]>();
   const [zoomOverride, setZoomOverride] = useState<number>();
   const { isHovered } = useHoverContext();
-  const [graph, setGraph] = useState<Graph>();
-  useEffect(() => {
-    buildGraph(run, runId, activeStepId, activeAttempt)
-      .then(setGraph)
-      .catch((e) => {
-        setGraph(undefined);
-        // TODO: handle error
-        console.error(e);
-      });
-  }, [run, runId, activeStepId, activeAttempt]);
+  const graph = useGraph(run, runId, activeStepId, activeAttempt);
   const graphWidth = graph?.width || 0;
   const graphHeight = graph?.height || 0;
   const [marginX, marginY] = calculateMargins(
