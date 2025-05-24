@@ -188,7 +188,17 @@ function traverseRun(
                 name: execution.groups[child.groupId],
                 steps: execution.children
                   .filter((c) => c.groupId === child.groupId)
-                  .reduce((acc, c) => ({ ...acc, [c.stepId]: c.attempt }), {}),
+                  .reduce(
+                    (acc, c) => ({
+                      ...acc,
+                      [c.stepId]: max(
+                        Object.keys(run.steps[c.stepId].executions).map((a) =>
+                          parseInt(a, 10),
+                        ),
+                      ),
+                    }),
+                    {},
+                  ),
                 activeStepId: child.stepId,
               }
             : group;
