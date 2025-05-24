@@ -1364,7 +1364,7 @@ defmodule Coflux.Orchestration.Server do
 
                    execution_groups =
                      groups
-                     |> Enum.filter(fn {execution_id, _, _} -> execution_id == execution_id end)
+                     |> Enum.filter(fn {e_id, _, _} -> e_id == execution_id end)
                      |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
 
                    # TODO: load assets in one query
