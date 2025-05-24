@@ -473,13 +473,7 @@ type EdgePathProps = {
 function EdgePath({ edge, offset, highlight }: EdgePathProps) {
   return (
     <path
-      className={
-        highlight
-          ? "stroke-slate-400"
-          : edge.type == "transitive"
-            ? "stroke-slate-100"
-            : "stroke-slate-200"
-      }
+      className={highlight ? "stroke-slate-400" : "stroke-slate-200"}
       fill="none"
       strokeWidth={
         edge.type == "asset"

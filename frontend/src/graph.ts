@@ -51,7 +51,7 @@ export type Edge = {
   from: string;
   to: string;
   path: { x: number; y: number }[];
-  type: "dependency" | "child" | "transitive" | "parent" | "asset";
+  type: "dependency" | "child" | "parent" | "asset";
 };
 
 export type Graph = {
