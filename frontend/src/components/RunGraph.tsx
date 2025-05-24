@@ -385,10 +385,13 @@ function GroupHeader({ group, runId, run }: GroupHeaderProps) {
   const counts = countBy(executions, getExecutionStatus);
   return (
     <div className="flex items-center gap-2">
-      <div className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis flex-1">
+      <div
+        className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis flex-1 pointer-events-auto"
+        title={`Group: ${group.name}`}
+      >
         {group.name}
       </div>
-      <div className="flex gap-1 bg-white rounded-md p-0.5">
+      <div className="flex gap-1 bg-white rounded-md p-0.5 pointer-events-auto">
         {(
           [
             "running",
@@ -415,7 +418,7 @@ function GroupHeader({ group, runId, run }: GroupHeaderProps) {
         )}
       </div>
       <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md border border-slate-300 bg-white shadow-sm hover:bg-slate-100 whitespace-nowrap">
+        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md border border-slate-300 bg-white shadow-sm hover:bg-slate-100 whitespace-nowrap pointer-events-auto">
           {group.activeStepId}
           <IconChevronDown size={16} className="opacity-50" />
         </MenuButton>
@@ -691,7 +694,7 @@ export default function RunGraph({
             Object.entries(graph.groups).map(([id, group]) => (
               <div
                 key={id}
-                className="absolute flex flex-col px-4"
+                className="absolute flex flex-col px-3 pointer-events-none"
                 style={{
                   left: group.x + marginX,
                   top: group.y + marginY,
