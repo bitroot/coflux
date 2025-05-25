@@ -6,7 +6,7 @@ import {
   useState,
 } from "react";
 import classNames from "classnames";
-import { minBy, sortBy } from "lodash";
+import { groupBy, minBy, sortBy } from "lodash";
 import { DateTime, Duration } from "luxon";
 import {
   Menu,
@@ -835,23 +835,38 @@ function RelationsSection({
         <h3 className="uppercase text-sm font-bold text-slate-400">Children</h3>
         {execution.children.length ? (
           <ul>
-            {execution.children.map((child) => {
-              const step = run.steps[child.stepId];
-              return (
-                <li key={`${child.stepId}/${child.attempt}`}>
-                  <StepLink
-                    runId={runId}
-                    stepId={child.stepId}
-                    attempt={child.attempt}
-                    className="rounded text-sm ring-offset-1 px-1"
-                    hoveredClassName="ring-2 ring-slate-300"
-                  >
-                    <span className="font-mono">{step.target}</span>{" "}
-                    <span className="text-slate-500">({step.module})</span>
-                  </StepLink>
+            {Object.entries(groupBy(execution.children, "groupId")).map(
+              ([groupId, children]) => (
+                <li key={groupId}>
+                  {groupId != "null" && (
+                    <h4 className="text-slate-600 mt-2">
+                      {execution.groups[groupId]}
+                    </h4>
+                  )}
+                  <ul>
+                    {children.map((child) => {
+                      const step = run.steps[child.stepId];
+                      return (
+                        <li key={`${child.stepId}/${child.attempt}`}>
+                          <StepLink
+                            runId={runId}
+                            stepId={child.stepId}
+                            attempt={child.attempt}
+                            className="rounded text-sm ring-offset-1 px-1"
+                            hoveredClassName="ring-2 ring-slate-300"
+                          >
+                            <span className="font-mono">{step.target}</span>{" "}
+                            <span className="text-slate-500">
+                              ({step.module})
+                            </span>
+                          </StepLink>
+                        </li>
+                      );
+                    })}
+                  </ul>
                 </li>
-              );
-            })}
+              ),
+            )}
           </ul>
         ) : (
           <p className="italic">None</p>
