@@ -18,19 +18,19 @@ import {
   IconAlertCircle,
   IconStackPop,
   IconStackPush,
-  IconChevronDown,
+  IconSelector,
 } from "@tabler/icons-react";
 
 import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
-import buildGraph, { Graph, Edge, Group } from "../graph";
+import buildGraph, { Graph, Edge } from "../graph";
 import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
-import { truncatePath } from "../utils";
+import { buildUrl, truncatePath } from "../utils";
 import AssetLink from "./AssetLink";
-import { countBy, isEqual } from "lodash";
-import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
+import { countBy, isEqual, max } from "lodash";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 
 function getExecutionStatus(execution: models.Execution) {
   const result =
@@ -373,29 +373,50 @@ function ChildNode({ child }: ChildNodeProps) {
 }
 
 type GroupHeaderProps = {
-  group: Group;
-  runId: string;
+  identifier: string;
   run: models.Run;
 };
 
-function GroupHeader({ group, runId, run }: GroupHeaderProps) {
-  const executions = Object.entries(group.steps).map(
-    ([stepId, attempt]) => run.steps[stepId].executions[attempt],
-  );
+function GroupHeader({ identifier, run }: GroupHeaderProps) {
+  const [searchParams] = useSearchParams();
+  const { pathname } = useLocation();
+  const parts = identifier.split("-");
+  const stepId = parts[0];
+  const attempt = parseInt(parts[1], 10);
+  const groupId = parseInt(parts[2], 10);
+  const execution = run.steps[stepId]?.executions[attempt];
+  const groupName = execution.groups[groupId];
+  const executions = execution.children
+    .filter((c) => c.groupId == groupId)
+    .map((c) => c.stepId)
+    .map(
+      (sId) =>
+        run.steps[sId].executions[
+          max(
+            Object.keys(run.steps[sId].executions).map((a) => parseInt(a, 10)),
+          )!
+        ],
+    );
   const counts = countBy(executions, getExecutionStatus);
   return (
     <div className="flex items-center gap-2">
       <div className="flex min-w-0 overflow-hidden mr-auto">
-        {group.name ? (
+        {groupName ? (
           <span
             className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded"
-            title={`Group: ${group.name}`}
+            title={groupName}
           >
-            {group.name}
+            {groupName}
           </span>
         ) : null}
       </div>
-      <div className="flex gap-1 bg-white rounded-md p-0.5 pointer-events-auto">
+      <Link
+        to={buildUrl(pathname, {
+          ...Object.fromEntries(searchParams),
+          group: identifier,
+        })}
+        className="flex items-center gap-1 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
+      >
         {(
           [
             "running",
@@ -420,34 +441,8 @@ function GroupHeader({ group, runId, run }: GroupHeaderProps) {
               </span>
             ),
         )}
-      </div>
-      <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 text-left text-slate-600 text-xs rounded-md border border-slate-300 bg-white shadow-sm hover:bg-slate-100 whitespace-nowrap pointer-events-auto">
-          {group.activeStepId}
-          <IconChevronDown size={16} className="opacity-50" />
-        </MenuButton>
-        <MenuItems
-          transition
-          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
-          anchor={{ to: "top end", gap: 2, padding: 20 }}
-        >
-          {Object.entries(group.steps).map(([stepId, attempt]) => (
-            <MenuItem key={stepId}>
-              <StepLink
-                runId={runId}
-                stepId={stepId}
-                attempt={attempt}
-                className={classNames(
-                  "p-1 cursor-pointer rounded flex items-center gap-1 data-[active]:bg-slate-100",
-                  stepId == group.activeStepId && "font-bold",
-                )}
-              >
-                {stepId}
-              </StepLink>
-            </MenuItem>
-          ))}
-        </MenuItems>
-      </Menu>
+        <IconSelector size={16} className="opacity-50" />
+      </Link>
     </div>
   );
 }
@@ -706,7 +701,7 @@ export default function RunGraph({
                   height: group.height,
                 }}
               >
-                <GroupHeader group={group} runId={runId} run={run} />
+                <GroupHeader identifier={group.identifier} run={run} />
               </div>
             ))}
           {graph &&

@@ -5,10 +5,7 @@ import * as models from "./models";
 import { truncatePath } from "./utils";
 
 type BaseGroup = {
-  id: string;
-  name: string | null;
-  steps: Record<string, number>;
-  activeStepId: string;
+  identifier: string;
 };
 
 export type Group = BaseGroup & {
@@ -47,7 +44,7 @@ type BaseNode = (
 ) & {
   width: number;
   height: number;
-  groupId: string | null;
+  groupIdentifier: string | null;
 };
 
 export type Node = BaseNode & {
@@ -150,9 +147,9 @@ function traverseRun(
     stepId: string,
     attempt: number,
     children: models.Child[],
-    group: BaseGroup | null,
+    groupIdentifier: string | null,
   ) => void,
-  group: BaseGroup | null = null,
+  groupIdentifier: string | null = null,
   seen: Record<string, true> = {},
 ) {
   const attempt = getStepAttempt(run, stepAttempts, stepId);
@@ -177,38 +174,21 @@ function traverseRun(
           children.push(child);
         });
 
-      callback(stepId, attempt, children, group);
+      callback(stepId, attempt, children, groupIdentifier);
       seen[stepId] = true;
 
       children.forEach((child) => {
         if (!(child.stepId in seen)) {
-          const childGroup = !isNil(child.groupId)
-            ? {
-                id: `${stepId}-${child.groupId}`,
-                name: execution.groups[child.groupId],
-                steps: execution.children
-                  .filter((c) => c.groupId === child.groupId)
-                  .reduce(
-                    (acc, c) => ({
-                      ...acc,
-                      [c.stepId]: max(
-                        Object.keys(run.steps[c.stepId].executions).map((a) =>
-                          parseInt(a, 10),
-                        ),
-                      ),
-                    }),
-                    {},
-                  ),
-                activeStepId: child.stepId,
-              }
-            : group;
+          const childGroupIdentifier = !isNil(child.groupId)
+            ? `${stepId}-${child.attempt}-${child.groupId}`
+            : groupIdentifier;
           traverseRun(
             run,
             groupSteps,
             stepAttempts,
             child.stepId,
             callback,
-            childGroup,
+            childGroupIdentifier,
             seen,
           );
         }
@@ -238,23 +218,23 @@ function truncateList<T>(array: T[], limit: number): [T[], T[]] {
 function buildChildren(
   nodes: Record<string, Omit<Node, "x" | "y">>,
 ): ElkNode[] {
-  const groupIds = uniq(
+  const groupIdentifiers = uniq(
     Object.values(nodes)
-      .map((n) => n.groupId)
+      .map((n) => n.groupIdentifier)
       .filter((id) => id),
   );
 
   return [
     ...Object.entries(nodes)
-      .filter(([, node]) => !node.groupId)
+      .filter(([, node]) => !node.groupIdentifier)
       .map(([id, { width, height }]) => ({ id, width, height })),
-    ...groupIds.map((groupId) => ({
-      id: groupId!,
+    ...groupIdentifiers.map((groupIdentifier) => ({
+      id: groupIdentifier!,
       layoutOptions: {
         "elk.padding": "[left=15, top=40, right=15, bottom=15]",
       },
       children: Object.entries(nodes)
-        .filter(([, node]) => node.groupId == groupId)
+        .filter(([, node]) => node.groupIdentifier == groupIdentifier)
         .map(([id, { width, height }]) => ({ id, width, height })),
     })),
   ];
@@ -336,7 +316,7 @@ export default function buildGraph(
   nodes[run.parent?.runId || "start"] = {
     type: "parent",
     parent: run.parent || null,
-    groupId: null,
+    groupIdentifier: null,
     width: run.parent ? 100 : 30,
     height: 30,
   };
@@ -355,10 +335,10 @@ export default function buildGraph(
       stepId: string,
       attempt: number,
       children: models.Child[],
-      group: BaseGroup | null,
+      groupIdentifier: string | null,
     ) => {
-      if (group && !(group.id in groups)) {
-        groups[group.id] = group;
+      if (groupIdentifier && !(groupIdentifier in groups)) {
+        groups[groupIdentifier] = { identifier: groupIdentifier };
       }
       const step = run.steps[stepId];
       nodes[stepId] = {
@@ -366,7 +346,7 @@ export default function buildGraph(
         step,
         stepId,
         attempt,
-        groupId: group?.id || null,
+        groupIdentifier,
         width: 160,
         height: 50,
       };
@@ -379,7 +359,7 @@ export default function buildGraph(
           stepId,
           assetId,
           asset,
-          groupId: group?.id || null,
+          groupIdentifier,
           width: Math.min(getTextWidth(text) + 32, 140),
           height: 20,
         };
@@ -396,7 +376,7 @@ export default function buildGraph(
           type: "assets",
           stepId,
           assetIds: rest.map(([id]) => id),
-          groupId: group?.id || null,
+          groupIdentifier,
           width: Math.min(getTextWidth(text) + 14, 100),
           height: 20,
         };
@@ -449,7 +429,7 @@ export default function buildGraph(
             nodes[childId] = {
               type: "child",
               child: result.execution,
-              groupId: group?.id || null,
+              groupIdentifier,
               width: 100,
               height: 30,
             };
