@@ -66,7 +66,7 @@ function Options({
                     activeWorkspaceName,
                     location.pathname,
                   )}
-                  className="flex items-baseline gap-1 text-sm p-1 data-[active]:bg-slate-100 rounded"
+                  className="flex items-baseline gap-1 text-sm p-1 data-active:bg-slate-100 rounded-sm"
                 >
                   <span
                     className={classNames(
@@ -138,7 +138,7 @@ function NextPreviousButton({
   const Icon = direction == "next" ? IconChevronRight : IconChevronLeft;
   const className = classNames(
     "p-1 bg-white border border-slate-300 flex items-center",
-    runId ? "hover:bg-slate-100 text-slate-500" : "text-slate-200",
+    runId ? "hover:bg-slate-50 text-slate-500" : "text-slate-200",
     direction == "next" ? "rounded-r-md -ml-px" : "rounded-l-md -mr-px",
   );
   if (runId) {
@@ -180,7 +180,7 @@ export default function RunSelector({
   className,
 }: Props) {
   return (
-    <div className={classNames(className, "flex shadow-sm")}>
+    <div className={classNames(className, "flex shadow-xs")}>
       <NextPreviousButton
         direction="previous"
         projectId={projectId}
@@ -191,13 +191,13 @@ export default function RunSelector({
       <Menu>
         <MenuButton className="flex items-center w-full py-1 px-2 gap-1 bg-white border border-slate-300 hover:bg-slate-50">
           <span className="font-mono text-sm">{runId}</span>
-          <span className="text-slate-400">
+          <span className="text-slate-500">
             <IconChevronDown size={16} />
           </span>
         </MenuButton>
         <MenuItems
           transition
-          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
           anchor={{ to: "bottom start", gap: 2, padding: 20 }}
         >
           <Options

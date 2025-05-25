@@ -35,7 +35,7 @@ export default function Alert({
   return (
     <div
       className={classNames(
-        "border rounded flex gap-1",
+        "border rounded-sm flex gap-1",
         variantStyles[variant],
         sizeStyles[size],
         className,

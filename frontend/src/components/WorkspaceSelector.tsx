@@ -69,7 +69,7 @@ export default function WorkspaceSelector({
               }
             />
           ) : (
-            <span className="flex items-center gap-1 rounded px-2 py-0.5 text-slate-100 hover:bg-white/10 text-sm">
+            <span className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-slate-100 hover:bg-white/10 text-sm">
               Select workspace...
               <IconChevronDown size={14} className="opacity-40 mt-0.5" />
             </span>
@@ -78,7 +78,7 @@ export default function WorkspaceSelector({
         <MenuItems
           transition
           anchor={{ to: "bottom start", gap: 4, padding: 20 }}
-          className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+          className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
         >
           {Object.keys(workspaces).length > 0 && (
             <Fragment>
@@ -90,7 +90,7 @@ export default function WorkspaceSelector({
                         to={buildUrl(location.pathname, {
                           workspace: workspace.name,
                         })}
-                        className="flex items-center gap-1 pl-2 pr-3 py-1 rounded whitespace-nowrap text-sm data-[active]:bg-slate-100"
+                        className="flex items-center gap-1 pl-2 pr-3 py-1 rounded-sm whitespace-nowrap text-sm data-active:bg-slate-100"
                       >
                         {workspace.name == activeWorkspace ? (
                           <IconCheck size={16} className="mt-0.5" />
@@ -119,7 +119,7 @@ export default function WorkspaceSelector({
           )}
           <MenuItem>
             <button
-              className="flex m-1 px-2 py-1 rounded whitespace-nowrap text-sm data-[active]:bg-slate-100"
+              className="flex m-1 px-2 py-1 rounded-sm whitespace-nowrap text-sm data-active:bg-slate-100"
               onClick={handleAddWorkspaceClick}
             >
               Add workspace...

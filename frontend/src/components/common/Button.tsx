@@ -1,10 +1,10 @@
 import classNames from "classnames";
-import { ButtonHTMLAttributes, ReactNode, forwardRef } from "react";
+import { ButtonHTMLAttributes, ReactNode } from "react";
 import { Size, Variant } from "./types";
 
 const outlineStyles = {
   true: "border",
-  false: "text-white shadow-sm",
+  false: "text-white shadow-xs",
 };
 
 const variantOutlineStyles = {
@@ -12,7 +12,7 @@ const variantOutlineStyles = {
     true: [
       "border-cyan-400/50 text-cyan-500 enabled:shadow-cyan-500/30",
       "hover:text-cyan-600 hover:border-cyan-500",
-      "focus:ring-cyan-300",
+      "focus:ring-cyan-300/50",
       "disabled:border-cyan-500/20 disabled:text-cyan-500/30",
     ],
     false: [
@@ -26,7 +26,7 @@ const variantOutlineStyles = {
     true: [
       "border-slate-400/50 text-slate-500 enabled:shadow-slate-500/30",
       "hover:text-slate-600 hover:border-slate-400",
-      "focus:ring-slate-300",
+      "focus:ring-slate-300/50",
       "disabled:border-slate-500/20 disabled:text-slate-500/30",
     ],
     false: [
@@ -40,7 +40,7 @@ const variantOutlineStyles = {
     true: [
       "border-green-400/50 text-green-500 enabled:shadow-green-500/30",
       "hover:text-green-600 hover:border-green-500",
-      "focus:ring-green-300",
+      "focus:ring-green-300/50",
       "disabled:border-green-500/20 disabled:text-green-500/30",
     ],
     false: [
@@ -54,7 +54,7 @@ const variantOutlineStyles = {
     true: [
       "border-yellow-400/50 text-yellow-500 enabled:shadow-yellow-500/30",
       "hover:text-yellow-600 hover:border-yellow-500",
-      "focus:ring-yellow-300",
+      "focus:ring-yellow-300/50",
       "disabled:border-yellow-500/20 disabled:text-yellow-500/30",
     ],
     false: [
@@ -68,7 +68,7 @@ const variantOutlineStyles = {
     true: [
       "border-red-400/50 text-red-500 enabled:shadow-red-500/30",
       "hover:text-red-600 hover:border-red-500",
-      "focus:ring-red-300",
+      "focus:ring-red-300/50",
       "disabled:border-red-500/20 disabled:text-red-500/30",
     ],
     false: [
@@ -81,7 +81,7 @@ const variantOutlineStyles = {
 };
 
 const sizeStyles = {
-  sm: "rounded px-2 py-0.5 text-xs h-6",
+  sm: "rounded-sm px-2 py-0.5 text-xs h-6",
   md: "rounded-md px-3 py-1 text-sm",
   lg: "rounded-lg px-4 py-1.5 text-base",
 };
@@ -94,24 +94,20 @@ type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
   right?: ReactNode;
 };
 
-const Button = forwardRef<HTMLButtonElement, Props>(function Button(
-  {
-    variant = "primary",
-    outline = false,
-    size = "md",
-    className,
-    children,
-    left,
-    right,
-    ...props
-  }: Props,
-  ref,
-) {
+export default function Button({
+  variant = "primary",
+  outline = false,
+  size = "md",
+  className,
+  children,
+  left,
+  right,
+  ...props
+}: Props) {
   return (
     <button
-      ref={ref}
       className={classNames(
-        "focus:ring focus:outline-none focus:ring-opacity-50 font-medium text-center flex items-center gap-1",
+        "focus:ring-3 focus:outline-hidden font-medium text-center flex items-center gap-1",
         outlineStyles[outline ? "true" : "false"],
         variantOutlineStyles[variant][outline ? "true" : "false"],
         sizeStyles[size],
@@ -124,6 +120,4 @@ const Button = forwardRef<HTMLButtonElement, Props>(function Button(
       {right}
     </button>
   );
-});
-
-export default Button;
+}

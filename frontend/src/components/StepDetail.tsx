@@ -109,7 +109,7 @@ function NextPreviousButton({
   const Icon = direction == "next" ? IconChevronRight : IconChevronLeft;
   const className = classNames(
     "p-1 bg-white border border-slate-300 flex items-center",
-    attempt ? "hover:bg-slate-100 text-slate-500" : "text-slate-200",
+    attempt ? "hover:bg-slate-50 text-slate-500" : "text-slate-200",
     direction == "next" ? "rounded-r-md -ml-px" : "rounded-l-md -mr-px",
   );
   if (attempt) {
@@ -174,7 +174,7 @@ function AttemptSelector({
 }: AttemptSelectorProps) {
   const selectedExecution = step.executions[selected];
   return (
-    <div className="flex shadow-sm">
+    <div className="flex shadow-xs">
       <NextPreviousButton
         direction="previous"
         activeWorkspaceName={activeWorkspaceName}
@@ -185,7 +185,7 @@ function AttemptSelector({
         maximised={maximised}
       />
       <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 bg-white text-left text-slate-600 border border-slate-300 ">
+        <MenuButton className="flex items-center gap-1 p-1 pl-2 bg-white hover:bg-slate-50 text-left text-slate-600 border border-slate-300 ">
           {selectedExecution && (
             <AttemptSelectorOption
               attempt={selected}
@@ -193,11 +193,11 @@ function AttemptSelector({
               execution={selectedExecution}
             />
           )}
-          <IconChevronDown size={16} className="opacity-40" />
+          <IconChevronDown size={16} className="text-slate-500" />
         </MenuButton>
         <MenuItems
           transition
-          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
           anchor={{ to: "bottom start", gap: 2, padding: 20 }}
         >
           {sortBy(Object.entries(step.executions), "attempt").map(
@@ -214,7 +214,7 @@ function AttemptSelector({
                       maximised: maximised ? "true" : undefined,
                     })}
                     className={classNames(
-                      "p-1 cursor-pointer rounded flex items-center gap-1 data-[active]:bg-slate-100",
+                      "p-1 cursor-pointer rounded-sm flex items-center gap-1 data-active:bg-slate-100",
                       attempt == selected && "font-bold",
                     )}
                   >
@@ -317,7 +317,7 @@ function RerunButton({
     [workspaces, workspaceId, baseWorkspaceId, onRerunStep, stepId],
   );
   return (
-    <div className="flex shadow-sm relative">
+    <div className="flex shadow-xs relative">
       <Popover>
         <PopoverButton
           as={Button}
@@ -333,11 +333,11 @@ function RerunButton({
         <PopoverPanel
           transition
           anchor={{ to: "bottom end", gap: 10, offset: 20 }}
-          className="bg-white shadow-xl rounded-lg p-2 !overflow-visible min-w-[300px]"
+          className="bg-white shadow-xl rounded-lg p-2 overflow-visible! min-w-[300px]"
         >
           {({ close }) => (
             <>
-              <div className="absolute border-b-[10px] border-b-white border-x-transparent border-x-[10px] top-[-10px] right-[30px] w-[20px] h-[10px]"></div>
+              <div className="absolute border-b-10 border-b-white border-x-transparent border-x-10 top-[-10px] right-[30px] w-[20px] h-[10px]"></div>
               <div className="flex items-center gap-1">
                 <Select
                   options={workspaceOptions}
@@ -887,7 +887,7 @@ type ErrorProps = {
 
 function Error({ error }: ErrorProps) {
   return (
-    <div className="p-2 mt-2 rounded bg-red-50 border border-red-200 overflow-x-auto">
+    <div className="p-2 mt-2 rounded-sm bg-red-50 border border-red-200 overflow-x-auto">
       <p className="mb-2">
         <span className="font-mono font-bold">{error.type}</span>:{" "}
         <span>{error.message}</span>

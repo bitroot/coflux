@@ -115,14 +115,14 @@ function Data({ data, references, projectId }: DataProps) {
             {"}"}
           </Fragment>
         );
-      case "ref":
+      case "ref": {
         const reference = references[data.index];
         switch (reference.type) {
-          case "fragment":
+          case "fragment": {
             const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
             return (
               <Menu>
-                <MenuButton className="bg-slate-100 rounded px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
+                <MenuButton className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
                   {reference.format}
                   <span className="text-slate-500">
                     ({humanSize(reference.size)})
@@ -136,7 +136,7 @@ function Data({ data, references, projectId }: DataProps) {
                 <MenuItems
                   transition
                   anchor="bottom"
-                  className="bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+                  className="bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
                 >
                   <dl className="flex flex-col gap-1 p-2">
                     {Object.entries(reference.metadata).map(([key, value]) => (
@@ -155,7 +155,7 @@ function Data({ data, references, projectId }: DataProps) {
                     <a
                       href={primaryBlobStore.url(reference.blobKey)}
                       download
-                      className="text-sm m-1 p-1 rounded-md data-[active]:bg-slate-100 flex items-center gap-1"
+                      className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
                     >
                       <IconDownload size={16} />
                       Download
@@ -164,32 +164,35 @@ function Data({ data, references, projectId }: DataProps) {
                 </MenuItems>
               </Menu>
             );
-          case "execution":
+          }
+          case "execution": {
             const execution = reference.execution;
             return (
               <StepLink
                 runId={execution.runId}
                 stepId={execution.stepId}
                 attempt={execution.attempt}
-                className="bg-slate-100 rounded px-0.5 hover:bg-slate-200 ring-offset-1 ring-slate-400"
+                className="bg-slate-100 rounded-sm px-0.5 hover:bg-slate-200 ring-offset-1 ring-slate-400"
                 hoveredClassName="ring-2"
               >
                 <IconFunction size={16} className="inline-block" />
               </StepLink>
             );
+          }
           case "asset":
             return (
               <AssetLink
                 projectId={projectId}
                 assetId={reference.assetId}
                 asset={reference.asset}
-                className="bg-slate-100 rounded px-0.5 ring-offset-1 ring-slate-400"
+                className="bg-slate-100 rounded-sm px-0.5 ring-offset-1 ring-slate-400"
                 hoveredClassName="ring-2"
               >
                 <AssetIcon asset={reference.asset} className="inline-block" />
               </AssetLink>
             );
         }
+      }
     }
   } else if (typeof data == "string") {
     return (
@@ -310,7 +313,7 @@ export default function Value({
         <Fragment>
           <div
             className={classNames(
-              "bg-white rounded border border-slate-300 font-mono text-sm leading-none",
+              "bg-white rounded-sm border border-slate-300 font-mono text-sm leading-none",
               block ? "p-1 overflow-auto" : "p-0.5",
             )}
           >

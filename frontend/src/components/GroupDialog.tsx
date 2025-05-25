@@ -79,7 +79,7 @@ export default function GroupDialog({
                   stepId={stepId}
                   attempt={attempt}
                   className={classNames(
-                    "p-1 cursor-pointer rounded flex flex-col data-[active]:bg-slate-100 hover:bg-slate-50",
+                    "p-1 cursor-pointer rounded-sm flex flex-col data-active:bg-slate-100 hover:bg-slate-50",
                   )}
                   activeClassName="bg-slate-100"
                 >

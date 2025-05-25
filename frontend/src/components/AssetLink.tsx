@@ -128,7 +128,7 @@ function EntriesTable({
           <tr>
             <td>
               <button
-                className="inline-flex gap-1 items-center mb-1 rounded px-1 hover:bg-slate-100"
+                className="inline-flex gap-1 items-center mb-1 rounded-sm px-1 hover:bg-slate-100"
                 onClick={() => onSelect(pathParent(path))}
               >
                 <IconCornerLeftUp size={16} /> Up
@@ -142,7 +142,7 @@ function EntriesTable({
             <td>
               <button
                 onClick={() => onSelect(`${path}${directory}`)}
-                className="inline-flex gap-1 items-center rounded px-1 hover:bg-slate-100"
+                className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
               >
                 <IconFolder size={16} />
                 {directory}
@@ -156,7 +156,7 @@ function EntriesTable({
             <td>
               <a
                 href={assetUrl(projectId, assetId, entry.path)}
-                className="inline-flex gap-1 items-center rounded px-1 hover:bg-slate-100"
+                className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
                 onClick={(ev) => {
                   if (!ev.ctrlKey) {
                     ev.preventDefault();

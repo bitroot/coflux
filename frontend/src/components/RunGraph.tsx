@@ -180,7 +180,7 @@ function StepNode({
       {Object.keys(step.executions).length > 1 && (
         <div
           className={classNames(
-            "absolute w-full h-full border border-slate-300 bg-white rounded ring-offset-2",
+            "absolute w-full h-full border border-slate-300 bg-white rounded-sm ring-offset-2",
             isActive || isHovered({ stepId, attempt })
               ? "-top-2 -right-2"
               : "-top-1 -right-1",
@@ -195,13 +195,13 @@ function StepNode({
         stepId={stepId}
         attempt={attempt}
         className={classNames(
-          "absolute w-full h-full flex-1 flex gap-2 items-center border rounded px-2 py-1 ring-offset-2",
+          "absolute w-full h-full flex-1 flex gap-2 items-center border rounded-sm px-2 py-1 ring-offset-2",
           execution &&
             classNameForExecutionStatus(getExecutionStatus(execution)),
           isStale && "border-opacity-40",
         )}
-        activeClassName="ring ring-cyan-400"
-        hoveredClassName="ring ring-slate-400"
+        activeClassName="ring-3 ring-cyan-400"
+        hoveredClassName="ring-3 ring-slate-400"
       >
         <span
           className={classNames(
@@ -333,7 +333,7 @@ function ParentNode({ parent }: ParentNodeProps) {
         stepId={parent.stepId}
         attempt={parent.attempt}
         className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
-        hoveredClassName="ring ring-slate-400"
+        hoveredClassName="ring-3 ring-slate-400"
       >
         <span className="text-slate-500 font-bold flex-1">{parent.runId}</span>
         <IconArrowDownRight size={20} className="text-slate-400" />
@@ -362,7 +362,7 @@ function ChildNode({ child }: ChildNodeProps) {
       stepId={child.stepId}
       attempt={child.attempt}
       className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
-      hoveredClassName="ring ring-slate-400"
+      hoveredClassName="ring-3 ring-slate-400"
     >
       <IconArrowUpLeft size={20} className="text-slate-400" />
       <span className="text-slate-500 font-bold flex-1 text-end">
@@ -403,7 +403,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
       <div className="flex min-w-0 overflow-hidden mr-auto">
         {groupName ? (
           <span
-            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded"
+            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded-sm"
             title={groupName}
           >
             {groupName}
@@ -415,7 +415,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
           ...Object.fromEntries(searchParams),
           group: identifier,
         })}
-        className="flex items-center gap-1 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
+        className="flex items-center gap-0.5 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
       >
         {(
           [
@@ -432,7 +432,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               <span
                 key={status}
                 className={classNames(
-                  "px-1 rounded text-xs text-slate-600",
+                  "px-1 rounded text-sm text-slate-600",
                   classNameForExecutionStatus(status),
                 )}
                 title={`${counts[status]} ${status}`}
@@ -441,7 +441,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               </span>
             ),
         )}
-        <IconSelector size={16} className="opacity-50" />
+        <IconSelector size={16} className="text-slate-500" />
       </Link>
     </div>
   );

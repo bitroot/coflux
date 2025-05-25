@@ -50,7 +50,7 @@ export default function AssetsPage() {
                     runId={runId!}
                     stepId={stepId}
                     attempt={attempt}
-                    className="block max-w-full rounded truncate leading-none text-sm ring-offset-1 w-40"
+                    className="block max-w-full rounded-sm truncate leading-none text-sm ring-offset-1 w-40"
                     activeClassName="ring-2 ring-cyan-400"
                     hoveredClassName="ring-2 ring-slate-300"
                   >

@@ -32,7 +32,7 @@ function StepIdentifier({ runId, run, executionId }: StepIdentifierProps) {
         runId={runId}
         stepId={stepId}
         attempt={parseInt(attempt, 10)}
-        className="block truncate w-40 max-w-full rounded text-sm ring-offset-1"
+        className="block truncate w-40 max-w-full rounded-sm text-sm ring-offset-1"
         activeClassName="ring-2 ring-cyan-400"
         hoveredClassName="ring-2 ring-slate-300"
       >

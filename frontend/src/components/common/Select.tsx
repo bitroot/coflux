@@ -5,7 +5,7 @@ import {
   ListboxOption,
   ListboxOptions,
 } from "@headlessui/react";
-import { IconSelector } from "@tabler/icons-react";
+import { IconChevronDown } from "@tabler/icons-react";
 import classNames from "classnames";
 
 import { useField } from "./Field";
@@ -57,7 +57,7 @@ export default function Select<T extends string>({
         <ListboxButton
           id={fieldId}
           className={classNames(
-            "w-full flex items-center bg-slate-50 rounded-md shadow-sm border focus:outline-none focus:ring",
+            "w-full flex items-center bg-slate-50 rounded-md shadow-xs border focus:outline-hidden focus:ring-3",
             variantStyles[variant || defaultVariant],
             sizeStyles[size],
           )}
@@ -68,19 +68,23 @@ export default function Select<T extends string>({
               : empty || "Select..."}
           </span>
           <span className="pointer-events-none -mr-1">
-            <IconSelector className="size-5 text-gray-400" aria-hidden="true" />
+            <IconChevronDown
+              className="text-gray-500"
+              size={16}
+              aria-hidden="true"
+            />
           </span>
         </ListboxButton>
         <ListboxOptions
           anchor="bottom"
           transition
-          className="absolute mt-1 p-1 overflow-auto bg-white rounded-md shadow-lg max-h-60 w-[var(--button-width)] focus:outline-none border transition duration-100 ease-in data-[leave]:data-[closed]:opacity-0"
+          className="absolute mt-1 p-1 overflow-auto bg-white rounded-md shadow-lg max-h-60 w-(--button-width) focus:outline-hidden border transition duration-100 ease-in data-leave:data-closed:opacity-0"
         >
           {keys.map((key) => (
             <ListboxOption
               key={key}
               value={key}
-              className="flex items-center gap-2 cursor-default rounded text-sm p-1 data-[active]:bg-slate-100 data-[selected]:font-bold"
+              className="flex items-center gap-2 cursor-default rounded-sm text-sm p-1 data-active:bg-slate-100 data-selected:font-bold"
             >
               {key === null
                 ? empty

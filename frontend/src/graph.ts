@@ -180,7 +180,7 @@ function traverseRun(
       children.forEach((child) => {
         if (!(child.stepId in seen)) {
           const childGroupIdentifier = !isNil(child.groupId)
-            ? `${stepId}-${child.attempt}-${child.groupId}`
+            ? `${stepId}-${attempt}-${child.groupId}`
             : groupIdentifier;
           traverseRun(
             run,

@@ -72,17 +72,17 @@ function BlobStoreSettings({
     >
       <div className="flex gap-1 items-center text-sm pr-2">
         <DisclosureButton className="flex gap-1 px-1 py-1.5 items-center group flex-1">
-          <span className="group-hover:bg-slate-200 rounded px-1 py-0.5 flex items-center gap-1">
+          <span className="group-hover:bg-slate-200 rounded-sm px-1 py-0.5 flex items-center gap-1">
             <IconChevronRight
               size={16}
-              className="group-data-[open]:rotate-90 transition"
+              className="group-data-open:rotate-90 transition"
             />
             {title}
           </span>
           {index == 0 && <Badge label="Primary" intent="info" size="sm" />}
         </DisclosureButton>
         <button
-          className="hover:enabled:bg-slate-200 rounded p-1 disabled:text-slate-300"
+          className="hover:enabled:bg-slate-200 rounded-sm p-1 disabled:text-slate-300"
           type="button"
           disabled={index == 0}
           onClick={handleMoveUpClick}
@@ -90,7 +90,7 @@ function BlobStoreSettings({
           <IconArrowUp size={16} />
         </button>
         <button
-          className="hover:enabled:bg-slate-200 rounded p-1 disabled:text-slate-300"
+          className="hover:enabled:bg-slate-200 rounded-sm p-1 disabled:text-slate-300"
           type="button"
           disabled={index == count - 1}
           onClick={handleMoveDownClick}
@@ -98,7 +98,7 @@ function BlobStoreSettings({
           <IconArrowDown size={16} />
         </button>
         <button
-          className="hover:enabled:bg-slate-200 rounded p-1 disabled:text-slate-300"
+          className="hover:enabled:bg-slate-200 rounded-sm p-1 disabled:text-slate-300"
           type="button"
           disabled={count <= 1}
           onClick={handleRemoveClick}
@@ -108,7 +108,7 @@ function BlobStoreSettings({
       </div>
       <DisclosurePanel
         transition
-        className="p-3 bg-white rounded-md origin-top transition duration-200 ease-out data-[closed]:opacity-0"
+        className="p-3 bg-white rounded-md origin-top transition duration-200 ease-out data-closed:opacity-0"
       >
         {children}
       </DisclosurePanel>
@@ -370,12 +370,12 @@ function BlobStoresSettings({ stores, onChange }: BlobStoresSettingsProps) {
           <MenuItems
             transition
             anchor="bottom start"
-            className="p-1 bg-white shadow-xl rounded-md flex flex-col text-sm origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+            className="p-1 bg-white shadow-xl rounded-md flex flex-col text-sm origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
           >
             <MenuItem>
               <button
                 onClick={handleHttpAddClick}
-                className="p-1 rounded text-start data-[active]:bg-slate-100"
+                className="p-1 rounded-sm text-start data-active:bg-slate-100"
               >
                 Add HTTP store
               </button>
@@ -383,7 +383,7 @@ function BlobStoresSettings({ stores, onChange }: BlobStoresSettingsProps) {
             <MenuItem>
               <button
                 onClick={handleS3AddClick}
-                className="p-1 rounded text-start data-[active]:bg-slate-100"
+                className="p-1 rounded-sm text-start data-active:bg-slate-100"
               >
                 Add S3 store
               </button>
