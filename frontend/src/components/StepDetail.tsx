@@ -109,7 +109,7 @@ function NextPreviousButton({
   const Icon = direction == "next" ? IconChevronRight : IconChevronLeft;
   const className = classNames(
     "p-1 bg-white border border-slate-300 flex items-center",
-    attempt ? "hover:bg-slate-100 text-slate-500" : "text-slate-200",
+    attempt ? "hover:bg-slate-50 text-slate-500" : "text-slate-200",
     direction == "next" ? "rounded-r-md -ml-px" : "rounded-l-md -mr-px",
   );
   if (attempt) {
@@ -185,7 +185,7 @@ function AttemptSelector({
         maximised={maximised}
       />
       <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 bg-white text-left text-slate-600 border border-slate-300 ">
+        <MenuButton className="flex items-center gap-1 p-1 pl-2 bg-white hover:bg-slate-50 text-left text-slate-600 border border-slate-300 ">
           {selectedExecution && (
             <AttemptSelectorOption
               attempt={selected}
@@ -193,7 +193,7 @@ function AttemptSelector({
               execution={selectedExecution}
             />
           )}
-          <IconChevronDown size={16} className="opacity-40" />
+          <IconChevronDown size={16} className="text-slate-500" />
         </MenuButton>
         <MenuItems
           transition

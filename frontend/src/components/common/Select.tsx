@@ -5,7 +5,7 @@ import {
   ListboxOption,
   ListboxOptions,
 } from "@headlessui/react";
-import { IconSelector } from "@tabler/icons-react";
+import { IconChevronDown } from "@tabler/icons-react";
 import classNames from "classnames";
 
 import { useField } from "./Field";
@@ -68,7 +68,11 @@ export default function Select<T extends string>({
               : empty || "Select..."}
           </span>
           <span className="pointer-events-none -mr-1">
-            <IconSelector className="size-5 text-gray-400" aria-hidden="true" />
+            <IconChevronDown
+              className="text-gray-500"
+              size={16}
+              aria-hidden="true"
+            />
           </span>
         </ListboxButton>
         <ListboxOptions

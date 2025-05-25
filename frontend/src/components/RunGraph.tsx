@@ -441,7 +441,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               </span>
             ),
         )}
-        <IconSelector size={16} className="opacity-50" />
+        <IconSelector size={16} className="text-slate-500" />
       </Link>
     </div>
   );
