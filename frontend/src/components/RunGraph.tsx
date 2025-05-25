@@ -415,7 +415,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
           ...Object.fromEntries(searchParams),
           group: identifier,
         })}
-        className="flex items-center gap-1 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
+        className="flex items-center gap-0.5 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
       >
         {(
           [
@@ -432,7 +432,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               <span
                 key={status}
                 className={classNames(
-                  "px-1 rounded-sm text-xs text-slate-600",
+                  "px-1 rounded text-sm text-slate-600",
                   classNameForExecutionStatus(status),
                 )}
                 title={`${counts[status]} ${status}`}
