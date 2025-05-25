@@ -58,7 +58,7 @@ function MatchOption({ icon: Icon, name, hint, href }: MatchOptionProps) {
       as={Link}
       to={href}
       value={href}
-      className="flex items-center gap-1 py-1 pl-1 pr-2 rounded data-[focus]:bg-slate-100"
+      className="flex items-center gap-1 py-1 pl-1 pr-2 rounded-sm data-focus:bg-slate-100"
     >
       <Icon size={20} strokeWidth={1} className="text-slate-400 shrink-0" />
       <div className="flex-1 text-sm whitespace-nowrap">
@@ -167,7 +167,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
       <ComboboxOptions
         transition
         anchor={{ to: "bottom end", gap: "8px" }}
-        className="bg-white min-w-[var(--input-width)] shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+        className="bg-white min-w-(--input-width) shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
       >
         {error ? (
           <p>Error</p>

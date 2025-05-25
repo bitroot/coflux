@@ -76,7 +76,7 @@ function LogMessage({
         <div className="flex flex-wrap gap-2 mt-1">
           {Object.entries(extra).map(([label, value]) => (
             <div key={label} className="flex items-start gap-1">
-              <span className="bg-slate-400/20 rounded text-slate-400 text-xs px-1 whitespace-nowrap my-0.5">
+              <span className="bg-slate-400/20 rounded-sm text-slate-400 text-xs px-1 whitespace-nowrap my-0.5">
                 <span className="text-slate-900">{label}</span>:
               </span>
               <Value value={value} projectId={projectId} />

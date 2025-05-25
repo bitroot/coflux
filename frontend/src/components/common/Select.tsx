@@ -57,7 +57,7 @@ export default function Select<T extends string>({
         <ListboxButton
           id={fieldId}
           className={classNames(
-            "w-full flex items-center bg-slate-50 rounded-md shadow-sm border focus:outline-none focus:ring",
+            "w-full flex items-center bg-slate-50 rounded-md shadow-xs border focus:outline-hidden focus:ring-3",
             variantStyles[variant || defaultVariant],
             sizeStyles[size],
           )}
@@ -74,13 +74,13 @@ export default function Select<T extends string>({
         <ListboxOptions
           anchor="bottom"
           transition
-          className="absolute mt-1 p-1 overflow-auto bg-white rounded-md shadow-lg max-h-60 w-[var(--button-width)] focus:outline-none border transition duration-100 ease-in data-[leave]:data-[closed]:opacity-0"
+          className="absolute mt-1 p-1 overflow-auto bg-white rounded-md shadow-lg max-h-60 w-(--button-width) focus:outline-hidden border transition duration-100 ease-in data-leave:data-closed:opacity-0"
         >
           {keys.map((key) => (
             <ListboxOption
               key={key}
               value={key}
-              className="flex items-center gap-2 cursor-default rounded text-sm p-1 data-[active]:bg-slate-100 data-[selected]:font-bold"
+              className="flex items-center gap-2 cursor-default rounded-sm text-sm p-1 data-active:bg-slate-100 data-selected:font-bold"
             >
               {key === null
                 ? empty

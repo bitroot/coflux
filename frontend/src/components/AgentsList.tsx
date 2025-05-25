@@ -130,7 +130,7 @@ export default function AgentsList({
     <div className="my-2">
       <div className="px-3">
         <button
-          className="w-full flex-1 flex justify-between items-center rounded p-1 hover:bg-slate-200/50"
+          className="w-full flex-1 flex justify-between items-center rounded-sm p-1 hover:bg-slate-200/50"
           onClick={handleToggleClick}
         >
           <div className="flex items-center gap-1">

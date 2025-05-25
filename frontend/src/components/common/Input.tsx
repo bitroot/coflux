@@ -59,7 +59,7 @@ export default function Input({
   return (
     <div
       className={classNames(
-        "flex items-center bg-slate-50 rounded-md shadow-sm border focus-within:ring ",
+        "flex items-center bg-slate-50 rounded-md shadow-xs border focus-within:ring-3 ",
         variantStyles[variant || defaultVariant],
         sizeStyles[size],
         className,

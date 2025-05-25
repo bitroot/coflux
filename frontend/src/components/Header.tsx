@@ -38,7 +38,7 @@ function PlayPauseButton({
   }, [projectId, workspaceId, state]);
   return state == "active" ? (
     <button
-      className="text-slate-100 bg-cyan-800/30 rounded p-1 hover:bg-cyan-800/60"
+      className="text-slate-100 bg-cyan-800/30 rounded-sm p-1 hover:bg-cyan-800/60"
       title="Pause workspace"
       onClick={handleClick}
     >
@@ -46,7 +46,7 @@ function PlayPauseButton({
     </button>
   ) : state == "paused" ? (
     <button
-      className="text-slate-100 bg-cyan-800/30 rounded p-1 hover:bg-cyan-800/60"
+      className="text-slate-100 bg-cyan-800/30 rounded-sm p-1 hover:bg-cyan-800/60"
       title="Resume workspace"
       onClick={handleClick}
     >
@@ -127,7 +127,7 @@ export default function Header({ projectId, activeWorkspaceName }: Props) {
               onClose={handleSettingsClose}
             />
             <button
-              className="text-slate-100 p-1 rounded hover:bg-slate-100/10"
+              className="text-slate-100 p-1 rounded-sm hover:bg-slate-100/10"
               title="Settings"
               onClick={handleSettingsClick}
             >

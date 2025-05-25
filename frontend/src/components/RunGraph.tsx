@@ -180,7 +180,7 @@ function StepNode({
       {Object.keys(step.executions).length > 1 && (
         <div
           className={classNames(
-            "absolute w-full h-full border border-slate-300 bg-white rounded ring-offset-2",
+            "absolute w-full h-full border border-slate-300 bg-white rounded-sm ring-offset-2",
             isActive || isHovered({ stepId, attempt })
               ? "-top-2 -right-2"
               : "-top-1 -right-1",
@@ -195,7 +195,7 @@ function StepNode({
         stepId={stepId}
         attempt={attempt}
         className={classNames(
-          "absolute w-full h-full flex-1 flex gap-2 items-center border rounded px-2 py-1 ring-offset-2",
+          "absolute w-full h-full flex-1 flex gap-2 items-center border rounded-sm px-2 py-1 ring-offset-2",
           execution &&
             classNameForExecutionStatus(getExecutionStatus(execution)),
           isStale && "border-opacity-40",
@@ -403,7 +403,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
       <div className="flex min-w-0 overflow-hidden mr-auto">
         {groupName ? (
           <span
-            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded"
+            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded-sm"
             title={groupName}
           >
             {groupName}
@@ -432,7 +432,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               <span
                 key={status}
                 className={classNames(
-                  "px-1 rounded text-xs text-slate-600",
+                  "px-1 rounded-sm text-xs text-slate-600",
                   classNameForExecutionStatus(status),
                 )}
                 title={`${counts[status]} ${status}`}

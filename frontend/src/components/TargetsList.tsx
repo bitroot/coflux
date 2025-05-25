@@ -142,17 +142,17 @@ function ModuleMenu({ projectId, workspaceName, moduleName }: ModuleMenuProps) {
   }, [projectId, workspaceName, moduleName]);
   return (
     <Menu>
-      <MenuButton className="text-slate-600 p-1 hover:bg-slate-200 rounded">
+      <MenuButton className="text-slate-600 p-1 hover:bg-slate-200 rounded-sm">
         <IconDotsVertical size={16} />
       </MenuButton>
       <MenuItems
         transition
-        className="p-1 bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+        className="p-1 bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
         anchor={{ to: "bottom end" }}
       >
         <MenuItem>
           <button
-            className="text-sm p-1 rounded data-[active]:bg-slate-100 flex items-center gap-1"
+            className="text-sm p-1 rounded-sm data-active:bg-slate-100 flex items-center gap-1"
             onClick={handleArchiveClick}
           >
             <span className="shrink-0 text-slate-400">

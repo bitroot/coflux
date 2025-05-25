@@ -4,7 +4,7 @@ import { Size, Variant } from "./types";
 
 const outlineStyles = {
   true: "border",
-  false: "text-white shadow-sm",
+  false: "text-white shadow-xs",
 };
 
 const variantOutlineStyles = {
@@ -81,7 +81,7 @@ const variantOutlineStyles = {
 };
 
 const sizeStyles = {
-  sm: "rounded px-2 py-0.5 text-xs h-6",
+  sm: "rounded-sm px-2 py-0.5 text-xs h-6",
   md: "rounded-md px-3 py-1 text-sm",
   lg: "rounded-lg px-4 py-1.5 text-base",
 };
@@ -111,7 +111,7 @@ const Button = forwardRef<HTMLButtonElement, Props>(function Button(
     <button
       ref={ref}
       className={classNames(
-        "focus:ring focus:outline-none focus:ring-opacity-50 font-medium text-center flex items-center gap-1",
+        "focus:ring-3 focus:outline-hidden focus:ring-opacity-50 font-medium text-center flex items-center gap-1",
         outlineStyles[outline ? "true" : "false"],
         variantOutlineStyles[variant][outline ? "true" : "false"],
         sizeStyles[size],

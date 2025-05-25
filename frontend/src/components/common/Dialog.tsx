@@ -34,7 +34,7 @@ export default function Dialog({
   return (
     <HeadlessDialog
       open={open}
-      className="fixed inset-0 flex w-screen items-center justify-center bg-black/30 p-4 transition duration-300 ease-out data-[closed]:opacity-0"
+      className="fixed inset-0 flex w-screen items-center justify-center bg-black/30 p-4 transition duration-300 ease-out data-closed:opacity-0"
       transition
       onClose={onClose}
     >

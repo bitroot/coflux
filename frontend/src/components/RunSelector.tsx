@@ -66,7 +66,7 @@ function Options({
                     activeWorkspaceName,
                     location.pathname,
                   )}
-                  className="flex items-baseline gap-1 text-sm p-1 data-[active]:bg-slate-100 rounded"
+                  className="flex items-baseline gap-1 text-sm p-1 data-active:bg-slate-100 rounded-sm"
                 >
                   <span
                     className={classNames(
@@ -180,7 +180,7 @@ export default function RunSelector({
   className,
 }: Props) {
   return (
-    <div className={classNames(className, "flex shadow-sm")}>
+    <div className={classNames(className, "flex shadow-xs")}>
       <NextPreviousButton
         direction="previous"
         projectId={projectId}
@@ -197,7 +197,7 @@ export default function RunSelector({
         </MenuButton>
         <MenuItems
           transition
-          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
+          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
           anchor={{ to: "bottom start", gap: 2, padding: 20 }}
         >
           <Options
