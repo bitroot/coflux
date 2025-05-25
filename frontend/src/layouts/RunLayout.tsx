@@ -8,7 +8,6 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { Transition } from "@headlessui/react";
-import useResizeObserver from "use-resize-observer";
 import { findKey } from "lodash";
 
 import * as models from "../models";
@@ -24,6 +23,7 @@ import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 import SensorHeader from "../components/SensorHeader";
 import GroupDialog from "../components/GroupDialog";
+import useSize from "../hooks/useSize";
 
 type TabProps = {
   page: string | null;
@@ -156,7 +156,7 @@ export default function RunLayout() {
   useSetActive(
     initialStep && ["target", initialStep.module, initialStep.target],
   );
-  const { ref, width, height } = useResizeObserver<HTMLDivElement>();
+  const [ref, size] = useSize<HTMLDivElement>();
   const detailWidth = Math.min(Math.max(window.innerWidth / 3, 400), 600);
   if (!run || !initialStep) {
     return <Loading />;
@@ -208,7 +208,11 @@ export default function RunLayout() {
             </div>
             <div className="flex-1 basis-0 overflow-auto" ref={ref}>
               <Outlet
-                context={{ run, width: width || 0, height: height || 0 }}
+                context={{
+                  run,
+                  width: size.width || 0,
+                  height: size.height || 0,
+                }}
               />
             </div>
           </div>
