@@ -200,8 +200,8 @@ function StepNode({
             classNameForExecutionStatus(getExecutionStatus(execution)),
           isStale && "border-opacity-40",
         )}
-        activeClassName="ring ring-cyan-400"
-        hoveredClassName="ring ring-slate-400"
+        activeClassName="ring-3 ring-cyan-400"
+        hoveredClassName="ring-3 ring-slate-400"
       >
         <span
           className={classNames(
@@ -333,7 +333,7 @@ function ParentNode({ parent }: ParentNodeProps) {
         stepId={parent.stepId}
         attempt={parent.attempt}
         className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
-        hoveredClassName="ring ring-slate-400"
+        hoveredClassName="ring-3 ring-slate-400"
       >
         <span className="text-slate-500 font-bold flex-1">{parent.runId}</span>
         <IconArrowDownRight size={20} className="text-slate-400" />
@@ -362,7 +362,7 @@ function ChildNode({ child }: ChildNodeProps) {
       stepId={child.stepId}
       attempt={child.attempt}
       className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
-      hoveredClassName="ring ring-slate-400"
+      hoveredClassName="ring-3 ring-slate-400"
     >
       <IconArrowUpLeft size={20} className="text-slate-400" />
       <span className="text-slate-500 font-bold flex-1 text-end">
