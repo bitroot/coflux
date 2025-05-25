@@ -115,10 +115,10 @@ function Data({ data, references, projectId }: DataProps) {
             {"}"}
           </Fragment>
         );
-      case "ref":
+      case "ref": {
         const reference = references[data.index];
         switch (reference.type) {
-          case "fragment":
+          case "fragment": {
             const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
             return (
               <Menu>
@@ -164,7 +164,8 @@ function Data({ data, references, projectId }: DataProps) {
                 </MenuItems>
               </Menu>
             );
-          case "execution":
+          }
+          case "execution": {
             const execution = reference.execution;
             return (
               <StepLink
@@ -177,6 +178,7 @@ function Data({ data, references, projectId }: DataProps) {
                 <IconFunction size={16} className="inline-block" />
               </StepLink>
             );
+          }
           case "asset":
             return (
               <AssetLink
@@ -190,6 +192,7 @@ function Data({ data, references, projectId }: DataProps) {
               </AssetLink>
             );
         }
+      }
     }
   } else if (typeof data == "string") {
     return (
