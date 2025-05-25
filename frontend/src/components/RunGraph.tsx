@@ -385,11 +385,15 @@ function GroupHeader({ group, runId, run }: GroupHeaderProps) {
   const counts = countBy(executions, getExecutionStatus);
   return (
     <div className="flex items-center gap-2">
-      <div
-        className="text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis flex-1 pointer-events-auto"
-        title={`Group: ${group.name}`}
-      >
-        {group.name}
+      <div className="flex min-w-0 overflow-hidden mr-auto">
+        {group.name ? (
+          <span
+            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded"
+            title={`Group: ${group.name}`}
+          >
+            {group.name}
+          </span>
+        ) : null}
       </div>
       <div className="flex gap-1 bg-white rounded-md p-0.5 pointer-events-auto">
         {(
@@ -425,7 +429,7 @@ function GroupHeader({ group, runId, run }: GroupHeaderProps) {
         <MenuItems
           transition
           className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-[closed]:scale-95 data-[closed]:opacity-0"
-          anchor={{ to: "top start", gap: 2, padding: 20 }}
+          anchor={{ to: "top end", gap: 2, padding: 20 }}
         >
           {Object.entries(group.steps).map(([stepId, attempt]) => (
             <MenuItem key={stepId}>
