@@ -40,7 +40,7 @@ export default function ChildrenPage() {
           <tbody>
             {Object.keys(executions)
               .map((a) => parseInt(a, 10))
-              .sort()
+              .sort((a, b) => a - b)
               .map((attempt) => {
                 const spawned = findSpawned(run, executions[attempt]);
                 return (

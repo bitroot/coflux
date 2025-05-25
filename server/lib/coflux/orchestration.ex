@@ -75,6 +75,10 @@ defmodule Coflux.Orchestration do
     )
   end
 
+  def register_group(project_id, parent_id, group_id, name) do
+    call_server(project_id, {:register_group, parent_id, group_id, name})
+  end
+
   def cancel_execution(project_id, execution_id) do
     call_server(project_id, {:cancel_execution, execution_id})
   end

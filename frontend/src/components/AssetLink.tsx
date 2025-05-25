@@ -67,8 +67,8 @@ function PreviewDialog({
 }: FilePreviewProps) {
   if (showPreview(type)) {
     return (
-      <Dialog open={open} className="max-w-[80vw] h-[80vh]" onClose={onClose}>
-        <div className="h-full rounded-lg overflow-hidden flex flex-col min-w-2xl">
+      <Dialog open={open} size="xl" onClose={onClose}>
+        <div className="h-[80vh] rounded-lg overflow-hidden flex flex-col min-w-2xl">
           <iframe
             src={assetUrl(projectId, assetId, path)}
             sandbox="allow-downloads allow-forms allow-modals allow-scripts"
@@ -79,7 +79,7 @@ function PreviewDialog({
     );
   } else {
     return (
-      <Dialog open={open} className="p-6 max-w-sm" onClose={onClose}>
+      <Dialog open={open} size="sm" className="p-6" onClose={onClose}>
         <div className="flex justify-center">
           <a
             href={assetUrl(projectId, assetId, path)}
@@ -236,7 +236,8 @@ function DirectoryBrowser({
             </span>
           </div>
         }
-        className={"p-6 max-w-lg"}
+        size="sm"
+        className="p-6"
         onClose={onClose}
       >
         <div className="flex flex-col">

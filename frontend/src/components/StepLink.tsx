@@ -14,6 +14,7 @@ type Props = {
   runId: string;
   stepId: string;
   attempt?: number;
+  group?: string;
   className?: string;
   activeClassName?: string;
   hoveredClassName?: string;
@@ -24,6 +25,7 @@ export default function StepLink({
   runId,
   stepId,
   attempt,
+  group,
   className,
   activeClassName,
   hoveredClassName,
@@ -55,6 +57,7 @@ export default function StepLink({
           ...Object.fromEntries(searchParams),
           step: isActive ? undefined : stepId,
           attempt: isActive ? undefined : attempt,
+          group,
         },
       )}
       className={classNames(

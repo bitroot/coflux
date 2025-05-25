@@ -6,18 +6,28 @@ import {
 } from "@headlessui/react";
 import classNames from "classnames";
 
+const sizeStyles = {
+  xs: "max-w-md",
+  sm: "max-w-lg",
+  md: "max-w-xl",
+  lg: "max-w-2xl",
+  xl: "max-w-4xl",
+};
+
 type Props = {
   open: boolean;
   title?: ReactNode;
+  size?: keyof typeof sizeStyles;
   className?: string;
   onClose: () => void;
   children: ReactNode;
 };
 
 export default function Dialog({
-  title,
   open,
-  className = "p-6",
+  title,
+  size,
+  className,
   onClose,
   children,
 }: Props) {
@@ -28,19 +38,26 @@ export default function Dialog({
       transition
       onClose={onClose}
     >
-      <DialogPanel
+      <div
         className={classNames(
-          "bg-white shadow-xl rounded-lg w-full",
-          className,
+          "max-h-screen p-4 flex flex-col w-full items-center",
+          size ? sizeStyles[size] : "max-w-screen",
         )}
       >
-        {title && (
-          <DialogTitle className="text-2xl font-bold text-slate-900 mb-4">
-            {title}
-          </DialogTitle>
-        )}
-        {children}
-      </DialogPanel>
+        <DialogPanel
+          className={classNames(
+            "bg-white shadow-xl rounded-lg w-full flex-1 overflow-auto",
+            className,
+          )}
+        >
+          {title && (
+            <DialogTitle className="text-2xl font-bold text-slate-900 mb-4">
+              {title}
+            </DialogTitle>
+          )}
+          {children}
+        </DialogPanel>
+      </div>
     </HeadlessDialog>
   );
 }

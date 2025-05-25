@@ -1,5 +1,6 @@
 from .decorators import workflow, task, stub, sensor
 from .context import (
+    group,
     checkpoint,
     suspense,
     suspend,
@@ -17,6 +18,7 @@ __all__ = [
     "task",
     "stub",
     "sensor",
+    "group",
     "checkpoint",
     "suspense",
     "suspend",

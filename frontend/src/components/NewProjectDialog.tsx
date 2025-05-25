@@ -54,7 +54,8 @@ export default function NewProjectDialog() {
     <Dialog
       title="New project"
       open={true}
-      className="p-6 max-w-lg"
+      size="sm"
+      className="p-6"
       onClose={handleClose}
     >
       {errors && (

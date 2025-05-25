@@ -1,8 +1,19 @@
-import ELK from "elkjs/lib/elk.bundled.js";
-import { max, minBy } from "lodash";
+import ELK, { ElkNode } from "elkjs/lib/elk.bundled.js";
+import { isNil, max, minBy, uniq } from "lodash";
 
 import * as models from "./models";
 import { truncatePath } from "./utils";
+
+type BaseGroup = {
+  identifier: string;
+};
+
+export type Group = BaseGroup & {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+};
 
 type BaseNode = (
   | {
@@ -33,6 +44,7 @@ type BaseNode = (
 ) & {
   width: number;
   height: number;
+  groupIdentifier: string | null;
 };
 
 export type Node = BaseNode & {
@@ -40,11 +52,14 @@ export type Node = BaseNode & {
   y: number;
 };
 
-export type Edge = {
+type BaseEdge = {
   from: string;
   to: string;
+  type: "dependency" | "child" | "parent" | "asset";
+};
+
+export type Edge = BaseEdge & {
   path: { x: number; y: number }[];
-  type: "dependency" | "child" | "transitive" | "parent" | "asset";
 };
 
 export type Graph = {
@@ -52,34 +67,63 @@ export type Graph = {
   height: number;
   nodes: Record<string, Node>;
   edges: Record<string, Edge>;
+  groups: Record<string, Group>;
 };
 
-function chooseStepAttempts(
+function findParentStep(
+  run: models.Run,
+  stepId: string,
+): [string, number] | undefined {
+  const parentStepId = Object.keys(run.steps).find((sId) =>
+    Object.values(run.steps[sId].executions).some((e) =>
+      e.children.some((c) => c.stepId == stepId),
+    ),
+  );
+  const attemptStr =
+    parentStepId &&
+    Object.keys(run.steps[parentStepId].executions).find((attempt) =>
+      run.steps[parentStepId].executions[attempt].children.some(
+        (c) => c.stepId == stepId,
+      ),
+    );
+  if (parentStepId && attemptStr) {
+    return [parentStepId, parseInt(attemptStr, 10)];
+  } else {
+    return undefined;
+  }
+}
+
+function resolvePath(
   run: models.Run,
   activeStepId: string | undefined,
   activeAttempt: number | undefined,
-) {
-  const stepAttempts: Record<string, number | undefined> = {};
+): [Record<string, Record<string, string>>, Record<string, number>] {
+  const groupSteps: Record<string, Record<string, string>> = {};
+  const stepAttempts: Record<string, number> = {};
   if (activeStepId) {
-    stepAttempts[activeStepId] = activeAttempt;
+    if (activeAttempt) {
+      stepAttempts[activeStepId] = activeAttempt;
+    }
     const process = (stepId: string) => {
-      Object.keys(run.steps).forEach((sId) => {
-        if (!(sId in stepAttempts)) {
-          Object.entries(run.steps[sId].executions).forEach(
-            ([attempt, execution]) => {
-              if (execution.children.some((c) => c.stepId == stepId)) {
-                // TODO: keep as string?
-                stepAttempts[sId] = parseInt(attempt, 10);
-                process(sId);
-              }
-            },
-          );
+      const parent = findParentStep(run, stepId);
+      if (parent) {
+        const [parentStepId, parentAttempt] = parent;
+        stepAttempts[parentStepId] = parentAttempt;
+        const child = run.steps[parentStepId].executions[
+          parentAttempt
+        ].children.find((c) => c.stepId == stepId);
+        if (child && !isNil(child.groupId)) {
+          if (!groupSteps[parentStepId]) {
+            groupSteps[parentStepId] = {};
+          }
+          groupSteps[parentStepId][child.groupId] = stepId;
         }
-      });
+        process(parentStepId);
+      }
     };
     process(activeStepId);
   }
-  return stepAttempts;
+  return [groupSteps, stepAttempts];
 }
 
 function getStepAttempt(
@@ -96,23 +140,60 @@ function getStepAttempt(
 
 function traverseRun(
   run: models.Run,
+  groupSteps: Record<string, Record<string, string>>,
   stepAttempts: Record<string, number | undefined>,
   stepId: string,
-  callback: (stepId: string, attempt: number) => void,
+  callback: (
+    stepId: string,
+    attempt: number,
+    children: models.Child[],
+    groupIdentifier: string | null,
+  ) => void,
+  groupIdentifier: string | null = null,
   seen: Record<string, true> = {},
 ) {
   const attempt = getStepAttempt(run, stepAttempts, stepId);
   if (attempt) {
-    callback(stepId, attempt);
     const execution = run.steps[stepId].executions[attempt];
-    execution?.children.forEach((child) => {
-      if (!(child.stepId in seen)) {
-        traverseRun(run, stepAttempts, child.stepId, callback, {
-          ...seen,
-          [child.stepId]: true,
+    if (execution) {
+      const children: models.Child[] = [];
+      Object.keys(execution.groups).forEach((groupIdStr) => {
+        const groupId = parseInt(groupIdStr, 10);
+        const groupStepId = groupSteps[stepId]?.[groupIdStr];
+        const child = execution.children.find(
+          (c) =>
+            c.groupId === groupId && (!groupStepId || c.stepId == groupStepId),
+        );
+        if (child) {
+          children.push(child);
+        }
+      });
+      execution.children
+        .filter((c) => isNil(c.groupId))
+        .forEach((child) => {
+          children.push(child);
         });
-      }
-    });
+
+      callback(stepId, attempt, children, groupIdentifier);
+      seen[stepId] = true;
+
+      children.forEach((child) => {
+        if (!(child.stepId in seen)) {
+          const childGroupIdentifier = !isNil(child.groupId)
+            ? `${stepId}-${child.attempt}-${child.groupId}`
+            : groupIdentifier;
+          traverseRun(
+            run,
+            groupSteps,
+            stepAttempts,
+            child.stepId,
+            callback,
+            childGroupIdentifier,
+            seen,
+          );
+        }
+      });
+    }
   }
 }
 
@@ -134,13 +215,94 @@ function truncateList<T>(array: T[], limit: number): [T[], T[]] {
   }
 }
 
+function buildChildren(
+  nodes: Record<string, Omit<Node, "x" | "y">>,
+): ElkNode[] {
+  const groupIdentifiers = uniq(
+    Object.values(nodes)
+      .map((n) => n.groupIdentifier)
+      .filter((id) => id),
+  );
+
+  return [
+    ...Object.entries(nodes)
+      .filter(([, node]) => !node.groupIdentifier)
+      .map(([id, { width, height }]) => ({ id, width, height })),
+    ...groupIdentifiers.map((groupIdentifier) => ({
+      id: groupIdentifier!,
+      layoutOptions: {
+        "elk.padding": "[left=15, top=40, right=15, bottom=15]",
+      },
+      children: Object.entries(nodes)
+        .filter(([, node]) => node.groupIdentifier == groupIdentifier)
+        .map(([id, { width, height }]) => ({ id, width, height })),
+    })),
+  ];
+}
+
+function extractNodes(
+  graph: ElkNode,
+  nodes: Record<string, Omit<Node, "x" | "y">>,
+): Record<string, Node> {
+  return (graph.children || []).reduce((result, child) => {
+    const node = { ...nodes[child.id], x: child.x!, y: child.y! };
+    return {
+      ...result,
+      ...extractNodes(child, nodes),
+      [child.id]: node,
+    };
+  }, {});
+}
+
+function extractEdges(
+  graph: ElkNode,
+  edges: Record<string, Omit<Edge, "path">>,
+) {
+  return (graph.edges || []).reduce((result, edge) => {
+    if (edge.sections) {
+      // TODO: support multiple sections?
+      const { startPoint, bendPoints, endPoint } = edge.sections[0];
+      const path = [startPoint, ...(bendPoints || []), endPoint];
+      const edge_ = { ...edges[edge.id], path };
+      return { ...result, [edge.id]: edge_ };
+    } else {
+      // TODO: ?
+      return result;
+    }
+  }, {});
+}
+
+function extractGroups(graph: ElkNode, groups: Record<string, BaseGroup>) {
+  return Object.entries(groups).reduce((acc, [id, group]) => {
+    const child = graph.children?.find((c) => c.id == id);
+    if (child) {
+      return {
+        ...acc,
+        [id]: {
+          ...group,
+          x: child.x,
+          y: child.y,
+          width: child.width,
+          height: child.height,
+        },
+      };
+    } else {
+      return acc;
+    }
+  }, {});
+}
+
 export default function buildGraph(
   run: models.Run,
   runId: string,
   activeStepId: string | undefined,
   activeAttempt: number | undefined,
 ): Promise<Graph> {
-  const stepAttempts = chooseStepAttempts(run, activeStepId, activeAttempt);
+  const [groupSteps, stepAttempts] = resolvePath(
+    run,
+    activeStepId,
+    activeAttempt,
+  );
 
   const initialStepId = minBy(
     Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
@@ -148,38 +310,47 @@ export default function buildGraph(
   )!;
 
   const nodes: Record<string, BaseNode> = {};
-  const edges: Record<string, Omit<Edge, "path">> = {};
+  const edges: Record<string, BaseEdge> = {};
+  const groups: Record<string, BaseGroup> = {};
 
   nodes[run.parent?.runId || "start"] = {
     type: "parent",
     parent: run.parent || null,
+    groupIdentifier: null,
     width: run.parent ? 100 : 30,
     height: 30,
   };
   edges["start"] = {
-    from: run.parent?.runId || "start",
-    to: initialStepId,
+    from: initialStepId,
+    to: run.parent?.runId || "start",
     type: "parent",
   };
 
   traverseRun(
     run,
+    groupSteps,
     stepAttempts,
     initialStepId,
-    (stepId: string, attempt: number) => {
+    (
+      stepId: string,
+      attempt: number,
+      children: models.Child[],
+      groupIdentifier: string | null,
+    ) => {
+      if (groupIdentifier && !(groupIdentifier in groups)) {
+        groups[groupIdentifier] = { identifier: groupIdentifier };
+      }
       const step = run.steps[stepId];
       nodes[stepId] = {
         type: "step",
         step,
         stepId,
         attempt,
+        groupIdentifier,
         width: 160,
         height: 50,
       };
       const execution = step.executions[attempt];
-      if (!execution) {
-        return;
-      }
       const [assets, rest] = truncateList(Object.entries(execution.assets), 3);
       assets.forEach(([assetId, asset]) => {
         const text = truncatePath(asset.path) + (asset.type == 1 ? "/" : "");
@@ -188,6 +359,7 @@ export default function buildGraph(
           stepId,
           assetId,
           asset,
+          groupIdentifier,
           width: Math.min(getTextWidth(text) + 32, 140),
           height: 20,
         };
@@ -204,6 +376,7 @@ export default function buildGraph(
           type: "assets",
           stepId,
           assetIds: rest.map(([id]) => id),
+          groupIdentifier,
           width: Math.min(getTextWidth(text) + 14, 100),
           height: 20,
         };
@@ -225,19 +398,18 @@ export default function buildGraph(
           // TODO: ?
         }
       });
-      execution.children.forEach((child) => {
-        const childAttempt = getStepAttempt(run, stepAttempts, child.stepId);
+      children.forEach((child) => {
         const childExecution =
-          childAttempt && run.steps[child.stepId].executions[childAttempt];
+          run.steps[child.stepId].executions[child.attempt];
         if (childExecution) {
           if (
             !Object.values(execution.dependencies).some(
               (d) => d.execution.stepId == child.stepId,
             )
           ) {
-            edges[`${stepId}-${child.stepId}`] = {
-              from: stepId,
-              to: child.stepId,
+            edges[`${child.stepId}-${stepId}`] = {
+              from: child.stepId,
+              to: stepId,
               type: "child",
             };
           }
@@ -252,19 +424,22 @@ export default function buildGraph(
         result?.type == "spawned"
       ) {
         if (result.execution.runId != runId) {
-          const childId = `${result.execution.runId}/${result.execution.stepId}`;
-          nodes[childId] = {
-            type: "child",
-            child: result.execution,
-            width: 100,
-            height: 30,
-          };
-          edges[`${childId}-${stepId}`] = {
-            from: childId,
-            to: stepId,
-            type: "dependency",
-          };
-        } else if (stepAttempts[result.execution.stepId]) {
+          if (result.type == "spawned") {
+            const childId = `${result.execution.runId}/${result.execution.stepId}`;
+            nodes[childId] = {
+              type: "child",
+              child: result.execution,
+              groupIdentifier,
+              width: 100,
+              height: 30,
+            };
+            edges[`${childId}-${stepId}`] = {
+              from: childId,
+              to: stepId,
+              type: "dependency",
+            };
+          }
+        } else {
           const childStepId = result.execution.stepId;
           edges[`${childStepId}-${stepId}`] = {
             from: childStepId,
@@ -277,39 +452,36 @@ export default function buildGraph(
   );
 
   return new ELK()
-    .layout({
-      id: "root",
-      layoutOptions: {
-        "elk.spacing.nodeNode": "10",
-        "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
+    .layout<ElkNode>(
+      {
+        id: "root",
+        children: buildChildren(nodes),
+        edges: Object.entries(edges)
+          .filter(([, { from, to }]) => from in nodes && to in nodes) // TODO: remove?
+          .map(([id, { from, to }]) => {
+            return {
+              id,
+              sources: [from],
+              targets: [to],
+            };
+          }),
       },
-      children: Object.entries(nodes).map(([id, { width, height }]) => ({
-        id,
-        width,
-        height,
-      })),
-      edges: Object.entries(edges).map(([id, { from, to }]) => ({
-        id,
-        sources: [from],
-        targets: [to],
-      })),
-    })
+      {
+        layoutOptions: {
+          "elk.layered.spacing.nodeNodeBetweenLayers": "40",
+          "elk.layered.crossingMinimization.forceNodeModelOrder": "true",
+          "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+          "elk.hierarchyHandling": "INCLUDE_CHILDREN",
+          "elk.json.shapeCoords": "ROOT",
+          "elk.json.edgeCoords": "ROOT",
+        },
+      },
+    )
     .then((graph) => {
-      const nodes_ = graph.children!.reduce((result, child) => {
-        const node = { ...nodes[child.id], x: child.x!, y: child.y! };
-        return { ...result, [child.id]: node };
-      }, {});
-      const edges_ = graph.edges!.reduce((result, edge) => {
-        // TODO: support multiple sections?
-        const { startPoint, bendPoints, endPoint } = edge.sections![0];
-        const path = [startPoint, ...(bendPoints || []), endPoint];
-        const edge_ = { ...edges[edge.id], path };
-        return { ...result, [edge.id]: edge_ };
-      }, {});
-
       return {
-        nodes: nodes_,
-        edges: edges_,
+        nodes: extractNodes(graph, nodes),
+        edges: extractEdges(graph, edges),
+        groups: extractGroups(graph, groups),
         width: graph.width!,
         height: graph.height!,
       };

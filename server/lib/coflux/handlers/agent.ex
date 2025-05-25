@@ -62,6 +62,24 @@ defmodule Coflux.Handlers.Agent do
             {[], state}
         end
 
+      "register_group" ->
+        [parent_id, group_id, name] = message["params"]
+
+        if is_recognised_execution?(parent_id, state) do
+          case(
+            Orchestration.register_group(
+              state.project_id,
+              parent_id,
+              group_id,
+              name
+            )
+          ) do
+            :ok -> {[], state}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
       "submit" ->
         [
           module,
@@ -69,6 +87,7 @@ defmodule Coflux.Handlers.Agent do
           type,
           arguments,
           parent_id,
+          group_id,
           wait_for,
           cache,
           defer,
@@ -86,6 +105,7 @@ defmodule Coflux.Handlers.Agent do
                  target,
                  parse_type(type),
                  Enum.map(arguments, &parse_value/1),
+                 group_id: group_id,
                  execute_after: execute_after,
                  wait_for: wait_for,
                  cache: parse_cache(cache),

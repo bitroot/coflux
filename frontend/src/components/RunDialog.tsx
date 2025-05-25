@@ -112,7 +112,7 @@ export default function RunDialog({
           />
         </div>
       }
-      className="max-w-2xl"
+      size="lg"
       open={open}
       onClose={onClose}
     >

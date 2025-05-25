@@ -74,6 +74,7 @@ defmodule Coflux.Topics.Logs do
   end
 
   defp process_notification(topic, {:step, _, _, _}), do: topic
+  defp process_notification(topic, {:group, _, _, _}), do: topic
   defp process_notification(topic, {:asset, _, _, _}), do: topic
   defp process_notification(topic, {:assigned, _}), do: topic
   defp process_notification(topic, {:result_dependency, _, _, _}), do: topic

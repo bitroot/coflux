@@ -17,7 +17,7 @@
     "@tabler/icons-react": "^3.17.0",
     "@topical/react": "^0.3.1",
     "classnames": "^2.5.1",
-    "elkjs": "^0.9.3",
+    "elkjs": "^0.10.0",
     "lodash": "^4.17.21",
     "luxon": "^3.5.0",
     "micromark": "^4.0.1",

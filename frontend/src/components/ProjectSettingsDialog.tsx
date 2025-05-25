@@ -435,7 +435,7 @@ export default function SettingsDialog({ projectId, open, onClose }: Props) {
       title={<div className="px-4 pt-4">Project settings</div>}
       open={open}
       onClose={onClose}
-      className="max-w-2xl"
+      size="lg"
     >
       <form onSubmit={handleSubmit}>
         <Tabs>

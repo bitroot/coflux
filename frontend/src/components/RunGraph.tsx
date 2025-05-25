@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useState,
   PointerEvent as ReactPointerEvent,
@@ -9,7 +8,7 @@ import {
 } from "react";
 import classNames from "classnames";
 import {
-  IconArrowUpRight,
+  IconArrowUpLeft,
   IconBolt,
   IconClock,
   IconArrowDownRight,
@@ -19,6 +18,7 @@ import {
   IconAlertCircle,
   IconStackPop,
   IconStackPush,
+  IconSelector,
 } from "@tabler/icons-react";
 
 import * as models from "../models";
@@ -27,11 +27,12 @@ import { useHoverContext } from "./HoverContext";
 import buildGraph, { Graph, Edge } from "../graph";
 import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
-import { truncatePath } from "../utils";
+import { buildUrl, truncatePath } from "../utils";
 import AssetLink from "./AssetLink";
-import { isEqual } from "lodash";
+import { countBy, isEqual, max } from "lodash";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 
-function classNameForExecution(execution: models.Execution) {
+function getExecutionStatus(execution: models.Execution) {
   const result =
     execution.result?.type == "deferred" ||
     execution.result?.type == "cached" ||
@@ -42,20 +43,40 @@ function classNameForExecution(execution: models.Execution) {
     execution.result?.type == "cached" ||
     execution.result?.type == "deferred"
   ) {
-    return "border-slate-200 bg-slate-50";
+    return "deferred";
   } else if (!result && !execution?.assignedAt) {
-    // TODO: handle spawned/etc case
-    return "border-blue-200 bg-blue-50";
+    return "assigning";
   } else if (!result) {
-    return "border-blue-400 bg-blue-100";
+    return "running";
   } else if (result.type == "error") {
-    return "border-red-400 bg-red-100";
+    return "errored";
   } else if (result.type == "abandoned" || result.type == "cancelled") {
-    return "border-yellow-400 bg-yellow-100";
+    return "aborted";
   } else if (result.type == "suspended") {
-    return "border-slate-200 bg-slate-50";
+    return "suspended";
   } else {
-    return "border-slate-400 bg-slate-100";
+    return "completed";
+  }
+}
+
+function classNameForExecutionStatus(
+  status: ReturnType<typeof getExecutionStatus>,
+) {
+  switch (status) {
+    case "deferred":
+      return "border-slate-200 bg-slate-50";
+    case "assigning":
+      return "border-blue-200 bg-blue-50";
+    case "running":
+      return "border-blue-400 bg-blue-100";
+    case "errored":
+      return "border-red-400 bg-red-100";
+    case "aborted":
+      return "border-yellow-400 bg-yellow-100";
+    case "suspended":
+      return "border-slate-200 bg-slate-50";
+    case "completed":
+      return "border-slate-400 bg-slate-100";
   }
 }
 
@@ -155,7 +176,7 @@ function StepNode({
     execution?.result?.type == "cached" ||
     execution?.result?.type == "deferred";
   return (
-    <Fragment>
+    <div className="relative h-[50px]">
       {Object.keys(step.executions).length > 1 && (
         <div
           className={classNames(
@@ -175,7 +196,8 @@ function StepNode({
         attempt={attempt}
         className={classNames(
           "absolute w-full h-full flex-1 flex gap-2 items-center border rounded px-2 py-1 ring-offset-2",
-          execution && classNameForExecution(execution),
+          execution &&
+            classNameForExecutionStatus(getExecutionStatus(execution)),
           isStale && "border-opacity-40",
         )}
         activeClassName="ring ring-cyan-400"
@@ -248,7 +270,7 @@ function StepNode({
           </span>
         ) : null}
       </StepLink>
-    </Fragment>
+    </div>
   );
 }
 
@@ -342,11 +364,86 @@ function ChildNode({ child }: ChildNodeProps) {
       className="flex-1 w-full h-full flex items-center px-2 py-1 border border-slate-300 rounded-full bg-white ring-offset-2"
       hoveredClassName="ring ring-slate-400"
     >
-      <IconArrowUpRight size={20} className="text-slate-400" />
+      <IconArrowUpLeft size={20} className="text-slate-400" />
       <span className="text-slate-500 font-bold flex-1 text-end">
         {child.runId}
       </span>
     </StepLink>
+  );
+}
+
+type GroupHeaderProps = {
+  identifier: string;
+  run: models.Run;
+};
+
+function GroupHeader({ identifier, run }: GroupHeaderProps) {
+  const [searchParams] = useSearchParams();
+  const { pathname } = useLocation();
+  const parts = identifier.split("-");
+  const stepId = parts[0];
+  const attempt = parseInt(parts[1], 10);
+  const groupId = parseInt(parts[2], 10);
+  const execution = run.steps[stepId]?.executions[attempt];
+  const groupName = execution.groups[groupId];
+  const executions = execution.children
+    .filter((c) => c.groupId == groupId)
+    .map((c) => c.stepId)
+    .map(
+      (sId) =>
+        run.steps[sId].executions[
+          max(
+            Object.keys(run.steps[sId].executions).map((a) => parseInt(a, 10)),
+          )!
+        ],
+    );
+  const counts = countBy(executions, getExecutionStatus);
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex min-w-0 overflow-hidden mr-auto">
+        {groupName ? (
+          <span
+            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded"
+            title={groupName}
+          >
+            {groupName}
+          </span>
+        ) : null}
+      </div>
+      <Link
+        to={buildUrl(pathname, {
+          ...Object.fromEntries(searchParams),
+          group: identifier,
+        })}
+        className="flex items-center gap-1 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
+      >
+        {(
+          [
+            "running",
+            "completed",
+            "deferred",
+            "suspended",
+            "aborted",
+            "errored",
+          ] as ReturnType<typeof getExecutionStatus>[]
+        ).map(
+          (status) =>
+            !!counts[status] && (
+              <span
+                key={status}
+                className={classNames(
+                  "px-1 rounded text-xs text-slate-600",
+                  classNameForExecutionStatus(status),
+                )}
+                title={`${counts[status]} ${status}`}
+              >
+                ×{counts[status]}
+              </span>
+            ),
+        )}
+        <IconSelector size={16} className="opacity-50" />
+      </Link>
+    </div>
   );
 }
 
@@ -369,13 +466,7 @@ type EdgePathProps = {
 function EdgePath({ edge, offset, highlight }: EdgePathProps) {
   return (
     <path
-      className={
-        highlight
-          ? "stroke-slate-400"
-          : edge.type == "transitive"
-            ? "stroke-slate-100"
-            : "stroke-slate-200"
-      }
+      className={highlight ? "stroke-slate-400" : "stroke-slate-200"}
       fill="none"
       strokeWidth={
         edge.type == "asset"
@@ -415,6 +506,26 @@ function calculateMargins(
   return [marginX, marginY];
 }
 
+function useGraph(
+  run: models.Run,
+  runId: string,
+  activeStepId: string | undefined,
+  activeAttempt: number | undefined,
+) {
+  const [graph, setGraph] = useState<Graph>();
+  useEffect(() => {
+    buildGraph(run, runId, activeStepId, activeAttempt)
+      .then(setGraph)
+      .catch((e) => {
+        setGraph(undefined);
+        // TODO: handle error
+        console.error(e);
+      });
+  }, [run, runId, activeStepId, activeAttempt]);
+  // return graph?.runId == runId ? graph : undefined;
+  return graph;
+}
+
 type Props = {
   projectId: string;
   runId: string;
@@ -441,12 +552,7 @@ export default function RunGraph({
   const [dragging, setDragging] = useState<[number, number]>();
   const [zoomOverride, setZoomOverride] = useState<number>();
   const { isHovered } = useHoverContext();
-  const [graph, setGraph] = useState<Graph>();
-  useEffect(() => {
-    buildGraph(run, runId, activeStepId, activeAttempt)
-      .then(setGraph)
-      .catch(() => setGraph(undefined)); // TODO: handle error
-  }, [run, runId, activeStepId, activeAttempt]);
+  const graph = useGraph(run, runId, activeStepId, activeAttempt);
   const graphWidth = graph?.width || 0;
   const graphHeight = graph?.height || 0;
   const [marginX, marginY] = calculateMargins(
@@ -543,6 +649,18 @@ export default function RunGraph({
               <circle cx={10} cy={10} r={0.5} className="fill-slate-400" />
             </pattern>
           </defs>
+          {graph &&
+            Object.entries(graph.groups).map(([id, group]) => (
+              <rect
+                key={id}
+                width={group.width}
+                height={group.height - 12}
+                x={group.x + marginX}
+                y={group.y + marginY + 12}
+                rx={2}
+                fill="rgba(148, 163, 184, 0.05)"
+              />
+            ))}
           <rect width="100%" height="100%" fill="url(#grid)" />
           {graph &&
             Object.entries(graph.edges).flatMap(([edgeId, edge]) => {
@@ -572,6 +690,21 @@ export default function RunGraph({
         </svg>
         <div className="absolute">
           {graph &&
+            Object.entries(graph.groups).map(([id, group]) => (
+              <div
+                key={id}
+                className="absolute flex flex-col px-3 pointer-events-none"
+                style={{
+                  left: group.x + marginX,
+                  top: group.y + marginY,
+                  width: group.width,
+                  height: group.height,
+                }}
+              >
+                <GroupHeader identifier={group.identifier} run={run} />
+              </div>
+            ))}
+          {graph &&
             Object.entries(graph.nodes).map(([nodeId, node]) => {
               return (
                 <div
@@ -587,22 +720,24 @@ export default function RunGraph({
                   {node.type == "parent" ? (
                     <ParentNode parent={node.parent} />
                   ) : node.type == "step" ? (
-                    <StepNode
-                      projectId={projectId}
-                      stepId={node.stepId}
-                      step={node.step}
-                      attempt={node.attempt}
-                      runId={runId}
-                      isActive={node.stepId == activeStepId}
-                      isStale={isStepStale(
-                        node.stepId,
-                        node.attempt,
-                        run,
-                        activeStepId,
-                        activeAttempt,
-                      )}
-                      runWorkspaceId={runWorkspaceId}
-                    />
+                    <div className="flex-1 flex flex-col justify-center gap-2">
+                      <StepNode
+                        projectId={projectId}
+                        stepId={node.stepId}
+                        step={node.step}
+                        attempt={node.attempt}
+                        runId={runId}
+                        isActive={node.stepId == activeStepId}
+                        isStale={isStepStale(
+                          node.stepId,
+                          node.attempt,
+                          run,
+                          activeStepId,
+                          activeAttempt,
+                        )}
+                        runWorkspaceId={runWorkspaceId}
+                      />
+                    </div>
                   ) : node.type == "asset" ? (
                     <AssetNode
                       projectId={projectId}

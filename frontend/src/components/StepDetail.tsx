@@ -6,7 +6,7 @@ import {
   useState,
 } from "react";
 import classNames from "classnames";
-import { minBy, sortBy } from "lodash";
+import { isNil, minBy, sortBy } from "lodash";
 import { DateTime, Duration } from "luxon";
 import {
   Menu,
@@ -18,7 +18,12 @@ import {
   PopoverButton,
   PopoverPanel,
 } from "@headlessui/react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import {
+  Link,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from "react-router-dom";
 import {
   IconChevronDown,
   IconChevronLeft,
@@ -46,6 +51,7 @@ import Tabs, { Tab } from "./common/Tabs";
 import Select from "./common/Select";
 import Value from "./Value";
 import TagSet from "./TagSet";
+import ExecutionStatus from "./ExecutionStatus";
 
 function getRunWorkspaceId(run: models.Run) {
   const initialStepId = minBy(
@@ -53,38 +59,6 @@ function getRunWorkspaceId(run: models.Run) {
     (stepId) => run.steps[stepId].createdAt,
   )!;
   return run.steps[initialStepId].executions[1].workspaceId;
-}
-
-type ExecutionStatusProps = {
-  execution: models.Execution;
-  step: models.Step;
-};
-
-function ExecutionStatus({ execution, step }: ExecutionStatusProps) {
-  return execution.result?.type == "cached" ? (
-    <Badge intent="none" label="Cached" />
-  ) : execution.result?.type == "spawned" ? (
-    <Badge intent="none" label="Spawned" />
-  ) : execution.result?.type == "deferred" ? (
-    <Badge intent="none" label="Deferred" />
-  ) : execution.result?.type == "value" ? (
-    <Badge intent="success" label="Completed" />
-  ) : execution.result?.type == "error" ? (
-    <Badge intent="danger" label="Failed" />
-  ) : execution.result?.type == "abandoned" ? (
-    <Badge intent="warning" label="Abandoned" />
-  ) : execution.result?.type == "suspended" ? (
-    <Badge intent="none" label="Suspended" />
-  ) : execution.result?.type == "cancelled" ? (
-    <Badge
-      intent="warning"
-      label={step.type == "sensor" ? "Stoppped" : "Cancelled"}
-    />
-  ) : !execution.assignedAt ? (
-    <Badge intent="info" label="Assigning" />
-  ) : !execution.result ? (
-    <Badge intent="info" label="Running" />
-  ) : null;
 }
 
 function getNextPrevious(
@@ -564,7 +538,7 @@ function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
     <div>
       <h3 className="uppercase text-sm font-bold text-slate-400">Arguments</h3>
       {arguments_.length > 0 ? (
-        <ol className="list-decimal list-inside ml-1 marker:text-slate-400 marker:text-xs space-y-1 mt-1">
+        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1">
           {arguments_.map((argument, index) => (
             <li key={index}>
               <Value
@@ -733,7 +707,7 @@ function DependenciesSection({ execution }: DependenciesSectionProps) {
         Dependencies
       </h3>
       {Object.keys(execution.dependencies).length > 0 ? (
-        <ul>
+        <ul className="flex flex-col gap-1 mt-1">
           {Object.entries(execution.dependencies).map(
             ([dependencyId, dependency]) => {
               return (
@@ -792,6 +766,8 @@ type RelationsSectionProps = {
   run: models.Run;
   step: models.Step;
   execution: models.Execution;
+  stepId: string;
+  attempt: number;
 };
 
 function RelationsSection({
@@ -799,7 +775,11 @@ function RelationsSection({
   run,
   step,
   execution,
+  stepId,
+  attempt,
 }: RelationsSectionProps) {
+  const { pathname } = useLocation();
+  const [searchParams] = useSearchParams();
   const parent = findExecution(run, step.parentId);
   return (
     <>
@@ -834,24 +814,45 @@ function RelationsSection({
       <div>
         <h3 className="uppercase text-sm font-bold text-slate-400">Children</h3>
         {execution.children.length ? (
-          <ul>
-            {execution.children.map((child) => {
-              const step = run.steps[child.stepId];
+          <ul className="flex flex-col gap-1 mt-1">
+            {Object.entries(execution.groups).map(([groupIdStr, groupName]) => {
+              const groupId = parseInt(groupIdStr, 10);
+              const count = execution.children.filter(
+                (c) => c.groupId == groupId,
+              ).length;
               return (
-                <li key={`${child.stepId}/${child.attempt}`}>
-                  <StepLink
-                    runId={runId}
-                    stepId={child.stepId}
-                    attempt={child.attempt}
-                    className="rounded text-sm ring-offset-1 px-1"
-                    hoveredClassName="ring-2 ring-slate-300"
+                <li key={groupId}>
+                  <Link
+                    to={buildUrl(pathname, {
+                      ...Object.fromEntries(searchParams),
+                      group: `${stepId}-${attempt}-${groupId}`,
+                    })}
+                    className="rounded border border-slate-200 bg-slate-200/50 hover:bg-slate-200 inline-block px-1 py-0.5 text-sm"
                   >
-                    <span className="font-mono">{step.target}</span>{" "}
-                    <span className="text-slate-500">({step.module})</span>
-                  </StepLink>
+                    {groupName || <em>Unnamed group</em>} ({count})
+                  </Link>
                 </li>
               );
             })}
+            {execution.children
+              .filter((c) => isNil(c.groupId))
+              .map((child) => {
+                const step = run.steps[child.stepId];
+                return (
+                  <li key={`${child.stepId}/${child.attempt}`}>
+                    <StepLink
+                      runId={runId}
+                      stepId={child.stepId}
+                      attempt={child.attempt}
+                      className="rounded text-sm ring-offset-1 px-1"
+                      hoveredClassName="ring-2 ring-slate-300"
+                    >
+                      <span className="font-mono">{step.target}</span>{" "}
+                      <span className="text-slate-500">({step.module})</span>
+                    </StepLink>
+                  </li>
+                );
+              })}
           </ul>
         ) : (
           <p className="italic">None</p>
@@ -1339,6 +1340,8 @@ export default function StepDetail({
                 runId={runId}
                 run={run}
                 step={step}
+                stepId={stepId}
+                attempt={attempt}
                 execution={execution}
               />
               <DependenciesSection execution={execution} />

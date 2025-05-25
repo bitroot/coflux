@@ -162,6 +162,7 @@ export type Dependency = {
 export type Child = {
   stepId: string;
   attempt: number;
+  groupId: number | null;
 };
 
 export type Execution = {
@@ -171,6 +172,7 @@ export type Execution = {
   executeAfter: number | null;
   assignedAt: number | null;
   completedAt: number | null;
+  groups: Record<string, string>;
   dependencies: Record<string, Dependency>;
   children: Child[];
   result: Result | null;

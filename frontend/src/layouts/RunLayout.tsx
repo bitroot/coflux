@@ -23,6 +23,7 @@ import HoverContext from "../components/HoverContext";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 import SensorHeader from "../components/SensorHeader";
+import GroupDialog from "../components/GroupDialog";
 
 type TabProps = {
   page: string | null;
@@ -143,6 +144,7 @@ export default function RunLayout() {
   const activeWorkspaceName = searchParams.get("workspace") || undefined;
   const activeTab = parseInt(searchParams.get("tab") || "", 10) || 0;
   const maximised = !!searchParams.get("maximised");
+  const activeGroupIdentifier = searchParams.get("group");
   const workspaces = useWorkspaces(projectId);
   const activeWorkspaceId = findKey(
     workspaces,
@@ -161,8 +163,14 @@ export default function RunLayout() {
   } else {
     return (
       <HoverContext>
+        <GroupDialog
+          runId={runId!}
+          run={run}
+          identifier={activeGroupIdentifier}
+          projectId={projectId!}
+        />
         <div
-          className={classNames("flex-1 flex flex-col relative")}
+          className="flex-1 flex flex-col relative"
           style={{ paddingRight: activeStepId && !maximised ? detailWidth : 0 }}
         >
           {initialStep.type == "sensor" ? (

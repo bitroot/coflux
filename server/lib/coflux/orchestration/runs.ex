@@ -255,6 +255,7 @@ defmodule Coflux.Orchestration.Runs do
          now,
          opts
        ) do
+    group_id = Keyword.get(opts, :group_id)
     priority = Keyword.get(opts, :priority, 0)
     wait_for = Keyword.get(opts, :wait_for)
     cache = Keyword.get(opts, :cache)
@@ -353,7 +354,7 @@ defmodule Coflux.Orchestration.Runs do
 
     child_added =
       if parent_id do
-        {:ok, id} = insert_child(db, parent_id, execution_id, now)
+        {:ok, id} = insert_child(db, parent_id, execution_id, group_id, now)
         !is_nil(id)
       else
         false
@@ -370,6 +371,16 @@ defmodule Coflux.Orchestration.Runs do
        memo_hit: memo_hit,
        child_added: child_added
      }}
+  end
+
+  def create_group(db, execution_id, group_id, name) do
+    case insert_one(db, :groups, %{
+           execution_id: execution_id,
+           group_id: group_id,
+           name: name
+         }) do
+      {:ok, _} -> :ok
+    end
   end
 
   def rerun_step(db, step_id, workspace_id, execute_after, dependency_ids) do
@@ -770,7 +781,7 @@ defmodule Coflux.Orchestration.Runs do
     case query(
            db,
            """
-           SELECT c.parent_id, s2.external_id, e2.attempt
+           SELECT c.parent_id, s2.external_id, e2.attempt, c.group_id
            FROM children AS c
            INNER JOIN executions AS e1 ON e1.id = c.parent_id
            INNER JOIN steps AS s1 ON s1.id = e1.step_id
@@ -781,7 +792,14 @@ defmodule Coflux.Orchestration.Runs do
            {run_id}
          ) do
       {:ok, rows} ->
-        {:ok, Enum.group_by(rows, &elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})}
+        {:ok,
+         Enum.group_by(
+           rows,
+           fn {parent_id, _, _, _} -> parent_id end,
+           fn {_, external_step_id, attempt, group_id} ->
+             {external_step_id, attempt, group_id}
+           end
+         )}
     end
   end
 
@@ -794,6 +812,20 @@ defmodule Coflux.Orchestration.Runs do
       WHERE execution_id = ?1
       """,
       {execution_id}
+    )
+  end
+
+  def get_groups_for_run(db, run_id) do
+    query(
+      db,
+      """
+      SELECT g.execution_id, g.group_id, g.name
+      FROM groups AS g
+      INNER JOIN executions AS e ON e.id = g.execution_id
+      INNER JOIN steps AS s ON s.id = e.step_id
+      WHERE s.run_id = ?1
+      """,
+      {run_id}
     )
   end
 
@@ -965,13 +997,14 @@ defmodule Coflux.Orchestration.Runs do
     })
   end
 
-  defp insert_child(db, parent_id, child_id, created_at) do
+  defp insert_child(db, parent_id, child_id, group_id, created_at) do
     insert_one(
       db,
       :children,
       %{
         parent_id: parent_id,
         child_id: child_id,
+        group_id: group_id,
         created_at: created_at
       },
       on_conflict: "DO NOTHING"

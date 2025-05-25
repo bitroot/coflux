@@ -76,8 +76,9 @@ export default function AddWorkspaceDialog({
     <Dialog
       title="Add workspace"
       open={open}
+      size="md"
+      className="p-6"
       onClose={onClose}
-      className="p-6 max-w-lg"
     >
       {errors && (
         <Alert variant="warning">
