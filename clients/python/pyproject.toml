@@ -2,7 +2,7 @@
 name = "coflux"
 version = "0.7.0"
 description = ""
-authors = ["Joe Freeman <joe@joef.uk>"]
+authors = ["Bitroot <hello@bitroot.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
