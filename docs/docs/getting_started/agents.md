@@ -12,7 +12,7 @@ Importantly, they can be run locally, automatically watching for code changes, r
 
 ## Initialise
 
-Use the `configure` command to populate a configuration. This isn't necessary, but avoids having to specify configuration manually in the following commands. Run the following command:
+Use the `configure` command to populate a configuration file. A configuration file isn't necessary, but avoids having to specify configuration manually in the following commands. Run the following command:
 
 ```bash
 coflux configure

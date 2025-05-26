@@ -19,6 +19,7 @@ const sidebars: SidebarsConfig = {
     "concurrency",
     "retries",
     "caching",
+    "groups",
     "logging",
     {
       type: "category",
