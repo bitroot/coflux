@@ -73,7 +73,7 @@ const config: Config = {
       ],
     },
     footer: {
-      copyright: `© ${new Date().getFullYear()} Joe Freeman. All Rights Reserved.`,
+      copyright: `© ${new Date().getFullYear()} Bitroot Ltd. All Rights Reserved.`,
     },
     prism: {
       theme: prismThemes.github,
