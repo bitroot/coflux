@@ -215,7 +215,7 @@ def cli():
 )
 @click.option(
     "--image",
-    default="ghcr.io/cofluxlabs/coflux",
+    default="ghcr.io/bitroot/coflux",
     help="The Docker image to run",
 )
 def server(port: int, data_dir: Path, image: str):

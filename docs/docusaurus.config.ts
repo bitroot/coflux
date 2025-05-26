@@ -9,7 +9,7 @@ const config: Config = {
   url: "https://docs.coflux.com",
   baseUrl: "/",
 
-  organizationName: "CofluxLabs",
+  organizationName: "bitroot",
   projectName: "coflux",
 
   onBrokenLinks: "throw",
@@ -66,14 +66,14 @@ const config: Config = {
       },
       items: [
         {
-          href: "https://github.com/CofluxLabs/coflux",
+          href: "https://github.com/bitroot/coflux",
           label: "GitHub",
           position: "right",
         },
       ],
     },
     footer: {
-      copyright: `© ${new Date().getFullYear()} Joe Freeman. All Rights Reserved.`,
+      copyright: `© ${new Date().getFullYear()} Bitroot Ltd. All Rights Reserved.`,
     },
     prism: {
       theme: prismThemes.github,

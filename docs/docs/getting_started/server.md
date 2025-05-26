@@ -16,7 +16,7 @@ docker run \
   --pull always \
   -p 7777:7777 \
   -v $(pwd):/data \
-  ghcr.io/cofluxlabs/coflux
+  ghcr.io/bitroot/coflux
 ```
 :::
 
