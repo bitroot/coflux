@@ -9,7 +9,7 @@ const config: Config = {
   url: "https://docs.coflux.com",
   baseUrl: "/",
 
-  organizationName: "CofluxLabs",
+  organizationName: "bitroot",
   projectName: "coflux",
 
   onBrokenLinks: "throw",
@@ -66,7 +66,7 @@ const config: Config = {
       },
       items: [
         {
-          href: "https://github.com/CofluxLabs/coflux",
+          href: "https://github.com/bitroot/coflux",
           label: "GitHub",
           position: "right",
         },
