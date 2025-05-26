@@ -1,3 +1,13 @@
+## 0.7.0
+
+Enhancements:
+
+- Adds support for defining groups using the `cf.group(...)` context manager.
+
+Changes:
+
+- Updates CLI to handle 'environments' being renamed to 'workspaces', and 'repositories' to 'modules'.
+
 ## 0.6.1
 
 Fixes:
