@@ -1,3 +1,14 @@
+## 0.7.0
+
+Enhancements:
+
+- Adds support for steps to be associated with 'groups'.
+
+Changes:
+
+- Renames 'environments' to 'workspaces'.
+- Renames 'repositories' to 'modules'.
+
 ## 0.6.1
 
 Enhancements:
