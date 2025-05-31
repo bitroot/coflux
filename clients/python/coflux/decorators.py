@@ -148,6 +148,19 @@ def _build_definition(
     )
 
 
+def _build_arguments(callable: t.Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> tuple[object, ...]:
+    sig = inspect.signature(callable)
+    bound = sig.bind_partial(*args, **kwargs)
+    bound.apply_defaults()
+    result: list[object] = []
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            result.extend(bound.arguments.get(param.name, ()))
+        elif param.kind is not inspect.Parameter.VAR_KEYWORD:
+            result.append(bound.arguments[param.name])
+    return tuple(result)
+
+
 class Target(t.Generic[P, T]):
     def __init__(
         self,
@@ -203,14 +216,13 @@ class Target(t.Generic[P, T]):
         return self._fn
 
     def submit(self, *args: P.args, **kwargs: P.kwargs) -> models.Execution[T]:
-        if kwargs:
-            raise Exception("Keyword arguments aren't supported - pass positional arguments instead")
+        arguments = _build_arguments(self._fn, *args, **kwargs)
         try:
             return context.submit(
                 self._definition.type,
                 self._module,
                 self._name,
-                args,
+                arguments,
                 wait_for=self._definition.wait_for,
                 cache=self._definition.cache,
                 retries=self._definition.retries,
@@ -220,6 +232,7 @@ class Target(t.Generic[P, T]):
                 requires=self._definition.requires,
             )
         except context.NotInContextException:
+            # TODO: use 'arguments'?
             result = self._fn(*args, **kwargs)
             return (
                 models.Execution(lambda: result, lambda: None, None)
