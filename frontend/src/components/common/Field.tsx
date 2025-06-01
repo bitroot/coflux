@@ -31,7 +31,7 @@ export default function Field({
             {label}
           </label>
           {hint && (
-            <span className="text-slate-400 ml-1 text-xs">({hint})</span>
+            <span className="text-slate-400 ml-1.5 text-xs">{hint}</span>
           )}
         </div>
         <div>{children}</div>

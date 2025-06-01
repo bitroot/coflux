@@ -27,14 +27,22 @@ const sizeStyles = {
 };
 
 type Props<T extends string> = {
-  value: T | null;
   options: Record<T, ReactNode> | T[];
   variant?: Variant;
   size?: Size;
-  empty?: string;
   className?: string;
-  onChange: (value: T | null) => void;
-};
+} & (
+  | {
+      empty: string;
+      value: T | null;
+      onChange: (value: T | null) => void;
+    }
+  | {
+      empty?: undefined;
+      value: T;
+      onChange: (value: T) => void;
+    }
+);
 
 export default function Select<T extends string>({
   value,
@@ -57,7 +65,7 @@ export default function Select<T extends string>({
         <ListboxButton
           id={fieldId}
           className={classNames(
-            "w-full flex items-center bg-slate-50 rounded-md shadow-xs border focus:outline-hidden focus:ring-3",
+            "w-full flex gap-1 items-center bg-slate-50 rounded-md shadow-xs border focus:outline-hidden focus:ring-3",
             variantStyles[variant || defaultVariant],
             sizeStyles[size],
           )}

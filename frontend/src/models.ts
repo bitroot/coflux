@@ -12,7 +12,7 @@ export type TagSet = Record<string, string[]>;
 
 export type Parameter = {
   name: string;
-  default: string;
+  default: string | null;
   annotation: string;
 };
 

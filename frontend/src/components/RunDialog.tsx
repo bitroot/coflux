@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useState } from "react";
+import { ComponentProps, FormEvent, useCallback, useState } from "react";
 
 import Dialog from "./common/Dialog";
 import * as models from "../models";
@@ -9,6 +9,240 @@ import { RequestError } from "../api";
 import Alert from "./common/Alert";
 import WorkspaceLabel from "./WorkspaceLabel";
 import { micromark } from "micromark";
+import Select from "./common/Select";
+
+type Value =
+  | {
+      type: "string";
+      value: string;
+    }
+  | {
+      type: "number";
+      value: string;
+    }
+  | {
+      type: "json";
+      value: string;
+    }
+  | {
+      type: "boolean";
+      value: boolean | null;
+    }
+  | { type: "null" };
+
+type StringInputProps = Omit<
+  ComponentProps<typeof Input>,
+  "value" | "onChange"
+> & {
+  value: Value & { type: "string" };
+  onChange: (value: Value) => void;
+};
+
+function StringInput({ value, onChange, ...props }: StringInputProps) {
+  const handleChange = useCallback(
+    (value: string) => onChange({ type: "string", value }),
+    [onChange],
+  );
+  return <Input value={value.value} onChange={handleChange} {...props} />;
+}
+
+type NumberInputProps = Omit<
+  ComponentProps<typeof Input>,
+  "value" | "onChange"
+> & {
+  value: Value & { type: "number" };
+  onChange: (value: Value) => void;
+};
+
+function NumberInput({ value, onChange, ...props }: NumberInputProps) {
+  const handleChange = useCallback(
+    (value: string) => onChange({ type: "number", value }),
+    [onChange],
+  );
+  return <Input value={value.value} onChange={handleChange} {...props} />;
+}
+
+type BooleanInputProps = Omit<
+  ComponentProps<typeof Select>,
+  "value" | "onChange" | "options" | "empty"
+> & {
+  value: Value & { type: "boolean" };
+  onChange: (value: Value) => void;
+};
+
+function BooleanInput({ value, onChange, ...props }: BooleanInputProps) {
+  const handleChange = useCallback(
+    (value: "true" | "false" | null) =>
+      onChange({
+        type: "boolean",
+        value: value == "true" ? true : value == "false" ? false : null,
+      }),
+    [onChange],
+  );
+  return (
+    <Select<"true" | "false">
+      value={value.value ? "true" : value.value === false ? "false" : null}
+      options={{ true: "True", false: "False" }}
+      empty="Select..."
+      onChange={handleChange}
+      {...props}
+    />
+  );
+}
+
+type JsonInputProps = Omit<
+  ComponentProps<typeof Input>,
+  "value" | "onChange"
+> & {
+  value: Value & { type: "json" };
+  onChange: (value: Value) => void;
+};
+
+function JsonInput({ value, onChange, ...props }: JsonInputProps) {
+  const handleChange = useCallback(
+    (value: string) => onChange({ type: "json", value }),
+    [onChange],
+  );
+  return <Input value={value.value} onChange={handleChange} {...props} />;
+}
+
+function serialiseValue(value: Value): ["json", string] {
+  switch (value.type) {
+    case "string":
+    case "boolean":
+      return ["json", JSON.stringify(value.value)];
+    case "number":
+      // TODO: parse?
+      return ["json", value.value];
+    case "null":
+      return ["json", "null"];
+    case "json":
+      return ["json", value.value];
+  }
+}
+
+function defaultValue(parameter: models.Parameter): Value {
+  switch (parameter.annotation) {
+    case "<class 'str'>":
+      return {
+        type: "string",
+        value: parameter.default ? JSON.parse(parameter.default) : "",
+      };
+    case "<class 'int'>":
+    case "<class 'float'>":
+      return { type: "number", value: parameter.default || "" };
+    case "<class 'bool'>":
+      return {
+        type: "boolean",
+        value:
+          parameter.default?.toLowerCase() == "true"
+            ? true
+            : parameter.default?.toLowerCase() == "false"
+              ? false
+              : null,
+      };
+    case "None":
+    case "typing.Literal[None]":
+      return { type: "null" };
+    default:
+      return { type: "json", value: parameter.default || "" };
+  }
+}
+
+function coerceToString(value: Value | undefined): Value & { type: "string" } {
+  switch (value?.type) {
+    case "string":
+      return value;
+    case "number":
+    case "json":
+      return { type: "string", value: value.value };
+    case "boolean":
+      return {
+        type: "string",
+        value: value.value ? "true" : value.value === false ? "false" : "",
+      };
+    case "null":
+    case undefined:
+      return { type: "string", value: "" };
+  }
+}
+
+function coerceToNumber(value: Value | undefined): Value & { type: "number" } {
+  switch (value?.type) {
+    case "string":
+    case "json": {
+      const float = parseFloat(value.value);
+      if (!isNaN(float)) {
+        return { type: "number", value: value.value.toString() };
+      } else {
+        return { type: "number", value: "" };
+      }
+    }
+    case "number":
+      return value;
+    case "boolean":
+      return {
+        type: "number",
+        value: value.value ? "1" : value.value === false ? "0" : "",
+      };
+    case "null":
+    case undefined:
+      return { type: "number", value: "" };
+  }
+}
+
+function coerceToJson(value: Value | undefined): Value & { type: "json" } {
+  switch (value?.type) {
+    case "string":
+    case "boolean":
+      return { type: "json", value: JSON.stringify(value.value) };
+    case "number":
+      return { type: "json", value: value.value };
+    case "json":
+      return value;
+    case "null":
+      return { type: "json", value: "null" };
+    case undefined:
+      return { type: "json", value: "" };
+  }
+}
+
+function coerceToBoolean(
+  value: Value | undefined,
+): Value & { type: "boolean" } {
+  switch (value?.type) {
+    case "string":
+      return { type: "boolean", value: value.value.toLowerCase() == "true" };
+    case "number":
+      return { type: "boolean", value: parseFloat(value.value) > 0 };
+    case "json":
+      return {
+        type: "boolean",
+        value:
+          value.value == "true" ? true : value.value == "false" ? false : null,
+      };
+    case "boolean":
+      return value;
+    case "null":
+    case undefined:
+      return { type: "boolean", value: null };
+  }
+}
+
+function coerceType(value: Value | undefined, type: Value["type"]): Value {
+  switch (type) {
+    case "string":
+      return coerceToString(value);
+    case "number":
+      return coerceToNumber(value);
+    case "json":
+      return coerceToJson(value);
+    case "boolean":
+      return coerceToBoolean(value);
+    case "null":
+      return { type: "null" };
+  }
+}
 
 function translateArgumentError(error: string | undefined) {
   switch (error) {
@@ -18,16 +252,27 @@ function translateArgumentError(error: string | undefined) {
       return error;
   }
 }
+
 type ArgumentProps = {
   parameter: models.Parameter;
-  value: string | undefined;
+  value: Value | undefined;
   error?: string;
-  onChange: (name: string, value: string) => void;
+  onChange: (name: string, value: Value) => void;
 };
 
-function Argument({ parameter, value, error, onChange }: ArgumentProps) {
-  const handleChange = useCallback(
-    (value: string) => onChange(parameter.name, value),
+function Argument({
+  parameter,
+  value: value_,
+  error,
+  onChange,
+}: ArgumentProps) {
+  const value = value_ || defaultValue(parameter);
+  const handleTypeChange = useCallback(
+    (type: Value["type"]) => onChange(parameter.name, coerceType(value, type)),
+    [parameter, value, onChange],
+  );
+  const handleValueChange = useCallback(
+    (value: Value) => onChange(parameter.name, value),
     [parameter, onChange],
   );
   return (
@@ -36,11 +281,44 @@ function Argument({ parameter, value, error, onChange }: ArgumentProps) {
       hint={parameter.annotation}
       error={translateArgumentError(error)}
     >
-      <Input
-        value={value ?? ""}
-        placeholder={parameter.default}
-        onChange={handleChange}
-      />
+      <div className="flex gap-1.5">
+        <Select<Value["type"]>
+          value={value.type}
+          options={{
+            string: "String",
+            number: "Number",
+            boolean: "Boolean",
+            null: "Null",
+            json: "JSON",
+          }}
+          onChange={handleTypeChange}
+        />
+        {value.type == "string" ? (
+          <StringInput
+            value={value}
+            onChange={handleValueChange}
+            className="flex-1"
+          />
+        ) : value.type == "number" ? (
+          <NumberInput
+            value={value}
+            onChange={handleValueChange}
+            className="flex-1"
+          />
+        ) : value.type == "boolean" ? (
+          <BooleanInput
+            value={value}
+            onChange={handleValueChange}
+            className="flex-1"
+          />
+        ) : value.type == "json" ? (
+          <JsonInput
+            value={value}
+            onChange={handleValueChange}
+            className="flex-1"
+          />
+        ) : null}
+      </div>
     </Field>
   );
 }
@@ -70,9 +348,9 @@ export default function RunDialog({
 }: Props) {
   const [starting, setStarting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>();
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, Value>>({});
   const handleValueChange = useCallback(
-    (name: string, value: string) =>
+    (name: string, value: Value) =>
       setValues((vs) => ({ ...vs, [name]: value })),
     [],
   );
@@ -81,7 +359,11 @@ export default function RunDialog({
       ev.preventDefault();
       setStarting(true);
       setErrors(undefined);
-      onRun(parameters.map((p) => ["json", values[p.name] || p.default]))
+      onRun(
+        parameters.map((p) =>
+          serialiseValue(values[p.name] || defaultValue(p)),
+        ),
+      )
         .catch((error) => {
           if (error instanceof RequestError) {
             setErrors(error.details);
