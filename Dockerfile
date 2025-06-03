@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN npm run build
 
 
-FROM elixir:1.15.7 AS mix_build
+FROM elixir:1.18.3 AS mix_build
 WORKDIR /app
 
 RUN mix local.hex --force && \
