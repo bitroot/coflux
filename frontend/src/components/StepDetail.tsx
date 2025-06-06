@@ -293,9 +293,7 @@ function RerunButton({
 }: RerunButtonProps) {
   const [rerunning, setRerunning] = useState(false);
   const baseWorkspaceId = getBaseExecution(step, run).workspaceId;
-  const [workspaceId, setWorkspaceId] = useState<string | null>(
-    executionWorkspaceId,
-  );
+  const [workspaceId, setWorkspaceId] = useState<string>(executionWorkspaceId);
   const childWorkspaceIds =
     workspaces && getWorkspaceOptions(workspaces, baseWorkspaceId);
   const workspaceOptions = (childWorkspaceIds || []).reduce(

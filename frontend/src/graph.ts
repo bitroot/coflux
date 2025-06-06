@@ -1,5 +1,5 @@
 import ELK, { ElkNode } from "elkjs/lib/elk.bundled.js";
-import { isNil, max, minBy, uniq } from "lodash";
+import { isNil, max, maxBy, minBy, uniq } from "lodash";
 
 import * as models from "./models";
 import { truncatePath } from "./utils";
@@ -74,23 +74,17 @@ function findParentStep(
   run: models.Run,
   stepId: string,
 ): [string, number] | undefined {
-  const parentStepId = Object.keys(run.steps).find((sId) =>
-    Object.values(run.steps[sId].executions).some((e) =>
-      e.children.some((c) => c.stepId == stepId),
-    ),
+  const parents = Object.keys(run.steps).flatMap((sId) =>
+    Object.keys(run.steps[sId].executions)
+      .filter((attempt) =>
+        run.steps[sId].executions[attempt].children.some(
+          (c) => c.stepId == stepId,
+        ),
+      )
+      .map((s) => parseInt(s, 10))
+      .map((a) => [sId, a] as [string, number]),
   );
-  const attemptStr =
-    parentStepId &&
-    Object.keys(run.steps[parentStepId].executions).find((attempt) =>
-      run.steps[parentStepId].executions[attempt].children.some(
-        (c) => c.stepId == stepId,
-      ),
-    );
-  if (parentStepId && attemptStr) {
-    return [parentStepId, parseInt(attemptStr, 10)];
-  } else {
-    return undefined;
-  }
+  return maxBy(parents, ([sId, a]) => run.steps[sId].executions[a].createdAt);
 }
 
 function resolvePath(
