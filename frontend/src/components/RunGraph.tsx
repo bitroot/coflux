@@ -45,6 +45,7 @@ function getExecutionStatus(execution: models.Execution) {
   ) {
     return "deferred";
   } else if (!result && !execution?.assignedAt) {
+    // TODO: consider previous result?
     return "assigning";
   } else if (!result) {
     return "running";
@@ -419,6 +420,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
       >
         {(
           [
+            "assigning",
             "running",
             "completed",
             "deferred",
