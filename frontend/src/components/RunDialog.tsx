@@ -149,13 +149,27 @@ function defaultValue(parameter: models.Parameter): Value {
   }
 }
 
+function tryParseJson(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function coerceToString(value: Value | undefined): Value & { type: "string" } {
   switch (value?.type) {
     case "string":
       return value;
     case "number":
-    case "json":
-      return { type: "string", value: value.value };
+    case "json": {
+      const value_ = tryParseJson(value.value);
+      if (typeof value_ == "string") {
+        return { type: "string", value: value_ };
+      } else {
+        return { type: "string", value: value.value };
+      }
+    }
     case "boolean":
       return {
         type: "string",
