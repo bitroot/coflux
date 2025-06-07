@@ -51,7 +51,7 @@ def group(name: str | None = None):
     return _get_channel().group(name)
 
 
-def suspense(timeout: float | None):
+def suspense(timeout: float | None = 0):
     return _get_channel().suspense(timeout)
 
 
