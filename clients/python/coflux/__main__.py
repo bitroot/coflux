@@ -351,7 +351,7 @@ def workspaces_create(
     name: str,
 ):
     """
-    Creates an workspace within the project.
+    Creates a workspace within the project.
     """
     base_id = None
     if base:
@@ -495,7 +495,7 @@ def workspaces_archive(
     host: str,
 ):
     """
-    Archives an workspace.
+    Archives a workspace.
     """
     workspaces = _api_request(
         "GET", host, "get_workspaces", params={"project": project}
