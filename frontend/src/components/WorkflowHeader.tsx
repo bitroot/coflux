@@ -122,9 +122,9 @@ export default function WorkflowHeader({
           <span className="text-slate-400">{module}</span>
           <span className="text-slate-400">/</span>
           <IconSubtask
-            size={26}
+            size={24}
             strokeWidth={1.5}
-            className="text-slate-500 shrink-0 self-start"
+            className="text-slate-400 shrink-0 self-start"
           />
           <h1 className="text-lg font-bold font-mono">{target}</h1>
         </div>

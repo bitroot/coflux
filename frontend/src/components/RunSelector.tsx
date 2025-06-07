@@ -12,6 +12,7 @@ import {
 
 import * as models from "../models";
 import { buildUrl } from "../utils";
+import Button from "./common/Button";
 
 function getRunUrl(
   projectId: string,
@@ -189,7 +190,12 @@ export default function RunSelector({
         currentRunId={runId}
       />
       <Menu>
-        <MenuButton className="flex items-center w-full py-1 px-2 gap-1 bg-white border border-slate-300 hover:bg-slate-50">
+        <MenuButton
+          as={Button}
+          variant="secondary"
+          outline={true}
+          className="rounded-none"
+        >
           <span className="font-mono text-sm">{runId}</span>
           <span className="text-slate-500">
             <IconChevronDown size={16} />
@@ -197,7 +203,7 @@ export default function RunSelector({
         </MenuButton>
         <MenuItems
           transition
-          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
+          className="p-1 overflow-y-scroll bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0 outline-none"
           anchor={{ to: "bottom start", gap: 2, padding: 20 }}
         >
           <Options

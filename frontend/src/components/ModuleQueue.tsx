@@ -25,11 +25,11 @@ export default function ModuleQueue({
   emptyText,
 }: Props) {
   return (
-    <div className="flex-1 py-2 flex flex-col gap-2">
-      <div className="shadow-inner bg-slate-50 rounded-sm px-3 py-4">
+    <div className="flex-1 flex flex-col gap-2 border border-slate-200 rounded-md">
+      <div className="px-3 py-4 border-b border-slate-200">
         <h1
           className={classNames(
-            "uppercase font-bold text-xs text-slate-400",
+            "uppercase font-semibold text-xs text-slate-400",
             titleClassName,
           )}
         >
@@ -39,7 +39,7 @@ export default function ModuleQueue({
           {Object.keys(executions).length}
         </p>
       </div>
-      <div className="flex-1 shadow-inner bg-slate-50 rounded-sm overflow-auto p-3">
+      <div className="flex-1 overflow-auto p-3">
         {Object.keys(executions).length ? (
           <table className="w-full">
             <tbody>

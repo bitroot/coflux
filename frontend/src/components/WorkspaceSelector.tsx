@@ -58,7 +58,7 @@ export default function WorkspaceSelector({
   return (
     <Fragment>
       <Menu as="div" className="relative">
-        <MenuButton className="flex items-center gap-1">
+        <MenuButton className="flex items-center gap-1 outline-none">
           {activeWorkspaceId ? (
             <WorkspaceLabel
               projectId={projectId}
@@ -78,7 +78,7 @@ export default function WorkspaceSelector({
         <MenuItems
           transition
           anchor={{ to: "bottom start", gap: 4, padding: 20 }}
-          className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
+          className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0 outline-none"
         >
           {Object.keys(workspaces).length > 0 && (
             <Fragment>

@@ -33,11 +33,11 @@ function Target({ url, icon: Icon, name, isActive }: TargetProps) {
       <Link
         to={url}
         className={classNames(
-          "px-1 py-0.5 my-0.5 rounded-md flex gap-1 items-center text-slate-900",
-          isActive ? "bg-slate-200" : "hover:bg-slate-200/50",
+          "px-1 py-1 my-px rounded-md flex gap-1 items-center text-slate-700",
+          isActive ? "bg-slate-100" : "hover:bg-slate-100/50",
         )}
       >
-        <Icon size={20} strokeWidth={1} className="text-slate-500 shrink-0" />
+        <Icon size={20} strokeWidth={1} className="text-slate-400 shrink-0" />
         <div className="font-mono flex-1 overflow-hidden text-sm text-ellipsis">
           {name}
         </div>
@@ -79,11 +79,11 @@ function ModuleHeader({
       )}
       className={classNames(
         "flex-1 rounded-md",
-        isActive ? "bg-slate-200" : "hover:bg-slate-200/50",
+        isActive ? "bg-slate-100" : "hover:bg-slate-100/50",
       )}
     >
       <div className="flex items-center py-1 px-1 gap-2">
-        <h2 className="font-bold uppercase text-slate-400 text-sm">
+        <h2 className="font-semibold uppercase text-slate-400 text-sm">
           {moduleName}
         </h2>
         {nextDueDiff && nextDueDiff.toMillis() < -1000 ? (
@@ -187,7 +187,7 @@ export default function TargetsList({
       {sortBy(Object.entries(modules), ([name]) => name).map(
         ([moduleName, module]) => (
           <div key={moduleName} className="py-2">
-            <div className="flex gap-1 sticky top-0 bg-slate-100 py-1">
+            <div className="flex gap-1 sticky top-0 bg-white py-1">
               <ModuleHeader
                 moduleName={moduleName}
                 module={module}

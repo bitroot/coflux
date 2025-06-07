@@ -83,7 +83,7 @@ const variantOutlineStyles = {
 const sizeStyles = {
   sm: "rounded-sm px-2 py-0.5 text-xs h-6",
   md: "rounded-md px-3 py-1 text-sm",
-  lg: "rounded-lg px-4 py-1.5 text-base",
+  lg: "rounded-md px-4 py-1 text-base",
 };
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & {

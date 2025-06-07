@@ -4,7 +4,6 @@ import { findKey } from "lodash";
 import Logo from "./Logo";
 import {
   IconChevronCompactRight,
-  IconMinusVertical,
   IconSettings,
   IconPlayerPauseFilled,
   IconPlayerPlayFilled,
@@ -15,6 +14,7 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import SearchInput from "./SearchInput";
 import * as api from "../api";
 import * as models from "../models";
+import Button from "./common/Button";
 
 type PlayPauseButtonProps = {
   projectId: string;
@@ -37,21 +37,18 @@ function PlayPauseButton({
     }
   }, [projectId, workspaceId, state]);
   return state == "active" ? (
-    <button
-      className="text-slate-100 bg-cyan-800/30 rounded-sm p-1 hover:bg-cyan-800/60"
+    <Button
+      variant="secondary"
+      outline={true}
       title="Pause workspace"
       onClick={handleClick}
     >
       <IconPlayerPauseFilled size={16} />
-    </button>
+    </Button>
   ) : state == "paused" ? (
-    <button
-      className="text-slate-100 bg-cyan-800/30 rounded-sm p-1 hover:bg-cyan-800/60"
-      title="Resume workspace"
-      onClick={handleClick}
-    >
+    <Button outline={true} title="Resume workspace" onClick={handleClick}>
       <IconPlayerPlayFilled size={16} className="animate-pulse" />
-    </button>
+    </Button>
   ) : null;
 }
 
@@ -71,38 +68,36 @@ export default function Header({ projectId, activeWorkspaceName }: Props) {
     (e) => e.name == activeWorkspaceName && e.state != "archived",
   );
   return (
-    <div className="flex p-3 items-center justify-between gap-5 h-14">
-      <div className="flex items-center gap-1">
+    <div className="flex p-4 items-center justify-between gap-5 h-14 border-b border-slate-300 bg-white">
+      <div className="flex items-center gap-2">
         <Logo />
-        {projects && (
+        {projects && projectId && (
           <Fragment>
             <IconChevronCompactRight
               size={16}
-              className="text-white/40 shrink-0"
+              className="text-slate-300 shrink-0"
             />
-            <div className="flex items-center gap-2">
-              <ProjectSelector projects={projects} />
-              <IconChevronCompactRight
-                size={16}
-                className="text-white/40 shrink-0"
-              />
-              {projectId && workspaces && (
-                <Fragment>
-                  <WorkspaceSelector
+            <ProjectSelector projects={projects} />
+            <IconChevronCompactRight
+              size={16}
+              className="text-slate-300 shrink-0"
+            />
+            {projectId && workspaces && (
+              <Fragment>
+                <WorkspaceSelector
+                  projectId={projectId}
+                  workspaces={workspaces}
+                  activeWorkspaceId={activeWorkspaceId}
+                />
+                {activeWorkspaceId && (
+                  <PlayPauseButton
                     projectId={projectId}
-                    workspaces={workspaces}
-                    activeWorkspaceId={activeWorkspaceId}
+                    workspaceId={activeWorkspaceId}
+                    workspace={workspaces[activeWorkspaceId]}
                   />
-                  {activeWorkspaceId && (
-                    <PlayPauseButton
-                      projectId={projectId}
-                      workspaceId={activeWorkspaceId}
-                      workspace={workspaces[activeWorkspaceId]}
-                    />
-                  )}
-                </Fragment>
-              )}
-            </div>
+                )}
+              </Fragment>
+            )}
           </Fragment>
         )}
       </div>
@@ -110,29 +105,24 @@ export default function Header({ projectId, activeWorkspaceName }: Props) {
         {projectId && (
           <Fragment>
             {activeWorkspaceId && (
-              <Fragment>
-                <SearchInput
-                  projectId={projectId}
-                  workspaceId={activeWorkspaceId}
-                />
-                <IconMinusVertical
-                  size={16}
-                  className="text-white/40 shrink-0"
-                />
-              </Fragment>
+              <SearchInput
+                projectId={projectId}
+                workspaceId={activeWorkspaceId}
+              />
             )}
             <ProjectSettingsDialog
               projectId={projectId}
               open={settingsOpen}
               onClose={handleSettingsClose}
             />
-            <button
-              className="text-slate-100 p-1 rounded-sm hover:bg-slate-100/10"
+            <Button
+              variant="secondary"
+              outline={true}
               title="Settings"
               onClick={handleSettingsClick}
             >
-              <IconSettings size={24} strokeWidth={1.5} />
-            </button>
+              <IconSettings size={20} strokeWidth={1.5} />
+            </Button>
           </Fragment>
         )}
       </div>

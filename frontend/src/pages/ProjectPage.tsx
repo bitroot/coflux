@@ -172,11 +172,8 @@ export default function ProjectPage() {
   const modules = useModules(projectId, workspaceId);
   if (
     projectId &&
-    (!workspaceName ||
-      (modules &&
-        !Object.values(modules).some(
-          (r) => r.workflows.length || r.sensors.length,
-        )))
+    modules &&
+    !Object.values(modules).some((r) => r.workflows.length || r.sensors.length)
   ) {
     return <GettingStarted projectId={projectId} workspaceId={workspaceId} />;
   } else {

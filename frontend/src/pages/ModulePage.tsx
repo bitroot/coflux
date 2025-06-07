@@ -62,17 +62,17 @@ export default function ModulePage() {
     const [executing, overdue, scheduled] = splitExecutions(executions, now);
     return (
       <div className="flex-1 p-4 flex flex-col min-h-0">
-        <div className="flex py-1 mb-2">
-          <h1 className="flex items-center">
+        <div className="flex py-1 mb-4">
+          <h1 className="flex items-baseline gap-1">
             <IconBox
               size={24}
               strokeWidth={1.5}
-              className="text-slate-400 mr-1"
+              className="text-slate-400 shrink-0 self-start"
             />
             <span className="text-xl font-bold font-mono">{moduleName}</span>
           </h1>
         </div>
-        <div className="flex-1 flex gap-2 min-h-0">
+        <div className="flex-1 flex gap-4 min-h-0">
           <ModuleQueue
             projectId={projectId!}
             workspaceName={workspaceName!}

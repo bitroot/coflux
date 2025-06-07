@@ -104,8 +104,8 @@ function DetailPanel({
       >
         <div
           className={classNames(
-            "bg-slate-100 border border-slate-200 flex flex-1 max-w-full",
-            maximised ? "rounded-lg" : "rounded-md",
+            "bg-white border-l border-slate-200 flex flex-1 max-w-full",
+            maximised ? "rounded-lg" : "",
           )}
         >
           {stepIdOrPrevious && run.steps[stepIdOrPrevious] && (
@@ -226,7 +226,7 @@ export default function RunLayout() {
             className={classNames(
               maximised
                 ? "fixed inset-0 px-10 py-10 bg-black/40"
-                : "absolute right-0 top-0 bottom-0 w-[400px] pt-2 pr-2 pb-2",
+                : "absolute right-0 top-0 bottom-0 w-[400px]",
             )}
             width={detailWidth}
             activeTab={activeTab}

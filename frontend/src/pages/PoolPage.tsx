@@ -173,11 +173,11 @@ export default function PoolPage() {
         <div className="flex-1 flex flex-col min-h-0">
           <div className="p-5 flex items-baseline gap-1 border-b border-slate-200">
             <IconLayoutGrid
-              size={26}
+              size={24}
               strokeWidth={1.5}
-              className="text-slate-500 shrink-0 self-start"
+              className="text-slate-400 shrink-0 self-start"
             />
-            <h1 className="text-lg font-mono">{poolName}</h1>
+            <h1 className="text-lg font-bold font-mono">{poolName}</h1>
           </div>
           <div className="flex-1 flex min-h-0">
             <div className="p-5 flex-1 flex flex-col gap-6 overflow-auto">

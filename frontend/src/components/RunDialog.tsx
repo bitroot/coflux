@@ -404,7 +404,7 @@ export default function RunDialog({
           dangerouslySetInnerHTML={{ __html: micromark(instruction) }}
         />
       )}
-      <form onSubmit={handleSubmit} className="p-6">
+      <form onSubmit={handleSubmit} className="pt-2 px-6 pb-6">
         {errors && (
           <Alert variant="warning">
             <p>Failed to start run. Please check errors below.</p>
@@ -424,11 +424,12 @@ export default function RunDialog({
           </div>
         )}
         <div className="flex gap-2">
-          <Button type="submit" disabled={starting}>
+          <Button type="submit" size="lg" disabled={starting}>
             Run
           </Button>
           <Button
             type="button"
+            size="lg"
             outline={true}
             variant="secondary"
             onClick={onClose}
