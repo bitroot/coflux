@@ -82,8 +82,8 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
   const workspaces = useWorkspaces(projectId);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController>();
-  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const abortControllerRef = useRef<AbortController>(null);
+  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<unknown>();
@@ -130,7 +130,9 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
   useEffect(() => {
-    clearTimeout(debounceTimeoutRef.current);
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
     if (query) {
       setLoading(true);
       debounceTimeoutRef.current = setTimeout(() => {
@@ -145,8 +147,8 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
   const workspaceName = workspaces?.[workspaceId].name;
   return (
     <Combobox immediate onChange={handleChange}>
-      <div className="flex items-center py-1 mr-1 gap-2 bg-slate-100/90 hover:bg-slate-100 rounded-lg flex-1 max-w-56 text-left text-cyan-900 text-sm relative">
-        <span className="absolute left-2 text-cyan-900/40">
+      <div className="flex items-center p-1 mr-1 gap-2 bg-slate-100 rounded-lg flex-1 max-w-56 text-left text-inherit text-sm relative">
+        <span className="absolute left-2 text-slate-400">
           {loading ? (
             <IconLoader2 size={16} className="animate-spin" />
           ) : (
@@ -158,9 +160,9 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
           onChange={handleQueryChange}
           ref={inputRef}
           placeholder="Go to..."
-          className="border-none bg-transparent text-sm text-slate-900 focus:ring-0 py-0 pl-7 pr-14 min-w-0 w-full flex-1 placeholder:text-cyan-900/40"
+          className="border-none bg-transparent text-sm text-slate-900 focus:ring-0 p-1 pl-7 pr-14 min-w-0 w-full flex-1 placeholder:text-slate-400"
         />
-        <span className="rounded-md bg-cyan-900/10 text-cyan-900/30 text-xs font-semibold px-1.5 py-0.5 absolute right-1">
+        <span className="rounded-md bg-white border border-slate-300 text-slate-400 text-xs font-semibold px-1 py-px absolute right-2">
           Ctrl-K
         </span>
       </div>

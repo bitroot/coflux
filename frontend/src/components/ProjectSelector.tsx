@@ -1,5 +1,4 @@
 import { Link, useParams } from "react-router-dom";
-import classNames from "classnames";
 import {
   Menu,
   MenuButton,
@@ -10,6 +9,7 @@ import {
 import { IconCheck, IconChevronDown } from "@tabler/icons-react";
 
 import * as models from "../models";
+import Button from "./common/Button";
 
 type Props = {
   projects: Record<string, models.Project>;
@@ -22,20 +22,17 @@ export default function ProjectSelector({ projects }: Props) {
   return (
     <Menu as="div" className="relative">
       <MenuButton
-        className={classNames(
-          "flex items-center gap-1 py-1 px-2 rounded-sm bg-black/10 hover:bg-white/10 whitespace-nowrap",
-          activeProject ? "text-white" : "text-white/70",
-        )}
+        as={Button}
+        variant="secondary"
+        outline={true}
+        right={<IconChevronDown size={16} className="opacity-40 mt-0.5" />}
       >
-        <span className="text-sm">
-          {activeProject ? activeProject.name : "Select project..."}
-        </span>
-        <IconChevronDown size={16} className="opacity-40 mt-0.5" />
+        {activeProject ? activeProject.name : "Select project..."}
       </MenuButton>
       <MenuItems
         transition
         anchor={{ to: "bottom start", gap: 4, padding: 20 }}
-        className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
+        className="bg-white flex flex-col overflow-y-scroll shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0 outline-none"
       >
         {Object.entries(projects).map(([projectId, project]) => (
           <MenuItem key={projectId}>

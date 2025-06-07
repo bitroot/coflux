@@ -185,7 +185,12 @@ function AttemptSelector({
         maximised={maximised}
       />
       <Menu>
-        <MenuButton className="flex items-center gap-1 p-1 pl-2 bg-white hover:bg-slate-50 text-left text-slate-600 border border-slate-300 ">
+        <MenuButton
+          as={Button}
+          variant="secondary"
+          outline={true}
+          className="rounded-none"
+        >
           {selectedExecution && (
             <AttemptSelectorOption
               attempt={selected}
@@ -197,7 +202,7 @@ function AttemptSelector({
         </MenuButton>
         <MenuItems
           transition
-          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
+          className="p-1 overflow-auto bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0 outline-none"
           anchor={{ to: "bottom start", gap: 2, padding: 20 }}
         >
           {sortBy(Object.entries(step.executions), "attempt").map(
@@ -534,7 +539,9 @@ type ArgumentsSectionProps = {
 function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Arguments</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Arguments
+      </h3>
       {arguments_.length > 0 ? (
         <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1">
           {arguments_.map((argument, index) => (
@@ -561,7 +568,9 @@ type RequiresSectionProps = {
 function RequiresSection({ requires }: RequiresSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Requires</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Requires
+      </h3>
       <TagSet tagSet={requires} />
     </div>
   );
@@ -587,14 +596,14 @@ function ExecutionSection({ execution }: ExecutionSectionProps) {
   return (
     <>
       <div>
-        <h3 className="uppercase text-sm font-bold text-slate-400">
+        <h3 className="uppercase text-sm font-semibold text-slate-400">
           Submitted
         </h3>
         <p>{submittedAt.toLocaleString(DateTime.DATETIME_FULL_WITH_SECONDS)}</p>
       </div>
       {executeAt && executeAt != submittedAt && (
         <div>
-          <h3 className="uppercase text-sm font-bold text-slate-400">
+          <h3 className="uppercase text-sm font-semibold text-slate-400">
             Scheduled
           </h3>
           <p>
@@ -613,7 +622,7 @@ function ExecutionSection({ execution }: ExecutionSectionProps) {
       <div>
         {assignedAt && completedAt ? (
           <>
-            <h3 className="uppercase text-sm font-bold text-slate-400">
+            <h3 className="uppercase text-sm font-semibold text-slate-400">
               Duration
             </h3>
             <p>
@@ -648,7 +657,7 @@ function CacheSection({ step }: CacheSectionProps) {
   return (
     <>
       <div>
-        <h3 className="uppercase text-sm font-bold text-slate-400">
+        <h3 className="uppercase text-sm font-semibold text-slate-400">
           Configuration
         </h3>
         <p>
@@ -687,7 +696,7 @@ function CacheSection({ step }: CacheSectionProps) {
         </p>
       </div>
       <div>
-        <h3 className="uppercase text-sm font-bold text-slate-400">Key</h3>
+        <h3 className="uppercase text-sm font-semibold text-slate-400">Key</h3>
         <p className="font-mono text-sm">{step.cacheKey}</p>
       </div>
     </>
@@ -701,7 +710,7 @@ type DependenciesSectionProps = {
 function DependenciesSection({ execution }: DependenciesSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
         Dependencies
       </h3>
       {Object.keys(execution.dependencies).length > 0 ? (
@@ -782,7 +791,9 @@ function RelationsSection({
   return (
     <>
       <div>
-        <h3 className="uppercase text-sm font-bold text-slate-400">Parent</h3>
+        <h3 className="uppercase text-sm font-semibold text-slate-400">
+          Parent
+        </h3>
         {parent ? (
           <StepLink
             runId={runId}
@@ -810,7 +821,9 @@ function RelationsSection({
         )}
       </div>
       <div>
-        <h3 className="uppercase text-sm font-bold text-slate-400">Children</h3>
+        <h3 className="uppercase text-sm font-semibold text-slate-400">
+          Children
+        </h3>
         {execution.children.length ? (
           <ul className="flex flex-col gap-1 mt-1">
             {Object.entries(execution.groups).map(([groupIdStr, groupName]) => {
@@ -825,7 +838,7 @@ function RelationsSection({
                       ...Object.fromEntries(searchParams),
                       group: `${stepId}-${attempt}-${groupId}`,
                     })}
-                    className="rounded border border-slate-200 bg-slate-200/50 hover:bg-slate-200 inline-block px-1 py-0.5 text-sm"
+                    className="rounded border border-slate-200 bg-slate-100/50 hover:bg-slate-100 inline-block px-1 py-0.5 text-sm"
                   >
                     {groupName || <em>Unnamed group</em>} ({count})
                   </Link>
@@ -868,7 +881,7 @@ type ValueSectionProps = {
 function ValueSection({ value, projectId }: ValueSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Result</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">Result</h3>
       <Value
         value={value}
         projectId={projectId}
@@ -917,7 +930,7 @@ type ErrorSectionProps = {
 function ErrorSection({ result }: ErrorSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Result</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">Result</h3>
       <Error error={result.error} />
     </div>
   );
@@ -932,7 +945,9 @@ type RetrySectionProps = {
 function RetrySection({ runId, stepId, retry }: RetrySectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Retried</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Retried
+      </h3>
       <p>
         By:{" "}
         <StepLink
@@ -958,7 +973,9 @@ type SuspendedSectionProps = {
 function SuspendedSection({ runId, stepId, successor }: SuspendedSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Suspended</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Suspended
+      </h3>
       <p>
         To:{" "}
         <StepLink
@@ -982,7 +999,9 @@ type DeferredSectionProps = {
 function DeferredSection({ result }: DeferredSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Deferred</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Deferred
+      </h3>
       {result.execution && (
         <p>
           To:{" "}
@@ -1009,7 +1028,7 @@ type CachedSectionProps = {
 function CachedSection({ result }: CachedSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Cached</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">Cached</h3>
       <p>
         To:{" "}
         <StepLink
@@ -1034,7 +1053,9 @@ type SpawnedSectionProps = {
 function SpawnedSection({ result }: SpawnedSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Spawned</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">
+        Spawned
+      </h3>
       <p>
         To:{" "}
         <StepLink
@@ -1141,7 +1162,7 @@ type AssetsSectionProps = {
 function AssetsSection({ execution, projectId }: AssetsSectionProps) {
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Assets</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">Assets</h3>
       {Object.keys(execution.assets).length ? (
         <ul>
           {Object.entries(execution.assets).map(([assetId, asset]) => (
@@ -1181,7 +1202,7 @@ function LogsSection({
   );
   return (
     <div>
-      <h3 className="uppercase text-sm font-bold text-slate-400">Logs</h3>
+      <h3 className="uppercase text-sm font-semibold text-slate-400">Logs</h3>
       {executionLogs === undefined ? (
         <Loading />
       ) : (

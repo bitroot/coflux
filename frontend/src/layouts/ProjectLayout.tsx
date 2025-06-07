@@ -58,7 +58,7 @@ function Sidebar({ projectId, workspaceName, active, open }: SidebarProps) {
       leaveFrom="translate-x-0"
       leaveTo="-translate-x-full"
     >
-      <div className="w-[30%] max-w-[350px] min-w-[200px] bg-slate-100 text-slate-400 border-r border-slate-200 flex-none flex flex-col">
+      <div className="w-[25%] max-w-[300px] min-w-[200px] bg-white text-slate-400 border-r border-slate-200 flex-none flex flex-col">
         <div className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 flex flex-col min-h-0 divide-y divide-slate-200">
             <div className="flex-1 flex flex-col overflow-auto">

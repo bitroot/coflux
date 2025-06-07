@@ -149,13 +149,27 @@ function defaultValue(parameter: models.Parameter): Value {
   }
 }
 
+function tryParseJson(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function coerceToString(value: Value | undefined): Value & { type: "string" } {
   switch (value?.type) {
     case "string":
       return value;
     case "number":
-    case "json":
-      return { type: "string", value: value.value };
+    case "json": {
+      const value_ = tryParseJson(value.value);
+      if (typeof value_ == "string") {
+        return { type: "string", value: value_ };
+      } else {
+        return { type: "string", value: value.value };
+      }
+    }
     case "boolean":
       return {
         type: "string",
@@ -404,7 +418,7 @@ export default function RunDialog({
           dangerouslySetInnerHTML={{ __html: micromark(instruction) }}
         />
       )}
-      <form onSubmit={handleSubmit} className="p-6">
+      <form onSubmit={handleSubmit} className="pt-2 px-6 pb-6">
         {errors && (
           <Alert variant="warning">
             <p>Failed to start run. Please check errors below.</p>
@@ -424,11 +438,12 @@ export default function RunDialog({
           </div>
         )}
         <div className="flex gap-2">
-          <Button type="submit" disabled={starting}>
+          <Button type="submit" size="lg" disabled={starting}>
             Run
           </Button>
           <Button
             type="button"
+            size="lg"
             outline={true}
             variant="secondary"
             onClick={onClose}

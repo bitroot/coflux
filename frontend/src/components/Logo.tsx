@@ -12,7 +12,7 @@ export default function Logo({ width = 75, height = 30 }: Props) {
         width={width}
         height={height}
         viewBox="0 0 300 120"
-        className="text-white"
+        className="text-cyan-600"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >

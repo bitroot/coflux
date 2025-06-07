@@ -9,17 +9,17 @@ import Value from "./Value";
 function classForLevel(level: models.LogMessageLevel) {
   switch (level) {
     case 0:
-      return "border-slate-200/30";
+      return "border-slate-200/50";
     case 1:
-      return "border-slate-300/30 text-slate-600 font-mono text-sm";
+      return "border-slate-400/50 text-slate-600 font-mono text-sm";
     case 2:
-      return "border-blue-400/30";
+      return "border-blue-400/50";
     case 3:
-      return "border-red-300/30 text-red-800 font-mono text-sm";
+      return "border-red-300/50 text-red-800 font-mono text-sm";
     case 4:
-      return "border-yellow-500/30";
+      return "border-yellow-500/50";
     case 5:
-      return "border-red-600/30";
+      return "border-red-600/50";
   }
 }
 
@@ -138,7 +138,7 @@ export default function RunLogs({
                     >
                       <div className="flex items-center">
                         <span
-                          className="text-slate-400/70 relative pr-2 text-sm"
+                          className="text-slate-400 relative pr-2 text-sm"
                           title={createdAt.toLocaleString(
                             DateTime.DATETIME_SHORT_WITH_SECONDS,
                           )}

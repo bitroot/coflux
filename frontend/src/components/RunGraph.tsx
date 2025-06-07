@@ -65,7 +65,7 @@ function classNameForExecutionStatus(
 ) {
   switch (status) {
     case "deferred":
-      return "border-slate-200 bg-slate-50";
+      return "border-slate-200 bg-white";
     case "assigning":
       return "border-blue-200 bg-blue-50";
     case "running":
@@ -75,9 +75,9 @@ function classNameForExecutionStatus(
     case "aborted":
       return "border-yellow-400 bg-yellow-100";
     case "suspended":
-      return "border-slate-200 bg-slate-50";
+      return "border-slate-200 bg-white";
     case "completed":
-      return "border-slate-400 bg-slate-100";
+      return "border-slate-400 bg-white";
   }
 }
 
@@ -251,7 +251,7 @@ function StepNode({
           </span>
         ) : execution?.result?.type == "cached" ? (
           <span title="Read from cache">
-            <IconStackPop size={16} className="text-slate-400" />
+            <IconStackPop size={16} className="text-slate-300" />
           </span>
         ) : step.memoKey ? (
           <span title="Memoised">
@@ -259,7 +259,7 @@ function StepNode({
           </span>
         ) : step.cacheConfig ? (
           <span title="Written to cache">
-            <IconStackPush size={16} className="text-slate-300" />
+            <IconStackPush size={16} className="text-slate-400" />
           </span>
         ) : execution?.result?.type == "suspended" ? (
           <span title="Suspended">
@@ -287,7 +287,7 @@ function AssetNode({ projectId, assetId, asset }: AssetNodeProps) {
       projectId={projectId}
       assetId={assetId}
       asset={asset}
-      className="h-full w-full flex gap-0.5 px-1.5 items-center bg-white rounded-full text-slate-700 text-sm ring-slate-400"
+      className="h-full w-full flex gap-0.5 px-1.5 items-center bg-slate-50 rounded-full text-slate-700 text-sm ring-slate-400"
       hoveredClassName="ring-2"
     >
       <AssetIcon
@@ -313,7 +313,7 @@ function MoreAssetsNode({ assetIds }: MoreAssetsNodeProps) {
   return (
     <span
       className={classNames(
-        "h-full w-full px-1.5 items-center bg-white rounded-full text-slate-400 text-sm ring-slate-400 text-ellipsis overflow-hidden whitespace-nowrap",
+        "h-full w-full px-1.5 items-center bg-slate-50 rounded-full text-slate-400 text-sm ring-slate-400 text-ellipsis overflow-hidden whitespace-nowrap",
         assetIds.some((assetId) => isHovered({ assetId })) && "ring-2",
       )}
     >
@@ -404,7 +404,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
       <div className="flex min-w-0 overflow-hidden mr-auto">
         {groupName ? (
           <span
-            className="bg-white block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded-sm"
+            className="block text-slate-600 text-sm overflow-hidden whitespace-nowrap text-ellipsis pointer-events-auto px-1 rounded-sm"
             title={groupName}
           >
             {groupName}
@@ -416,7 +416,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
           ...Object.fromEntries(searchParams),
           group: identifier,
         })}
-        className="flex items-center gap-0.5 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-300 pointer-events-auto"
+        className="flex items-center gap-0.5 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-400 pointer-events-auto"
       >
         {(
           [
@@ -468,7 +468,7 @@ type EdgePathProps = {
 function EdgePath({ edge, offset, highlight }: EdgePathProps) {
   return (
     <path
-      className={highlight ? "stroke-slate-400" : "stroke-slate-200"}
+      className={highlight ? "stroke-slate-400" : "stroke-slate-300"}
       fill="none"
       strokeWidth={
         edge.type == "asset"
@@ -632,7 +632,7 @@ export default function RunGraph({
           width={canvasWidth}
           height={canvasHeight}
           className={classNames(
-            "absolute",
+            "absolute bg-slate-50/50",
             dragging
               ? "cursor-grabbing"
               : zoom > minZoom
@@ -644,11 +644,11 @@ export default function RunGraph({
           <defs>
             <pattern
               id="grid"
-              width={16}
-              height={16}
+              width={20}
+              height={20}
               patternUnits="userSpaceOnUse"
             >
-              <circle cx={10} cy={10} r={0.5} className="fill-slate-400" />
+              <circle cx={10} cy={10} r={1} className="fill-slate-400/30" />
             </pattern>
           </defs>
           {graph &&
@@ -659,8 +659,8 @@ export default function RunGraph({
                 height={group.height - 12}
                 x={group.x + marginX}
                 y={group.y + marginY + 12}
-                rx={2}
-                fill="rgba(148, 163, 184, 0.05)"
+                rx={5}
+                className="fill-slate-100"
               />
             ))}
           <rect width="100%" height="100%" fill="url(#grid)" />

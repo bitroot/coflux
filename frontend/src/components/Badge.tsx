@@ -14,7 +14,7 @@ function classNameForIntent(intent: Intent) {
     case "info":
       return "bg-blue-100 text-blue-500";
     case "none":
-      return "bg-slate-200 text-slate-500";
+      return "bg-slate-100 text-slate-500";
   }
 }
 

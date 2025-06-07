@@ -313,7 +313,7 @@ export default function Value({
         <Fragment>
           <div
             className={classNames(
-              "bg-white rounded-sm border border-slate-300 font-mono text-sm leading-none",
+              "bg-white rounded-sm border border-slate-200 font-mono text-sm leading-none",
               block ? "p-1 overflow-auto" : "p-0.5",
             )}
           >
