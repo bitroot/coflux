@@ -152,7 +152,7 @@ export default function ProjectLayout() {
   return (
     <Fragment>
       <Header projectId={projectId!} activeWorkspaceName={workspaceName} />
-      <div className="flex-1 flex min-h-0 bg-white overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
         <Sidebar
           projectId={projectId!}
           workspaceName={workspaceName!}

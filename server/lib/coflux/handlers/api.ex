@@ -200,9 +200,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :descendants} ->
-          json_error_response(req, "bad_request",
-            details: %{"workspaceId" => "has_dependencies"}
-          )
+          json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
 
         {:error, :not_found} ->
           json_error_response(req, "not_found", code: 404)
@@ -763,7 +761,6 @@ defmodule Coflux.Handlers.Api do
              Enum.reduce_while(value, {:ok, []}, fn parameter, {:ok, result} ->
                case parse_parameter(parameter) do
                  {:ok, parsed} -> {:cont, {:ok, [parsed | result]}}
-                 # {:error, error} -> {:halt, {:error, error}}
                end
              end) do
         {:ok, Enum.reverse(backwards)}
