@@ -82,8 +82,8 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
   const workspaces = useWorkspaces(projectId);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController>();
-  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const abortControllerRef = useRef<AbortController>(null);
+  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<unknown>();
@@ -130,7 +130,9 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
   useEffect(() => {
-    clearTimeout(debounceTimeoutRef.current);
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
     if (query) {
       setLoading(true);
       debounceTimeoutRef.current = setTimeout(() => {
