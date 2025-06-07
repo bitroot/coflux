@@ -32,19 +32,14 @@ _timeout: ContextVar[float | None] = ContextVar("timeout", default=None)
 _group_id: ContextVar[int | None] = ContextVar("group_id", default=None)
 
 
-class Timeout(Exception):
-    pass
-
-
 class Future(t.Generic[T]):
     def __init__(self):
         self._event = threading.Event()
         self._result: T | None = None
         self._error: t.Any | None = None
 
-    def result(self, timeout: float | None = None):
-        if not self._event.wait(timeout):
-            raise Timeout()
+    def result(self):
+        self._event.wait()
         if self._error:
             raise Exception(self._error)
         else:
@@ -104,6 +99,7 @@ class SubmitExecutionRequest(t.NamedTuple):
 
 class ResolveReferenceRequest(t.NamedTuple):
     execution_id: int
+    timeout: float | None
 
 
 class PersistAssetRequest(t.NamedTuple):
@@ -114,13 +110,12 @@ class PersistAssetRequest(t.NamedTuple):
     metadata: dict[str, t.Any]
 
 
-class ResolveAssetRequest(t.NamedTuple):
+class GetAssetRequest(t.NamedTuple):
     asset_id: int
 
 
 class SuspendRequest(t.NamedTuple):
     execute_after: dt.datetime | None
-    execution_ids: list[int]
 
 
 class CancelExecutionRequest(t.NamedTuple):
@@ -228,7 +223,6 @@ class Channel:
         self._connection = connection
         self._request_id = counter()
         self._requests: dict[int, Future[t.Any]] = {}
-        self._cache: dict[t.Any, Future[t.Any]] = {}
         self._groups: list[str | None] = []
         self._running = True
         self._exit_stack = contextlib.ExitStack()
@@ -260,16 +254,12 @@ class Channel:
     def _send(self, *message):
         self._connection.send(message)
 
-    def _request(self, request, *, key=None, timeout=None):
-        if key and key in self._cache:
-            return self._cache[key].result(timeout)
+    def _request(self, request):
         request_id = self._request_id()
         future = Future()
         self._requests[request_id] = future
-        if key:
-            self._cache[key] = future
         self._send("request", request_id, request)
-        return future.result(timeout)
+        return future.result()
 
     def _notify(self, notification):
         self._send("notify", notification)
@@ -365,7 +355,7 @@ class Channel:
             execute_after = dt.datetime.now() + dt.timedelta(seconds=delay)
         elif isinstance(delay, dt.timedelta):
             execute_after = dt.datetime.now() + delay
-        self._notify(SuspendRequest(execute_after, []))
+        self._notify(SuspendRequest(execute_after))
 
     def _resolve_arguments(
         self,
@@ -419,15 +409,10 @@ class Channel:
                 raise Exception(f"unexpected result ({result})")
 
     def _resolve_reference(self, execution_id: int) -> t.Any:
-        try:
-            result = self._request(
-                ResolveReferenceRequest(execution_id),
-                key=("result", execution_id),
-                timeout=_timeout.get(),
-            )
-            return self._deserialise_result(result)
-        except Timeout:
-            self._notify(SuspendRequest(None, [execution_id]))
+        result = self._request(
+            ResolveReferenceRequest(execution_id, _timeout.get())
+        )
+        return self._deserialise_result(result)
 
     def _cancel_execution(self, execution_id: int) -> None:
         # TODO: wait for confirmation?
@@ -493,10 +478,7 @@ class Channel:
                 to = self._directory.joinpath(to)
             if not to.is_relative_to(self._directory):
                 raise Exception("asset must be restored to execution directory")
-        # TODO: use timeout?
-        asset_type, path_str, blob_key = self._request(
-            ResolveAssetRequest(asset_id), key=("asset", asset_id)
-        )
+        asset_type, path_str, blob_key = self._request(GetAssetRequest(asset_id))
         target = to or self._directory.joinpath(path_str)
         target.parent.mkdir(parents=True, exist_ok=True)
         if asset_type == 0:
@@ -764,13 +746,13 @@ class Execution:
                 self._status = ExecutionStatus.STOPPING
                 self._server_notify("put_error", (self._id, error))
                 self._process.join()
-            case SuspendRequest(execute_after, execution_ids):
+            case SuspendRequest(execute_after):
                 self._status = ExecutionStatus.STOPPING
                 execute_after_ms = execute_after and int(
                     execute_after.timestamp() * 1000
                 )
                 self._server_notify(
-                    "suspend", (self._id, execute_after_ms, execution_ids)
+                    "suspend", (self._id, execute_after_ms)
                 )
                 self._process.join()
             case CancelExecutionRequest(execution_id):
@@ -828,10 +810,11 @@ class Execution:
                     ),
                     request_id,
                 )
-            case ResolveReferenceRequest(execution_id):
+            case ResolveReferenceRequest(execution_id, timeout):
                 # TODO: set (and unset) state on Execution to indicate waiting?
+                timeout_ms = timeout and timeout * 1000
                 self._server_request(
-                    "get_result", (execution_id, self._id), request_id, _parse_result
+                    "get_result", (execution_id, self._id, timeout_ms), request_id, _parse_result
                 )
             case PersistAssetRequest(type, path, blob_key, size, metadata):
                 self._server_request(
@@ -839,7 +822,7 @@ class Execution:
                     (self._id, type, path, blob_key, size, metadata),
                     request_id,
                 )
-            case ResolveAssetRequest(asset_id):
+            case GetAssetRequest(asset_id):
                 self._server_request("get_asset", (asset_id, self._id), request_id)
             case other:
                 raise Exception(f"Received unhandled request: {other!r}")

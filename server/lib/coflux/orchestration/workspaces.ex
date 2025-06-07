@@ -285,7 +285,7 @@ defmodule Coflux.Orchestration.Workspaces do
   end
 
   def update_pool(db, workspace_id, pool_name, pool) do
-    # TODO: validate pool
+    # TODO: validate pool (check launcher is specified)
 
     with_transaction(db, fn ->
       now = current_timestamp()

@@ -67,7 +67,8 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after}
+         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
+          dependencies}
        ) do
     if workspace_id in topic.state.workspace_ids do
       Topic.set(
@@ -82,7 +83,10 @@ defmodule Coflux.Topics.Run do
           completedAt: nil,
           groups: %{},
           assets: %{},
-          dependencies: %{},
+          dependencies:
+            Map.new(dependencies, fn {dependency_id, dependency} ->
+              {Integer.to_string(dependency_id), build_dependency(dependency)}
+            end),
           children: [],
           result: nil,
           logCount: 0

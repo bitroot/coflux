@@ -26,6 +26,7 @@ defmodule Coflux.Orchestration.Server do
     defstruct project_id: nil,
               db: nil,
               tick_timer: nil,
+              suspend_timer: nil,
 
               # id -> %{name, base_id, state}
               workspaces: %{},
@@ -60,7 +61,7 @@ defmodule Coflux.Orchestration.Server do
               # topic -> [notification]
               notifications: %{},
 
-              # execution_id -> [{session_id, request_id}]
+              # execution_id -> [{from_execution_id, request_id, suspend_at}]
               waiting: %{},
 
               # task_ref -> callback
@@ -691,7 +692,7 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               {:run, run.id},
               {:execution, external_step_id, attempt, execution_id, workspace_id, created_at,
-               execute_after}
+               execute_after, %{}}
             )
           else
             state
@@ -964,11 +965,12 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:get_result, execution_id, from_execution_id, external_session_id, request_id},
+        {:get_result, execution_id, from_execution_id, timeout_ms, request_id},
         _from,
         state
       ) do
     # TODO: check execution_id exists? (call resolve_result first?)
+    # TODO: require from_execution_id to be set if timeout_ms is specified?
 
     state =
       if from_execution_id do
@@ -995,14 +997,29 @@ defmodule Coflux.Orchestration.Server do
     {result, state} =
       case resolve_result(state.db, execution_id) do
         {:pending, execution_id} ->
-          session_id = Map.fetch!(state.session_ids, external_session_id)
-
           state =
-            update_in(
-              state,
-              [Access.key(:waiting), Access.key(execution_id, [])],
-              &[{session_id, request_id} | &1]
-            )
+            if timeout_ms == 0 do
+              {:ok, state} =
+                process_result(state, from_execution_id, {:suspended, nil, [execution_id]})
+
+              state
+            else
+              now = System.monotonic_time(:millisecond)
+              suspend_at = if timeout_ms, do: now + timeout_ms
+
+              state =
+                update_in(
+                  state,
+                  [Access.key(:waiting), Access.key(execution_id, [])],
+                  &[{from_execution_id, request_id, suspend_at} | &1]
+                )
+
+              if timeout_ms do
+                reschedule_next_suspend(state)
+              else
+                state
+              end
+            end
 
           {:wait, state}
 
@@ -1958,6 +1975,46 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
+  def handle_info(:suspend, state) do
+    now = System.monotonic_time(:millisecond)
+
+    suspended =
+      Enum.reduce(
+        state.waiting,
+        %{},
+        fn {execution_id, execution_waiting}, suspended ->
+          Enum.reduce(
+            execution_waiting,
+            suspended,
+            fn {from_execution_id, _, suspend_at}, suspended ->
+              if suspend_at && suspend_at <= now do
+                Map.update(suspended, from_execution_id, [execution_id], &[execution_id | &1])
+              else
+                suspended
+              end
+            end
+          )
+        end
+      )
+
+    state =
+      Enum.reduce(
+        suspended,
+        state,
+        fn {execution_id, dependency_ids}, state ->
+          {:ok, state} = process_result(state, execution_id, {:suspended, nil, dependency_ids})
+          state
+        end
+      )
+
+    state =
+      state
+      |> reschedule_next_suspend()
+      |> flush_notifications()
+
+    {:noreply, state}
+  end
+
   def handle_info({task_ref, result}, state) when is_map_key(state.launcher_tasks, task_ref) do
     state = process_launcher_result(state, task_ref, {:ok, result})
     {:noreply, state}
@@ -2138,8 +2195,9 @@ defmodule Coflux.Orchestration.Server do
         waiting
         |> Enum.map(fn {execution_id, execution_waiting} ->
           {execution_id,
-           Enum.reject(execution_waiting, fn {s_id, _} ->
-             s_id == session_id
+           Enum.reject(execution_waiting, fn {from_execution_id, _, _} ->
+             MapSet.member?(session.starting, from_execution_id) ||
+               MapSet.member?(session.executing, from_execution_id)
            end)}
         end)
         |> Enum.reject(fn {_execution_id, execution_waiting} ->
@@ -2276,12 +2334,17 @@ defmodule Coflux.Orchestration.Server do
 
         execute_at = execute_after || created_at
 
+        dependencies =
+          Map.new(dependency_ids, fn execution_id ->
+            {execution_id, resolve_execution(state.db, execution_id)}
+          end)
+
         state =
           state
           |> notify_listeners(
             {:run, step.run_id},
             {:execution, step.external_id, attempt, execution_id, workspace_id, created_at,
-             execute_after}
+             execute_after, dependencies}
           )
           |> notify_listeners(
             {:modules, workspace_id},
@@ -2794,24 +2857,55 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp reschedule_next_suspend(state) do
+    if state.suspend_timer do
+      Process.cancel_timer(state.suspend_timer)
+    end
+
+    next_suspend_at =
+      state.waiting
+      |> Map.values()
+      |> Enum.flat_map(fn execution_waiting ->
+        Enum.map(execution_waiting, fn {_, _, suspend_at} -> suspend_at end)
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> nil end)
+
+    timer =
+      if next_suspend_at do
+        Process.send_after(self(), :suspend, next_suspend_at, abs: true)
+      end
+
+    Map.put(state, :suspend_timer, timer)
+  end
+
   defp notify_waiting(state, execution_id) do
     {execution_waiting, waiting} = Map.pop(state.waiting, execution_id)
 
     if execution_waiting do
-      case resolve_result(state.db, execution_id) do
-        {:pending, execution_id} ->
-          waiting =
-            Map.update(waiting, execution_id, execution_waiting, &(&1 ++ execution_waiting))
+      state =
+        case resolve_result(state.db, execution_id) do
+          {:pending, new_execution_id} ->
+            waiting =
+              Map.update(waiting, new_execution_id, execution_waiting, &(&1 ++ execution_waiting))
 
-          Map.put(state, :waiting, waiting)
+            Map.put(state, :waiting, waiting)
 
-        {:ok, result} ->
-          state = Map.put(state, :waiting, waiting)
+          {:ok, result} ->
+            state = Map.put(state, :waiting, waiting)
 
-          Enum.reduce(execution_waiting, state, fn {session_id, request_id}, state ->
-            send_session(state, session_id, {:result, request_id, result})
-          end)
-      end
+            Enum.reduce(
+              execution_waiting,
+              state,
+              fn {from_execution_id, request_id, _}, state ->
+                # TODO: handle missing session?
+                {:ok, session_id} = find_session_for_execution(state, from_execution_id)
+                send_session(state, session_id, {:result, request_id, result})
+              end
+            )
+        end
+
+      reschedule_next_suspend(state)
     else
       state
     end
@@ -2833,6 +2927,26 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp abort_execution(state, execution_id) do
+    state =
+      Enum.reduce(
+        state.waiting,
+        state,
+        fn {for_execution_id, execution_waiting}, state ->
+          execution_waiting =
+            Enum.reject(execution_waiting, fn {from_execution_id, _, _} ->
+              from_execution_id == execution_id
+            end)
+
+          Map.update!(state, :waiting, fn waiting ->
+            if Enum.any?(execution_waiting) do
+              Map.put(waiting, for_execution_id, execution_waiting)
+            else
+              Map.delete(waiting, for_execution_id)
+            end
+          end)
+        end
+      )
+
     case find_session_for_execution(state, execution_id) do
       {:ok, session_id} ->
         send_session(state, session_id, {:abort, execution_id})
