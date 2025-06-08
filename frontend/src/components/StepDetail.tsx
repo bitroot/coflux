@@ -543,9 +543,9 @@ function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
         Arguments
       </h3>
       {arguments_.length > 0 ? (
-        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1">
+        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1 overflow-x-auto">
           {arguments_.map((argument, index) => (
-            <li key={index}>
+            <li key={index} className="whitespace-nowrap">
               <Value
                 value={argument}
                 projectId={projectId}
@@ -555,7 +555,7 @@ function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
           ))}
         </ol>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
@@ -669,15 +669,15 @@ function CacheSection({ step }: CacheSectionProps) {
               })}
             </span>
           ) : (
-            <span className="text-slate-400">(none)</span>
+            <span className="text-slate-400 italic">None</span>
           )}
         </p>
         <p>
           Parameters:{" "}
           {cacheConfig.params === true ? (
-            <span className="text-slate-400">(all)</span>
+            <span className="text-slate-400 italic">All</span>
           ) : !cacheConfig.params.length ? (
-            <span>(none)</span>
+            <span className="italic">None</span>
           ) : (
             cacheConfig.params.map((position) => `${position}`).join(", ")
           )}
@@ -685,13 +685,13 @@ function CacheSection({ step }: CacheSectionProps) {
         <p>
           Version:{" "}
           {cacheConfig.version || (
-            <span className="text-slate-400">(none)</span>
+            <span className="text-slate-400 italic">None</span>
           )}
         </p>
         <p>
           Namespace:{" "}
           {cacheConfig.namespace || (
-            <span className="text-slate-400">(default)</span>
+            <span className="text-slate-400 italic">Default</span>
           )}
         </p>
       </div>
@@ -739,7 +739,7 @@ function DependenciesSection({ execution }: DependenciesSectionProps) {
           )}
         </ul>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
@@ -802,8 +802,10 @@ function RelationsSection({
             className="rounded text-sm ring-offset-1 px-1"
             hoveredClassName="ring-2 ring-slate-300"
           >
-            <span className="font-mono">{step.target}</span>{" "}
-            <span className="text-slate-500">({step.module})</span>
+            <span className="font-mono">{run.steps[parent[0]].target}</span>{" "}
+            <span className="text-slate-500">
+              ({run.steps[parent[0]].module})
+            </span>
           </StepLink>
         ) : run.parent ? (
           <StepLink
@@ -817,7 +819,7 @@ function RelationsSection({
             <span className="text-slate-500">({run.parent.module})</span>
           </StepLink>
         ) : (
-          <p className="italic">None</p>
+          <p className="text-slate-400 italic">None</p>
         )}
       </div>
       <div>
@@ -838,9 +840,10 @@ function RelationsSection({
                       ...Object.fromEntries(searchParams),
                       group: `${stepId}-${attempt}-${groupId}`,
                     })}
-                    className="rounded border border-slate-200 bg-slate-100/50 hover:bg-slate-100 inline-block px-1 py-0.5 text-sm"
+                    className="rounded hover:bg-slate-50 inline-block px-1 py-0.5 text-sm"
                   >
-                    {groupName || <em>Unnamed group</em>} ({count})
+                    {groupName || <em>Unnamed group</em>}{" "}
+                    <Badge label={count} />
                   </Link>
                 </li>
               );
@@ -866,7 +869,7 @@ function RelationsSection({
               })}
           </ul>
         ) : (
-          <p className="italic">None</p>
+          <p className="text-slate-400 italic">None</p>
         )}
       </div>
     </>
@@ -1175,7 +1178,7 @@ function AssetsSection({ execution, projectId }: AssetsSectionProps) {
           ))}
         </ul>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
