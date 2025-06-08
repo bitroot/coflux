@@ -1,5 +1,5 @@
 import { useParams } from "react-router-dom";
-import { sortBy } from "lodash";
+import { sortBy, uniqBy } from "lodash";
 
 import * as models from "../models";
 import { useContext } from "../layouts/RunLayout";
@@ -21,20 +21,23 @@ export default function AssetsPage() {
   const { run } = useContext();
   const { run: runId, project: projectId } = useParams();
   const assets: Item[] = sortBy(
-    Object.entries(run.steps).flatMap(([stepId, step]) =>
-      Object.entries(step.executions).flatMap(([attempt, execution]) =>
-        Object.entries(execution.assets).map(
-          ([assetId, asset]) =>
-            [
-              stepId,
-              step,
-              parseInt(attempt, 10),
-              execution,
-              assetId,
-              asset,
-            ] as Item,
+    uniqBy(
+      Object.entries(run.steps).flatMap(([stepId, step]) =>
+        Object.entries(step.executions).flatMap(([attempt, execution]) =>
+          Object.entries(execution.assets).map(
+            ([assetId, asset]) =>
+              [
+                stepId,
+                step,
+                parseInt(attempt, 10),
+                execution,
+                assetId,
+                asset,
+              ] as Item,
+          ),
         ),
       ),
+      (item) => item[4],
     ),
     (item) => item[5].path,
   );
