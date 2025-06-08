@@ -2898,9 +2898,13 @@ defmodule Coflux.Orchestration.Server do
               execution_waiting,
               state,
               fn {from_execution_id, request_id, _}, state ->
-                # TODO: handle missing session?
-                {:ok, session_id} = find_session_for_execution(state, from_execution_id)
-                send_session(state, session_id, {:result, request_id, result})
+                case find_session_for_execution(state, from_execution_id) do
+                  {:ok, session_id} ->
+                    send_session(state, session_id, {:result, request_id, result})
+
+                  :error ->
+                    state
+                end
               end
             )
         end
