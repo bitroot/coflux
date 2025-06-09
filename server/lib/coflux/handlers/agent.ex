@@ -255,19 +255,18 @@ defmodule Coflux.Handlers.Agent do
         end
 
       "put_asset" ->
-        [execution_id, type, path, blob_key, size, metadata] = message["params"]
+        [execution_id, entries] = message["params"]
+
+        # TODO: validate
 
         if is_recognised_execution?(execution_id, state) do
+          entries =
+            Enum.map(entries, fn [path, blob_key, size, metadata] ->
+              {path, blob_key, size, metadata}
+            end)
+
           {:ok, asset_id} =
-            Orchestration.put_asset(
-              state.project_id,
-              execution_id,
-              type,
-              path,
-              blob_key,
-              size,
-              metadata
-            )
+            Orchestration.put_asset(state.project_id, execution_id, entries)
 
           {[success_message(message["id"], asset_id)], state}
         else
@@ -283,8 +282,11 @@ defmodule Coflux.Handlers.Agent do
                  asset_id,
                  from_execution_id: from_execution_id
                ) do
-            {:ok, asset_type, path, blob_key, _metadata} ->
-              {[success_message(message["id"], [asset_type, path, blob_key])], state}
+            {:ok, entries} ->
+              entries =
+                Map.new(entries, fn {path, blob_key, _size, _metadata} -> {path, blob_key} end)
+
+              {[success_message(message["id"], entries)], state}
 
             {:error, error} ->
               {[error_message(message["id"], error)], state}

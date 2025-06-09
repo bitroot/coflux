@@ -110,11 +110,8 @@ defmodule Coflux.Orchestration do
     )
   end
 
-  def put_asset(project_id, execution_id, type, path, blob_key, size, metadata) do
-    call_server(
-      project_id,
-      {:put_asset, execution_id, type, path, blob_key, size, metadata}
-    )
+  def put_asset(project_id, execution_id, entries) do
+    call_server(project_id, {:put_asset, execution_id, entries})
   end
 
   def get_asset(project_id, asset_id, opts) do

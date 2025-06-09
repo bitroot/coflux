@@ -227,21 +227,25 @@ defmodule Coflux.Orchestration.Results do
     end
   end
 
-  defp hash_asset(type, path, blob_key, metadata) do
-    metadata_parts =
-      Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
-
+  defp hash_asset(entries) do
     data =
-      [type, path, blob_key]
-      |> Enum.concat(metadata_parts)
+      entries
+      |> Enum.flat_map(fn {path, blob_key, _size, metadata} ->
+        Enum.concat(
+          [path, blob_key, Enum.count(metadata)],
+          Enum.flat_map(metadata, fn {key, value} ->
+            [key, Jason.encode!(value)]
+          end)
+        )
+      end)
       |> Enum.intersperse(0)
 
     :crypto.hash(:sha256, data)
   end
 
-  def get_or_create_asset(db, execution_id, type, path, blob_key, size, metadata) do
+  def get_or_create_asset(db, execution_id, entries) do
     with_transaction(db, fn ->
-      hash = hash_asset(type, path, blob_key, metadata)
+      hash = hash_asset(entries)
       now = current_timestamp()
 
       {:ok, asset_id} =
@@ -250,25 +254,29 @@ defmodule Coflux.Orchestration.Results do
             {:ok, asset_id}
 
           {:ok, nil} ->
-            {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
-
             {:ok, asset_id} =
-              insert_one(db, :assets, %{
-                hash: {:blob, hash},
-                type: type,
-                path: path,
-                blob_id: blob_id
-              })
+              insert_one(db, :assets, %{hash: {:blob, hash}})
 
-            {:ok, _} =
-              insert_many(
-                db,
-                :asset_metadata,
-                {:asset_id, :key, :value},
-                Enum.map(metadata, fn {key, value} ->
-                  {asset_id, key, Jason.encode!(value)}
-                end)
-              )
+            Enum.each(entries, fn {path, blob_key, size, metadata} ->
+              {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
+
+              {:ok, asset_entry_id} =
+                insert_one(db, :asset_entries, %{
+                  asset_id: asset_id,
+                  path: path,
+                  blob_id: blob_id
+                })
+
+              {:ok, _} =
+                insert_many(
+                  db,
+                  :asset_entry_metadata,
+                  {:asset_entry_id, :key, :value},
+                  Enum.map(metadata, fn {key, value} ->
+                    {asset_entry_id, key, Jason.encode!(value)}
+                  end)
+                )
+            end)
 
             {:ok, asset_id}
         end
@@ -290,33 +298,41 @@ defmodule Coflux.Orchestration.Results do
   end
 
   def get_asset_by_id(db, asset_id, load_metadata) do
-    case query_one(
-           db,
-           """
-           SELECT a.type, a.path, b.key, b.size
-           FROM assets AS a
-           INNER JOIN blobs AS b ON b.id = a.blob_id
-           WHERE a.id = ?1
-           """,
-           {asset_id}
-         ) do
-      {:ok, {type, path, blob_key, size}} ->
-        metadata =
-          if load_metadata do
-            case query(
-                   db,
-                   "SELECT key, value FROM asset_metadata WHERE asset_id = ?1",
-                   {asset_id}
-                 ) do
-              {:ok, rows} ->
-                Map.new(rows, fn {key, value} -> {key, Jason.decode!(value)} end)
-            end
-          end
+    case query_one(db, "SELECT 1 FROM assets WHERE id = ?1", {asset_id}) do
+      {:ok, {1}} ->
+        case query(
+               db,
+               """
+               SELECT ae.entry_id, ae.path, b.key, b.size
+               FROM asset_entries AS ae
+               INNER JOIN blobs AS b ON b.id = ae.blob_id
+               WHERE ae.asset_id = ?1
+               """,
+               {asset_id}
+             ) do
+          {:ok, rows} ->
+            entries =
+              Enum.map(rows, fn {asset_entry_id, path, blob_key, size} ->
+                metadata =
+                  if load_metadata do
+                    case query(
+                           db,
+                           "SELECT key, value FROM asset_entry_metadata WHERE asset_entry_id = ?1",
+                           {asset_entry_id}
+                         ) do
+                      {:ok, rows} ->
+                        Map.new(rows, fn {key, value} -> {key, Jason.decode!(value)} end)
+                    end
+                  end
 
-        {:ok, {type, path, blob_key, size, metadata}}
+                {path, blob_key, size, metadata}
+              end)
+
+            {:ok, entries}
+        end
 
       {:ok, nil} ->
-        {:ok, nil}
+        {:error, :not_found}
     end
   end
 

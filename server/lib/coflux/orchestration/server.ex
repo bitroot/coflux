@@ -1032,11 +1032,11 @@ defmodule Coflux.Orchestration.Server do
     {:reply, result, state}
   end
 
-  def handle_call({:put_asset, execution_id, type, path, blob_key, size, metadata}, _from, state) do
+  def handle_call({:put_asset, execution_id, entries}, _from, state) do
     {:ok, run_id} = Runs.get_execution_run_id(state.db, execution_id)
 
     {:ok, asset_id} =
-      Results.get_or_create_asset(state.db, execution_id, type, path, blob_key, size, metadata)
+      Results.get_or_create_asset(state.db, execution_id, entries)
 
     asset = resolve_asset(state.db, asset_id)
 
@@ -1053,14 +1053,14 @@ defmodule Coflux.Orchestration.Server do
     load_metadata = opts[:load_metadata]
 
     case Results.get_asset_by_id(state.db, asset_id, load_metadata) do
-      {:ok, {type, path, blob_key, _size, metadata}} ->
+      {:ok, entries} ->
         if from_execution_id do
           {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
         end
 
-        {:reply, {:ok, type, path, blob_key, metadata}, state}
+        {:reply, {:ok, entries}, state}
 
-      {:ok, nil} ->
+      {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
     end
   end
@@ -2409,16 +2409,12 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp resolve_asset(db, asset_id) do
-    {:ok, {type, path, blob_key, size, metadata}} =
-      Results.get_asset_by_id(db, asset_id, true)
-
-    %{
-      type: type,
-      path: path,
-      metadata: metadata,
-      blob_key: blob_key,
-      size: size
-    }
+    case Results.get_asset_by_id(db, asset_id, true) do
+      {:ok, entries} ->
+        Map.new(entries, fn {path, blob_key, size, metadata} ->
+          {path, {blob_key, size, metadata}}
+        end)
+    end
   end
 
   defp resolve_references(db, references) do

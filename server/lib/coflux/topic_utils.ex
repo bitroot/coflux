@@ -47,11 +47,10 @@ defmodule Coflux.TopicUtils do
 
   def build_asset(asset) do
     %{
-      type: asset.type,
-      path: asset.path,
-      metadata: asset.metadata,
-      blobKey: asset.blob_key,
-      size: asset.size
+      entries:
+        Map.new(asset, fn {path, {blob_key, size, metadata}} ->
+          {path, %{blobKey: blob_key, size: size, metadata: metadata}}
+        end)
     }
   end
 
