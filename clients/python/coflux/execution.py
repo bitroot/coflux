@@ -103,11 +103,7 @@ class ResolveReferenceRequest(t.NamedTuple):
 
 
 class PersistAssetRequest(t.NamedTuple):
-    type: int
-    path: str
-    blob_key: str
-    size: int
-    metadata: dict[str, t.Any]
+    entries: list[tuple[str, str, int, dict[str, t.Any]]]
 
 
 class GetAssetRequest(t.NamedTuple):
@@ -208,6 +204,14 @@ def counter():
     count = itertools.count()
     return lambda: next(count)
 
+
+def _find_paths(glob_or_path_or_paths: str | Path | list[Path], base_dir: Path):
+    if isinstance(glob_or_path_or_paths, str):
+        return base_dir.glob(glob_or_path_or_paths)
+    elif isinstance(glob_or_path_or_paths, Path):
+        return [glob_or_path_or_paths]
+    else:
+        return glob_or_path_or_paths
 
 class Channel:
     def __init__(
@@ -367,7 +371,7 @@ class Channel:
                 value,
                 self._resolve_reference,
                 self._cancel_execution,
-                self._restore_asset,
+                self._resolve_asset,
             )
             for value in arguments
         ]
@@ -395,7 +399,7 @@ class Channel:
                     value,
                     self._resolve_reference,
                     self._cancel_execution,
-                    self._restore_asset,
+                    self._resolve_asset,
                 )
             case ["error", type_, message]:
                 raise _build_exception(type_, message)
@@ -424,75 +428,36 @@ class Channel:
         ]
         self._notify(RecordCheckpointRequest(serialised_arguments))
 
-    def persist_asset(
-        self, path: Path | str | None = None, *, match: str | None = None
-    ) -> models.Asset:
-        if isinstance(path, str):
-            path = Path(path)
-        path = path or self._directory
-        if not path.exists():
-            raise Exception(f"path '{path}' doesn't exist")
-        path = path.resolve()
-        if not path.is_relative_to(self._directory):
-            raise Exception(f"path ({path}) not in execution directory")
-        # TODO: zip all assets?
-        path_str = str(path.relative_to(self._directory))
-        if path.is_file():
-            if match:
-                raise Exception("match cannot be specified for file")
-            asset_type = 0
-            blob_key = self._blob_manager.upload(path)
-            (mime_type, _) = mimetypes.guess_type(path)
-            size = path.stat().st_size
-            metadata = {"type": mime_type}
-        elif path.is_dir():
-            asset_type = 1
-            sizes = []
-            with tempfile.NamedTemporaryFile() as zip_file:
-                zip_path = Path(zip_file.name)
-                with zipfile.ZipFile(zip_path, "w") as zip:
-                    for root, _, files in os.walk(path):
-                        root = Path(root)
-                        for file in files:
-                            file_path = root.joinpath(file)
-                            if not match or file_path.match(match):
-                                zip.write(
-                                    file_path, arcname=file_path.relative_to(path)
-                                )
-                                sizes.append(file_path.stat().st_size)
-                blob_key = self._blob_manager.upload(zip_path)
-            size = sum(sizes)
-            metadata = {"count": len(sizes)}
+    def persist_asset(self, glob_or_path_or_paths: str | Path | list[Path] = "*", at: Path | None = None) -> models.Asset:
+        base_dir = at or self._directory
+        if isinstance(glob_or_path_or_paths, str):
+            paths = list(base_dir.rglob(glob_or_path_or_paths))
+        elif isinstance(glob_or_path_or_paths, Path):
+            paths = [glob_or_path_or_paths]
         else:
-            raise Exception(f"path ({path}) isn't a file or a directory")
-        asset_id = self._request(
-            PersistAssetRequest(asset_type, path_str, blob_key, size, metadata)
-        )
-        return models.Asset(lambda to: self._restore_asset(asset_id, to=to), asset_id)
+            paths = glob_or_path_or_paths
+        if not paths:
+            # TODO: just return None?
+            raise Exception("No paths for asset")
+        paths = [p.resolve() for p in paths]
+        if not all(p.is_relative_to(base_dir) for p in paths):
+            # TODO: more helpful error?
+            raise Exception("Path(s) aren't in base directory")
+        entries = []
+        # TODO: parallelise uploads (and/or do uploads in background?)
+        for path in paths:
+            if path.is_file():
+                path_str = str(path.relative_to(base_dir))
+                blob_key = self._blob_manager.upload(path)
+                size = path.stat().st_size
+                (mime_type, _) = mimetypes.guess_type(path)
+                metadata = {"type": mime_type}
+                entries.append((path_str, blob_key, size, metadata))
+        asset_id = self._request(PersistAssetRequest(entries))
+        return models.Asset(lambda: self._resolve_asset(asset_id), self._blob_manager.download, asset_id)
 
-    def _restore_asset(self, asset_id: int, to: Path | str | None = None) -> Path:
-        if to:
-            if isinstance(to, str):
-                to = Path(to)
-            if not to.is_absolute():
-                to = self._directory.joinpath(to)
-            if not to.is_relative_to(self._directory):
-                raise Exception("asset must be restored to execution directory")
-        asset_type, path_str, blob_key = self._request(GetAssetRequest(asset_id))
-        target = to or self._directory.joinpath(path_str)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if asset_type == 0:
-            self._blob_manager.download(blob_key, target)
-        elif asset_type == 1:
-            target.mkdir()
-            with tempfile.NamedTemporaryFile() as zip_file:
-                zip_path = Path(zip_file.name)
-                self._blob_manager.download(blob_key, zip_path)
-                with zipfile.ZipFile(zip_path, "r") as zip:
-                    zip.extractall(target)
-        else:
-            raise Exception(f"unrecognised asset type ({asset_type})")
-        return target
+    def _resolve_asset(self, asset_id: int) -> dict[str, str]:
+        return self._request(GetAssetRequest(asset_id))
 
     def log_message(self, level, template: str | None, **kwargs):
         timestamp = time.time() * 1000
@@ -816,12 +781,8 @@ class Execution:
                 self._server_request(
                     "get_result", (execution_id, self._id, timeout_ms), request_id, _parse_result
                 )
-            case PersistAssetRequest(type, path, blob_key, size, metadata):
-                self._server_request(
-                    "put_asset",
-                    (self._id, type, path, blob_key, size, metadata),
-                    request_id,
-                )
+            case PersistAssetRequest(entries):
+                self._server_request("put_asset", (self._id, entries), request_id)
             case GetAssetRequest(asset_id):
                 self._server_request("get_asset", (asset_id, self._id), request_id)
             case other:

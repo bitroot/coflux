@@ -183,9 +183,9 @@ class Manager:
     def deserialise(
         self,
         value: models.Value,
-        resolve_fn: t.Callable[[int], t.Any],
+        result_fn: t.Callable[[int], t.Any],
         cancel_fn: t.Callable[[int], None],
-        restore_fn: t.Callable[[int, Path | str | None], Path],
+        asset_fn: t.Callable[[int], dict[str, str]],
     ) -> t.Any:
         data, references = self._get_value_data(value)
 
@@ -208,13 +208,15 @@ class Manager:
                         match reference:
                             case ("execution", execution_id):
                                 return models.Execution(
-                                    lambda: resolve_fn(execution_id),
+                                    lambda: result_fn(execution_id),
                                     lambda: cancel_fn(execution_id),
                                     execution_id,
                                 )
                             case ("asset", asset_id):
                                 return models.Asset(
-                                    lambda to: restore_fn(asset_id, to), asset_id
+                                    lambda: asset_fn(asset_id),
+                                    self._blob_manager.download,
+                                    asset_id,
                                 )
                             case ("fragment", format, blob_key, _size, metadata):
                                 data = self._blob_manager.get(blob_key)

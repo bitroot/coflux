@@ -1,5 +1,6 @@
 import typing as t
 from pathlib import Path
+import functools
 
 T = t.TypeVar("T")
 
@@ -93,15 +94,33 @@ class Execution(t.Generic[T]):
 class Asset:
     def __init__(
         self,
-        restore_fn: t.Callable[[Path | str | None], Path],
+        resolve_fn: t.Callable[[], dict[str, str]],
+        download_fn: t.Callable[[str, Path], None],
         id: int,
     ):
-        self._restore_fn = restore_fn
+        self._resolve_fn = resolve_fn
+        self._download_fn = download_fn
         self._id = id
 
     @property
     def id(self) -> int:
         return self._id
 
-    def restore(self, *, to: Path | str | None = None) -> Path:
-        return self._restore_fn(to)
+    @functools.cached_property
+    def _entries(self):
+        return self._resolve_fn()
+
+    def restore(self, *, match: str = "*", at: Path | str | None = None) -> dict[str, Path]:
+        if at:
+            if isinstance(at, str):
+                at = Path(at)
+            at = at.resolve()
+        base_path = at or Path.cwd()
+        result = {}
+        for path_str, blob_key in self._entries.items():
+            # TODO: filter using `match`
+            target = base_path.joinpath(path_str)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._download_fn(blob_key, target)
+            result[path_str] = target
+        return result
