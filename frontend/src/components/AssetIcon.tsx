@@ -1,39 +1,38 @@
 import {
   IconFile,
   IconFileText,
-  IconFolder,
+  IconFiles,
   IconProps,
 } from "@tabler/icons-react";
 
 import * as models from "../models";
 
-function iconForAsset(asset: models.Asset) {
-  switch (asset.type) {
-    case 0: {
-      const type = asset.metadata["type"] as undefined | string;
-      switch (type?.split("/")[0]) {
-        case "text":
-          return IconFileText;
-        default:
-          return IconFile;
-      }
+function iconForAsset(asset: models.Asset, path: string | undefined) {
+  const entry = path && asset.entries[path];
+  if (entry) {
+    const type = entry.metadata["type"] as undefined | string;
+    switch (type?.split("/")[0]) {
+      case "text":
+        return IconFileText;
+      default:
+        return IconFile;
     }
-    case 1:
-      return IconFolder;
-    default:
-      throw new Error(`unrecognised asset type (${asset.type})`);
+  } else {
+    return IconFiles;
   }
 }
 
 type AssetIconProps = IconProps & {
   asset: models.Asset;
+  path?: string;
 };
 
 export default function AssetIcon({
   asset,
+  path,
   size = 16,
   ...props
 }: AssetIconProps) {
-  const Icon = iconForAsset(asset);
+  const Icon = iconForAsset(asset, path);
   return <Icon size={size} {...props} />;
 }

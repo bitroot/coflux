@@ -43,7 +43,6 @@ import Button from "./common/Button";
 import RunLogs from "./RunLogs";
 import StepLink from "./StepLink";
 import AssetLink from "./AssetLink";
-import { getAssetMetadata } from "../assets";
 import AssetIcon from "./AssetIcon";
 import WorkspaceLabel from "./WorkspaceLabel";
 import { useWorkspaces, useLogs } from "../topics";
@@ -52,6 +51,7 @@ import Select from "./common/Select";
 import Value from "./Value";
 import TagSet from "./TagSet";
 import ExecutionStatus from "./ExecutionStatus";
+import { getAssetName } from "../assets";
 
 function getRunWorkspaceId(run: models.Run) {
   const initialStepId = minBy(
@@ -1134,25 +1134,32 @@ type AssetItemProps = {
 };
 
 function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
+  const path =
+    Object.keys(asset.entries).length == 1
+      ? Object.keys(asset.entries)[0]
+      : undefined;
   return (
     <li className="my-1 flex items-center gap-1">
       <AssetLink
         projectId={projectId}
         assetId={assetId}
         asset={asset}
+        path={path}
         className="inline-flex items-start gap-1 rounded-full px-1 ring-slate-400"
         hoveredClassName="ring-2"
       >
-        <AssetIcon asset={asset} size={18} className="mt-1 shrink-0" />
+        <AssetIcon
+          asset={asset}
+          path={path}
+          size={18}
+          className="mt-1 shrink-0"
+        />
         <span className="flex flex-col min-w-0">
           <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-            {truncatePath(asset.path) + (asset.type == 1 ? "/" : "")}
+            {getAssetName(asset)}
           </span>
         </span>
       </AssetLink>
-      <span className="text-slate-500 text-xs">
-        {getAssetMetadata(asset).join(", ")}
-      </span>
     </li>
   );
 }

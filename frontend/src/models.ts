@@ -68,12 +68,14 @@ export type ExecutionReference = {
   target: string;
 };
 
-export type Asset = {
-  type: 0 | 1;
-  path: string;
+export type AssetEntry = {
   blobKey: string;
   size: number;
   metadata: Record<string, unknown>;
+};
+
+export type Asset = {
+  entries: Record<string, AssetEntry>;
 };
 
 export type Reference =

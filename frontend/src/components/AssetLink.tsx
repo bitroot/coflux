@@ -1,11 +1,4 @@
-import {
-  Fragment,
-  ReactNode,
-  MouseEvent,
-  useCallback,
-  useState,
-  useEffect,
-} from "react";
+import { Fragment, ReactNode, MouseEvent, useCallback, useState } from "react";
 import {
   IconCornerLeftUp,
   IconDownload,
@@ -14,18 +7,14 @@ import {
 } from "@tabler/icons-react";
 
 import * as models from "../models";
-import { getAssetMetadata } from "../assets";
+import { getAssetName } from "../assets";
 import { humanSize, pluralise } from "../utils";
 import Dialog from "./common/Dialog";
 import { uniq } from "lodash";
-import usePrevious from "../hooks/usePrevious";
 import { useHoverContext } from "./HoverContext";
 import classNames from "classnames";
 import { createBlobStore } from "../blobs";
 import { useSetting } from "../settings";
-import Alert from "./common/Alert";
-
-type Entry = { path: string; size: number; type: string };
 
 function showPreview(mimeType: string | undefined) {
   const parts = mimeType?.split("/");
@@ -51,8 +40,7 @@ type FilePreviewProps = {
   projectId: string;
   assetId: string;
   path?: string;
-  type?: string;
-  size?: number;
+  entry: models.AssetEntry;
   onClose: () => void;
 };
 
@@ -61,11 +49,10 @@ function PreviewDialog({
   projectId,
   assetId,
   path,
-  type,
-  size,
+  entry,
   onClose,
 }: FilePreviewProps) {
-  if (showPreview(type)) {
+  if (showPreview(entry.metadata["type"] as string | undefined)) {
     return (
       <Dialog open={open} size="xl" onClose={onClose}>
         <div className="h-[80vh] rounded-lg overflow-hidden flex flex-col min-w-2xl">
@@ -88,7 +75,7 @@ function PreviewDialog({
             rel="noreferrer"
           >
             <IconDownload size={30} />
-            {size !== undefined && humanSize(size)}
+            {humanSize(entry.size)}
           </a>
         </div>
       </Dialog>
@@ -97,8 +84,8 @@ function PreviewDialog({
 }
 
 type EntriesTableProps = {
-  entries: Entry[];
-  path: string;
+  entries: models.Asset["entries"];
+  basePath: string;
   projectId: string;
   assetId: string;
   onSelect: (path: string) => void;
@@ -106,30 +93,32 @@ type EntriesTableProps = {
 
 function EntriesTable({
   entries,
-  path,
+  basePath,
   projectId,
   assetId,
   onSelect,
 }: EntriesTableProps) {
-  const pathEntries = entries.filter((e) => e.path.startsWith(path));
+  const pathEntries = Object.keys(entries).filter((p) =>
+    p.startsWith(basePath),
+  );
   const directories = uniq(
     pathEntries
-      .map((e) => e.path.substring(path.length))
+      .map((p) => p.substring(basePath.length))
       .filter((e) => e.includes("/"))
       .map((p) => p.substring(0, p.indexOf("/") + 1)),
   );
   const files = pathEntries.filter(
-    (e) => !e.path.substring(path.length).includes("/"),
+    (p) => !p.substring(basePath.length).includes("/"),
   );
   return (
     <table className="w-full">
       <tbody>
-        {path && (
+        {basePath && (
           <tr>
             <td>
               <button
                 className="inline-flex gap-1 items-center mb-1 rounded-sm px-1 hover:bg-slate-100"
-                onClick={() => onSelect(pathParent(path))}
+                onClick={() => onSelect(pathParent(basePath))}
               >
                 <IconCornerLeftUp size={16} /> Up
               </button>
@@ -141,7 +130,7 @@ function EntriesTable({
           <tr key={directory}>
             <td>
               <button
-                onClick={() => onSelect(`${path}${directory}`)}
+                onClick={() => onSelect(`${basePath}${directory}`)}
                 className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
               >
                 <IconFolder size={16} />
@@ -151,24 +140,24 @@ function EntriesTable({
             <td></td>
           </tr>
         ))}
-        {files.map((entry) => (
-          <tr key={entry.path}>
+        {files.map((path) => (
+          <tr key={path}>
             <td>
               <a
-                href={assetUrl(projectId, assetId, entry.path)}
+                href={assetUrl(projectId, assetId, path)}
                 className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
                 onClick={(ev) => {
                   if (!ev.ctrlKey) {
                     ev.preventDefault();
-                    onSelect(entry.path);
+                    onSelect(path);
                   }
                 }}
               >
                 <IconFile size={16} />
-                {entry.path.substring(path.length)}
+                {path.substring(basePath.length)}
               </a>
             </td>
-            <td className="text-slate-500">{humanSize(entry.size)}</td>
+            <td className="text-slate-500">{humanSize(entries[path].size)}</td>
           </tr>
         ))}
       </tbody>
@@ -191,48 +180,22 @@ function DirectoryBrowser({
   assetId,
   onClose,
 }: DirectoryBrowserProps) {
-  const [entries, setEntries] = useState<Entry[]>();
-  const [directory, setDirectory] = useState("");
-  const [entry, setEntry] = useState<Entry>();
-  const [error, setError] = useState<unknown>();
-  const previousEntry = usePrevious(entry);
-  useEffect(() => {
-    if (open) {
-      setError(undefined);
-      fetch(`/assets/${projectId}/${assetId}`)
-        .then((resp) => {
-          if (resp.ok) {
-            return resp.json();
-          } else if (resp.status == 404) {
-            throw new Error("Not found");
-          } else {
-            throw new Error(`Unexpected status code: ${resp.status}`);
-          }
-        })
-        .then(setEntries)
-        .catch(setError);
-    }
-  }, [projectId, assetId, open]);
-  const handleSelect = useCallback(
-    (path: string) => {
-      if (path == "" || path.endsWith("/")) {
-        setDirectory(path);
-      } else {
-        setEntry(entries?.find((e) => e.path == path));
-      }
-    },
-    [entries],
+  const [selected, setSelected] = useState<string>("");
+  const handlePreviewClose = useCallback(
+    () =>
+      setSelected((s) =>
+        s.includes("/") ? s.substring(0, s.lastIndexOf("/") + 1) : "",
+      ),
+    [],
   );
-  const handlePreviewClose = useCallback(() => setEntry(undefined), []);
   return (
     <>
       <Dialog
         open={open}
         title={
           <div>
-            {asset.path}/{" "}
             <span className="text-slate-500 font-normal text-lg">
-              ({pluralise(asset.metadata["count"] as number, "file")})
+              {getAssetName(asset)}
             </span>
           </div>
         }
@@ -241,40 +204,43 @@ function DirectoryBrowser({
         onClose={onClose}
       >
         <div className="flex flex-col">
-          {error ? (
-            <Alert variant="danger">{error.toString()}</Alert>
-          ) : entries ? (
-            <div className="">
-              <EntriesTable
-                entries={entries}
-                path={directory}
-                projectId={projectId}
-                assetId={assetId}
-                onSelect={handleSelect}
-              />
-            </div>
-          ) : (
-            <p>Loading...</p>
-          )}
+          <EntriesTable
+            entries={asset.entries}
+            basePath={selected}
+            projectId={projectId}
+            assetId={assetId}
+            onSelect={setSelected}
+          />
         </div>
-        <PreviewDialog
-          open={!!entry}
-          projectId={projectId}
-          assetId={assetId}
-          path={(entry || previousEntry)?.path}
-          type={(entry || previousEntry)?.type}
-          size={(entry || previousEntry)?.size}
-          onClose={handlePreviewClose}
-        />
+        {asset.entries[selected] && (
+          <PreviewDialog
+            open={!!asset.entries[selected]}
+            projectId={projectId}
+            assetId={assetId}
+            path={selected}
+            entry={asset.entries[selected]}
+            onClose={handlePreviewClose}
+          />
+        )}
       </Dialog>
     </>
   );
+}
+
+function getAssetEntryMetadata(entry: models.AssetEntry) {
+  const parts = [];
+  parts.push(humanSize(entry.size));
+  if ("type" in entry.metadata && entry.metadata["type"]) {
+    parts.push(entry.metadata["type"]);
+  }
+  return parts;
 }
 
 type Props = {
   asset: models.Asset;
   projectId: string;
   assetId: string;
+  path?: string;
   className?: string;
   hoveredClassName?: string;
   children: ReactNode;
@@ -284,6 +250,7 @@ export default function AssetLink({
   asset,
   projectId,
   assetId,
+  path,
   className,
   hoveredClassName,
   children,
@@ -298,24 +265,44 @@ export default function AssetLink({
   }, []);
   const handleClose = useCallback(() => setOpen(false), []);
   const handleMouseOver = useCallback(
-    () => setHovered({ assetId }),
-    [setHovered, assetId],
+    () => setHovered({ assetId, path }),
+    [setHovered, assetId, path],
   );
   const handleMouseOut = useCallback(() => setHovered(undefined), [setHovered]);
   const blobStoresSetting = useSetting(projectId, "blobStores");
   const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
-  return (
-    <Fragment>
-      {asset.type == 0 ? (
+  if (path) {
+    const entry = asset.entries[path];
+    return (
+      <Fragment>
         <PreviewDialog
           open={open}
           projectId={projectId}
           assetId={assetId}
-          type={asset.metadata["type"] as string}
-          size={asset.metadata["size"] as number}
+          path={path}
+          entry={entry}
           onClose={handleClose}
         />
-      ) : asset.type == 1 ? (
+        <a
+          href={primaryBlobStore.url(entry.blobKey)}
+          title={`${path}\n${getAssetEntryMetadata(entry).join("; ")}`}
+          className={classNames(
+            className,
+            isHovered({ assetId, path }) && hoveredClassName,
+          )}
+          target="_blank"
+          rel="noreferrer"
+          onClick={handleLinkClick}
+          onMouseOver={handleMouseOver}
+          onMouseOut={handleMouseOut}
+        >
+          {children}
+        </a>
+      </Fragment>
+    );
+  } else {
+    return (
+      <Fragment>
         <DirectoryBrowser
           open={open}
           asset={asset}
@@ -323,22 +310,21 @@ export default function AssetLink({
           assetId={assetId}
           onClose={handleClose}
         />
-      ) : null}
-      <a
-        href={primaryBlobStore.url(asset.blobKey)}
-        title={`${asset.path}\n${getAssetMetadata(asset).join("; ")}`}
-        className={classNames(
-          className,
-          isHovered({ assetId }) && hoveredClassName,
-        )}
-        target="_blank"
-        rel="noreferrer"
-        onClick={handleLinkClick}
-        onMouseOver={handleMouseOver}
-        onMouseOut={handleMouseOut}
-      >
-        {children}
-      </a>
-    </Fragment>
-  );
+        <button
+          type="button"
+          title={pluralise(Object.keys(asset.entries).length, "file")}
+          className={classNames(
+            className,
+            "cursor-pointer",
+            isHovered({ assetId }) && hoveredClassName,
+          )}
+          onClick={handleLinkClick}
+          onMouseOver={handleMouseOver}
+          onMouseOut={handleMouseOut}
+        >
+          {children}
+        </button>
+      </Fragment>
+    );
+  }
 }

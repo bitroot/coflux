@@ -24,13 +24,14 @@ import {
 import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
-import buildGraph, { Graph, Edge } from "../graph";
+import { buildGraph, Graph, Edge } from "../graph";
 import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
-import { buildUrl, truncatePath } from "../utils";
+import { buildUrl } from "../utils";
 import AssetLink from "./AssetLink";
 import { countBy, isEqual, max } from "lodash";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { getAssetName } from "../assets";
 
 function getExecutionStatus(execution: models.Execution) {
   const result =
@@ -271,22 +272,28 @@ type AssetNodeProps = {
 };
 
 function AssetNode({ projectId, assetId, asset }: AssetNodeProps) {
+  const path =
+    Object.keys(asset.entries).length == 1
+      ? Object.keys(asset.entries)[0]
+      : undefined;
   return (
     <AssetLink
       projectId={projectId}
       assetId={assetId}
       asset={asset}
+      path={path}
       className="h-full w-full flex gap-0.5 px-1.5 items-center bg-slate-50 rounded-full text-slate-700 text-sm ring-slate-400"
       hoveredClassName="ring-2"
     >
       <AssetIcon
         asset={asset}
+        path={path}
         size={16}
         strokeWidth={1.5}
         className="shrink-0"
       />
       <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-        {truncatePath(asset.path) + (asset.type == 1 ? "/" : "")}
+        {getAssetName(asset)}
       </span>
     </AssetLink>
   );
