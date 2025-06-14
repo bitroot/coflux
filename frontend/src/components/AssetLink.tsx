@@ -1,9 +1,8 @@
 import { Fragment, ReactNode, MouseEvent, useCallback, useState } from "react";
 import {
-  IconCornerLeftUp,
+  IconCaretRightFilled,
   IconDownload,
   IconFile,
-  IconFolder,
 } from "@tabler/icons-react";
 
 import * as models from "../models";
@@ -29,10 +28,6 @@ function showPreview(mimeType: string | undefined) {
 
 function assetUrl(projectId: string, assetId: string, path?: string) {
   return `/assets/${projectId}/${assetId}${path ? `/${path}` : ""}`;
-}
-
-function pathParent(path: string) {
-  return path.includes("/") ? path.substring(path.lastIndexOf("/") + 1) : "";
 }
 
 type FilePreviewProps = {
@@ -85,18 +80,20 @@ function PreviewDialog({
 
 type EntriesTableProps = {
   entries: models.Asset["entries"];
-  basePath: string;
+  basePath?: string;
   projectId: string;
   assetId: string;
   onSelect: (path: string) => void;
+  className?: string;
 };
 
 function EntriesTable({
   entries,
-  basePath,
+  basePath = "",
   projectId,
   assetId,
   onSelect,
+  className,
 }: EntriesTableProps) {
   const pathEntries = Object.keys(entries).filter((p) =>
     p.startsWith(basePath),
@@ -110,58 +107,81 @@ function EntriesTable({
   const files = pathEntries.filter(
     (p) => !p.substring(basePath.length).includes("/"),
   );
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   return (
-    <table className="w-full">
-      <tbody>
-        {basePath && (
-          <tr>
-            <td>
-              <button
-                className="inline-flex gap-1 items-center mb-1 rounded-sm px-1 hover:bg-slate-100"
-                onClick={() => onSelect(pathParent(basePath))}
-              >
-                <IconCornerLeftUp size={16} /> Up
-              </button>
-            </td>
-            <td></td>
-          </tr>
-        )}
-        {directories.map((directory) => (
-          <tr key={directory}>
-            <td>
-              <button
-                onClick={() => onSelect(`${basePath}${directory}`)}
-                className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
-              >
-                <IconFolder size={16} />
-                {directory}
-              </button>
-            </td>
-            <td></td>
-          </tr>
-        ))}
-        {files.map((path) => (
-          <tr key={path}>
-            <td>
-              <a
-                href={assetUrl(projectId, assetId, path)}
-                className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
-                onClick={(ev) => {
-                  if (!ev.ctrlKey) {
-                    ev.preventDefault();
-                    onSelect(path);
-                  }
-                }}
-              >
-                <IconFile size={16} />
-                {path.substring(basePath.length)}
-              </a>
-            </td>
-            <td className="text-slate-500">{humanSize(entries[path].size)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className={className}>
+      {directories.length || files.length ? (
+        <table className="w-full">
+          <tbody>
+            {directories.map((directory) => (
+              <Fragment key={directory}>
+                <tr>
+                  <td>
+                    <button
+                      onClick={() =>
+                        setExpanded((e) => ({
+                          ...e,
+                          [directory]: !e[directory],
+                        }))
+                      }
+                      className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
+                    >
+                      <IconCaretRightFilled
+                        size={16}
+                        className={classNames(
+                          "transform transition-transform",
+                          expanded[directory] ? "rotate-90" : "rotate-0",
+                        )}
+                      />
+                      {directory}
+                    </button>
+                  </td>
+                  <td></td>
+                </tr>
+                <tr>
+                  <td colSpan={2}>
+                    {expanded[directory] && (
+                      <EntriesTable
+                        entries={entries}
+                        basePath={`${basePath}${directory}`}
+                        projectId={projectId}
+                        assetId={assetId}
+                        onSelect={onSelect}
+                        className="ml-3 pl-1 border-l border-slate-200"
+                      />
+                    )}
+                  </td>
+                </tr>
+              </Fragment>
+            ))}
+            {files.map((path) => (
+              <tr key={path}>
+                <td>
+                  <a
+                    href={assetUrl(projectId, assetId, path)}
+                    className="inline-flex gap-1 items-center rounded-sm px-1 hover:bg-slate-100"
+                    onClick={(ev) => {
+                      if (!ev.ctrlKey) {
+                        ev.preventDefault();
+                        onSelect(path);
+                      }
+                    }}
+                  >
+                    <IconFile size={16} />
+                    {path.substring(basePath.length)}
+                  </a>
+                </td>
+                <td className="text-slate-500 text-right">
+                  {humanSize(entries[path].size)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="text-slate-500 italic">Empty</p>
+      )}
+    </div>
   );
 }
 
@@ -180,14 +200,8 @@ function DirectoryBrowser({
   assetId,
   onClose,
 }: DirectoryBrowserProps) {
-  const [selected, setSelected] = useState<string>("");
-  const handlePreviewClose = useCallback(
-    () =>
-      setSelected((s) =>
-        s.includes("/") ? s.substring(0, s.lastIndexOf("/") + 1) : "",
-      ),
-    [],
-  );
+  const [selected, setSelected] = useState<string | null>(null);
+  const handlePreviewClose = useCallback(() => setSelected(null), []);
   return (
     <>
       <Dialog
@@ -203,18 +217,17 @@ function DirectoryBrowser({
         className="p-6"
         onClose={onClose}
       >
-        <div className="flex flex-col">
+        <div className="flex flex-col h-100 overflow-auto">
           <EntriesTable
             entries={asset.entries}
-            basePath={selected}
             projectId={projectId}
             assetId={assetId}
             onSelect={setSelected}
           />
         </div>
-        {asset.entries[selected] && (
+        {selected && asset.entries[selected] && (
           <PreviewDialog
-            open={!!asset.entries[selected]}
+            open={true}
             projectId={projectId}
             assetId={assetId}
             path={selected}
