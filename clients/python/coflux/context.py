@@ -1,5 +1,5 @@
-import typing as t
 import datetime as dt
+import typing as t
 from pathlib import Path
 
 from . import execution, models
@@ -59,12 +59,18 @@ def suspend(delay: float | dt.datetime | None = None):
     return _get_channel().suspend(delay)
 
 
-def persist(
-    glob_or_path_or_paths: str | Path | list[Path] = "*",
+def asset(
+    entries: str
+    | Path
+    | list[str | Path]
+    | models.Asset
+    | dict[str, str | Path | models.Asset | models.AssetEntry]
+    | None = None,
     *,
     at: Path | None = None,
+    match: str | None = None,
 ) -> models.Asset:
-    return _get_channel().persist_asset(glob_or_path_or_paths, at)
+    return _get_channel().create_asset(entries, at=at, match=match)
 
 
 def checkpoint(*arguments: t.Any) -> None:

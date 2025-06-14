@@ -261,7 +261,7 @@ defmodule Coflux.Handlers.Agent do
 
         if is_recognised_execution?(execution_id, state) do
           entries =
-            Enum.map(entries, fn [path, blob_key, size, metadata] ->
+            Enum.map(entries, fn {path, [blob_key, size, metadata]} ->
               {path, blob_key, size, metadata}
             end)
 
@@ -280,11 +280,14 @@ defmodule Coflux.Handlers.Agent do
           case Orchestration.get_asset(
                  state.project_id,
                  asset_id,
-                 from_execution_id: from_execution_id
+                 from_execution_id: from_execution_id,
+                 load_metadata: true
                ) do
             {:ok, entries} ->
               entries =
-                Map.new(entries, fn {path, blob_key, _size, _metadata} -> {path, blob_key} end)
+                Map.new(entries, fn {path, blob_key, size, metadata} ->
+                  {path, [blob_key, size, metadata]}
+                end)
 
               {[success_message(message["id"], entries)], state}
 

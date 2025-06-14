@@ -14,12 +14,11 @@ import threading
 import time
 import traceback
 import typing as t
-import zipfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from . import blobs, config, decorators, loader, models, serialisation, server
+from . import blobs, config, loader, models, serialisation, server, utils
 
 _EXECUTION_THRESHOLD_S = 1.0
 _AGENT_THRESHOLD_S = 5.0
@@ -103,7 +102,7 @@ class ResolveReferenceRequest(t.NamedTuple):
 
 
 class PersistAssetRequest(t.NamedTuple):
-    entries: list[tuple[str, str, int, dict[str, t.Any]]]
+    entries: dict[str, tuple[str, int, t.Mapping[str, t.Any]]]
 
 
 class GetAssetRequest(t.NamedTuple):
@@ -205,13 +204,45 @@ def counter():
     return lambda: next(count)
 
 
-def _find_paths(glob_or_path_or_paths: str | Path | list[Path], base_dir: Path):
-    if isinstance(glob_or_path_or_paths, str):
-        return base_dir.glob(glob_or_path_or_paths)
-    elif isinstance(glob_or_path_or_paths, Path):
-        return [glob_or_path_or_paths]
-    else:
-        return glob_or_path_or_paths
+def _prepare_asset_entry_for_file(
+    path: Path, blob_manager: blobs.Manager
+) -> tuple[str, int, dict[str, t.Any]]:
+    blob_key = blob_manager.upload(path)
+    size = path.stat().st_size
+    (mime_type, _) = mimetypes.guess_type(path)
+    metadata = {"type": mime_type}
+    return (blob_key, size, metadata)
+
+
+def _prepare_asset_entries_for_path(
+    path: Path,
+    blob_manager: blobs.Manager,
+    base_dir: Path,
+    match_parts: list[str] | None = None,
+    path_prefix: str = "",
+) -> dict[str, tuple[str, int, t.Mapping[str, t.Any]]]:
+    entries = {}
+    if path.is_file():
+        path_str = (
+            f"{path_prefix + '/' if path_prefix else ''}{path.relative_to(base_dir)}"
+            if path != base_dir
+            else path_prefix
+        )
+        if match_parts is None or utils.match_path(match_parts, path_str.split("/")):
+            entries[path_str] = _prepare_asset_entry_for_file(path, blob_manager)
+    elif path.is_dir():
+        for dirpath, _dirnames, filenames in path.walk():
+            for filename in filenames:
+                path_ = dirpath.joinpath(filename)
+                path_str = f"{path_prefix + '/' if path_prefix else ''}{path_.relative_to(base_dir)}"
+                if match_parts is None or utils.match_path(
+                    match_parts, path_str.split("/")
+                ):
+                    entries[path_str] = _prepare_asset_entry_for_file(
+                        path_, blob_manager
+                    )
+    return entries
+
 
 class Channel:
     def __init__(
@@ -413,9 +444,7 @@ class Channel:
                 raise Exception(f"unexpected result ({result})")
 
     def _resolve_reference(self, execution_id: int) -> t.Any:
-        result = self._request(
-            ResolveReferenceRequest(execution_id, _timeout.get())
-        )
+        result = self._request(ResolveReferenceRequest(execution_id, _timeout.get()))
         return self._deserialise_result(result)
 
     def _cancel_execution(self, execution_id: int) -> None:
@@ -428,36 +457,92 @@ class Channel:
         ]
         self._notify(RecordCheckpointRequest(serialised_arguments))
 
-    def persist_asset(self, glob_or_path_or_paths: str | Path | list[Path] = "*", at: Path | None = None) -> models.Asset:
-        base_dir = at or self._directory
-        if isinstance(glob_or_path_or_paths, str):
-            paths = list(base_dir.rglob(glob_or_path_or_paths))
-        elif isinstance(glob_or_path_or_paths, Path):
-            paths = [glob_or_path_or_paths]
-        else:
-            paths = glob_or_path_or_paths
-        if not paths:
-            # TODO: just return None?
-            raise Exception("No paths for asset")
-        paths = [p.resolve() for p in paths]
-        if not all(p.is_relative_to(base_dir) for p in paths):
-            # TODO: more helpful error?
-            raise Exception("Path(s) aren't in base directory")
-        entries = []
+    def create_asset(
+        self,
+        entries: str
+        | Path
+        | list[str | Path]
+        | models.Asset
+        | t.Mapping[str, str | Path | models.Asset | models.AssetEntry]
+        | None = None,
+        *,
+        at: Path | None = None,
+        match: str | None = None,
+    ) -> models.Asset:
+        base_dir = (at or self._directory).resolve()
+        match_parts = match.split("/") if match else None
+        if entries is None:
+            entries = [base_dir]
+        elif isinstance(entries, Path) or isinstance(entries, str):
+            entries = [entries]
+        elif isinstance(entries, models.Asset):
+            entries = entries.entries
         # TODO: parallelise uploads (and/or do uploads in background?)
-        for path in paths:
-            if path.is_file():
-                path_str = str(path.relative_to(base_dir))
-                blob_key = self._blob_manager.upload(path)
-                size = path.stat().st_size
-                (mime_type, _) = mimetypes.guess_type(path)
-                metadata = {"type": mime_type}
-                entries.append((path_str, blob_key, size, metadata))
-        asset_id = self._request(PersistAssetRequest(entries))
-        return models.Asset(lambda: self._resolve_asset(asset_id), self._blob_manager.download, asset_id)
+        entries_: dict[str, tuple[str, int, t.Mapping[str, t.Any]]] = {}
+        if isinstance(entries, list):
+            paths = [Path(p).resolve() for p in entries]
+            for path in paths:
+                if not path.exists():
+                    raise Exception(f"Path doesn't exist ({path})")
+                if not path.is_relative_to(base_dir):
+                    raise Exception(
+                        f"Specified path ({path}) is not relative to the base directory ({base_dir})"
+                    )
+            for path in paths:
+                entries_.update(
+                    _prepare_asset_entries_for_path(
+                        path, self._blob_manager, base_dir, match_parts
+                    )
+                )
+        elif isinstance(entries, dict):
+            if at is not None:
+                raise Exception(
+                    "Base directory (`at`) cannot be specified with dictionary of entries"
+                )
+            for path_str, entry in entries.items():
+                if isinstance(entry, str):
+                    entry = Path(entry)
+                if isinstance(entry, Path):
+                    path = entry.resolve()
+                    entries_.update(
+                        _prepare_asset_entries_for_path(
+                            path, self._blob_manager, path, match_parts, path_str
+                        )
+                    )
+                elif isinstance(entry, models.Asset):
+                    for path, asset_entry in entry.entries.items():
+                        path_str_ = f"{path_str}/{path}"
+                        if match_parts is None or utils.match_path(
+                            match_parts, path_str_.split("/")
+                        ):
+                            entries_[path_str_] = (
+                                asset_entry.blob_key,
+                                asset_entry.size,
+                                asset_entry.metadata,
+                            )
+                elif isinstance(entry, models.AssetEntry):
+                    if match_parts is None or utils.match_path(
+                        match_parts, path_str.split("/")
+                    ):
+                        entries_[path_str] = (
+                            entry.blob_key,
+                            entry.size,
+                            entry.metadata,
+                        )
+                else:
+                    raise Exception(f"Unhandled entry type ({type(entry)})")
+        else:
+            raise Exception(f"Unhandled entries type ({type(entries)})")
+        asset_id = self._request(PersistAssetRequest(entries_))
+        return models.Asset(
+            lambda: self._resolve_asset(asset_id), self._blob_manager.download, asset_id
+        )
 
-    def _resolve_asset(self, asset_id: int) -> dict[str, str]:
-        return self._request(GetAssetRequest(asset_id))
+    def _resolve_asset(
+        self, asset_id: int
+    ) -> dict[str, tuple[str, int, dict[str, t.Any]]]:
+        result = self._request(GetAssetRequest(asset_id))
+        return {k: tuple(v) for k, v in result.items()}
 
     def log_message(self, level, template: str | None, **kwargs):
         timestamp = time.time() * 1000
@@ -517,8 +602,9 @@ def _execute(
         _channel_context = channel
         try:
             target = getattr(module, target_name)
-            if not isinstance(target, decorators.Target) or target.definition.is_stub:
-                raise Exception("not valid target")
+            # TODO: fix circular dependency
+            # if not isinstance(target, decorators.Target) or target.definition.is_stub:
+            #     raise Exception("not valid target")
             channel.execute(target, arguments)
         finally:
             _channel_context = None
@@ -716,9 +802,7 @@ class Execution:
                 execute_after_ms = execute_after and int(
                     execute_after.timestamp() * 1000
                 )
-                self._server_notify(
-                    "suspend", (self._id, execute_after_ms)
-                )
+                self._server_notify("suspend", (self._id, execute_after_ms))
                 self._process.join()
             case CancelExecutionRequest(execution_id):
                 # TODO: pass reference to self?
@@ -779,7 +863,10 @@ class Execution:
                 # TODO: set (and unset) state on Execution to indicate waiting?
                 timeout_ms = timeout and timeout * 1000
                 self._server_request(
-                    "get_result", (execution_id, self._id, timeout_ms), request_id, _parse_result
+                    "get_result",
+                    (execution_id, self._id, timeout_ms),
+                    request_id,
+                    _parse_result,
                 )
             case PersistAssetRequest(entries):
                 self._server_request("put_asset", (self._id, entries), request_id)

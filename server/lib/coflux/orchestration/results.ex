@@ -297,6 +297,7 @@ defmodule Coflux.Orchestration.Results do
     end)
   end
 
+  # TODO: always load metadata?
   def get_asset_by_id(db, asset_id, load_metadata) do
     case query_one(db, "SELECT 1 FROM assets WHERE id = ?1", {asset_id}) do
       {:ok, {1}} ->

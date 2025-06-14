@@ -1,6 +1,8 @@
+import functools
 import typing as t
 from pathlib import Path
-import functools
+
+from . import utils
 
 T = t.TypeVar("T")
 
@@ -91,10 +93,45 @@ class Execution(t.Generic[T]):
         self._cancel_fn()
 
 
+class AssetEntry:
+    def __init__(
+        self,
+        path: str,
+        blob_key: str,
+        size: int,
+        metadata: t.Mapping[str, t.Any],
+        download_fn: t.Callable[[str, Path], None],
+    ):
+        self._path = path
+        self._blob_key = blob_key
+        self._size = size
+        self._metadata = metadata
+        self._download_fn = download_fn
+
+    @property
+    def blob_key(self) -> str:
+        return self._blob_key
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def metadata(self) -> t.Mapping[str, t.Any]:
+        return self._metadata
+
+    def restore(self, *, at: Path | str | None = None) -> Path:
+        base_path = Path(at) if at else Path.cwd()
+        target = base_path.joinpath(self._path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._download_fn(self._blob_key, target)
+        return target
+
+
 class Asset:
     def __init__(
         self,
-        resolve_fn: t.Callable[[], dict[str, str]],
+        resolve_fn: t.Callable[[], dict[str, tuple[str, int, dict[str, t.Any]]]],
         download_fn: t.Callable[[str, Path], None],
         id: int,
     ):
@@ -107,20 +144,20 @@ class Asset:
         return self._id
 
     @functools.cached_property
-    def _entries(self):
-        return self._resolve_fn()
+    def entries(self):
+        return {
+            path: AssetEntry(path, blob_key, size, metadata, self._download_fn)
+            for path, (blob_key, size, metadata) in self._resolve_fn().items()
+        }
 
-    def restore(self, *, match: str = "*", at: Path | str | None = None) -> dict[str, Path]:
-        if at:
-            if isinstance(at, str):
-                at = Path(at)
-            at = at.resolve()
-        base_path = at or Path.cwd()
+    def restore(
+        self, *, match: str | None = None, at: Path | str | None = None
+    ) -> dict[str, Path]:
         result = {}
-        for path_str, blob_key in self._entries.items():
-            # TODO: filter using `match`
-            target = base_path.joinpath(path_str)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            self._download_fn(blob_key, target)
-            result[path_str] = target
+        match_parts = match.split("/") if match is not None else None
+        for path_str, entry in self.entries.items():
+            if match_parts is None or utils.match_path(
+                match_parts, path_str.split("/")
+            ):
+                result[path_str] = entry.restore(at=at)
         return result
