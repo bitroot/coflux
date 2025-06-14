@@ -13,7 +13,7 @@ try:
 except ImportError:
     pandas = None
 
-from . import blobs, config, models
+from . import blobs, config, models, types
 
 T = t.TypeVar("T")
 
@@ -129,8 +129,8 @@ class Manager:
         self._blob_threshold = blob_threshold
         self._blob_manager = blob_manager
 
-    def serialise(self, value: t.Any) -> models.Value:
-        references: list[models.Reference] = []
+    def serialise(self, value: t.Any) -> types.Value:
+        references: list[types.Reference] = []
 
         def _serialise(value: t.Any) -> t.Any:
             if value is None or isinstance(value, (str, bool, int, float)):
@@ -187,8 +187,8 @@ class Manager:
             return ("raw", data, references)
 
     def _get_value_data(
-        self, value: models.Value
-    ) -> tuple[t.Any, list[models.Reference]]:
+        self, value: types.Value
+    ) -> tuple[t.Any, list[types.Reference]]:
         match value:
             case ("blob", key, _, references):
                 result = self._blob_manager.get(key)
@@ -196,13 +196,7 @@ class Manager:
             case ("raw", data, references):
                 return data, references
 
-    def deserialise(
-        self,
-        value: models.Value,
-        result_fn: t.Callable[[int], t.Any],
-        cancel_fn: t.Callable[[int], None],
-        asset_fn: t.Callable[[int], dict[str, tuple[str, int, dict[str, t.Any]]]],
-    ) -> t.Any:
+    def deserialise(self, value: types.Value) -> t.Any:
         data, references = self._get_value_data(value)
 
         def _deserialise(data: t.Any):
@@ -223,17 +217,9 @@ class Manager:
                         reference = references[data["index"]]
                         match reference:
                             case ("execution", execution_id):
-                                return models.Execution(
-                                    lambda: result_fn(execution_id),
-                                    lambda: cancel_fn(execution_id),
-                                    execution_id,
-                                )
+                                return models.Execution(execution_id)
                             case ("asset", asset_id):
-                                return models.Asset(
-                                    lambda: asset_fn(asset_id),
-                                    self._blob_manager.download,
-                                    asset_id,
-                                )
+                                return models.Asset(asset_id)
                             case ("fragment", format, blob_key, _size, metadata):
                                 data = self._blob_manager.get(blob_key)
                                 for serialiser in self._serialisers:

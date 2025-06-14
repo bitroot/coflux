@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from . import blobs, config, loader, models, serialisation, server, utils
+from . import blobs, config, loader, models, serialisation, server, types, utils
 
 _EXECUTION_THRESHOLD_S = 1.0
 _AGENT_THRESHOLD_S = 5.0
@@ -74,7 +74,7 @@ class ExecutingNotification(t.NamedTuple):
 
 
 class RecordResultRequest(t.NamedTuple):
-    value: models.Value
+    value: types.Value
 
 
 class RecordErrorRequest(t.NamedTuple):
@@ -84,8 +84,8 @@ class RecordErrorRequest(t.NamedTuple):
 class SubmitExecutionRequest(t.NamedTuple):
     module: str
     target: str
-    type: models.TargetType
-    arguments: list[models.Value]
+    type: types.TargetType
+    arguments: list[types.Value]
     group_id: int | None
     wait_for: set[int]
     cache: models.Cache | None
@@ -93,7 +93,7 @@ class SubmitExecutionRequest(t.NamedTuple):
     memo: list[int] | bool
     execute_after: dt.datetime | None
     retries: models.Retries | None
-    requires: models.Requires | None
+    requires: types.Requires | None
 
 
 class ResolveReferenceRequest(t.NamedTuple):
@@ -124,7 +124,7 @@ class RegisterGroupRequest(t.NamedTuple):
 
 
 class RecordCheckpointRequest(t.NamedTuple):
-    arguments: list[models.Value]
+    arguments: list[types.Value]
 
 
 class LogMessageRequest(t.NamedTuple):
@@ -202,6 +202,16 @@ def working_directory():
 def counter():
     count = itertools.count()
     return lambda: next(count)
+
+
+class NotInContextException(Exception):
+    pass
+
+
+def get_channel() -> "Channel":
+    if _channel_context is None:
+        raise NotInContextException("Not running in execution context")
+    return _channel_context
 
 
 def _prepare_asset_entry_for_file(
@@ -312,7 +322,7 @@ class Channel:
 
     def submit_execution(
         self,
-        type: models.TargetType,
+        type: types.TargetType,
         module: str,
         target: str,
         arguments: tuple[t.Any, ...],
@@ -324,7 +334,7 @@ class Channel:
         execute_after: dt.datetime | None = None,
         delay: float | dt.timedelta = 0,
         memo: list[int] | bool = False,
-        requires: models.Requires | None = None,
+        requires: types.Requires | None = None,
     ) -> models.Execution[t.Any]:
         if delay:
             delay = (
@@ -353,11 +363,7 @@ class Channel:
                 requires,
             )
         )
-        return models.Execution(
-            lambda: self._resolve_reference(execution_id),
-            lambda: self._cancel_execution(execution_id),
-            execution_id,
-        )
+        return models.Execution(execution_id)
 
     @contextmanager
     def group(self, name: str | None):
@@ -394,18 +400,10 @@ class Channel:
 
     def _resolve_arguments(
         self,
-        arguments: list[models.Value],
+        arguments: list[types.Value],
     ) -> list[t.Any]:
         # TODO: parallelise
-        return [
-            self._serialisation_manager.deserialise(
-                value,
-                self._resolve_reference,
-                self._cancel_execution,
-                self._resolve_asset,
-            )
-            for value in arguments
-        ]
+        return [self._serialisation_manager.deserialise(value) for value in arguments]
 
     def execute(self, target, arguments):
         resolved_arguments = self._resolve_arguments(arguments)
@@ -423,15 +421,10 @@ class Channel:
         else:
             self._record_result(value)
 
-    def _deserialise_result(self, result: models.Result):
+    def _deserialise_result(self, result: types.Result):
         match result:
             case ["value", value]:
-                return self._serialisation_manager.deserialise(
-                    value,
-                    self._resolve_reference,
-                    self._cancel_execution,
-                    self._resolve_asset,
-                )
+                return self._serialisation_manager.deserialise(value)
             case ["error", type_, message]:
                 raise _build_exception(type_, message)
             case ["abandoned"]:
@@ -443,11 +436,11 @@ class Channel:
             case result:
                 raise Exception(f"unexpected result ({result})")
 
-    def _resolve_reference(self, execution_id: int) -> t.Any:
+    def resolve_reference(self, execution_id: int) -> t.Any:
         result = self._request(ResolveReferenceRequest(execution_id, _timeout.get()))
         return self._deserialise_result(result)
 
-    def _cancel_execution(self, execution_id: int) -> None:
+    def cancel_execution(self, execution_id: int) -> None:
         # TODO: wait for confirmation?
         self._notify(CancelExecutionRequest(execution_id))
 
@@ -457,6 +450,7 @@ class Channel:
         ]
         self._notify(RecordCheckpointRequest(serialised_arguments))
 
+    # TODO: don't support AssetEntry? or somehow consider entry's path? or somehow remove path from AssetEntry..?
     def create_asset(
         self,
         entries: str
@@ -476,7 +470,7 @@ class Channel:
         elif isinstance(entries, Path) or isinstance(entries, str):
             entries = [entries]
         elif isinstance(entries, models.Asset):
-            entries = entries.entries
+            entries = {e.path: e for e in entries.entries}
         # TODO: parallelise uploads (and/or do uploads in background?)
         entries_: dict[str, tuple[str, int, t.Mapping[str, t.Any]]] = {}
         if isinstance(entries, list):
@@ -510,8 +504,8 @@ class Channel:
                         )
                     )
                 elif isinstance(entry, models.Asset):
-                    for path, asset_entry in entry.entries.items():
-                        path_str_ = f"{path_str}/{path}"
+                    for asset_entry in entry.entries:
+                        path_str_ = f"{path_str}/{asset_entry.path}"
                         if match_parts is None or utils.match_path(
                             match_parts, path_str_.split("/")
                         ):
@@ -534,15 +528,17 @@ class Channel:
         else:
             raise Exception(f"Unhandled entries type ({type(entries)})")
         asset_id = self._request(PersistAssetRequest(entries_))
-        return models.Asset(
-            lambda: self._resolve_asset(asset_id), self._blob_manager.download, asset_id
-        )
+        return models.Asset(asset_id)
 
-    def _resolve_asset(
-        self, asset_id: int
-    ) -> dict[str, tuple[str, int, dict[str, t.Any]]]:
+    def resolve_asset(self, asset_id: int) -> list[models.AssetEntry]:
         result = self._request(GetAssetRequest(asset_id))
-        return {k: tuple(v) for k, v in result.items()}
+        return [
+            models.AssetEntry(path, blob_key, size, metadata)
+            for path, (blob_key, size, metadata) in result.items()
+        ]
+
+    def download_blob(self, blob_key: str, path: Path):
+        self._blob_manager.download(blob_key, path)
 
     def log_message(self, level, template: str | None, **kwargs):
         timestamp = time.time() * 1000
@@ -561,10 +557,6 @@ class Channel:
         )
 
 
-def get_channel() -> Channel | None:
-    return _channel_context
-
-
 def _build_exception(type_, message):
     # TODO: better way to re-create exception?
     parts = type_.rsplit(type_, maxsplit=1)
@@ -580,7 +572,7 @@ def _build_exception(type_, message):
 def _execute(
     module_name: str,
     target_name: str,
-    arguments: list[models.Value],
+    arguments: list[types.Value],
     execution_id: int,
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
@@ -610,7 +602,7 @@ def _execute(
             _channel_context = None
 
 
-def _json_safe_reference(reference: models.Reference) -> t.Any:
+def _json_safe_reference(reference: types.Reference) -> t.Any:
     match reference:
         case ("execution", execution_id):
             return ["execution", execution_id]
@@ -622,11 +614,11 @@ def _json_safe_reference(reference: models.Reference) -> t.Any:
             raise Exception(f"unhandled reference type ({other})")
 
 
-def _json_safe_references(references: list[models.Reference]) -> list[t.Any]:
+def _json_safe_references(references: list[types.Reference]) -> list[t.Any]:
     return [_json_safe_reference(r) for r in references]
 
 
-def _json_safe_value(value: models.Value):
+def _json_safe_value(value: types.Value):
     # TODO: tidy
     match value:
         case ("raw", content, references):
@@ -635,11 +627,11 @@ def _json_safe_value(value: models.Value):
             return ["blob", key, size, _json_safe_references(references)]
 
 
-def _json_safe_arguments(arguments: list[models.Value]):
+def _json_safe_arguments(arguments: list[types.Value]):
     return [_json_safe_value(v) for v in arguments]
 
 
-def _parse_reference(reference) -> models.Reference:
+def _parse_reference(reference) -> types.Reference:
     match reference:
         case ["execution", execution_id]:
             return ("execution", execution_id)
@@ -651,11 +643,11 @@ def _parse_reference(reference) -> models.Reference:
             raise Exception(f"unrecognised reference: {other}")
 
 
-def _parse_references(references) -> list[models.Reference]:
+def _parse_references(references) -> list[types.Reference]:
     return [_parse_reference(r) for r in references]
 
 
-def _parse_value(value: t.Any) -> models.Value:
+def _parse_value(value: t.Any) -> types.Value:
     match value:
         case ["raw", content, references]:
             return ("raw", content, _parse_references(references))
@@ -665,7 +657,7 @@ def _parse_value(value: t.Any) -> models.Value:
             raise Exception(f"unrecognised value: {other}")
 
 
-def _parse_result(result: t.Any) -> models.Result:
+def _parse_result(result: t.Any) -> types.Result:
     match result:
         case ["error", type_, message]:
             return ("error", type_, message)
@@ -679,7 +671,7 @@ def _parse_result(result: t.Any) -> models.Result:
             raise Exception(f"unrecognised result: {other}")
 
 
-class Execution:
+class ExecutionState:
     def __init__(
         self,
         execution_id: int,
@@ -915,11 +907,11 @@ class Manager:
         self._serialiser_configs = serialiser_configs
         self._blob_threshold = blob_threshold
         self._blob_store_configs = blob_store_configs
-        self._executions: dict[int, Execution] = {}
+        self._executions: dict[int, ExecutionState] = {}
         self._last_heartbeat_sent = None
 
     async def _declare_targets(
-        self, targets: dict[str, dict[models.TargetType, list[str]]]
+        self, targets: dict[str, dict[types.TargetType, list[str]]]
     ) -> None:
         await self._connection.notify("declare_targets", (targets,))
 
@@ -937,7 +929,7 @@ class Manager:
             await asyncio.sleep(_EXECUTION_THRESHOLD_S - elapsed)
 
     def _should_send_heartbeats(
-        self, executions: list[Execution], threshold_s: float, now: float
+        self, executions: list[ExecutionState], threshold_s: float, now: float
     ) -> bool:
         return (
             any(executions)
@@ -945,7 +937,7 @@ class Manager:
             or (now - self._last_heartbeat_sent) > threshold_s
         )
 
-    async def run(self, targets: dict[str, dict[models.TargetType, list[str]]]) -> None:
+    async def run(self, targets: dict[str, dict[types.TargetType, list[str]]]) -> None:
         # TODO: only declare targets once when starting session? (not on reconnect)
         await self._declare_targets(targets)
         await self._send_heartbeats()
@@ -955,13 +947,13 @@ class Manager:
         execution_id: int,
         module: str,
         target: str,
-        arguments: list[models.Value],
+        arguments: list[types.Value],
         server_host: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         if execution_id in self._executions:
             raise Exception(f"Execution ({execution_id}) already running")
-        execution = Execution(
+        execution = ExecutionState(
             execution_id,
             module,
             target,
@@ -979,7 +971,7 @@ class Manager:
         ).start()
 
     def _run_execution(
-        self, execution: Execution, loop: asyncio.AbstractEventLoop
+        self, execution: ExecutionState, loop: asyncio.AbstractEventLoop
     ) -> None:
         self._executions[execution.id] = execution
         try:

@@ -2,22 +2,11 @@ import datetime as dt
 import typing as t
 from pathlib import Path
 
-from . import execution, models
-
-
-class NotInContextException(Exception):
-    pass
-
-
-def _get_channel() -> execution.Channel:
-    channel = execution.get_channel()
-    if channel is None:
-        raise NotInContextException("Not running in execution context")
-    return channel
+from . import execution, models, types
 
 
 def submit(
-    type: models.TargetType,
+    type: types.TargetType,
     module: str,
     target: str,
     arguments: tuple[t.Any, ...],
@@ -29,9 +18,9 @@ def submit(
     execute_after: dt.datetime | None = None,
     delay: float | dt.timedelta = 0,
     memo: list[int] | bool = False,
-    requires: models.Requires | None = None,
+    requires: types.Requires | None = None,
 ) -> models.Execution[t.Any]:
-    return _get_channel().submit_execution(
+    return execution.get_channel().submit_execution(
         type,
         module,
         target,
@@ -48,15 +37,15 @@ def submit(
 
 
 def group(name: str | None = None):
-    return _get_channel().group(name)
+    return execution.get_channel().group(name)
 
 
 def suspense(timeout: float | None = 0):
-    return _get_channel().suspense(timeout)
+    return execution.get_channel().suspense(timeout)
 
 
 def suspend(delay: float | dt.datetime | None = None):
-    return _get_channel().suspend(delay)
+    return execution.get_channel().suspend(delay)
 
 
 def asset(
@@ -70,24 +59,24 @@ def asset(
     at: Path | None = None,
     match: str | None = None,
 ) -> models.Asset:
-    return _get_channel().create_asset(entries, at=at, match=match)
+    return execution.get_channel().create_asset(entries, at=at, match=match)
 
 
 def checkpoint(*arguments: t.Any) -> None:
-    return _get_channel().record_checkpoint(arguments)
+    return execution.get_channel().record_checkpoint(arguments)
 
 
 def log_debug(template: str | None = None, **kwargs) -> None:
-    _get_channel().log_message(0, template, **kwargs)
+    execution.get_channel().log_message(0, template, **kwargs)
 
 
 def log_info(template: str | None = None, **kwargs) -> None:
-    _get_channel().log_message(2, template, **kwargs)
+    execution.get_channel().log_message(2, template, **kwargs)
 
 
 def log_warning(template: str | None = None, **kwargs) -> None:
-    _get_channel().log_message(4, template, **kwargs)
+    execution.get_channel().log_message(4, template, **kwargs)
 
 
 def log_error(template: str | None = None, **kwargs) -> None:
-    _get_channel().log_message(5, template, **kwargs)
+    execution.get_channel().log_message(5, template, **kwargs)
