@@ -1364,20 +1364,18 @@ export default function StepDetail({
         <StepDetailTab label="Cache" disabled={!step.cacheConfig}>
           {step.cacheConfig && <CacheSection step={step} />}
         </StepDetailTab>
-        <StepDetailTab label="Connections" disabled={!execution?.assignedAt}>
-          {execution?.assignedAt && (
-            <Fragment>
-              <RelationsSection
-                runId={runId}
-                run={run}
-                step={step}
-                stepId={stepId}
-                attempt={attempt}
-                execution={execution}
-              />
-              <DependenciesSection execution={execution} />
-            </Fragment>
-          )}
+        <StepDetailTab label="Connections">
+          <Fragment>
+            <RelationsSection
+              runId={runId}
+              run={run}
+              step={step}
+              stepId={stepId}
+              attempt={attempt}
+              execution={execution}
+            />
+            <DependenciesSection execution={execution} />
+          </Fragment>
         </StepDetailTab>
       </Tabs>
     </div>
