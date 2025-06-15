@@ -4,11 +4,11 @@ import classNames from "classnames";
 import { TablerIcon } from "@tabler/icons-react";
 
 const variantStyles: Record<Variant, string> = {
-  primary: "bg-sky-50 text-sky-700 border-sky-600/10",
-  secondary: "bg-slate-50 text-slate-700 border-slate-600/10",
-  success: "bg-green-50 text-green-700 border-green-600/10",
-  warning: "bg-yellow-50 text-yellow-700 border-yellow-600/10",
-  danger: "bg-red-50 text-red-700 border-red-600/10",
+  primary: "bg-sky-50 text-sky-900 border-sky-900/5",
+  secondary: "bg-slate-50 text-slate-900 border-slate-900/5",
+  success: "bg-green-50 text-green-900 border-green-900/5",
+  warning: "bg-yellow-50 text-yellow-900 border-yellow-900/5",
+  danger: "bg-red-50 text-red-900 border-red-900/5",
 };
 
 const sizeStyles: Record<Size, string> = {
@@ -35,13 +35,13 @@ export default function Alert({
   return (
     <div
       className={classNames(
-        "border rounded-sm flex gap-1",
+        "border rounded-sm flex gap-2",
         variantStyles[variant],
         sizeStyles[size],
         className,
       )}
     >
-      {Icon && <Icon size={16} />}
+      {Icon && <Icon size={18} className="shrink-0" />}
       <div>{children}</div>
     </div>
   );
