@@ -7,10 +7,9 @@ import {
 
 import * as models from "../models";
 
-function iconForAsset(asset: models.Asset, path: string | undefined) {
-  const entry = path && asset.entries[path];
-  if (entry) {
-    const type = entry.metadata["type"] as undefined | string;
+function iconForAsset(asset: models.AssetSummary) {
+  if (asset.entry) {
+    const type = asset.entry.metadata["type"] as undefined | string;
     switch (type?.split("/")[0]) {
       case "text":
         return IconFileText;
@@ -23,16 +22,14 @@ function iconForAsset(asset: models.Asset, path: string | undefined) {
 }
 
 type AssetIconProps = IconProps & {
-  asset: models.Asset;
-  path?: string;
+  asset: models.AssetSummary;
 };
 
 export default function AssetIcon({
   asset,
-  path,
   size = 16,
   ...props
 }: AssetIconProps) {
-  const Icon = iconForAsset(asset, path);
+  const Icon = iconForAsset(asset);
   return <Icon size={size} {...props} />;
 }

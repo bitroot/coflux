@@ -266,28 +266,20 @@ function StepNode({
 }
 
 type AssetNodeProps = {
-  projectId: string;
   assetId: string;
-  asset: models.Asset;
+  asset: models.AssetSummary;
 };
 
-function AssetNode({ projectId, assetId, asset }: AssetNodeProps) {
-  const path =
-    Object.keys(asset.entries).length == 1
-      ? Object.keys(asset.entries)[0]
-      : undefined;
+function AssetNode({ assetId, asset }: AssetNodeProps) {
   return (
     <AssetLink
-      projectId={projectId}
       assetId={assetId}
       asset={asset}
-      path={path}
       className="h-full w-full flex gap-0.5 px-1.5 items-center bg-slate-50 rounded-full text-slate-700 text-sm ring-slate-400"
       hoveredClassName="ring-2"
     >
       <AssetIcon
         asset={asset}
-        path={path}
         size={16}
         strokeWidth={1.5}
         className="shrink-0"
@@ -747,11 +739,7 @@ export default function RunGraph({
                       />
                     </div>
                   ) : node.type == "asset" ? (
-                    <AssetNode
-                      projectId={projectId}
-                      assetId={node.assetId}
-                      asset={node.asset}
-                    />
+                    <AssetNode assetId={node.assetId} asset={node.asset} />
                   ) : node.type == "assets" ? (
                     <MoreAssetsNode assetIds={node.assetIds} />
                   ) : node.type == "child" ? (

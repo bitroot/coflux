@@ -1135,32 +1135,20 @@ function ResultSection({
 }
 
 type AssetItemProps = {
-  asset: models.Asset;
-  projectId: string;
+  asset: models.AssetSummary;
   assetId: string;
 };
 
-function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
-  const path =
-    Object.keys(asset.entries).length == 1
-      ? Object.keys(asset.entries)[0]
-      : undefined;
+function AssetItem({ asset, assetId }: AssetItemProps) {
   return (
     <li className="my-1 flex items-center gap-1">
       <AssetLink
-        projectId={projectId}
         assetId={assetId}
         asset={asset}
-        path={path}
         className="inline-flex items-start gap-1 rounded-full px-1 ring-slate-400"
         hoveredClassName="ring-2"
       >
-        <AssetIcon
-          asset={asset}
-          path={path}
-          size={18}
-          className="mt-1 shrink-0"
-        />
+        <AssetIcon asset={asset} size={18} className="mt-1 shrink-0" />
         <span className="flex flex-col min-w-0">
           <span className="text-ellipsis overflow-hidden whitespace-nowrap">
             {getAssetName(asset)}
@@ -1173,22 +1161,16 @@ function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
 
 type AssetsSectionProps = {
   execution: models.Execution;
-  projectId: string;
 };
 
-function AssetsSection({ execution, projectId }: AssetsSectionProps) {
+function AssetsSection({ execution }: AssetsSectionProps) {
   return (
     <div>
       <h3 className="uppercase text-sm font-semibold text-slate-400">Assets</h3>
       {Object.keys(execution.assets).length ? (
         <ul>
           {Object.entries(execution.assets).map(([assetId, asset]) => (
-            <AssetItem
-              key={assetId}
-              asset={asset}
-              projectId={projectId}
-              assetId={assetId}
-            />
+            <AssetItem key={assetId} asset={asset} assetId={assetId} />
           ))}
         </ul>
       ) : (
@@ -1333,7 +1315,7 @@ export default function StepDetail({
             />
           )}
           {execution && Object.keys(execution.assets).length > 0 && (
-            <AssetsSection execution={execution} projectId={projectId} />
+            <AssetsSection execution={execution} />
           )}
         </StepDetailTab>
         <StepDetailTab

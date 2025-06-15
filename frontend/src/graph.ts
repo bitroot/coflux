@@ -34,7 +34,7 @@ type BaseNode = (
       type: "asset";
       stepId: string;
       assetId: string;
-      asset: models.Asset;
+      asset: models.AssetSummary;
     }
   | {
       type: "assets";

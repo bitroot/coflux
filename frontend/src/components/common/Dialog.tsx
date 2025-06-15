@@ -41,7 +41,7 @@ export default function Dialog({
       <div
         className={classNames(
           "max-h-screen p-4 flex flex-col w-full items-center",
-          size ? sizeStyles[size] : "max-w-screen",
+          size ? sizeStyles[size] : "max-w-screen h-screen",
         )}
       >
         <DialogPanel

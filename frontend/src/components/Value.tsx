@@ -180,24 +180,14 @@ function Data({ data, references, projectId }: DataProps) {
             );
           }
           case "asset": {
-            const path =
-              Object.keys(reference.asset.entries).length == 1
-                ? Object.keys(reference.asset.entries)[0]
-                : undefined;
             return (
               <AssetLink
-                projectId={projectId}
                 assetId={reference.assetId}
                 asset={reference.asset}
-                path={path}
                 className="bg-slate-100 rounded-sm px-0.5 ring-offset-1 ring-slate-400"
                 hoveredClassName="ring-2"
               >
-                <AssetIcon
-                  asset={reference.asset}
-                  path={path}
-                  className="inline-block"
-                />
+                <AssetIcon asset={reference.asset} className="inline-block" />
               </AssetLink>
             );
           }

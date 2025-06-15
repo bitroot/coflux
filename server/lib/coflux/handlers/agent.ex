@@ -277,12 +277,7 @@ defmodule Coflux.Handlers.Agent do
         [asset_id, from_execution_id] = message["params"]
 
         if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.get_asset(
-                 state.project_id,
-                 asset_id,
-                 from_execution_id: from_execution_id,
-                 load_metadata: true
-               ) do
+          case Orchestration.get_asset(state.project_id, asset_id, from_execution_id) do
             {:ok, entries} ->
               entries =
                 Map.new(entries, fn {path, blob_key, size, metadata} ->

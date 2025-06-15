@@ -500,6 +500,20 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "GET", ["get_asset"]) do
+    qs = :cowboy_req.parse_qs(req)
+    project_id = get_query_param(qs, "project")
+    asset_id = get_query_param(qs, "asset")
+
+    case Orchestration.get_asset_by_external_id(project_id, asset_id) do
+      {:ok, nil} ->
+        json_error_response(req, "not_found", status: 404)
+
+      {:ok, entries} ->
+        json_response(req, compose_asset(entries))
+    end
+  end
+
   defp handle(req, _method, _path) do
     json_error_response(req, "not_found", status: 404)
   end
@@ -1029,6 +1043,20 @@ defmodule Coflux.Handlers.Api do
       "delay" => workflow.delay,
       "retries" => compose_workflow_retries(workflow.retries),
       "requires" => workflow.requires
+    }
+  end
+
+  defp compose_asset(entries) do
+    %{
+      "entries" =>
+        Map.new(entries, fn {path, blob_key, size, metadata} ->
+          {path,
+           %{
+             "blobKey" => blob_key,
+             "size" => size,
+             "metadata" => metadata
+           }}
+        end)
     }
   end
 end
