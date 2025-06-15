@@ -578,7 +578,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_target_runs(db, module, target, workspace_id, limit \\ 50) do
+  def get_target_runs(db, module, target, type, workspace_id, limit \\ 50) do
     query(
       db,
       """
@@ -586,11 +586,11 @@ defmodule Coflux.Orchestration.Runs do
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
-      WHERE s.module = ?1 AND s.target = ?2 AND s.parent_id IS NULL AND e.workspace_id = ?3
+      WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.workspace_id = ?4
       ORDER BY r.created_at DESC
-      LIMIT ?4
+      LIMIT ?5
       """,
-      {module, target, workspace_id, limit}
+      {module, target, Utils.encode_step_type(type), workspace_id, limit}
     )
   end
 
