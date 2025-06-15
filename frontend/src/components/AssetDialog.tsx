@@ -1,13 +1,7 @@
 import Dialog from "./common/Dialog";
 import * as models from "../models";
 import * as api from "../api";
-import {
-  ComponentProps,
-  Fragment,
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   Link,
   useLocation,
@@ -24,6 +18,7 @@ import {
   IconFolder,
   IconLoader2,
   IconWindowMaximize,
+  IconWindowMinimize,
 } from "@tabler/icons-react";
 import classNames from "classnames";
 import Alert from "./common/Alert";
@@ -106,14 +101,25 @@ function LocationBar({ selected, assetId }: LocationBarProps) {
 }
 
 type ToolbarProps = {
-  onMaximise: () => void;
+  maximised: boolean;
+  onToggleMaximise: () => void;
 };
 
-function Toolbar({ onMaximise }: ToolbarProps) {
+function Toolbar({ maximised, onToggleMaximise }: ToolbarProps) {
   return (
     <div>
-      <Button variant="secondary" size="sm" outline={true} onClick={onMaximise}>
-        <IconWindowMaximize size={16} className="shrink-0" />
+      <Button
+        variant="secondary"
+        size="sm"
+        outline={true}
+        title={maximised ? "Restore dialog" : "Maxmise dialog"}
+        onClick={onToggleMaximise}
+      >
+        {maximised ? (
+          <IconWindowMinimize size={16} className="shrink-0" />
+        ) : (
+          <IconWindowMaximize size={16} className="shrink-0" />
+        )}
       </Button>
     </div>
   );
@@ -263,7 +269,7 @@ export default function AssetDialog({ identifier, projectId }: Props) {
   const [assetId, selected] = parseIdentifier(identifier);
   const [asset, setAsset] = useState<models.Asset | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [size, setSize] = useState<ComponentProps<typeof Dialog>["size"]>("lg");
+  const [maximised, setMaximised] = useState(false);
   useEffect(() => {
     setError(null);
     if (assetId) {
@@ -279,14 +285,19 @@ export default function AssetDialog({ identifier, projectId }: Props) {
       buildUrl(pathname, omit(Object.fromEntries(searchParams), "asset")),
     );
   }, [searchParams, pathname, navigate]);
-  const handleMaximise = useCallback(() => {
-    setSize((size) => (size == "lg" ? undefined : "lg"));
-  }, []);
+  const handleToggleMaximise = useCallback(
+    () => setMaximised((maximised) => !maximised),
+    [],
+  );
   const entry =
     selected && !selected.endsWith("/") ? asset?.entries[selected] : undefined;
   const type = entry && (entry.metadata["type"] as string);
   return (
-    <Dialog open={!!assetId} onClose={handleDialogClose} size={size}>
+    <Dialog
+      open={!!assetId}
+      onClose={handleDialogClose}
+      size={maximised ? undefined : "lg"}
+    >
       {error ? (
         <div className="p-3">
           <Alert icon={IconAlertTriangle} variant="danger">
@@ -297,17 +308,22 @@ export default function AssetDialog({ identifier, projectId }: Props) {
         <div
           className={classNames(
             "flex flex-col items-center justify-center gap-2",
-            size ? "h-96" : "h-full",
+            maximised ? "h-full" : "h-96",
           )}
         >
           <IconLoader2 size={24} className="animate-spin text-slate-300" />
           <p className="text-slate-500">Loading asset...</p>
         </div>
       ) : (
-        <div className={classNames("flex flex-col", size ? "h-96" : "h-full")}>
+        <div
+          className={classNames("flex flex-col", maximised ? "h-full" : "h-96")}
+        >
           <div className="p-3 border-b border-slate-200 flex justify-between">
             <LocationBar selected={selected} assetId={assetId!} />
-            <Toolbar onMaximise={handleMaximise} />
+            <Toolbar
+              maximised={maximised}
+              onToggleMaximise={handleToggleMaximise}
+            />
           </div>
           {entry &&
           (type?.startsWith("text/") || type?.startsWith("image/")) ? (
