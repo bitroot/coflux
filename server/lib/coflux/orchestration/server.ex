@@ -1264,7 +1264,8 @@ defmodule Coflux.Orchestration.Server do
              do: Manifests.get_instruction(state.db, workflow.instruction_id),
              else: {:ok, nil}
            ),
-         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, workspace_id) do
+         {:ok, runs} =
+           Runs.get_target_runs(state.db, module, target_name, :workflow, workspace_id) do
       {:ok, ref, state} =
         add_listener(state, {:workflow, module, target_name, workspace_id}, pid)
 
@@ -1288,7 +1289,7 @@ defmodule Coflux.Orchestration.Server do
              do: Manifests.get_instruction(state.db, sensor.instruction_id),
              else: {:ok, nil}
            ),
-         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, workspace_id) do
+         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, :sensor, workspace_id) do
       {:ok, ref, state} =
         add_listener(state, {:sensor, module, target_name, workspace_id}, pid)
 
