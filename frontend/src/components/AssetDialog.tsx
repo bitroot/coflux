@@ -432,6 +432,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
           (type?.startsWith("text/") || type?.startsWith("image/")) ? (
             <iframe
               src={primaryBlobStore.url(entry.blobKey)}
+              sandbox="allow-downloads allow-forms allow-modals allow-scripts"
               className="flex-1"
             ></iframe>
           ) : entry ? (
