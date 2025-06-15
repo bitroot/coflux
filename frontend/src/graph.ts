@@ -18,7 +18,6 @@ export type Group = BaseGroup & {
 type BaseNode = (
   | {
       type: "step";
-      step: models.Step;
       stepId: string;
       attempt: number;
     }
@@ -33,8 +32,8 @@ type BaseNode = (
   | {
       type: "asset";
       stepId: string;
+      attempt: number;
       assetId: string;
-      asset: models.AssetSummary;
     }
   | {
       type: "assets";
@@ -369,7 +368,6 @@ export function buildGraph(
       const step = run.steps[stepId];
       nodes[stepId] = {
         type: "step",
-        step,
         stepId,
         attempt,
         groupIdentifier,
@@ -383,8 +381,8 @@ export function buildGraph(
         nodes[`asset:${assetId}`] = {
           type: "asset",
           stepId,
+          attempt,
           assetId,
-          asset,
           groupIdentifier,
           width: Math.min(getTextWidth(text) + 32, 140),
           height: 20,

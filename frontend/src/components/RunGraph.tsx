@@ -726,7 +726,7 @@ export default function RunGraph({
                       <StepNode
                         projectId={projectId}
                         stepId={node.stepId}
-                        step={node.step}
+                        step={run.steps[node.stepId]}
                         attempt={node.attempt}
                         runId={runId}
                         isActive={node.stepId == activeStepId}
@@ -741,7 +741,14 @@ export default function RunGraph({
                       />
                     </div>
                   ) : node.type == "asset" ? (
-                    <AssetNode assetId={node.assetId} asset={node.asset} />
+                    <AssetNode
+                      assetId={node.assetId}
+                      asset={
+                        run.steps[node.stepId].executions[node.attempt].assets[
+                          node.assetId
+                        ]
+                      }
+                    />
                   ) : node.type == "assets" ? (
                     <MoreAssetsNode assetIds={node.assetIds} />
                   ) : node.type == "child" ? (
