@@ -18,7 +18,6 @@ import {
   IconFile,
   IconFiles,
   IconFolder,
-  IconFolderFilled,
   IconLoader2,
   IconWindowMaximize,
   IconWindowMinimize,
@@ -238,19 +237,19 @@ function FileListItem({
           asset: `${assetId}:${prefix}${item}`,
         })}
         className={classNames(
-          "flex items-center px-2 py-1 gap-1",
+          "flex items-center px-3 py-2 gap-1",
           selected ? "bg-slate-100" : "hover:bg-slate-50",
         )}
       >
         <span className="flex-1 flex items-center gap-1">
           {item.endsWith("/") ? (
             <Fragment>
-              <IconFolderFilled size={16} className="shrink-0" />
+              <IconFolder size={20} strokeWidth={1.5} className="shrink-0" />
               {item.slice(0, -1)}
             </Fragment>
           ) : (
             <Fragment>
-              <Icon size={16} className="shrink-0" />
+              <Icon size={20} strokeWidth={1.5} className="shrink-0" />
               {item}
             </Fragment>
           )}
@@ -392,7 +391,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
     <Dialog
       open={!!assetId}
       onClose={handleDialogClose}
-      size={maximised ? undefined : "lg"}
+      size={maximised ? undefined : "2xl"}
     >
       {error ? (
         <div className="p-3">
@@ -404,7 +403,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
         <div
           className={classNames(
             "flex flex-col items-center justify-center gap-2",
-            maximised ? "h-full" : "h-96",
+            maximised ? "h-full" : "h-[50vh]",
           )}
         >
           <IconLoader2 size={24} className="animate-spin text-slate-300" />
@@ -412,7 +411,10 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
         </div>
       ) : (
         <div
-          className={classNames("flex flex-col", maximised ? "h-full" : "h-96")}
+          className={classNames(
+            "flex flex-col",
+            maximised ? "h-full" : "h-[50vh]",
+          )}
         >
           <div className="border-b border-slate-200 flex justify-between">
             <LocationBar
