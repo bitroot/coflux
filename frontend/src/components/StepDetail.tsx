@@ -108,13 +108,15 @@ function NextPreviousButton({
   const attempt = getNextPrevious(attempts, currentAttempt, direction);
   const Icon = direction == "next" ? IconChevronRight : IconChevronLeft;
   const className = classNames(
-    "p-1 bg-white border border-slate-300 flex items-center",
-    attempt ? "hover:bg-slate-50 text-slate-500" : "text-slate-200",
-    direction == "next" ? "rounded-r-md -ml-px" : "rounded-l-md -mr-px",
+    "px-1!",
+    direction == "next" ? "rounded-l-none -ml-px" : "rounded-r-none -mr-px",
   );
   if (attempt) {
     return (
-      <Link
+      <Button
+        as={Link}
+        variant="secondary"
+        outline={true}
         to={buildUrl(location.pathname, {
           workspace: activeWorkspaceName,
           step: stepId,
@@ -125,13 +127,18 @@ function NextPreviousButton({
         className={className}
       >
         <Icon size={16} />
-      </Link>
+      </Button>
     );
   } else {
     return (
-      <span className={className}>
+      <Button
+        variant="secondary"
+        outline={true}
+        disabled={true}
+        className={className}
+      >
         <Icon size={16} />
-      </span>
+      </Button>
     );
   }
 }
