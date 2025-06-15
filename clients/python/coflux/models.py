@@ -98,9 +98,9 @@ class Asset:
 
     def restore(self, *, match: str | None = None, at: Path | str | None = None):
         # TODO: parallelise
-        match_parts = match.split("/") if match is not None else None
+        matcher = utils.GlobMatcher(match) if match else None
         return {
             e.path: e.restore(at=at)
             for e in self.entries
-            if match_parts is None or utils.match_path(match_parts, e.path.split("/"))
+            if matcher is None or matcher.match(e.path)
         }

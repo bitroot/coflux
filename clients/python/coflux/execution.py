@@ -229,7 +229,7 @@ def _prepare_asset_entries_for_path(
     path: Path,
     blob_manager: blobs.Manager,
     base_dir: Path,
-    match_parts: list[str] | None = None,
+    matcher: utils.GlobMatcher | None = None,
     path_prefix: str = "",
 ) -> dict[str, tuple[str, int, t.Mapping[str, t.Any]]]:
     entries = {}
@@ -239,16 +239,14 @@ def _prepare_asset_entries_for_path(
             if path != base_dir
             else path_prefix
         )
-        if match_parts is None or utils.match_path(match_parts, path_str.split("/")):
+        if matcher is None or matcher.match(path_str):
             entries[path_str] = _prepare_asset_entry_for_file(path, blob_manager)
     elif path.is_dir():
         for dirpath, _dirnames, filenames in path.walk():
             for filename in filenames:
                 path_ = dirpath.joinpath(filename)
                 path_str = f"{path_prefix + '/' if path_prefix else ''}{path_.relative_to(base_dir)}"
-                if match_parts is None or utils.match_path(
-                    match_parts, path_str.split("/")
-                ):
+                if matcher is None or matcher.match(path_str):
                     entries[path_str] = _prepare_asset_entry_for_file(
                         path_, blob_manager
                     )
@@ -466,7 +464,7 @@ class Channel:
         name: str | None = None,
     ) -> models.Asset:
         base_dir = (at or self._directory).resolve()
-        match_parts = match.split("/") if match else None
+        matcher = utils.GlobMatcher(match) if match else None
         if entries is None:
             entries = [base_dir]
         elif isinstance(entries, Path) or isinstance(entries, str):
@@ -487,7 +485,7 @@ class Channel:
             for path in paths:
                 entries_.update(
                     _prepare_asset_entries_for_path(
-                        path, self._blob_manager, base_dir, match_parts
+                        path, self._blob_manager, base_dir, matcher
                     )
                 )
         elif isinstance(entries, dict):
@@ -502,24 +500,20 @@ class Channel:
                     path = entry.resolve()
                     entries_.update(
                         _prepare_asset_entries_for_path(
-                            path, self._blob_manager, path, match_parts, path_str
+                            path, self._blob_manager, path, matcher, path_str
                         )
                     )
                 elif isinstance(entry, models.Asset):
                     for asset_entry in entry.entries:
                         path_str_ = f"{path_str}/{asset_entry.path}"
-                        if match_parts is None or utils.match_path(
-                            match_parts, path_str_.split("/")
-                        ):
+                        if matcher is None or matcher.match(path_str_):
                             entries_[path_str_] = (
                                 asset_entry.blob_key,
                                 asset_entry.size,
                                 asset_entry.metadata,
                             )
                 elif isinstance(entry, models.AssetEntry):
-                    if match_parts is None or utils.match_path(
-                        match_parts, path_str.split("/")
-                    ):
+                    if matcher is None or matcher.match(path_str):
                         entries_[path_str] = (
                             entry.blob_key,
                             entry.size,
