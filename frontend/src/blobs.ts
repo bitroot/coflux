@@ -1,7 +1,7 @@
 import { GetObjectCommand, NoSuchKey, S3Client } from "@aws-sdk/client-s3";
 import * as settings from "./settings";
 
-interface BlobStore {
+export interface BlobStore {
   load(blobKey: string): Promise<string | undefined>;
   url(blobKey: string): string;
 }

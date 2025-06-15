@@ -21,7 +21,6 @@ import {
   IconChevronCompactRight,
   IconDownload,
   IconFile,
-  IconFiles,
   IconFolder,
   IconLoader2,
   IconWindowMaximize,
@@ -29,7 +28,7 @@ import {
 import classNames from "classnames";
 import Alert from "./common/Alert";
 import { useSetting } from "../settings";
-import { createBlobStore } from "../blobs";
+import { BlobStore, createBlobStore } from "../blobs";
 import Button from "./common/Button";
 
 function parseIdentifier(value: string | null): [string | undefined, string] {
@@ -39,6 +38,18 @@ function parseIdentifier(value: string | null): [string | undefined, string] {
   } else {
     return [undefined, ""];
   }
+}
+
+function totalCount(entries: models.Asset["entries"], path?: string) {
+  return Object.keys(entries).filter((p) => !path || p.startsWith(path)).length;
+}
+
+function totalSize(entries: models.Asset["entries"], path?: string) {
+  return sum(
+    Object.keys(entries)
+      .filter((p) => !path || p.startsWith(path))
+      .map((p) => entries[p].size),
+  );
 }
 
 type LocationBarProps = {
@@ -113,9 +124,18 @@ type FileListItemProps = {
   item: string;
   selected?: boolean;
   assetId: string;
+  count: number;
+  size: number;
 };
 
-function FileListItem({ prefix, item, selected, assetId }: FileListItemProps) {
+function FileListItem({
+  prefix,
+  item,
+  selected,
+  assetId,
+  count,
+  size,
+}: FileListItemProps) {
   const { pathname } = useLocation();
   const [searchParams] = useSearchParams();
   return (
@@ -127,34 +147,35 @@ function FileListItem({ prefix, item, selected, assetId }: FileListItemProps) {
         })}
         className={classNames(
           "flex items-center px-2 py-1 gap-1",
-          selected ? "bg-slate-100" : "hover:bg-slate-50 hover:underline",
+          selected ? "bg-slate-100" : "hover:bg-slate-50",
         )}
       >
-        {/* TODO: use icon for file type */}
-        {item.endsWith("/") ? (
-          <IconFolder size={16} className="shrink-0" />
-        ) : (
-          <IconFile size={16} className="shrink-0" />
-        )}
-        {item}
+        <span className="flex-1 flex items-center gap-1">
+          {/* TODO: use icon for file type */}
+          {item.endsWith("/") ? (
+            <IconFolder size={16} className="shrink-0" />
+          ) : (
+            <IconFile size={16} className="shrink-0" />
+          )}
+          {item}
+        </span>
+        <span className="flex-1 text-slate-500 text-sm">
+          {item.endsWith("/")
+            ? `${pluralise(count, "file")}, ${humanSize(size)}`
+            : humanSize(size)}
+        </span>
       </Link>
     </li>
   );
 }
 
-type FilesPanelProps = {
+type FilesListProps = {
   entries: models.Asset["entries"];
   assetId: string;
   selected: string;
-  className?: string;
 };
 
-function FilesPanel({
-  entries,
-  assetId,
-  selected,
-  className,
-}: FilesPanelProps) {
+function FilesList({ entries, assetId, selected }: FilesListProps) {
   const pathPrefix =
     !selected || selected.endsWith("/")
       ? selected
@@ -171,137 +192,59 @@ function FilesPanel({
           return p;
         }
       }),
-  ).sort();
+  );
+  const sorted = [
+    ...contents.filter((p) => p.endsWith("/")).sort(),
+    ...contents.filter((p) => !p.endsWith("/")).sort(),
+  ];
   return (
-    <div className={classNames("flex flex-col", className)}>
+    <div className="flex flex-col">
       <div className="flex-1 overflow-auto">
         <ol>
-          {contents
-            .filter((p) => p.endsWith("/"))
-            .map((path) => (
-              <FileListItem
-                key={path}
-                prefix={pathPrefix}
-                item={path}
-                assetId={assetId}
-              />
-            ))}
-          {contents
-            .filter((p) => !p.endsWith("/"))
-            .map((path) => (
-              <FileListItem
-                key={path}
-                prefix={pathPrefix}
-                item={path}
-                selected={selected == `${pathPrefix}${path}`}
-                assetId={assetId}
-              />
-            ))}
+          {sorted.map((path) => (
+            <FileListItem
+              key={path}
+              prefix={pathPrefix}
+              item={path}
+              assetId={assetId}
+              count={totalCount(entries, `${pathPrefix}${path}`)}
+              size={totalSize(entries, `${pathPrefix}${path}`)}
+            />
+          ))}
         </ol>
       </div>
     </div>
   );
 }
 
-function totalCount(entries: models.Asset["entries"], path?: string) {
-  return Object.keys(entries).filter((p) => !path || p.startsWith(path)).length;
-}
-
-function totalSize(entries: models.Asset["entries"], path?: string) {
-  return sum(
-    Object.keys(entries)
-      .filter((p) => !path || p.startsWith(path))
-      .map((p) => entries[p].size),
-  );
-}
-
-type PreviewPanelProps = {
-  projectId: string;
-  path: string;
-  entries: models.Asset["entries"];
-  className?: string;
+type FileInfoProps = {
+  entry: models.AssetEntry;
+  blobStore: BlobStore;
 };
 
-function PreviewPanel({
-  projectId,
-  path,
-  entries,
-  className,
-}: PreviewPanelProps) {
-  const blobStoresSetting = useSetting(projectId, "blobStores");
-  const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
-  const entry = path && !path.endsWith("/") ? entries[path] : undefined;
-  const type = entry && (entry.metadata["type"] as string);
+function FileInfo({ entry, blobStore }: FileInfoProps) {
   return (
-    <div className={classNames(className, "flex flex-col")}>
-      {type && (type.startsWith("text/") || type.startsWith("image/")) ? (
-        <iframe
-          src={primaryBlobStore.url(entry.blobKey)}
-          className="flex-1"
-        ></iframe>
-      ) : (
-        <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-5">
-          {entry ? (
-            <Fragment>
-              <div className="flex flex-col items-center">
-                <IconFile
-                  size={40}
-                  strokeWidth={1}
-                  className="shrink-0 text-slate-500 mb-2"
-                />
-                <h1>{path}</h1>
-                <p className="text-slate-500 text-sm">
-                  {humanSize(entry.size)}
-                </p>
-              </div>
-              <Button
-                as="a"
-                variant="secondary"
-                outline={true}
-                href={primaryBlobStore.url(entry.blobKey)}
-                download={true}
-                className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
-              >
-                <IconDownload size={16} />
-                Download
-              </Button>
-            </Fragment>
-          ) : path ? (
-            <Fragment>
-              <div className="flex flex-col items-center">
-                <IconFolder
-                  size={40}
-                  strokeWidth={1}
-                  className="shrink-0 text-slate-500 mb-2"
-                />
-                <h1>{path}</h1>
-                <p className="text-slate-500 text-sm">
-                  {pluralise(totalCount(entries, path), "file")}
-                </p>
-                <p className="text-slate-500 text-sm">
-                  ({humanSize(totalSize(entries, path))})
-                </p>
-              </div>
-            </Fragment>
-          ) : (
-            <Fragment>
-              <div className="flex flex-col items-center">
-                <IconFiles
-                  size={40}
-                  strokeWidth={1}
-                  className="shrink-0 text-slate-500 mb-2"
-                />
-                <p className="text-slate-500 text-sm">
-                  {pluralise(totalCount(entries), "file")}
-                </p>
-                <p className="text-slate-500 text-sm">
-                  ({humanSize(totalSize(entries))})
-                </p>
-              </div>
-            </Fragment>
-          )}
-        </div>
-      )}
+    <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-5">
+      <div className="flex flex-col items-center">
+        <IconFile
+          size={40}
+          strokeWidth={1}
+          className="shrink-0 text-slate-500 mb-2"
+        />
+        <h1>{entry.path}</h1>
+        <p className="text-slate-500 text-sm">{humanSize(entry.size)}</p>
+      </div>
+      <Button
+        as="a"
+        variant="secondary"
+        outline={true}
+        href={blobStore.url(entry.blobKey)}
+        download={true}
+        className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
+      >
+        <IconDownload size={16} />
+        Download
+      </Button>
     </div>
   );
 }
@@ -315,6 +258,8 @@ export default function AssetDialog({ identifier, projectId }: Props) {
   const [searchParams] = useSearchParams();
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const blobStoresSetting = useSetting(projectId, "blobStores");
+  const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
   const [assetId, selected] = parseIdentifier(identifier);
   const [asset, setAsset] = useState<models.Asset | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -337,6 +282,9 @@ export default function AssetDialog({ identifier, projectId }: Props) {
   const handleMaximise = useCallback(() => {
     setSize((size) => (size == "lg" ? undefined : "lg"));
   }, []);
+  const entry =
+    selected && !selected.endsWith("/") ? asset?.entries[selected] : undefined;
+  const type = entry && (entry.metadata["type"] as string);
   return (
     <Dialog open={!!assetId} onClose={handleDialogClose} size={size}>
       {error ? (
@@ -361,20 +309,24 @@ export default function AssetDialog({ identifier, projectId }: Props) {
             <LocationBar selected={selected} assetId={assetId!} />
             <Toolbar onMaximise={handleMaximise} />
           </div>
-          <div className="flex-1 flex divide-x divide-slate-200">
-            <FilesPanel
+          {entry &&
+          (type?.startsWith("text/") || type?.startsWith("image/")) ? (
+            <iframe
+              src={primaryBlobStore.url(entry.blobKey)}
+              className="flex-1"
+            ></iframe>
+          ) : entry ? (
+            <FileInfo
+              entry={{ ...entry, path: selected }}
+              blobStore={primaryBlobStore}
+            />
+          ) : (
+            <FilesList
               entries={asset.entries}
               assetId={assetId!}
               selected={selected}
-              className="w-3xs"
             />
-            <PreviewPanel
-              projectId={projectId}
-              path={selected}
-              entries={asset.entries}
-              className="flex-1"
-            />
-          </div>
+          )}
         </div>
       )}
     </Dialog>
