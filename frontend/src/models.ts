@@ -76,10 +76,11 @@ export type AssetEntry = {
 };
 
 export type Asset = {
+  name: string | null;
   entries: Record<string, Omit<AssetEntry, "path">>;
 };
 
-export type AssetSummary = {
+export type AssetSummary = Omit<Asset, "entries"> & {
   totalCount: number;
   totalSize: number;
   entry: AssetEntry | null;

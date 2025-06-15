@@ -260,6 +260,7 @@ CREATE TABLE executions (
 CREATE TABLE assets (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
+  name TEXT,
   hash BLOB NOT NULL UNIQUE
 ) STRICT;
 

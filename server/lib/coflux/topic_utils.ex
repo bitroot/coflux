@@ -45,7 +45,7 @@ defmodule Coflux.TopicUtils do
     end)
   end
 
-  def build_asset({total_count, total_size, entry}) do
+  def build_asset({name, total_count, total_size, entry}) do
     entry =
       case entry do
         {path, blob_key, size, metadata} ->
@@ -56,6 +56,7 @@ defmodule Coflux.TopicUtils do
       end
 
     %{
+      name: name,
       totalCount: total_count,
       totalSize: total_size,
       entry: entry

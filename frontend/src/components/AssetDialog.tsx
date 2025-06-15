@@ -16,6 +16,7 @@ import {
   IconDownload,
   IconFile,
   IconFolder,
+  IconFolderFilled,
   IconLoader2,
   IconWindowMaximize,
   IconWindowMinimize,
@@ -48,11 +49,12 @@ function totalSize(entries: models.Asset["entries"], path?: string) {
 }
 
 type LocationBarProps = {
+  asset: models.Asset;
   selected: string;
   assetId: string;
 };
 
-function LocationBar({ selected, assetId }: LocationBarProps) {
+function LocationBar({ asset, selected, assetId }: LocationBarProps) {
   const { pathname } = useLocation();
   const [searchParams] = useSearchParams();
   return (
@@ -65,7 +67,7 @@ function LocationBar({ selected, assetId }: LocationBarProps) {
           })}
           className="p-1 hover:bg-slate-50 rounded hover:underline"
         >
-          Asset
+          {asset.name || <span className="italic">Untitled asset</span>}
         </Link>
       </li>
       {selected &&
@@ -159,7 +161,7 @@ function FileListItem({
         <span className="flex-1 flex items-center gap-1">
           {/* TODO: use icon for file type */}
           {item.endsWith("/") ? (
-            <IconFolder size={16} className="shrink-0" />
+            <IconFolderFilled size={16} className="shrink-0" />
           ) : (
             <IconFile size={16} className="shrink-0" />
           )}
@@ -319,7 +321,7 @@ export default function AssetDialog({ identifier, projectId }: Props) {
           className={classNames("flex flex-col", maximised ? "h-full" : "h-96")}
         >
           <div className="p-3 border-b border-slate-200 flex justify-between">
-            <LocationBar selected={selected} assetId={assetId!} />
+            <LocationBar asset={asset} selected={selected} assetId={assetId!} />
             <Toolbar
               maximised={maximised}
               onToggleMaximise={handleToggleMaximise}

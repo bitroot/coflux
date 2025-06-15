@@ -116,7 +116,7 @@ defmodule Coflux.Orchestration.Results do
   end
 
   def has_result?(db, execution_id) do
-    case query_one(db, "SELECT COUNT(*) FROM results WHERE execution_id = ?1", {execution_id}) do
+    case query_one(db, "SELECT count(*) FROM results WHERE execution_id = ?1", {execution_id}) do
       {:ok, {0}} -> {:ok, false}
       {:ok, {1}} -> {:ok, true}
     end

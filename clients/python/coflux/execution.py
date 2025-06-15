@@ -102,6 +102,7 @@ class ResolveReferenceRequest(t.NamedTuple):
 
 
 class PersistAssetRequest(t.NamedTuple):
+    name: str | None
     entries: dict[str, tuple[str, int, t.Mapping[str, t.Any]]]
 
 
@@ -462,6 +463,7 @@ class Channel:
         *,
         at: Path | None = None,
         match: str | None = None,
+        name: str | None = None,
     ) -> models.Asset:
         base_dir = (at or self._directory).resolve()
         match_parts = match.split("/") if match else None
@@ -527,7 +529,7 @@ class Channel:
                     raise Exception(f"Unhandled entry type ({type(entry)})")
         else:
             raise Exception(f"Unhandled entries type ({type(entries)})")
-        asset_id = self._request(PersistAssetRequest(entries_))
+        asset_id = self._request(PersistAssetRequest(name, entries_))
         return models.Asset(asset_id)
 
     def resolve_asset(self, asset_id: int) -> list[models.AssetEntry]:
@@ -860,8 +862,8 @@ class ExecutionState:
                     request_id,
                     _parse_result,
                 )
-            case PersistAssetRequest(entries):
-                self._server_request("put_asset", (self._id, entries), request_id)
+            case PersistAssetRequest(name, entries):
+                self._server_request("put_asset", (self._id, name, entries), request_id)
             case GetAssetRequest(asset_id):
                 self._server_request("get_asset", (asset_id, self._id), request_id)
             case other:

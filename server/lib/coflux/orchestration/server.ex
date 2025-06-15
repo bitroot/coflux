@@ -1033,27 +1033,27 @@ defmodule Coflux.Orchestration.Server do
     {:reply, result, state}
   end
 
-  def handle_call({:put_asset, execution_id, entries}, _from, state) do
+  def handle_call({:put_asset, execution_id, name, entries}, _from, state) do
     {:ok, run_id} = Runs.get_execution_run_id(state.db, execution_id)
-    {:ok, asset_id} = Assets.get_or_create_asset(state.db, entries)
+    {:ok, asset_id} = Assets.get_or_create_asset(state.db, name, entries)
     :ok = Results.put_execution_asset(state.db, execution_id, asset_id)
 
-    {external_id, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
+    {external_id, name, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
 
     state =
       state
       |> notify_listeners(
         {:run, run_id},
-        {:asset, execution_id, external_id, {total_count, total_size, entry}}
+        {:asset, execution_id, external_id, {name, total_count, total_size, entry}}
       )
       |> flush_notifications()
 
     {:reply, {:ok, asset_id}, state}
   end
 
-  def handle_call({:get_asset, asset_id, from_execution_id}, _from, state) do
+  def handle_call({:get_asset_entries, asset_id, from_execution_id}, _from, state) do
     case Assets.get_asset_by_id(state.db, asset_id) do
-      {:ok, {entries}} ->
+      {:ok, _external_id, _name, entries} ->
         if from_execution_id do
           {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
         end
@@ -1067,8 +1067,8 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:get_asset_by_external_id, asset_external_id}, _from, state) do
     case Assets.get_asset_by_external_id(state.db, asset_external_id) do
-      {:ok, entries} ->
-        {:reply, {:ok, entries}, state}
+      {:ok, name, entries} ->
+        {:reply, {:ok, name, entries}, state}
 
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
@@ -1400,8 +1400,8 @@ defmodule Coflux.Orchestration.Server do
                    assets =
                      asset_ids
                      |> Enum.map(&resolve_asset(state.db, &1))
-                     |> Map.new(fn {external_id, total_count, total_size, entry} ->
-                       {external_id, {total_count, total_size, entry}}
+                     |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
+                       {external_id, {name, total_count, total_size, entry}}
                      end)
 
                    # TODO: batch? get `get_dependencies` to resolve?
@@ -2426,8 +2426,8 @@ defmodule Coflux.Orchestration.Server do
 
   defp resolve_asset(db, asset_id) do
     case Assets.get_asset_summary(db, asset_id) do
-      {:ok, external_id, total_count, total_size, entry} ->
-        {external_id, total_count, total_size, entry}
+      {:ok, external_id, name, total_count, total_size, entry} ->
+        {external_id, name, total_count, total_size, entry}
     end
   end
 
@@ -2440,8 +2440,8 @@ defmodule Coflux.Orchestration.Server do
         {:execution, execution_id, resolve_execution(db, execution_id)}
 
       {:asset, asset_id} ->
-        {external_asset_id, total_count, total_size, entry} = resolve_asset(db, asset_id)
-        {:asset, external_asset_id, {total_count, total_size, entry}}
+        {external_asset_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+        {:asset, external_asset_id, {name, total_count, total_size, entry}}
     end)
   end
 

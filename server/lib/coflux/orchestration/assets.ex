@@ -4,25 +4,27 @@ defmodule Coflux.Orchestration.Assets do
   alias Coflux.Orchestration.Values
   alias Coflux.Utils
 
-  defp hash_asset(entries) do
+  defp hash_asset(name, entries) do
     data =
-      entries
-      |> Enum.flat_map(fn {path, blob_key, _size, metadata} ->
-        Enum.concat(
-          [path, blob_key, Enum.count(metadata)],
-          Enum.flat_map(metadata, fn {key, value} ->
-            [key, Jason.encode!(value)]
-          end)
-        )
-      end)
+      [name || ""]
+      |> Enum.concat(
+        Enum.flat_map(entries, fn {path, blob_key, _size, metadata} ->
+          Enum.concat(
+            [path, blob_key, Enum.count(metadata)],
+            Enum.flat_map(metadata, fn {key, value} ->
+              [key, Jason.encode!(value)]
+            end)
+          )
+        end)
+      )
       |> Enum.intersperse(0)
 
     :crypto.hash(:sha256, data)
   end
 
-  def get_or_create_asset(db, entries) do
+  def get_or_create_asset(db, name, entries) do
     with_transaction(db, fn ->
-      hash = hash_asset(entries)
+      hash = hash_asset(name, entries)
 
       case query_one(db, "SELECT id FROM assets WHERE hash = ?1", {{:blob, hash}}) do
         {:ok, {asset_id}} ->
@@ -32,7 +34,7 @@ defmodule Coflux.Orchestration.Assets do
           external_id = Utils.generate_id(20)
 
           {:ok, asset_id} =
-            insert_one(db, :assets, %{external_id: external_id, hash: {:blob, hash}})
+            insert_one(db, :assets, %{external_id: external_id, name: name, hash: {:blob, hash}})
 
           Enum.each(entries, fn {path, blob_key, size, metadata} ->
             {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
@@ -93,12 +95,12 @@ defmodule Coflux.Orchestration.Assets do
   end
 
   def get_asset_summary(db, asset_id) do
-    case query_one(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id}) do
-      {:ok, {external_id}} ->
+    case query_one(db, "SELECT external_id, name FROM assets WHERE id = ?1", {asset_id}) do
+      {:ok, {external_id, name}} ->
         case query_one(
                db,
                """
-               SELECT COUNT(*) AS total_count, SUM(b.size) AS total_size
+               SELECT count(*) AS total_count, total(b.size) AS total_size
                FROM asset_entries AS ae
                INNER JOIN blobs AS b ON ae.blob_id = b.id
                WHERE ae.asset_id = ?1
@@ -113,7 +115,7 @@ defmodule Coflux.Orchestration.Assets do
                 end
               end
 
-            {:ok, external_id, total_count, total_size || 0, entry}
+            {:ok, external_id, name, total_count, total_size, entry}
         end
 
       {:ok, nil} ->
@@ -122,10 +124,10 @@ defmodule Coflux.Orchestration.Assets do
   end
 
   def get_asset_by_id(db, asset_id) do
-    case query_one(db, "SELECT 1 FROM assets WHERE id = ?1", {asset_id}) do
-      {:ok, {1}} ->
+    case query_one(db, "SELECT external_id, name FROM assets WHERE id = ?1", {asset_id}) do
+      {:ok, {external_id, name}} ->
         {:ok, entries} = get_asset_entries(db, asset_id)
-        {:ok, {entries}}
+        {:ok, external_id, name, entries}
 
       {:ok, nil} ->
         {:error, :not_found}
@@ -133,10 +135,10 @@ defmodule Coflux.Orchestration.Assets do
   end
 
   def get_asset_by_external_id(db, external_id) do
-    case query_one(db, "SELECT id FROM assets WHERE external_id = ?1", {external_id}) do
-      {:ok, {asset_id}} ->
+    case query_one(db, "SELECT id, name FROM assets WHERE external_id = ?1", {external_id}) do
+      {:ok, {asset_id, name}} ->
         {:ok, entries} = get_asset_entries(db, asset_id)
-        {:ok, entries}
+        {:ok, name, entries}
 
       {:ok, nil} ->
         {:error, :not_found}

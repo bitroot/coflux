@@ -110,12 +110,12 @@ defmodule Coflux.Orchestration do
     )
   end
 
-  def put_asset(project_id, execution_id, entries) do
-    call_server(project_id, {:put_asset, execution_id, entries})
+  def put_asset(project_id, execution_id, name, entries) do
+    call_server(project_id, {:put_asset, execution_id, name, entries})
   end
 
-  def get_asset(project_id, asset_id, opts \\ []) do
-    call_server(project_id, {:get_asset, asset_id, opts})
+  def get_asset_entries(project_id, asset_id, opts \\ []) do
+    call_server(project_id, {:get_asset_entries, asset_id, opts})
   end
 
   def get_asset_by_external_id(project_id, asset_external_id) do

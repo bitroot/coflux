@@ -255,7 +255,7 @@ defmodule Coflux.Handlers.Agent do
         end
 
       "put_asset" ->
-        [execution_id, entries] = message["params"]
+        [execution_id, name, entries] = message["params"]
 
         # TODO: validate
 
@@ -266,7 +266,7 @@ defmodule Coflux.Handlers.Agent do
             end)
 
           {:ok, asset_id} =
-            Orchestration.put_asset(state.project_id, execution_id, entries)
+            Orchestration.put_asset(state.project_id, execution_id, name, entries)
 
           {[success_message(message["id"], asset_id)], state}
         else
@@ -277,7 +277,7 @@ defmodule Coflux.Handlers.Agent do
         [asset_id, from_execution_id] = message["params"]
 
         if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.get_asset(state.project_id, asset_id, from_execution_id) do
+          case Orchestration.get_asset_entries(state.project_id, asset_id, from_execution_id) do
             {:ok, entries} ->
               entries =
                 Map.new(entries, fn {path, blob_key, size, metadata} ->

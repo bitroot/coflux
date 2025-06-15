@@ -58,8 +58,9 @@ def asset(
     *,
     at: Path | None = None,
     match: str | None = None,
+    name: str | None = None,
 ) -> models.Asset:
-    return execution.get_channel().create_asset(entries, at=at, match=match)
+    return execution.get_channel().create_asset(entries, at=at, match=match, name=name)
 
 
 def checkpoint(*arguments: t.Any) -> None:

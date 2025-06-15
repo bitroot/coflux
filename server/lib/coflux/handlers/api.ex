@@ -509,8 +509,8 @@ defmodule Coflux.Handlers.Api do
       {:ok, nil} ->
         json_error_response(req, "not_found", status: 404)
 
-      {:ok, entries} ->
-        json_response(req, compose_asset(entries))
+      {:ok, name, entries} ->
+        json_response(req, compose_asset(name, entries))
     end
   end
 
@@ -1046,8 +1046,9 @@ defmodule Coflux.Handlers.Api do
     }
   end
 
-  defp compose_asset(entries) do
+  defp compose_asset(name, entries) do
     %{
+      "name" => name,
       "entries" =>
         Map.new(entries, fn {path, blob_key, size, metadata} ->
           {path,
