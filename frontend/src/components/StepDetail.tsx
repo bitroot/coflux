@@ -37,7 +37,13 @@ import {
 
 import * as models from "../models";
 import Badge from "./Badge";
-import { buildUrl, truncatePath } from "../utils";
+import {
+  buildUrl,
+  humanSize,
+  humanSize,
+  pluralise,
+  truncatePath,
+} from "../utils";
 import Loading from "./Loading";
 import Button from "./common/Button";
 import RunLogs from "./RunLogs";
@@ -1151,10 +1157,17 @@ function AssetItem({ asset, assetId }: AssetItemProps) {
         <AssetIcon asset={asset} size={18} className="mt-1 shrink-0" />
         <span className="flex flex-col min-w-0">
           <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-            {getAssetName(asset)}
+            {asset.name || (
+              <span className="italic text-slate-800">
+                {getAssetName(asset)}
+              </span>
+            )}
           </span>
         </span>
       </AssetLink>
+      <span className="text-slate-500 text-sm">
+        {`${pluralise(asset.totalCount, "file")}, ${humanSize(asset.totalSize)}`}
+      </span>
     </li>
   );
 }

@@ -1,7 +1,7 @@
 import Dialog from "./common/Dialog";
 import * as models from "../models";
 import * as api from "../api";
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, ReactNode, useCallback, useEffect, useState } from "react";
 import {
   Link,
   useLocation,
@@ -11,10 +11,12 @@ import {
 import { buildUrl, humanSize, pluralise } from "../utils";
 import { omit, sum, uniq } from "lodash";
 import {
+  Icon,
   IconAlertTriangle,
-  IconChevronCompactRight,
+  IconChevronDown,
   IconDownload,
   IconFile,
+  IconFiles,
   IconFolder,
   IconFolderFilled,
   IconLoader2,
@@ -26,6 +28,12 @@ import Alert from "./common/Alert";
 import { useSetting } from "../settings";
 import { BlobStore, createBlobStore } from "../blobs";
 import Button from "./common/Button";
+import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
+import {
+  getAssetName,
+  getIconForFileType,
+  resolveAssetsForRun,
+} from "../assets";
 
 function parseIdentifier(value: string | null): [string | undefined, string] {
   if (value) {
@@ -48,57 +56,132 @@ function totalSize(entries: models.Asset["entries"], path?: string) {
   );
 }
 
+type AssetSelectorProps = {
+  assetId: string;
+  run: models.Run;
+};
+
+function AssetSelector({ assetId: selectedAssetId, run }: AssetSelectorProps) {
+  const { pathname } = useLocation();
+  const [searchParams] = useSearchParams();
+  const activeStepId = searchParams.get("step") || undefined;
+  const activeAttempt = searchParams.has("attempt")
+    ? parseInt(searchParams.get("attempt")!)
+    : undefined;
+  const assets = resolveAssetsForRun(run, activeStepId, activeAttempt);
+  return (
+    <div className="flex relative">
+      <Menu>
+        <MenuButton as={Button} variant="secondary" outline={true}>
+          <IconChevronDown size={16} className="shrink-0" />
+        </MenuButton>
+        <MenuItems
+          transition
+          anchor={{ to: "bottom start", gap: 4, padding: 20 }}
+          className="absolute top-full left-0 bg-white flex flex-col overflow-y-scroll min-w-40 shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0 outline-none"
+        >
+          {assets.map(([stepId, attempt, assetId]) => {
+            const step = run.steps[stepId];
+            const asset = step.executions[attempt].assets[assetId];
+            return (
+              <MenuItem key={`${stepId}-${attempt}-${assetId}`}>
+                <Link
+                  to={buildUrl(pathname, {
+                    ...Object.fromEntries(searchParams),
+                    asset: assetId,
+                  })}
+                  className="px-2 py-1 data-active:bg-slate-100 flex flex-col"
+                >
+                  <span
+                    className={
+                      assetId == selectedAssetId ? "font-bold" : undefined
+                    }
+                  >
+                    {asset.name || (
+                      <span className="italic text-slate-800">
+                        {getAssetName(asset)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-slate-500 text-sm">
+                    {`${pluralise(asset.totalCount, "file")}, ${humanSize(asset.totalSize)}`}
+                  </span>
+                </Link>
+              </MenuItem>
+            );
+          })}
+        </MenuItems>
+      </Menu>
+    </div>
+  );
+}
+
 type LocationBarProps = {
   asset: models.Asset;
   selected: string;
   assetId: string;
+  run: models.Run;
 };
 
-function LocationBar({ asset, selected, assetId }: LocationBarProps) {
+function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
   const { pathname } = useLocation();
   const [searchParams] = useSearchParams();
+  const parts = selected.match(/[^/]+\/?/g) || [];
+  const segments: [string, Icon, ReactNode][] = ["", ...parts].map(
+    (part, i, ps) => {
+      if (part == "") {
+        const child = asset.name || (
+          <span className="italic text-slate-800">{getAssetName(asset)}</span>
+        );
+        return ["", IconFiles, child];
+      } else if (part.endsWith("/")) {
+        return [ps.slice(0, i + 1).join(""), IconFolder, part.slice(0, -1)];
+      } else {
+        const path = ps.slice(0, i + 1).join("");
+        const icon = getIconForFileType(
+          asset.entries[path].metadata["type"] as string,
+        );
+        return [path, icon, part];
+      }
+    },
+  );
   return (
-    <ol className="flex items-center">
-      <li>
-        <Link
-          to={buildUrl(pathname, {
-            ...Object.fromEntries(searchParams),
-            asset: assetId,
-          })}
-          className="p-1 hover:bg-slate-50 rounded hover:underline"
-        >
-          {asset.name || <span className="italic">Untitled asset</span>}
-        </Link>
-      </li>
-      {selected &&
-        (selected.endsWith("/") ? selected.slice(0, -1) : selected)
-          .split("/")
-          .map((p, i, ps) => (
-            <Fragment key={i}>
-              <li>
-                <IconChevronCompactRight
-                  size={16}
-                  className="shrink-0 text-slate-300"
-                />
-              </li>
-              <li>
-                {i == ps.length - 1 ? (
-                  <span className="p-1">{p}</span>
-                ) : (
-                  <Link
-                    to={buildUrl(pathname, {
-                      ...Object.fromEntries(searchParams),
-                      asset: `${assetId}:${ps.slice(0, i + 1).join("/")}/`,
-                    })}
-                    className="p-1 hover:bg-slate-50 hover:underline rounded"
-                  >
-                    {p}
-                  </Link>
-                )}
-              </li>
-            </Fragment>
-          ))}
-    </ol>
+    <div className="p-3 flex items-center gap-2 min-w-0">
+      <AssetSelector assetId={assetId} run={run} />
+      <ol className="flex items-center gap-2 overflow-auto scrollbar-none">
+        {segments.map(([path, icon, child], i) => {
+          const Icon = icon;
+          if (i == segments.length - 1) {
+            return (
+              <span
+                key={i}
+                className="p-1 flex items-center gap-1 whitespace-nowrap"
+              >
+                <Icon size={16} className="shrink-0" />
+                {child}
+              </span>
+            );
+          } else {
+            return (
+              <Button
+                key={i}
+                as={Link}
+                variant="secondary"
+                outline={true}
+                to={buildUrl(pathname, {
+                  ...Object.fromEntries(searchParams),
+                  asset: `${assetId}:${path}`,
+                })}
+                left={<Icon size={16} className="shrink-0" />}
+                className="whitespace-nowrap"
+              >
+                {child}
+              </Button>
+            );
+          }
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -109,10 +192,9 @@ type ToolbarProps = {
 
 function Toolbar({ maximised, onToggleMaximise }: ToolbarProps) {
   return (
-    <div>
+    <div className="p-3">
       <Button
         variant="secondary"
-        size="sm"
         outline={true}
         title={maximised ? "Restore dialog" : "Maxmise dialog"}
         onClick={onToggleMaximise}
@@ -130,6 +212,7 @@ function Toolbar({ maximised, onToggleMaximise }: ToolbarProps) {
 type FileListItemProps = {
   prefix: string;
   item: string;
+  icon: Icon;
   selected?: boolean;
   assetId: string;
   count: number;
@@ -139,6 +222,7 @@ type FileListItemProps = {
 function FileListItem({
   prefix,
   item,
+  icon: Icon,
   selected,
   assetId,
   count,
@@ -159,13 +243,17 @@ function FileListItem({
         )}
       >
         <span className="flex-1 flex items-center gap-1">
-          {/* TODO: use icon for file type */}
           {item.endsWith("/") ? (
-            <IconFolderFilled size={16} className="shrink-0" />
+            <Fragment>
+              <IconFolderFilled size={16} className="shrink-0" />
+              {item.slice(0, -1)}
+            </Fragment>
           ) : (
-            <IconFile size={16} className="shrink-0" />
+            <Fragment>
+              <Icon size={16} className="shrink-0" />
+              {item}
+            </Fragment>
           )}
-          {item}
         </span>
         <span className="flex-1 text-slate-500 text-sm">
           {item.endsWith("/")
@@ -201,26 +289,31 @@ function FilesList({ entries, assetId, selected }: FilesListProps) {
         }
       }),
   );
+  const collator = new Intl.Collator(undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
   const sorted = [
-    ...contents.filter((p) => p.endsWith("/")).sort(),
-    ...contents.filter((p) => !p.endsWith("/")).sort(),
+    ...contents.filter((p) => p.endsWith("/")).sort(collator.compare),
+    ...contents.filter((p) => !p.endsWith("/")).sort(collator.compare),
   ];
   return (
-    <div className="flex flex-col">
-      <div className="flex-1 overflow-auto">
-        <ol>
-          {sorted.map((path) => (
-            <FileListItem
-              key={path}
-              prefix={pathPrefix}
-              item={path}
-              assetId={assetId}
-              count={totalCount(entries, `${pathPrefix}${path}`)}
-              size={totalSize(entries, `${pathPrefix}${path}`)}
-            />
-          ))}
-        </ol>
-      </div>
+    <div className="flex-1 overflow-auto">
+      <ol>
+        {sorted.map((path) => (
+          <FileListItem
+            key={path}
+            prefix={pathPrefix}
+            item={path}
+            icon={getIconForFileType(
+              entries[`${pathPrefix}${path}`]?.metadata["type"] as string,
+            )}
+            assetId={assetId}
+            count={totalCount(entries, `${pathPrefix}${path}`)}
+            size={totalSize(entries, `${pathPrefix}${path}`)}
+          />
+        ))}
+      </ol>
     </div>
   );
 }
@@ -260,9 +353,10 @@ function FileInfo({ entry, blobStore }: FileInfoProps) {
 type Props = {
   identifier: string | null;
   projectId: string;
+  run: models.Run;
 };
 
-export default function AssetDialog({ identifier, projectId }: Props) {
+export default function AssetDialog({ identifier, projectId, run }: Props) {
   const [searchParams] = useSearchParams();
   const { pathname } = useLocation();
   const navigate = useNavigate();
@@ -320,8 +414,13 @@ export default function AssetDialog({ identifier, projectId }: Props) {
         <div
           className={classNames("flex flex-col", maximised ? "h-full" : "h-96")}
         >
-          <div className="p-3 border-b border-slate-200 flex justify-between">
-            <LocationBar asset={asset} selected={selected} assetId={assetId!} />
+          <div className="border-b border-slate-200 flex justify-between">
+            <LocationBar
+              asset={asset}
+              selected={selected}
+              assetId={assetId!}
+              run={run}
+            />
             <Toolbar
               maximised={maximised}
               onToggleMaximise={handleToggleMaximise}

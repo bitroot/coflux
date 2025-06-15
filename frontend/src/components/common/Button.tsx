@@ -81,9 +81,9 @@ const variantOutlineStyles = {
 };
 
 const sizeStyles = {
-  sm: "rounded-sm px-2 py-0.5 text-xs h-6",
-  md: "rounded-md px-3 py-1 text-sm",
-  lg: "rounded-md px-4 py-1 text-base",
+  sm: "rounded-sm px-2 pt-1 pb-0.5 text-xs h-6",
+  md: "rounded-md px-3 pt-1.5 pb-1 text-sm h-8",
+  lg: "rounded-md px-4 pt-1.5 pb-1 text-base",
 };
 
 type Props<C extends ElementType = "button"> = {

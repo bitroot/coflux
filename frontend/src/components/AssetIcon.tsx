@@ -1,21 +1,12 @@
-import {
-  IconFile,
-  IconFileText,
-  IconFiles,
-  IconProps,
-} from "@tabler/icons-react";
+import { IconFiles, IconProps } from "@tabler/icons-react";
 
 import * as models from "../models";
+import { getIconForFileType } from "../assets";
 
 function iconForAsset(asset: models.AssetSummary) {
   if (asset.entry) {
     const type = asset.entry.metadata["type"] as undefined | string;
-    switch (type?.split("/")[0]) {
-      case "text":
-        return IconFileText;
-      default:
-        return IconFile;
-    }
+    return getIconForFileType(type);
   } else {
     return IconFiles;
   }

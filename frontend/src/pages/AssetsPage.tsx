@@ -1,15 +1,11 @@
 import { useParams, useSearchParams } from "react-router-dom";
-import { sortBy } from "lodash";
 
 import { useContext } from "../layouts/RunLayout";
 import AssetLink from "../components/AssetLink";
 import StepLink from "../components/StepLink";
-import { getAssetName } from "../assets";
+import { getAssetName, resolveAssetsForRun } from "../assets";
 import AssetIcon from "../components/AssetIcon";
-import { resolveSteps } from "../graph";
-import { humanSize } from "../utils";
-
-type Item = [string, number, string];
+import { humanSize, pluralise } from "../utils";
 
 export default function AssetsPage() {
   const { run } = useContext();
@@ -19,15 +15,7 @@ export default function AssetsPage() {
   const activeAttempt = searchParams.has("attempt")
     ? parseInt(searchParams.get("attempt")!)
     : undefined;
-  const stepAttempts = resolveSteps(run, activeStepId, activeAttempt);
-  const assets = sortBy(
-    Object.entries(stepAttempts).flatMap(([stepId, attempt]) =>
-      Object.keys(run.steps[stepId].executions[attempt].assets).map(
-        (assetId) => [stepId, attempt, assetId] as Item,
-      ),
-    ),
-    (item) => run.steps[item[0]].executions[item[1]].createdAt,
-  );
+  const assets = resolveAssetsForRun(run, activeStepId, activeAttempt);
   return (
     <div className="p-5">
       {assets.length ? (
@@ -48,14 +36,20 @@ export default function AssetsPage() {
                       <AssetIcon asset={asset} size={18} className="shrink-0" />
                       <span className="flex flex-col min-w-0">
                         <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-                          {getAssetName(asset)}
+                          {asset.name || (
+                            <span className="italic text-slate-800">
+                              {getAssetName(asset)}
+                            </span>
+                          )}
                         </span>
                       </span>
                     </AssetLink>
                   </td>
                   <td className="p-1">
                     <span className="text-slate-500 text-sm whitespace-nowrap">
-                      {humanSize(asset.totalSize)}
+                      {asset.totalCount > 1
+                        ? `${pluralise(asset.totalCount, "file")}, ${humanSize(asset.totalSize)}`
+                        : humanSize(asset.totalSize)}
                     </span>
                   </td>
                   <td className="p-1 text-right">

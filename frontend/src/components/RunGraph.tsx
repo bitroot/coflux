@@ -285,7 +285,9 @@ function AssetNode({ assetId, asset }: AssetNodeProps) {
         className="shrink-0"
       />
       <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-        {getAssetName(asset)}
+        {asset.name || (
+          <span className="italic text-slate-800">{getAssetName(asset)}</span>
+        )}
       </span>
     </AssetLink>
   );

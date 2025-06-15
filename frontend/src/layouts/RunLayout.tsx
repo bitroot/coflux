@@ -166,7 +166,11 @@ export default function RunLayout() {
   } else {
     return (
       <HoverContext>
-        <AssetDialog identifier={assetIdentifier} projectId={projectId!} />
+        <AssetDialog
+          identifier={assetIdentifier}
+          projectId={projectId!}
+          run={run}
+        />
         <GroupDialog
           runId={runId!}
           run={run}
