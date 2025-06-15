@@ -109,8 +109,8 @@ export default function RunTimeline({ runId, run }: Props) {
       .flat()
       .filter((t): t is DateTime => t !== null),
   ];
-  const earliestTime = DateTime.min(...times);
-  const latestTime = running ? now : DateTime.max(...times);
+  const earliestTime = DateTime.min(...times)!;
+  const latestTime = running ? now : DateTime.max(...times)!;
   const elapsedDiff = latestTime.diff(earliestTime, [
     "days",
     "hours",
@@ -157,7 +157,7 @@ export default function RunTimeline({ runId, run }: Props) {
                     x2={stepFinishedAt}
                     x0={earliestTime}
                     d={totalMillis}
-                    style={{ boxShadow: "inset 0 0 5px rgb(226, 232, 240)" }}
+                    style={{ boxShadow: "inset 0 0 2px 0 rgb(226, 232, 240)" }}
                   />
                   {Object.entries(step.executions).map(
                     ([attempt, execution]) => {

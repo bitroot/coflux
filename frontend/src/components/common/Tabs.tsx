@@ -32,7 +32,7 @@ export default function Tabs({ children, ...props }: Props) {
           <HeadlessTab
             key={i}
             disabled={c.props.disabled}
-            className="text-sm px-2 py-2 border-cyan-500 data-selected:border-b-2 data-selected:font-semibold outline-hidden disabled:opacity-30"
+            className="text-sm px-2 py-2 border-cyan-500 data-selected:border-b-2 data-selected:font-semibold outline-hidden disabled:opacity-30 cursor-pointer"
           >
             {c.props.label}
           </HeadlessTab>

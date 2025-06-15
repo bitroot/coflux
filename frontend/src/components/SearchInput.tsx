@@ -162,7 +162,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
           placeholder="Go to..."
           className="border-none bg-transparent text-sm text-slate-900 focus:ring-0 p-1 pl-7 pr-14 min-w-0 w-full flex-1 placeholder:text-slate-400"
         />
-        <span className="rounded-md bg-white border border-slate-300 text-slate-400 text-xs font-semibold px-1 py-px absolute right-2">
+        <span className="rounded-md bg-slate-50 text-slate-400 text-xs px-1 py-px absolute right-2">
           Ctrl-K
         </span>
       </div>

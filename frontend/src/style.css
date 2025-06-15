@@ -19,3 +19,7 @@
     -webkit-font-smoothing: antialiased;
   }
 }
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+}

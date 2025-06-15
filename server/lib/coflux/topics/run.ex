@@ -103,7 +103,7 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:asset, execution_id, asset_id, asset}) do
+  defp process_notification(topic, {:asset, execution_id, external_asset_id, asset}) do
     asset = build_asset(asset)
 
     update_execution(
@@ -112,7 +112,7 @@ defmodule Coflux.Topics.Run do
       fn topic, base_path ->
         Topic.set(
           topic,
-          base_path ++ [:assets, Integer.to_string(asset_id)],
+          base_path ++ [:assets, external_asset_id],
           asset
         )
       end
@@ -217,8 +217,8 @@ defmodule Coflux.Topics.Run do
                     completedAt: execution.completed_at,
                     groups: execution.groups,
                     assets:
-                      Map.new(execution.assets, fn {asset_id, asset} ->
-                        {Integer.to_string(asset_id), build_asset(asset)}
+                      Map.new(execution.assets, fn {external_asset_id, asset} ->
+                        {external_asset_id, build_asset(asset)}
                       end),
                     dependencies: build_dependencies(execution.dependencies),
                     children: Enum.map(execution.children, &build_child/1),

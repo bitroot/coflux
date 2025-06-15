@@ -75,7 +75,7 @@ defmodule Coflux.Orchestration.Observations do
     case query(
            db,
            """
-           SELECT m.execution_id, COUNT(*)
+           SELECT m.execution_id, count(*)
            FROM messages AS m
            INNER JOIN executions AS e ON e.id = m.execution_id
            INNER JOIN steps AS s ON s.id = e.step_id

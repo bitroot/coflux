@@ -179,10 +179,9 @@ function Data({ data, references, projectId }: DataProps) {
               </StepLink>
             );
           }
-          case "asset":
+          case "asset": {
             return (
               <AssetLink
-                projectId={projectId}
                 assetId={reference.assetId}
                 asset={reference.asset}
                 className="bg-slate-100 rounded-sm px-0.5 ring-offset-1 ring-slate-400"
@@ -191,6 +190,7 @@ function Data({ data, references, projectId }: DataProps) {
                 <AssetIcon asset={reference.asset} className="inline-block" />
               </AssetLink>
             );
+          }
         }
       }
     }

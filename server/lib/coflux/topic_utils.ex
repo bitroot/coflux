@@ -39,19 +39,27 @@ defmodule Coflux.TopicUtils do
       {:asset, asset_id, asset} ->
         %{
           type: "asset",
-          assetId: Integer.to_string(asset_id),
+          assetId: asset_id,
           asset: build_asset(asset)
         }
     end)
   end
 
-  def build_asset(asset) do
+  def build_asset({name, total_count, total_size, entry}) do
+    entry =
+      case entry do
+        {path, blob_key, size, metadata} ->
+          %{path: path, blobKey: blob_key, size: size, metadata: metadata}
+
+        nil ->
+          nil
+      end
+
     %{
-      type: asset.type,
-      path: asset.path,
-      metadata: asset.metadata,
-      blobKey: asset.blob_key,
-      size: asset.size
+      name: name,
+      totalCount: total_count,
+      totalSize: total_size,
+      entry: entry
     }
   end
 

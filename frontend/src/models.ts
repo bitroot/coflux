@@ -68,12 +68,22 @@ export type ExecutionReference = {
   target: string;
 };
 
-export type Asset = {
-  type: 0 | 1;
+export type AssetEntry = {
   path: string;
   blobKey: string;
   size: number;
   metadata: Record<string, unknown>;
+};
+
+export type Asset = {
+  name: string | null;
+  entries: Record<string, Omit<AssetEntry, "path">>;
+};
+
+export type AssetSummary = Omit<Asset, "entries"> & {
+  totalCount: number;
+  totalSize: number;
+  entry: AssetEntry | null;
 };
 
 export type Reference =
@@ -91,7 +101,7 @@ export type Reference =
   | {
       type: "asset";
       assetId: string;
-      asset: Asset;
+      asset: AssetSummary;
     };
 
 export type Data =
@@ -176,7 +186,7 @@ export type Execution = {
   dependencies: Record<string, Dependency>;
   children: Child[];
   result: Result | null;
-  assets: Record<string, Asset>;
+  assets: Record<string, AssetSummary>;
   logCount: number;
 };
 

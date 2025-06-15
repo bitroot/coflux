@@ -259,19 +259,27 @@ CREATE TABLE executions (
 
 CREATE TABLE assets (
   id INTEGER PRIMARY KEY,
-  hash BLOB NOT NULL UNIQUE,
-  type INTEGER NOT NULL,
+  external_id TEXT NOT NULL UNIQUE,
+  name TEXT,
+  hash BLOB NOT NULL UNIQUE
+) STRICT;
+
+CREATE TABLE asset_entries (
+  entry_id INTEGER PRIMARY KEY,
+  asset_id INTEGER NOT NULL,
   path TEXT NOT NULL,
   blob_id INTEGER NOT NULL,
+  UNIQUE (asset_id, path),
+  FOREIGN KEY (asset_id) REFERENCES assets ON DELETE CASCADE,
   FOREIGN KEY (blob_id) REFERENCES blobs ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE asset_metadata (
-  asset_id INTEGER NOT NULL,
+CREATE TABLE asset_entry_metadata (
+  asset_entry_id INTEGER NOT NULL,
   key TEXT NOT NULL,
   value TEXT NOT NULL,
-  PRIMARY KEY (asset_id, key),
-  FOREIGN KEY (asset_id) REFERENCES assets ON DELETE CASCADE
+  PRIMARY KEY (asset_entry_id, key),
+  FOREIGN KEY (asset_entry_id) REFERENCES asset_entries ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE execution_assets (
@@ -357,7 +365,7 @@ CREATE TABLE heartbeats (
 
 CREATE TABLE blobs (
   id INTEGER PRIMARY KEY,
-  key TEXT NOT NULL UNIQUE, -- TODO: use type BLOB?
+  key TEXT NOT NULL UNIQUE,
   size INTEGER NOT NULL
 ) STRICT;
 

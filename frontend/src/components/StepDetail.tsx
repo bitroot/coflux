@@ -37,13 +37,18 @@ import {
 
 import * as models from "../models";
 import Badge from "./Badge";
-import { buildUrl, truncatePath } from "../utils";
+import {
+  buildUrl,
+  humanSize,
+  humanSize,
+  pluralise,
+  truncatePath,
+} from "../utils";
 import Loading from "./Loading";
 import Button from "./common/Button";
 import RunLogs from "./RunLogs";
 import StepLink from "./StepLink";
 import AssetLink from "./AssetLink";
-import { getAssetMetadata } from "../assets";
 import AssetIcon from "./AssetIcon";
 import WorkspaceLabel from "./WorkspaceLabel";
 import { useWorkspaces, useLogs } from "../topics";
@@ -52,6 +57,7 @@ import Select from "./common/Select";
 import Value from "./Value";
 import TagSet from "./TagSet";
 import ExecutionStatus from "./ExecutionStatus";
+import { getAssetName } from "../assets";
 
 function getRunWorkspaceId(run: models.Run) {
   const initialStepId = minBy(
@@ -108,13 +114,15 @@ function NextPreviousButton({
   const attempt = getNextPrevious(attempts, currentAttempt, direction);
   const Icon = direction == "next" ? IconChevronRight : IconChevronLeft;
   const className = classNames(
-    "p-1 bg-white border border-slate-300 flex items-center",
-    attempt ? "hover:bg-slate-50 text-slate-500" : "text-slate-200",
-    direction == "next" ? "rounded-r-md -ml-px" : "rounded-l-md -mr-px",
+    "px-1!",
+    direction == "next" ? "rounded-l-none -ml-px" : "rounded-r-none -mr-px",
   );
   if (attempt) {
     return (
-      <Link
+      <Button
+        as={Link}
+        variant="secondary"
+        outline={true}
         to={buildUrl(location.pathname, {
           workspace: activeWorkspaceName,
           step: stepId,
@@ -125,13 +133,18 @@ function NextPreviousButton({
         className={className}
       >
         <Icon size={16} />
-      </Link>
+      </Button>
     );
   } else {
     return (
-      <span className={className}>
+      <Button
+        variant="secondary"
+        outline={true}
+        disabled={true}
+        className={className}
+      >
         <Icon size={16} />
-      </span>
+      </Button>
     );
   }
 }
@@ -543,9 +556,9 @@ function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
         Arguments
       </h3>
       {arguments_.length > 0 ? (
-        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1">
+        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1 mt-1 overflow-x-auto">
           {arguments_.map((argument, index) => (
-            <li key={index}>
+            <li key={index} className="whitespace-nowrap">
               <Value
                 value={argument}
                 projectId={projectId}
@@ -555,7 +568,7 @@ function ArgumentsSection({ arguments_, projectId }: ArgumentsSectionProps) {
           ))}
         </ol>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
@@ -669,15 +682,15 @@ function CacheSection({ step }: CacheSectionProps) {
               })}
             </span>
           ) : (
-            <span className="text-slate-400">(none)</span>
+            <span className="text-slate-400 italic">None</span>
           )}
         </p>
         <p>
           Parameters:{" "}
           {cacheConfig.params === true ? (
-            <span className="text-slate-400">(all)</span>
+            <span className="text-slate-400 italic">All</span>
           ) : !cacheConfig.params.length ? (
-            <span>(none)</span>
+            <span className="italic">None</span>
           ) : (
             cacheConfig.params.map((position) => `${position}`).join(", ")
           )}
@@ -685,13 +698,13 @@ function CacheSection({ step }: CacheSectionProps) {
         <p>
           Version:{" "}
           {cacheConfig.version || (
-            <span className="text-slate-400">(none)</span>
+            <span className="text-slate-400 italic">None</span>
           )}
         </p>
         <p>
           Namespace:{" "}
           {cacheConfig.namespace || (
-            <span className="text-slate-400">(default)</span>
+            <span className="text-slate-400 italic">Default</span>
           )}
         </p>
       </div>
@@ -739,7 +752,7 @@ function DependenciesSection({ execution }: DependenciesSectionProps) {
           )}
         </ul>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
@@ -802,8 +815,10 @@ function RelationsSection({
             className="rounded text-sm ring-offset-1 px-1"
             hoveredClassName="ring-2 ring-slate-300"
           >
-            <span className="font-mono">{step.target}</span>{" "}
-            <span className="text-slate-500">({step.module})</span>
+            <span className="font-mono">{run.steps[parent[0]].target}</span>{" "}
+            <span className="text-slate-500">
+              ({run.steps[parent[0]].module})
+            </span>
           </StepLink>
         ) : run.parent ? (
           <StepLink
@@ -817,7 +832,7 @@ function RelationsSection({
             <span className="text-slate-500">({run.parent.module})</span>
           </StepLink>
         ) : (
-          <p className="italic">None</p>
+          <p className="text-slate-400 italic">None</p>
         )}
       </div>
       <div>
@@ -838,9 +853,10 @@ function RelationsSection({
                       ...Object.fromEntries(searchParams),
                       group: `${stepId}-${attempt}-${groupId}`,
                     })}
-                    className="rounded border border-slate-200 bg-slate-100/50 hover:bg-slate-100 inline-block px-1 py-0.5 text-sm"
+                    className="rounded hover:bg-slate-50 inline-block px-1 py-0.5 text-sm"
                   >
-                    {groupName || <em>Unnamed group</em>} ({count})
+                    {groupName || <em>Unnamed group</em>}{" "}
+                    <Badge label={count} />
                   </Link>
                 </li>
               );
@@ -866,7 +882,7 @@ function RelationsSection({
               })}
           </ul>
         ) : (
-          <p className="italic">None</p>
+          <p className="text-slate-400 italic">None</p>
         )}
       </div>
     </>
@@ -1125,16 +1141,14 @@ function ResultSection({
 }
 
 type AssetItemProps = {
-  asset: models.Asset;
-  projectId: string;
+  asset: models.AssetSummary;
   assetId: string;
 };
 
-function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
+function AssetItem({ asset, assetId }: AssetItemProps) {
   return (
     <li className="my-1 flex items-center gap-1">
       <AssetLink
-        projectId={projectId}
         assetId={assetId}
         asset={asset}
         className="inline-flex items-start gap-1 rounded-full px-1 ring-slate-400"
@@ -1143,12 +1157,16 @@ function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
         <AssetIcon asset={asset} size={18} className="mt-1 shrink-0" />
         <span className="flex flex-col min-w-0">
           <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-            {truncatePath(asset.path) + (asset.type == 1 ? "/" : "")}
+            {asset.name || (
+              <span className="italic text-slate-800">
+                {getAssetName(asset)}
+              </span>
+            )}
           </span>
         </span>
       </AssetLink>
-      <span className="text-slate-500 text-xs">
-        {getAssetMetadata(asset).join(", ")}
+      <span className="text-slate-500 text-sm">
+        {`${pluralise(asset.totalCount, "file")}, ${humanSize(asset.totalSize)}`}
       </span>
     </li>
   );
@@ -1156,26 +1174,20 @@ function AssetItem({ asset, projectId, assetId }: AssetItemProps) {
 
 type AssetsSectionProps = {
   execution: models.Execution;
-  projectId: string;
 };
 
-function AssetsSection({ execution, projectId }: AssetsSectionProps) {
+function AssetsSection({ execution }: AssetsSectionProps) {
   return (
     <div>
       <h3 className="uppercase text-sm font-semibold text-slate-400">Assets</h3>
       {Object.keys(execution.assets).length ? (
         <ul>
           {Object.entries(execution.assets).map(([assetId, asset]) => (
-            <AssetItem
-              key={assetId}
-              asset={asset}
-              projectId={projectId}
-              assetId={assetId}
-            />
+            <AssetItem key={assetId} asset={asset} assetId={assetId} />
           ))}
         </ul>
       ) : (
-        <p className="italic">None</p>
+        <p className="text-slate-400 italic">None</p>
       )}
     </div>
   );
@@ -1316,7 +1328,7 @@ export default function StepDetail({
             />
           )}
           {execution && Object.keys(execution.assets).length > 0 && (
-            <AssetsSection execution={execution} projectId={projectId} />
+            <AssetsSection execution={execution} />
           )}
         </StepDetailTab>
         <StepDetailTab
@@ -1352,20 +1364,18 @@ export default function StepDetail({
         <StepDetailTab label="Cache" disabled={!step.cacheConfig}>
           {step.cacheConfig && <CacheSection step={step} />}
         </StepDetailTab>
-        <StepDetailTab label="Connections" disabled={!execution?.assignedAt}>
-          {execution?.assignedAt && (
-            <Fragment>
-              <RelationsSection
-                runId={runId}
-                run={run}
-                step={step}
-                stepId={stepId}
-                attempt={attempt}
-                execution={execution}
-              />
-              <DependenciesSection execution={execution} />
-            </Fragment>
-          )}
+        <StepDetailTab label="Connections">
+          <Fragment>
+            <RelationsSection
+              runId={runId}
+              run={run}
+              step={step}
+              stepId={stepId}
+              attempt={attempt}
+              execution={execution}
+            />
+            <DependenciesSection execution={execution} />
+          </Fragment>
         </StepDetailTab>
       </Tabs>
     </div>

@@ -1,11 +1,11 @@
-import functools
-import typing as t
 import datetime as dt
+import functools
 import inspect
-import re
 import json
+import re
+import typing as t
 
-from . import context, models
+from . import execution, models, types
 
 TARGET_KEY = "_coflux_target"
 
@@ -62,7 +62,11 @@ def _parse_cache(
         (
             int(cache * 1000)
             if isinstance(cache, (int, float)) and not isinstance(cache, bool)
-            else (int(cache.total_seconds() * 1000) if isinstance(cache, dt.timedelta) else None)
+            else (
+                int(cache.total_seconds() * 1000)
+                if isinstance(cache, dt.timedelta)
+                else None
+            )
         ),
         cache_namespace,
         cache_version,
@@ -70,7 +74,7 @@ def _parse_cache(
 
 
 def _parse_retries(
-    retries: int | tuple[int, int] | tuple[int, int, int]
+    retries: int | tuple[int, int] | tuple[int, int, int],
 ) -> models.Retries | None:
     # TODO: parse string (e.g., '1h')
     match retries:
@@ -113,7 +117,7 @@ def _parse_memo(
 
 
 def _build_definition(
-    type: models.TargetType,
+    type: types.TargetType,
     fn: t.Callable,
     wait: bool | t.Iterable[str] | str,
     cache: bool | float | dt.timedelta,
@@ -148,7 +152,9 @@ def _build_definition(
     )
 
 
-def _build_arguments(callable: t.Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> tuple[object, ...]:
+def _build_arguments(
+    callable: t.Callable[P, T], *args: P.args, **kwargs: P.kwargs
+) -> tuple[object, ...]:
     sig = inspect.signature(callable)
     bound = sig.bind_partial(*args, **kwargs)
     bound.apply_defaults()
@@ -165,7 +171,7 @@ class Target(t.Generic[P, T]):
     def __init__(
         self,
         fn: t.Callable[P, T],
-        type: models.TargetType,
+        type: types.TargetType,
         *,
         module: str | None = None,
         name: str | None = None,
@@ -218,7 +224,7 @@ class Target(t.Generic[P, T]):
     def submit(self, *args: P.args, **kwargs: P.kwargs) -> models.Execution[T]:
         arguments = _build_arguments(self._fn, *args, **kwargs)
         try:
-            return context.submit(
+            return execution.get_channel().submit_execution(
                 self._definition.type,
                 self._module,
                 self._name,
@@ -231,14 +237,16 @@ class Target(t.Generic[P, T]):
                 memo=self._definition.memo,
                 requires=self._definition.requires,
             )
-        except context.NotInContextException:
+        except execution.NotInContextException:
+            # TODO: run in thread?
             # TODO: use 'arguments'?
-            result = self._fn(*args, **kwargs)
-            return (
-                models.Execution(lambda: result, lambda: None, None)
-                if not isinstance(result, models.Execution)
-                else result
-            )
+            # result = self._fn(*args, **kwargs)
+            # return (
+            #     models.Execution(None)
+            #     if not isinstance(result, models.Execution)
+            #     else result
+            # )
+            raise
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         return self.submit(*args, **kwargs).result()
@@ -269,8 +277,8 @@ def _parse_require(value: str | bool | list[str]):
 
 
 def _parse_requires(
-    requires: dict[str, str | bool | list[str]] | None
-) -> models.Requires | None:
+    requires: dict[str, str | bool | list[str]] | None,
+) -> types.Requires | None:
     return {k: _parse_require(v) for k, v in requires.items()} if requires else None
 
 

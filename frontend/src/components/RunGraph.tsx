@@ -24,13 +24,14 @@ import {
 import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
-import buildGraph, { Graph, Edge } from "../graph";
+import { buildGraph, Graph, Edge } from "../graph";
 import WorkspaceLabel from "./WorkspaceLabel";
 import AssetIcon from "./AssetIcon";
-import { buildUrl, truncatePath } from "../utils";
+import { buildUrl } from "../utils";
 import AssetLink from "./AssetLink";
 import { countBy, isEqual, max } from "lodash";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { getAssetName } from "../assets";
 
 function getExecutionStatus(execution: models.Execution) {
   const result =
@@ -57,27 +58,6 @@ function getExecutionStatus(execution: models.Execution) {
     return "suspended";
   } else {
     return "completed";
-  }
-}
-
-function classNameForExecutionStatus(
-  status: ReturnType<typeof getExecutionStatus>,
-) {
-  switch (status) {
-    case "deferred":
-      return "border-slate-200 bg-white";
-    case "assigning":
-      return "border-blue-200 bg-blue-50";
-    case "running":
-      return "border-blue-400 bg-blue-100";
-    case "errored":
-      return "border-red-400 bg-red-100";
-    case "aborted":
-      return "border-yellow-400 bg-yellow-100";
-    case "suspended":
-      return "border-slate-200 bg-white";
-    case "completed":
-      return "border-slate-400 bg-white";
   }
 }
 
@@ -150,6 +130,16 @@ function isStepStale(
   }
 }
 
+const stepNodeStatusClassNames = {
+  deferred: "border-slate-200 bg-white",
+  assigning: "border-blue-200 bg-blue-50",
+  running: "border-blue-400 bg-blue-100",
+  errored: "border-red-400 bg-red-100",
+  aborted: "border-yellow-400 bg-yellow-100",
+  suspended: "border-slate-200 bg-white",
+  completed: "border-slate-400 bg-white",
+};
+
 type StepNodeProps = {
   projectId: string;
   stepId: string;
@@ -176,6 +166,7 @@ function StepNode({
   const isDeferred =
     execution?.result?.type == "cached" ||
     execution?.result?.type == "deferred";
+  const status = getExecutionStatus(execution);
   return (
     <div className="relative h-[50px]">
       {Object.keys(step.executions).length > 1 && (
@@ -197,8 +188,7 @@ function StepNode({
         attempt={attempt}
         className={classNames(
           "absolute w-full h-full flex-1 flex gap-2 items-center border rounded-sm px-2 py-1 ring-offset-2",
-          execution &&
-            classNameForExecutionStatus(getExecutionStatus(execution)),
+          execution && stepNodeStatusClassNames[status],
           isStale && "border-opacity-40",
         )}
         activeClassName="ring-3 ring-cyan-400"
@@ -276,15 +266,13 @@ function StepNode({
 }
 
 type AssetNodeProps = {
-  projectId: string;
   assetId: string;
-  asset: models.Asset;
+  asset: models.AssetSummary;
 };
 
-function AssetNode({ projectId, assetId, asset }: AssetNodeProps) {
+function AssetNode({ assetId, asset }: AssetNodeProps) {
   return (
     <AssetLink
-      projectId={projectId}
       assetId={assetId}
       asset={asset}
       className="h-full w-full flex gap-0.5 px-1.5 items-center bg-slate-50 rounded-full text-slate-700 text-sm ring-slate-400"
@@ -297,7 +285,9 @@ function AssetNode({ projectId, assetId, asset }: AssetNodeProps) {
         className="shrink-0"
       />
       <span className="text-ellipsis overflow-hidden whitespace-nowrap">
-        {truncatePath(asset.path) + (asset.type == 1 ? "/" : "")}
+        {asset.name || (
+          <span className="italic text-slate-800">{getAssetName(asset)}</span>
+        )}
       </span>
     </AssetLink>
   );
@@ -373,6 +363,16 @@ function ChildNode({ child }: ChildNodeProps) {
   );
 }
 
+const groupHeaderStatusClassNames = {
+  deferred: "bg-slate-100 text-slate-500",
+  assigning: "bg-blue-100 text-slate-500",
+  running: "bg-blue-200 text-blue-800",
+  errored: "bg-red-200 text-red-800",
+  aborted: "bg-yellow-200 text-yellow-800",
+  suspended: "bg-slate-100 text-slate-500",
+  completed: "bg-green-200 text-green-800",
+};
+
 type GroupHeaderProps = {
   identifier: string;
   run: models.Run;
@@ -434,8 +434,8 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
               <span
                 key={status}
                 className={classNames(
-                  "px-1 rounded text-sm text-slate-600",
-                  classNameForExecutionStatus(status),
+                  "px-1 rounded text-sm",
+                  groupHeaderStatusClassNames[status],
                 )}
                 title={`${counts[status]} ${status}`}
               >
@@ -726,7 +726,7 @@ export default function RunGraph({
                       <StepNode
                         projectId={projectId}
                         stepId={node.stepId}
-                        step={node.step}
+                        step={run.steps[node.stepId]}
                         attempt={node.attempt}
                         runId={runId}
                         isActive={node.stepId == activeStepId}
@@ -742,9 +742,12 @@ export default function RunGraph({
                     </div>
                   ) : node.type == "asset" ? (
                     <AssetNode
-                      projectId={projectId}
                       assetId={node.assetId}
-                      asset={node.asset}
+                      asset={
+                        run.steps[node.stepId].executions[node.attempt].assets[
+                          node.assetId
+                        ]
+                      }
                     />
                   ) : node.type == "assets" ? (
                     <MoreAssetsNode assetIds={node.assetIds} />

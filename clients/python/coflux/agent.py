@@ -6,10 +6,10 @@ import urllib.parse
 
 import websockets
 
-from . import config, execution, models, server
+from . import config, execution, models, server, types
 
 
-def _parse_reference(reference: t.Any) -> models.Reference:
+def _parse_reference(reference: t.Any) -> types.Reference:
     match reference:
         case ["execution", execution_id]:
             return ("execution", execution_id)
@@ -21,12 +21,12 @@ def _parse_reference(reference: t.Any) -> models.Reference:
             raise Exception(f"unexpected reference: {other}")
 
 
-def _parse_references(references: list[t.Any]) -> list[models.Reference]:
+def _parse_references(references: list[t.Any]) -> list[types.Reference]:
     return [_parse_reference(r) for r in references]
 
 
 # TODO: remove duplication in execution.py
-def _parse_value(value: list) -> models.Value:
+def _parse_value(value: list) -> types.Value:
     match value:
         case ["raw", content, references]:
             return ("raw", content, _parse_references(references))
@@ -118,7 +118,7 @@ class Agent:
             try:
                 async with websockets.connect(url) as websocket:
                     print("Connected.")
-                    targets: dict[str, dict[models.TargetType, list[str]]] = {}
+                    targets: dict[str, dict[types.TargetType, list[str]]] = {}
                     for module, module_targets in self._targets.items():
                         for target_name, (target, _) in module_targets.items():
                             targets.setdefault(module, {}).setdefault(
