@@ -1,3 +1,16 @@
+## 0.8.0
+
+Enhancements:
+
+- Modernises the UI.
+- Updates implementation of suspense to be managed by the server.
+- Reworks assets so that listings are managed by the server, and improves UI integration.
+- Removes the need to JSON-encode run arguments.
+
+Fixes:
+
+- Switching a workflow to a sensor and vice versa.
+
 ## 0.7.0
 
 Enhancements:
