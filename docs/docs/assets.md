@@ -1,6 +1,6 @@
 # Assets
 
-An asset is a collection of files, which can be shared between tasks and inspected in the UI. Individual files are uploaded to the configured blob store. The listing and metadata are uploaded to the Coflux server.
+An asset is a collection of files, which can be shared between tasks and inspected in the UI. Individual files are uploaded to the configured [blob store](/blobs). The listing and metadata are uploaded to the Coflux server.
 
 ## Creating assets
 
