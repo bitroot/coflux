@@ -1,3 +1,11 @@
+## 0.8.0
+
+Enhancements:
+
+- Updates the API for storing and restoring assets (`cf.asset(...)`).
+- Adds support for calling tasks with keyword arguments.
+- Move suspense coordination to the server.
+
 ## 0.7.0
 
 Enhancements:
