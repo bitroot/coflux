@@ -47,4 +47,4 @@ When a workflow is submitted, this initiates a _run_. A run is made up of _steps
 
 # Assets
 
-Executions can 'persist' _assets_ (files or directories) so that they can be shared with other executions. A persisted asset is given a reference, which must be passed to other executions so that it can be 'restored'.
+Executions can persist _assets_ (a collection of files) which can be passed between executions and restored as needed, or viewed in the UI.
