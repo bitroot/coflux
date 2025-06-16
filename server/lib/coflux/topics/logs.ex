@@ -56,7 +56,7 @@ defmodule Coflux.Topics.Logs do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:execution, _, _, execution_id, workspace_id, _, _}) do
+  defp process_notification(topic, {:execution, _, _, execution_id, workspace_id, _, _, _}) do
     if workspace_id in topic.state.workspace_ids do
       update_in(topic.state.execution_ids, &MapSet.put(&1, execution_id))
     else

@@ -16,7 +16,6 @@ defmodule Coflux.Web do
       {:_,
        [
          {"/blobs/:key", Handlers.Blobs, []},
-         {"/assets/:project/:asset/[...]", Handlers.Assets, []},
          {"/agent", Handlers.Agent, []},
          {"/topics", TopicalHandler, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},

@@ -1,5 +1,6 @@
 import classNames from "classnames";
 import { Size } from "./common/types";
+import { ReactNode } from "react";
 
 type Intent = "success" | "danger" | "warning" | "info" | "none";
 
@@ -30,7 +31,7 @@ function classNameForSize(size: Size) {
 }
 
 type Props = {
-  label: string;
+  label: ReactNode;
   intent?: Intent;
   size?: Size;
   title?: string;

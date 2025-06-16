@@ -179,3 +179,10 @@ export function getWorkspaces(
 ): Promise<Record<string, Pick<models.Workspace, "name" | "baseId">>> {
   return get("get_workspaces", { project: projectId });
 }
+
+export function getAsset(
+  projectId: string,
+  assetId: string,
+): Promise<models.Asset> {
+  return get("get_asset", { project: projectId, asset: assetId });
+}

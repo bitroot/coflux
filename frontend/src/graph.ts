@@ -2,7 +2,7 @@ import ELK, { ElkNode } from "elkjs/lib/elk.bundled.js";
 import { isNil, max, maxBy, minBy, uniq } from "lodash";
 
 import * as models from "./models";
-import { truncatePath } from "./utils";
+import { getAssetName } from "./assets";
 
 type BaseGroup = {
   identifier: string;
@@ -18,7 +18,6 @@ export type Group = BaseGroup & {
 type BaseNode = (
   | {
       type: "step";
-      step: models.Step;
       stepId: string;
       attempt: number;
     }
@@ -33,8 +32,8 @@ type BaseNode = (
   | {
       type: "asset";
       stepId: string;
+      attempt: number;
       assetId: string;
-      asset: models.Asset;
     }
   | {
       type: "assets";
@@ -286,7 +285,39 @@ function extractGroups(graph: ElkNode, groups: Record<string, BaseGroup>) {
   }, {});
 }
 
-export default function buildGraph(
+export function resolveSteps(
+  run: models.Run,
+  activeStepId: string | undefined,
+  activeAttempt: number | undefined,
+) {
+  const [, stepAttempts] = resolvePath(run, activeStepId, activeAttempt);
+
+  const initialStepId = minBy(
+    Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
+    (stepId) => run.steps[stepId].createdAt,
+  )!;
+
+  const result: Record<string, number> = {};
+  const traverse = function (stepId: string) {
+    const attempt = getStepAttempt(run, stepAttempts, stepId);
+    if (attempt) {
+      const execution = run.steps[stepId].executions[attempt];
+      if (execution) {
+        result[stepId] = attempt;
+        execution.children.forEach((child) => {
+          if (!result[child.stepId]) {
+            traverse(child.stepId);
+          }
+        });
+      }
+    }
+  };
+
+  traverse(initialStepId);
+  return result;
+}
+
+export function buildGraph(
   run: models.Run,
   runId: string,
   activeStepId: string | undefined,
@@ -337,7 +368,6 @@ export default function buildGraph(
       const step = run.steps[stepId];
       nodes[stepId] = {
         type: "step",
-        step,
         stepId,
         attempt,
         groupIdentifier,
@@ -347,12 +377,12 @@ export default function buildGraph(
       const execution = step.executions[attempt];
       const [assets, rest] = truncateList(Object.entries(execution.assets), 3);
       assets.forEach(([assetId, asset]) => {
-        const text = truncatePath(asset.path) + (asset.type == 1 ? "/" : "");
+        const text = getAssetName(asset);
         nodes[`asset:${assetId}`] = {
           type: "asset",
           stepId,
+          attempt,
           assetId,
-          asset,
           groupIdentifier,
           width: Math.min(getTextWidth(text) + 32, 140),
           height: 20,

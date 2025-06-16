@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 
 export default function HomePage() {
   const navigate = useNavigate();
-  useEffect(() => navigate("/projects", { replace: true }), [navigate]);
+  useEffect(() => {
+    navigate("/projects", { replace: true });
+  }, [navigate]);
   return <div></div>;
 }

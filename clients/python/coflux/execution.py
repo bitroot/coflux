@@ -14,12 +14,11 @@ import threading
 import time
 import traceback
 import typing as t
-import zipfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from . import blobs, config, decorators, loader, models, serialisation, server
+from . import blobs, config, loader, models, serialisation, server, types, utils
 
 _EXECUTION_THRESHOLD_S = 1.0
 _AGENT_THRESHOLD_S = 5.0
@@ -75,7 +74,7 @@ class ExecutingNotification(t.NamedTuple):
 
 
 class RecordResultRequest(t.NamedTuple):
-    value: models.Value
+    value: types.Value
 
 
 class RecordErrorRequest(t.NamedTuple):
@@ -85,8 +84,8 @@ class RecordErrorRequest(t.NamedTuple):
 class SubmitExecutionRequest(t.NamedTuple):
     module: str
     target: str
-    type: models.TargetType
-    arguments: list[models.Value]
+    type: types.TargetType
+    arguments: list[types.Value]
     group_id: int | None
     wait_for: set[int]
     cache: models.Cache | None
@@ -94,7 +93,7 @@ class SubmitExecutionRequest(t.NamedTuple):
     memo: list[int] | bool
     execute_after: dt.datetime | None
     retries: models.Retries | None
-    requires: models.Requires | None
+    requires: types.Requires | None
 
 
 class ResolveReferenceRequest(t.NamedTuple):
@@ -103,11 +102,8 @@ class ResolveReferenceRequest(t.NamedTuple):
 
 
 class PersistAssetRequest(t.NamedTuple):
-    type: int
-    path: str
-    blob_key: str
-    size: int
-    metadata: dict[str, t.Any]
+    name: str | None
+    entries: dict[str, tuple[str, int, t.Mapping[str, t.Any]]]
 
 
 class GetAssetRequest(t.NamedTuple):
@@ -129,7 +125,7 @@ class RegisterGroupRequest(t.NamedTuple):
 
 
 class RecordCheckpointRequest(t.NamedTuple):
-    arguments: list[models.Value]
+    arguments: list[types.Value]
 
 
 class LogMessageRequest(t.NamedTuple):
@@ -209,6 +205,54 @@ def counter():
     return lambda: next(count)
 
 
+class NotInContextException(Exception):
+    pass
+
+
+def get_channel() -> "Channel":
+    if _channel_context is None:
+        raise NotInContextException("Not running in execution context")
+    return _channel_context
+
+
+def _prepare_asset_entry_for_file(
+    path: Path, blob_manager: blobs.Manager
+) -> tuple[str, int, dict[str, t.Any]]:
+    blob_key = blob_manager.upload(path)
+    size = path.stat().st_size
+    (mime_type, _) = mimetypes.guess_type(path)
+    metadata = {"type": mime_type}
+    return (blob_key, size, metadata)
+
+
+def _prepare_asset_entries_for_path(
+    path: Path,
+    blob_manager: blobs.Manager,
+    base_dir: Path,
+    matcher: utils.GlobMatcher | None = None,
+    path_prefix: str = "",
+) -> dict[str, tuple[str, int, t.Mapping[str, t.Any]]]:
+    entries = {}
+    if path.is_file():
+        path_str = (
+            f"{path_prefix + '/' if path_prefix else ''}{path.relative_to(base_dir)}"
+            if path != base_dir
+            else path_prefix
+        )
+        if matcher is None or matcher.match(path_str):
+            entries[path_str] = _prepare_asset_entry_for_file(path, blob_manager)
+    elif path.is_dir():
+        for dirpath, _dirnames, filenames in path.walk():
+            for filename in filenames:
+                path_ = dirpath.joinpath(filename)
+                path_str = f"{path_prefix + '/' if path_prefix else ''}{path_.relative_to(base_dir)}"
+                if matcher is None or matcher.match(path_str):
+                    entries[path_str] = _prepare_asset_entry_for_file(
+                        path_, blob_manager
+                    )
+    return entries
+
+
 class Channel:
     def __init__(
         self,
@@ -277,7 +321,7 @@ class Channel:
 
     def submit_execution(
         self,
-        type: models.TargetType,
+        type: types.TargetType,
         module: str,
         target: str,
         arguments: tuple[t.Any, ...],
@@ -289,7 +333,7 @@ class Channel:
         execute_after: dt.datetime | None = None,
         delay: float | dt.timedelta = 0,
         memo: list[int] | bool = False,
-        requires: models.Requires | None = None,
+        requires: types.Requires | None = None,
     ) -> models.Execution[t.Any]:
         if delay:
             delay = (
@@ -318,11 +362,7 @@ class Channel:
                 requires,
             )
         )
-        return models.Execution(
-            lambda: self._resolve_reference(execution_id),
-            lambda: self._cancel_execution(execution_id),
-            execution_id,
-        )
+        return models.Execution(execution_id)
 
     @contextmanager
     def group(self, name: str | None):
@@ -359,18 +399,10 @@ class Channel:
 
     def _resolve_arguments(
         self,
-        arguments: list[models.Value],
+        arguments: list[types.Value],
     ) -> list[t.Any]:
         # TODO: parallelise
-        return [
-            self._serialisation_manager.deserialise(
-                value,
-                self._resolve_reference,
-                self._cancel_execution,
-                self._restore_asset,
-            )
-            for value in arguments
-        ]
+        return [self._serialisation_manager.deserialise(value) for value in arguments]
 
     def execute(self, target, arguments):
         resolved_arguments = self._resolve_arguments(arguments)
@@ -388,15 +420,10 @@ class Channel:
         else:
             self._record_result(value)
 
-    def _deserialise_result(self, result: models.Result):
+    def _deserialise_result(self, result: types.Result):
         match result:
             case ["value", value]:
-                return self._serialisation_manager.deserialise(
-                    value,
-                    self._resolve_reference,
-                    self._cancel_execution,
-                    self._restore_asset,
-                )
+                return self._serialisation_manager.deserialise(value)
             case ["error", type_, message]:
                 raise _build_exception(type_, message)
             case ["abandoned"]:
@@ -408,13 +435,11 @@ class Channel:
             case result:
                 raise Exception(f"unexpected result ({result})")
 
-    def _resolve_reference(self, execution_id: int) -> t.Any:
-        result = self._request(
-            ResolveReferenceRequest(execution_id, _timeout.get())
-        )
+    def resolve_reference(self, execution_id: int) -> t.Any:
+        result = self._request(ResolveReferenceRequest(execution_id, _timeout.get()))
         return self._deserialise_result(result)
 
-    def _cancel_execution(self, execution_id: int) -> None:
+    def cancel_execution(self, execution_id: int) -> None:
         # TODO: wait for confirmation?
         self._notify(CancelExecutionRequest(execution_id))
 
@@ -424,75 +449,92 @@ class Channel:
         ]
         self._notify(RecordCheckpointRequest(serialised_arguments))
 
-    def persist_asset(
-        self, path: Path | str | None = None, *, match: str | None = None
+    # TODO: don't support AssetEntry? or somehow consider entry's path? or somehow remove path from AssetEntry..?
+    def create_asset(
+        self,
+        entries: str
+        | Path
+        | list[str | Path]
+        | models.Asset
+        | t.Mapping[str, str | Path | models.Asset | models.AssetEntry]
+        | None = None,
+        *,
+        at: Path | None = None,
+        match: str | None = None,
+        name: str | None = None,
     ) -> models.Asset:
-        if isinstance(path, str):
-            path = Path(path)
-        path = path or self._directory
-        if not path.exists():
-            raise Exception(f"path '{path}' doesn't exist")
-        path = path.resolve()
-        if not path.is_relative_to(self._directory):
-            raise Exception(f"path ({path}) not in execution directory")
-        # TODO: zip all assets?
-        path_str = str(path.relative_to(self._directory))
-        if path.is_file():
-            if match:
-                raise Exception("match cannot be specified for file")
-            asset_type = 0
-            blob_key = self._blob_manager.upload(path)
-            (mime_type, _) = mimetypes.guess_type(path)
-            size = path.stat().st_size
-            metadata = {"type": mime_type}
-        elif path.is_dir():
-            asset_type = 1
-            sizes = []
-            with tempfile.NamedTemporaryFile() as zip_file:
-                zip_path = Path(zip_file.name)
-                with zipfile.ZipFile(zip_path, "w") as zip:
-                    for root, _, files in os.walk(path):
-                        root = Path(root)
-                        for file in files:
-                            file_path = root.joinpath(file)
-                            if not match or file_path.match(match):
-                                zip.write(
-                                    file_path, arcname=file_path.relative_to(path)
-                                )
-                                sizes.append(file_path.stat().st_size)
-                blob_key = self._blob_manager.upload(zip_path)
-            size = sum(sizes)
-            metadata = {"count": len(sizes)}
+        base_dir = (at or self._directory).resolve()
+        matcher = utils.GlobMatcher(match) if match else None
+        if entries is None:
+            entries = [base_dir]
+        elif isinstance(entries, Path) or isinstance(entries, str):
+            entries = [entries]
+        elif isinstance(entries, models.Asset):
+            entries = {e.path: e for e in entries.entries}
+        # TODO: parallelise uploads (and/or do uploads in background?)
+        entries_: dict[str, tuple[str, int, t.Mapping[str, t.Any]]] = {}
+        if isinstance(entries, list):
+            paths = [Path(p).resolve() for p in entries]
+            for path in paths:
+                if not path.exists():
+                    raise Exception(f"Path doesn't exist ({path})")
+                if not path.is_relative_to(base_dir):
+                    raise Exception(
+                        f"Specified path ({path}) is not relative to the base directory ({base_dir})"
+                    )
+            for path in paths:
+                entries_.update(
+                    _prepare_asset_entries_for_path(
+                        path, self._blob_manager, base_dir, matcher
+                    )
+                )
+        elif isinstance(entries, dict):
+            if at is not None:
+                raise Exception(
+                    "Base directory (`at`) cannot be specified with dictionary of entries"
+                )
+            for path_str, entry in entries.items():
+                if isinstance(entry, str):
+                    entry = Path(entry)
+                if isinstance(entry, Path):
+                    path = entry.resolve()
+                    entries_.update(
+                        _prepare_asset_entries_for_path(
+                            path, self._blob_manager, path, matcher, path_str
+                        )
+                    )
+                elif isinstance(entry, models.Asset):
+                    for asset_entry in entry.entries:
+                        path_str_ = f"{path_str}/{asset_entry.path}"
+                        if matcher is None or matcher.match(path_str_):
+                            entries_[path_str_] = (
+                                asset_entry.blob_key,
+                                asset_entry.size,
+                                asset_entry.metadata,
+                            )
+                elif isinstance(entry, models.AssetEntry):
+                    if matcher is None or matcher.match(path_str):
+                        entries_[path_str] = (
+                            entry.blob_key,
+                            entry.size,
+                            entry.metadata,
+                        )
+                else:
+                    raise Exception(f"Unhandled entry type ({type(entry)})")
         else:
-            raise Exception(f"path ({path}) isn't a file or a directory")
-        asset_id = self._request(
-            PersistAssetRequest(asset_type, path_str, blob_key, size, metadata)
-        )
-        return models.Asset(lambda to: self._restore_asset(asset_id, to=to), asset_id)
+            raise Exception(f"Unhandled entries type ({type(entries)})")
+        asset_id = self._request(PersistAssetRequest(name, entries_))
+        return models.Asset(asset_id)
 
-    def _restore_asset(self, asset_id: int, to: Path | str | None = None) -> Path:
-        if to:
-            if isinstance(to, str):
-                to = Path(to)
-            if not to.is_absolute():
-                to = self._directory.joinpath(to)
-            if not to.is_relative_to(self._directory):
-                raise Exception("asset must be restored to execution directory")
-        asset_type, path_str, blob_key = self._request(GetAssetRequest(asset_id))
-        target = to or self._directory.joinpath(path_str)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if asset_type == 0:
-            self._blob_manager.download(blob_key, target)
-        elif asset_type == 1:
-            target.mkdir()
-            with tempfile.NamedTemporaryFile() as zip_file:
-                zip_path = Path(zip_file.name)
-                self._blob_manager.download(blob_key, zip_path)
-                with zipfile.ZipFile(zip_path, "r") as zip:
-                    zip.extractall(target)
-        else:
-            raise Exception(f"unrecognised asset type ({asset_type})")
-        return target
+    def resolve_asset(self, asset_id: int) -> list[models.AssetEntry]:
+        result = self._request(GetAssetRequest(asset_id))
+        return [
+            models.AssetEntry(path, blob_key, size, metadata)
+            for path, (blob_key, size, metadata) in result.items()
+        ]
+
+    def download_blob(self, blob_key: str, path: Path):
+        self._blob_manager.download(blob_key, path)
 
     def log_message(self, level, template: str | None, **kwargs):
         timestamp = time.time() * 1000
@@ -511,10 +553,6 @@ class Channel:
         )
 
 
-def get_channel() -> Channel | None:
-    return _channel_context
-
-
 def _build_exception(type_, message):
     # TODO: better way to re-create exception?
     parts = type_.rsplit(type_, maxsplit=1)
@@ -530,7 +568,7 @@ def _build_exception(type_, message):
 def _execute(
     module_name: str,
     target_name: str,
-    arguments: list[models.Value],
+    arguments: list[types.Value],
     execution_id: int,
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
@@ -552,14 +590,15 @@ def _execute(
         _channel_context = channel
         try:
             target = getattr(module, target_name)
-            if not isinstance(target, decorators.Target) or target.definition.is_stub:
-                raise Exception("not valid target")
+            # TODO: fix circular dependency
+            # if not isinstance(target, decorators.Target) or target.definition.is_stub:
+            #     raise Exception("not valid target")
             channel.execute(target, arguments)
         finally:
             _channel_context = None
 
 
-def _json_safe_reference(reference: models.Reference) -> t.Any:
+def _json_safe_reference(reference: types.Reference) -> t.Any:
     match reference:
         case ("execution", execution_id):
             return ["execution", execution_id]
@@ -571,11 +610,11 @@ def _json_safe_reference(reference: models.Reference) -> t.Any:
             raise Exception(f"unhandled reference type ({other})")
 
 
-def _json_safe_references(references: list[models.Reference]) -> list[t.Any]:
+def _json_safe_references(references: list[types.Reference]) -> list[t.Any]:
     return [_json_safe_reference(r) for r in references]
 
 
-def _json_safe_value(value: models.Value):
+def _json_safe_value(value: types.Value):
     # TODO: tidy
     match value:
         case ("raw", content, references):
@@ -584,11 +623,11 @@ def _json_safe_value(value: models.Value):
             return ["blob", key, size, _json_safe_references(references)]
 
 
-def _json_safe_arguments(arguments: list[models.Value]):
+def _json_safe_arguments(arguments: list[types.Value]):
     return [_json_safe_value(v) for v in arguments]
 
 
-def _parse_reference(reference) -> models.Reference:
+def _parse_reference(reference) -> types.Reference:
     match reference:
         case ["execution", execution_id]:
             return ("execution", execution_id)
@@ -600,11 +639,11 @@ def _parse_reference(reference) -> models.Reference:
             raise Exception(f"unrecognised reference: {other}")
 
 
-def _parse_references(references) -> list[models.Reference]:
+def _parse_references(references) -> list[types.Reference]:
     return [_parse_reference(r) for r in references]
 
 
-def _parse_value(value: t.Any) -> models.Value:
+def _parse_value(value: t.Any) -> types.Value:
     match value:
         case ["raw", content, references]:
             return ("raw", content, _parse_references(references))
@@ -614,7 +653,7 @@ def _parse_value(value: t.Any) -> models.Value:
             raise Exception(f"unrecognised value: {other}")
 
 
-def _parse_result(result: t.Any) -> models.Result:
+def _parse_result(result: t.Any) -> types.Result:
     match result:
         case ["error", type_, message]:
             return ("error", type_, message)
@@ -628,7 +667,7 @@ def _parse_result(result: t.Any) -> models.Result:
             raise Exception(f"unrecognised result: {other}")
 
 
-class Execution:
+class ExecutionState:
     def __init__(
         self,
         execution_id: int,
@@ -751,9 +790,7 @@ class Execution:
                 execute_after_ms = execute_after and int(
                     execute_after.timestamp() * 1000
                 )
-                self._server_notify(
-                    "suspend", (self._id, execute_after_ms)
-                )
+                self._server_notify("suspend", (self._id, execute_after_ms))
                 self._process.join()
             case CancelExecutionRequest(execution_id):
                 # TODO: pass reference to self?
@@ -814,14 +851,13 @@ class Execution:
                 # TODO: set (and unset) state on Execution to indicate waiting?
                 timeout_ms = timeout and timeout * 1000
                 self._server_request(
-                    "get_result", (execution_id, self._id, timeout_ms), request_id, _parse_result
-                )
-            case PersistAssetRequest(type, path, blob_key, size, metadata):
-                self._server_request(
-                    "put_asset",
-                    (self._id, type, path, blob_key, size, metadata),
+                    "get_result",
+                    (execution_id, self._id, timeout_ms),
                     request_id,
+                    _parse_result,
                 )
+            case PersistAssetRequest(name, entries):
+                self._server_request("put_asset", (self._id, name, entries), request_id)
             case GetAssetRequest(asset_id):
                 self._server_request("get_asset", (asset_id, self._id), request_id)
             case other:
@@ -867,11 +903,11 @@ class Manager:
         self._serialiser_configs = serialiser_configs
         self._blob_threshold = blob_threshold
         self._blob_store_configs = blob_store_configs
-        self._executions: dict[int, Execution] = {}
+        self._executions: dict[int, ExecutionState] = {}
         self._last_heartbeat_sent = None
 
     async def _declare_targets(
-        self, targets: dict[str, dict[models.TargetType, list[str]]]
+        self, targets: dict[str, dict[types.TargetType, list[str]]]
     ) -> None:
         await self._connection.notify("declare_targets", (targets,))
 
@@ -889,7 +925,7 @@ class Manager:
             await asyncio.sleep(_EXECUTION_THRESHOLD_S - elapsed)
 
     def _should_send_heartbeats(
-        self, executions: list[Execution], threshold_s: float, now: float
+        self, executions: list[ExecutionState], threshold_s: float, now: float
     ) -> bool:
         return (
             any(executions)
@@ -897,7 +933,7 @@ class Manager:
             or (now - self._last_heartbeat_sent) > threshold_s
         )
 
-    async def run(self, targets: dict[str, dict[models.TargetType, list[str]]]) -> None:
+    async def run(self, targets: dict[str, dict[types.TargetType, list[str]]]) -> None:
         # TODO: only declare targets once when starting session? (not on reconnect)
         await self._declare_targets(targets)
         await self._send_heartbeats()
@@ -907,13 +943,13 @@ class Manager:
         execution_id: int,
         module: str,
         target: str,
-        arguments: list[models.Value],
+        arguments: list[types.Value],
         server_host: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         if execution_id in self._executions:
             raise Exception(f"Execution ({execution_id}) already running")
-        execution = Execution(
+        execution = ExecutionState(
             execution_id,
             module,
             target,
@@ -931,7 +967,7 @@ class Manager:
         ).start()
 
     def _run_execution(
-        self, execution: Execution, loop: asyncio.AbstractEventLoop
+        self, execution: ExecutionState, loop: asyncio.AbstractEventLoop
     ) -> None:
         self._executions[execution.id] = execution
         try:

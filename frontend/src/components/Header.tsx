@@ -39,6 +39,7 @@ function PlayPauseButton({
   return state == "active" ? (
     <Button
       variant="secondary"
+      size="sm"
       outline={true}
       title="Pause workspace"
       onClick={handleClick}
@@ -46,7 +47,12 @@ function PlayPauseButton({
       <IconPlayerPauseFilled size={16} />
     </Button>
   ) : state == "paused" ? (
-    <Button outline={true} title="Resume workspace" onClick={handleClick}>
+    <Button
+      size="sm"
+      outline={true}
+      title="Resume workspace"
+      onClick={handleClick}
+    >
       <IconPlayerPlayFilled size={16} className="animate-pulse" />
     </Button>
   ) : null;

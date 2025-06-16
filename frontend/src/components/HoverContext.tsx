@@ -16,6 +16,7 @@ type State =
     }
   | {
       assetId: string;
+      path?: string;
     };
 
 const Context = createContext<
@@ -41,7 +42,10 @@ export function useHoverContext() {
               : true)) ||
           ("assetId" in query &&
             "assetId" in state &&
-            query.assetId == state.assetId))
+            query.assetId == state.assetId &&
+            ("path" in query
+              ? "path" in state && query.path == state.path
+              : true)))
       );
     },
     [state],

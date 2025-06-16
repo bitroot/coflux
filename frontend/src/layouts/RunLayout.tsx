@@ -22,6 +22,7 @@ import HoverContext from "../components/HoverContext";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 import SensorHeader from "../components/SensorHeader";
+import AssetDialog from "../components/AssetDialog";
 import GroupDialog from "../components/GroupDialog";
 import useSize from "../hooks/useSize";
 
@@ -138,12 +139,14 @@ export default function RunLayout() {
   const { project: projectId, run: runId } = useParams();
   const [searchParams] = useSearchParams();
   const activeStepId = searchParams.get("step") || undefined;
+  // TODO: get attempt from 'step' parameter?
   const activeAttemptNumber = searchParams.has("attempt")
     ? parseInt(searchParams.get("attempt")!, 10)
     : undefined;
   const activeWorkspaceName = searchParams.get("workspace") || undefined;
   const activeTab = parseInt(searchParams.get("tab") || "", 10) || 0;
   const maximised = !!searchParams.get("maximised");
+  const assetIdentifier = searchParams.get("asset");
   const activeGroupIdentifier = searchParams.get("group");
   const workspaces = useWorkspaces(projectId);
   const activeWorkspaceId = findKey(
@@ -163,6 +166,11 @@ export default function RunLayout() {
   } else {
     return (
       <HoverContext>
+        <AssetDialog
+          identifier={assetIdentifier}
+          projectId={projectId!}
+          run={run}
+        />
         <GroupDialog
           runId={runId!}
           run={run}

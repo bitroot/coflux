@@ -9,6 +9,7 @@ defmodule Coflux.Orchestration.Server do
     Sessions,
     Runs,
     Results,
+    Assets,
     CacheConfigs,
     TagSets,
     Agents,
@@ -1032,35 +1033,44 @@ defmodule Coflux.Orchestration.Server do
     {:reply, result, state}
   end
 
-  def handle_call({:put_asset, execution_id, type, path, blob_key, size, metadata}, _from, state) do
+  def handle_call({:put_asset, execution_id, name, entries}, _from, state) do
     {:ok, run_id} = Runs.get_execution_run_id(state.db, execution_id)
+    {:ok, asset_id} = Assets.get_or_create_asset(state.db, name, entries)
+    :ok = Results.put_execution_asset(state.db, execution_id, asset_id)
 
-    {:ok, asset_id} =
-      Results.get_or_create_asset(state.db, execution_id, type, path, blob_key, size, metadata)
-
-    asset = resolve_asset(state.db, asset_id)
+    {external_id, name, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
 
     state =
       state
-      |> notify_listeners({:run, run_id}, {:asset, execution_id, asset_id, asset})
+      |> notify_listeners(
+        {:run, run_id},
+        {:asset, execution_id, external_id, {name, total_count, total_size, entry}}
+      )
       |> flush_notifications()
 
     {:reply, {:ok, asset_id}, state}
   end
 
-  def handle_call({:get_asset, asset_id, opts}, _from, state) do
-    from_execution_id = opts[:from_execution_id]
-    load_metadata = opts[:load_metadata]
-
-    case Results.get_asset_by_id(state.db, asset_id, load_metadata) do
-      {:ok, {type, path, blob_key, _size, metadata}} ->
+  def handle_call({:get_asset_entries, asset_id, from_execution_id}, _from, state) do
+    case Assets.get_asset_by_id(state.db, asset_id) do
+      {:ok, _external_id, _name, entries} ->
         if from_execution_id do
           {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
         end
 
-        {:reply, {:ok, type, path, blob_key, metadata}, state}
+        {:reply, {:ok, entries}, state}
 
-      {:ok, nil} ->
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:get_asset_by_external_id, asset_external_id}, _from, state) do
+    case Assets.get_asset_by_external_id(state.db, asset_external_id) do
+      {:ok, name, entries} ->
+        {:reply, {:ok, name, entries}, state}
+
+      {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
     end
   end
@@ -1387,7 +1397,13 @@ defmodule Coflux.Orchestration.Server do
 
                    # TODO: load assets in one query
                    {:ok, asset_ids} = Results.get_assets_for_execution(state.db, execution_id)
-                   assets = Map.new(asset_ids, &{&1, resolve_asset(state.db, &1)})
+
+                   assets =
+                     asset_ids
+                     |> Enum.map(&resolve_asset(state.db, &1))
+                     |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
+                       {external_id, {name, total_count, total_size, entry}}
+                     end)
 
                    # TODO: batch? get `get_dependencies` to resolve?
                    dependencies =
@@ -2410,16 +2426,10 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp resolve_asset(db, asset_id) do
-    {:ok, {type, path, blob_key, size, metadata}} =
-      Results.get_asset_by_id(db, asset_id, true)
-
-    %{
-      type: type,
-      path: path,
-      metadata: metadata,
-      blob_key: blob_key,
-      size: size
-    }
+    case Assets.get_asset_summary(db, asset_id) do
+      {:ok, external_id, name, total_count, total_size, entry} ->
+        {external_id, name, total_count, total_size, entry}
+    end
   end
 
   defp resolve_references(db, references) do
@@ -2431,7 +2441,8 @@ defmodule Coflux.Orchestration.Server do
         {:execution, execution_id, resolve_execution(db, execution_id)}
 
       {:asset, asset_id} ->
-        {:asset, asset_id, resolve_asset(db, asset_id)}
+        {external_asset_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+        {:asset, external_asset_id, {name, total_count, total_size, entry}}
     end)
   end
 
@@ -2899,9 +2910,13 @@ defmodule Coflux.Orchestration.Server do
               execution_waiting,
               state,
               fn {from_execution_id, request_id, _}, state ->
-                # TODO: handle missing session?
-                {:ok, session_id} = find_session_for_execution(state, from_execution_id)
-                send_session(state, session_id, {:result, request_id, result})
+                case find_session_for_execution(state, from_execution_id) do
+                  {:ok, session_id} ->
+                    send_session(state, session_id, {:result, request_id, result})
+
+                  :error ->
+                    state
+                end
               end
             )
         end

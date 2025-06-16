@@ -116,7 +116,7 @@ defmodule Coflux.Orchestration.Results do
   end
 
   def has_result?(db, execution_id) do
-    case query_one(db, "SELECT COUNT(*) FROM results WHERE execution_id = ?1", {execution_id}) do
+    case query_one(db, "SELECT count(*) FROM results WHERE execution_id = ?1", {execution_id}) do
       {:ok, {0}} -> {:ok, false}
       {:ok, {1}} -> {:ok, true}
     end
@@ -227,97 +227,22 @@ defmodule Coflux.Orchestration.Results do
     end
   end
 
-  defp hash_asset(type, path, blob_key, metadata) do
-    metadata_parts =
-      Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
+  def put_execution_asset(db, execution_id, asset_id) do
+    now = current_timestamp()
 
-    data =
-      [type, path, blob_key]
-      |> Enum.concat(metadata_parts)
-      |> Enum.intersperse(0)
+    {:ok, _} =
+      insert_one(
+        db,
+        :execution_assets,
+        %{
+          execution_id: execution_id,
+          asset_id: asset_id,
+          created_at: now
+        },
+        on_conflict: "DO NOTHING"
+      )
 
-    :crypto.hash(:sha256, data)
-  end
-
-  def get_or_create_asset(db, execution_id, type, path, blob_key, size, metadata) do
-    with_transaction(db, fn ->
-      hash = hash_asset(type, path, blob_key, metadata)
-      now = current_timestamp()
-
-      {:ok, asset_id} =
-        case query_one(db, "SELECT id FROM assets WHERE hash = ?1", {{:blob, hash}}) do
-          {:ok, {asset_id}} ->
-            {:ok, asset_id}
-
-          {:ok, nil} ->
-            {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
-
-            {:ok, asset_id} =
-              insert_one(db, :assets, %{
-                hash: {:blob, hash},
-                type: type,
-                path: path,
-                blob_id: blob_id
-              })
-
-            {:ok, _} =
-              insert_many(
-                db,
-                :asset_metadata,
-                {:asset_id, :key, :value},
-                Enum.map(metadata, fn {key, value} ->
-                  {asset_id, key, Jason.encode!(value)}
-                end)
-              )
-
-            {:ok, asset_id}
-        end
-
-      {:ok, _} =
-        insert_one(
-          db,
-          :execution_assets,
-          %{
-            execution_id: execution_id,
-            asset_id: asset_id,
-            created_at: now
-          },
-          on_conflict: "DO NOTHING"
-        )
-
-      {:ok, asset_id}
-    end)
-  end
-
-  def get_asset_by_id(db, asset_id, load_metadata) do
-    case query_one(
-           db,
-           """
-           SELECT a.type, a.path, b.key, b.size
-           FROM assets AS a
-           INNER JOIN blobs AS b ON b.id = a.blob_id
-           WHERE a.id = ?1
-           """,
-           {asset_id}
-         ) do
-      {:ok, {type, path, blob_key, size}} ->
-        metadata =
-          if load_metadata do
-            case query(
-                   db,
-                   "SELECT key, value FROM asset_metadata WHERE asset_id = ?1",
-                   {asset_id}
-                 ) do
-              {:ok, rows} ->
-                Map.new(rows, fn {key, value} -> {key, Jason.decode!(value)} end)
-            end
-          end
-
-        {:ok, {type, path, blob_key, size, metadata}}
-
-      {:ok, nil} ->
-        {:ok, nil}
-    end
+    :ok
   end
 
   # TODO: get all assets for run?

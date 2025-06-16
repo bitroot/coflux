@@ -1,19 +1,19 @@
-import typing as t
+import abc
+import collections
+import importlib
+import io
 import json
 import pickle
-import abc
-import io
+import typing as t
+
 import pydantic
-import importlib
-import collections
-from pathlib import Path
 
 try:
     import pandas
 except ImportError:
     pandas = None
 
-from . import blobs, models, config
+from . import blobs, config, models, types
 
 T = t.TypeVar("T")
 
@@ -24,16 +24,22 @@ def _json_dumps(obj: t.Any) -> str:
 
 class Serialiser(abc.ABC):
     @abc.abstractmethod
-    def serialise(self, value: t.Any) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
+    def serialise(
+        self, value: t.Any
+    ) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
         raise NotImplementedError
 
     @abc.abstractmethod
-    def deserialise(self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]) -> t.Any | None:
+    def deserialise(
+        self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]
+    ) -> t.Any | None:
         raise NotImplementedError
 
 
 class PickleSerialiser(Serialiser):
-    def serialise(self, value: t.Any) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
+    def serialise(
+        self, value: t.Any
+    ) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
         try:
             buffer = io.BytesIO()
             pickle.dump(value, buffer)
@@ -41,14 +47,18 @@ class PickleSerialiser(Serialiser):
         except pickle.PicklingError:
             return None
 
-    def deserialise(self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]) -> t.Any | None:
+    def deserialise(
+        self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]
+    ) -> t.Any | None:
         if format != "pickle":
             return None
         return pickle.loads(buffer.getbuffer())
 
 
 class PydanticSerialiser(Serialiser):
-    def serialise(self, value: t.Any) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
+    def serialise(
+        self, value: t.Any
+    ) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
         if not isinstance(value, pydantic.BaseModel):
             return None
         buffer = io.BytesIO()
@@ -58,7 +68,9 @@ class PydanticSerialiser(Serialiser):
         model = f"{model_class.__module__}.{model_class.__name__}"
         return "json", buffer, {"model": model}
 
-    def deserialise(self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]) -> t.Any | None:
+    def deserialise(
+        self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]
+    ) -> t.Any | None:
         if format != "json" or "model" not in metadata:
             return None
         json_data = buffer.read().decode()
@@ -75,14 +87,18 @@ class PydanticSerialiser(Serialiser):
 
 
 class PandasSerialiser(Serialiser):
-    def serialise(self, value: t.Any) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
+    def serialise(
+        self, value: t.Any
+    ) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
         # TODO: support series
         if pandas and isinstance(value, pandas.DataFrame):
             buffer = io.BytesIO()
             value.to_parquet(buffer)
             return "parquet", buffer, {"shape": value.shape}
 
-    def deserialise(self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]) -> t.Any | None:
+    def deserialise(
+        self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]
+    ) -> t.Any | None:
         if format != "parquet":
             return None
         if not pandas:
@@ -113,8 +129,8 @@ class Manager:
         self._blob_threshold = blob_threshold
         self._blob_manager = blob_manager
 
-    def serialise(self, value: t.Any) -> models.Value:
-        references: list[models.Reference] = []
+    def serialise(self, value: t.Any) -> types.Value:
+        references: list[types.Reference] = []
 
         def _serialise(value: t.Any) -> t.Any:
             if value is None or isinstance(value, (str, bool, int, float)):
@@ -171,8 +187,8 @@ class Manager:
             return ("raw", data, references)
 
     def _get_value_data(
-        self, value: models.Value
-    ) -> tuple[t.Any, list[models.Reference]]:
+        self, value: types.Value
+    ) -> tuple[t.Any, list[types.Reference]]:
         match value:
             case ("blob", key, _, references):
                 result = self._blob_manager.get(key)
@@ -180,13 +196,7 @@ class Manager:
             case ("raw", data, references):
                 return data, references
 
-    def deserialise(
-        self,
-        value: models.Value,
-        resolve_fn: t.Callable[[int], t.Any],
-        cancel_fn: t.Callable[[int], None],
-        restore_fn: t.Callable[[int, Path | str | None], Path],
-    ) -> t.Any:
+    def deserialise(self, value: types.Value) -> t.Any:
         data, references = self._get_value_data(value)
 
         def _deserialise(data: t.Any):
@@ -207,22 +217,20 @@ class Manager:
                         reference = references[data["index"]]
                         match reference:
                             case ("execution", execution_id):
-                                return models.Execution(
-                                    lambda: resolve_fn(execution_id),
-                                    lambda: cancel_fn(execution_id),
-                                    execution_id,
-                                )
+                                return models.Execution(execution_id)
                             case ("asset", asset_id):
-                                return models.Asset(
-                                    lambda to: restore_fn(asset_id, to), asset_id
-                                )
+                                return models.Asset(asset_id)
                             case ("fragment", format, blob_key, _size, metadata):
                                 data = self._blob_manager.get(blob_key)
                                 for serialiser in self._serialisers:
-                                    result = serialiser.deserialise(format, data, metadata)
+                                    result = serialiser.deserialise(
+                                        format, data, metadata
+                                    )
                                     if result is not None:
                                         return result
-                                raise Exception(f"Couldn't deserialise fragment ({format})")
+                                raise Exception(
+                                    f"Couldn't deserialise fragment ({format})"
+                                )
                     case other:
                         raise Exception(f"unhandled data type ({other})")
             else:

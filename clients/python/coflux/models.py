@@ -1,10 +1,10 @@
+import functools
 import typing as t
 from pathlib import Path
 
+from . import types, utils
+
 T = t.TypeVar("T")
-
-
-TargetType = t.Literal["workflow", "task", "sensor"]
 
 
 class Parameter(t.NamedTuple):
@@ -30,11 +30,8 @@ class Retries(t.NamedTuple):
     delay_max: int
 
 
-Requires = dict[str, list[str]]
-
-
 class Target(t.NamedTuple):
-    type: TargetType
+    type: types.TargetType
     parameters: list[Parameter]
     wait_for: set[int]
     cache: Cache | None
@@ -42,66 +39,68 @@ class Target(t.NamedTuple):
     delay: float
     retries: Retries | None
     memo: list[int] | bool
-    requires: Requires | None
+    requires: types.Requires | None
     instruction: str | None
     is_stub: bool
 
 
-Metadata = dict[str, t.Any]
+# TODO: better way to avoid circular dependency?
+def _get_channel():
+    from . import execution
 
-Reference = (
-    tuple[t.Literal["execution"], int]
-    | tuple[t.Literal["asset"], int]
-    | tuple[t.Literal["fragment"], str, str, int, dict[str, t.Any]]
-)
-
-Value = t.Union[
-    tuple[t.Literal["raw"], t.Any, list[Reference]],
-    tuple[t.Literal["blob"], str, int, list[Reference]],
-]
-
-Result = t.Union[
-    tuple[t.Literal["value"], Value],
-    tuple[t.Literal["error"], str, str],
-    tuple[t.Literal["abandoned"]],
-    tuple[t.Literal["cancelled"]],
-]
+    return execution.get_channel()
 
 
-class Execution(t.Generic[T]):
-    def __init__(
-        self,
-        resolve_fn: t.Callable[[], T],
-        cancel_fn: t.Callable[[], None],
-        id: int | None,
-    ):
-        self._resolve_fn = resolve_fn
-        self._cancel_fn = cancel_fn
-        self._id = id
-
-    @property
-    def id(self) -> int | None:
-        return self._id
+class Execution[T](t.NamedTuple):
+    id: int
 
     def result(self) -> T:
-        return self._resolve_fn()
+        return _get_channel().resolve_reference(self.id)
 
     def cancel(self) -> None:
-        self._cancel_fn()
+        _get_channel().cancel_execution(self.id)
+
+
+class AssetEntry(t.NamedTuple):
+    path: str
+    blob_key: str
+    size: int
+    metadata: dict[str, t.Any]
+
+    def restore(self, *, at: Path | str | None = None) -> Path:
+        base_path = Path(at).resolve() if at else Path.cwd()
+        target = base_path.joinpath(self.path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _get_channel().download_blob(self.blob_key, target)
+        return target
 
 
 class Asset:
-    def __init__(
-        self,
-        restore_fn: t.Callable[[Path | str | None], Path],
-        id: int,
-    ):
-        self._restore_fn = restore_fn
+    def __init__(self, id: int):
         self._id = id
 
     @property
-    def id(self) -> int:
+    def id(self):
         return self._id
 
-    def restore(self, *, to: Path | str | None = None) -> Path:
-        return self._restore_fn(to)
+    @functools.cached_property
+    def entries(self) -> list[AssetEntry]:
+        return _get_channel().resolve_asset(self._id)
+
+    def __getitem__(self, path: str) -> AssetEntry:
+        entry = next((e for e in self.entries if e.path == path), None)
+        if not entry:
+            raise KeyError(path)
+        return entry
+
+    def __contains__(self, path: str) -> bool:
+        return any(e.path == path for e in self.entries)
+
+    def restore(self, *, match: str | None = None, at: Path | str | None = None):
+        # TODO: parallelise
+        matcher = utils.GlobMatcher(match) if match else None
+        return {
+            e.path: e.restore(at=at)
+            for e in self.entries
+            if matcher is None or matcher.match(e.path)
+        }
