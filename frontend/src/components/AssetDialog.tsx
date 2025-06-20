@@ -130,7 +130,7 @@ function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
     (part, i, ps) => {
       if (part == "") {
         const child = asset.name || (
-          <span className="italic text-slate-800">{getAssetName(asset)}</span>
+          <span className="italic text-slate-800">Untitled</span>
         );
         return ["", IconFiles, child];
       } else if (part.endsWith("/")) {
@@ -145,7 +145,7 @@ function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
     },
   );
   return (
-    <div className="p-3 flex items-center gap-2 min-w-0">
+    <div className="flex-1 p-3 flex items-center gap-2 min-w-0">
       <AssetSelector assetId={assetId} run={run} />
       <ol className="flex items-center gap-2 overflow-auto scrollbar-none">
         {segments.map(([path, icon, child], i) => {
@@ -416,7 +416,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
             maximised ? "h-full" : "h-[50vh]",
           )}
         >
-          <div className="border-b border-slate-200 flex justify-between">
+          <div className="border-b border-slate-200 flex">
             <LocationBar
               asset={asset}
               selected={selected}
@@ -428,13 +428,19 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
               onToggleMaximise={handleToggleMaximise}
             />
           </div>
-          {entry &&
-          (type?.startsWith("text/") || type?.startsWith("image/")) ? (
+          {entry && type?.startsWith("text/") ? (
             <iframe
               src={primaryBlobStore.url(entry.blobKey)}
               sandbox="allow-downloads allow-forms allow-modals allow-scripts"
               className="flex-1"
             ></iframe>
+          ) : entry && type?.startsWith("image/") ? (
+            <div className="flex-1 flex min-h-0 min-w-0">
+              <img
+                src={primaryBlobStore.url(entry.blobKey)}
+                className="object-contain mx-auto"
+              />
+            </div>
           ) : entry ? (
             <FileInfo
               entry={{ ...entry, path: selected }}
