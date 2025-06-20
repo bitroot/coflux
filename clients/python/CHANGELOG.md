@@ -6,6 +6,10 @@ Enhancements:
 - Adds support for calling tasks with keyword arguments.
 - Move suspense coordination to the server.
 
+Changes:
+
+- Updates CLI to handle 'agents' being renamed to 'workers', and 'workspaces' (previously 'environments') to 'spaces'.
+
 ## 0.7.0
 
 Enhancements:

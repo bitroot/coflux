@@ -11,6 +11,11 @@ Fixes:
 
 - Switching a workflow to a sensor and vice versa.
 
+Changes:
+
+- Renames 'agents' to 'workers'.
+- Renamed 'workspaces' (previously 'environments') to 'spaces'.
+
 ## 0.7.0
 
 Enhancements:
