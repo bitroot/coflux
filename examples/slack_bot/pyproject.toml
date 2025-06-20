@@ -1,16 +1,17 @@
-[tool.poetry]
-name = "slackbot"
+[project]
+name = "slack-bot"
 version = "0.1.0"
-description = ""
-authors = ["Your Name <you@example.com>"]
+description = "Add your description here"
 readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "coflux",
+ "slack-sdk>=3.35.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-coflux = "^0.2.4"
-slack-sdk = "^3.26.2"
+[tool.uv.sources]
+coflux = { path = "../../clients/python", editable = true }
 
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

@@ -1,20 +1,21 @@
 import os
 import random
 import threading
+
 import coflux as cf
-from slack_sdk.web import WebClient
 from slack_sdk.socket_mode import SocketModeClient
-from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.socket_mode.request import SocketModeRequest
+from slack_sdk.socket_mode.response import SocketModeResponse
+from slack_sdk.web import WebClient
 
 
 def _web_client():
-    return WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+    return WebClient(token=os.environ["SLACK_BOT_TOKEN"])
 
 
 def _socket_client():
     return SocketModeClient(
-        app_token=os.environ.get("SLACK_APP_TOKEN"),
+        app_token=os.environ["SLACK_APP_TOKEN"],
         web_client=_web_client(),
     )
 
