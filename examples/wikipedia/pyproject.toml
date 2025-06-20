@@ -1,18 +1,19 @@
-[tool.poetry]
+[project]
 name = "wikipedia"
 version = "0.1.0"
-description = ""
-authors = ["Your Name <you@example.com>"]
+description = "Add your description here"
 readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.13.4",
+    "coflux",
+    "nltk>=3.9.1",
+    "requests>=2.32.4",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-requests = "^2.31.0"
-beautifulsoup4 = "^4.12.3"
-nltk = "^3.8.1"
-coflux = {path = "../../clients/python", develop = true}
+[tool.uv.sources]
+coflux = { path = "../../clients/python", editable = true }
 
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

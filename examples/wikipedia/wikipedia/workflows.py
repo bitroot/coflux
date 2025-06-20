@@ -1,10 +1,10 @@
-import requests
+import collections
 import datetime as dt
 import typing as t
-import nltk
-import collections
-import coflux as cf
 
+import coflux as cf
+import nltk
+import requests
 from bs4 import BeautifulSoup
 
 # TODO
@@ -49,6 +49,7 @@ def convert_to_text(html: str):
 
 @cf.task(wait=True)
 def tokenise(text_: cf.Execution[str]):
+    nltk.download("punkt_tab")
     return nltk.word_tokenize(text_.result())
 
 
@@ -86,4 +87,5 @@ def wikipedia_workflow(date: str | None = None, n: int = 3):
         count=len(article_names),
         n=n,
     )
-    return [process_article.submit(a) for a in article_names[:n]]
+    with cf.group():
+        return [process_article.submit(a) for a in article_names[:n]]

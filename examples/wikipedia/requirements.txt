@@ -1,4 +1,0 @@
-coflux
-requests
-beautifulsoup4
-nltk
