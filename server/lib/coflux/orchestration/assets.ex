@@ -2,7 +2,6 @@ defmodule Coflux.Orchestration.Assets do
   import Coflux.Store
 
   alias Coflux.Orchestration.Values
-  alias Coflux.Utils
 
   defp hash_asset(name, entries) do
     data =
@@ -31,7 +30,7 @@ defmodule Coflux.Orchestration.Assets do
           {:ok, asset_id}
 
         {:ok, nil} ->
-          external_id = Utils.generate_id(20)
+          {:ok, external_id} = generate_external_id(db, :assets, 2, "A")
 
           {:ok, asset_id} =
             insert_one(db, :assets, %{external_id: external_id, name: name, hash: {:blob, hash}})
