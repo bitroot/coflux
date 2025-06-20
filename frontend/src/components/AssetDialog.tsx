@@ -130,7 +130,7 @@ function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
     (part, i, ps) => {
       if (part == "") {
         const child = asset.name || (
-          <span className="italic text-slate-800">{getAssetName(asset)}</span>
+          <span className="italic text-slate-800">Untitled</span>
         );
         return ["", IconFiles, child];
       } else if (part.endsWith("/")) {
