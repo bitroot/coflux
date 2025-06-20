@@ -221,7 +221,7 @@ export type LogMessage = [
   Record<string, Value>,
 ];
 
-export type Agent = {
+export type Worker = {
   startingAt: number;
   startedAt?: number;
   startError?: unknown;

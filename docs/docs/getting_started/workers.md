@@ -1,8 +1,8 @@
-# 4. Starting agents
+# 4. Starting workers
 
-Modules are hosted by _agents_ - each agent can have its own package dependencies, and be deployed within your infrastructure as needed - for example one agent could be deployed on an on-premise bare-metal server with a GPU, and another agent could be deployed as a Docker image on an auto-scaling cloud cluster.
+Modules are hosted by _workers_ - each worker can have its own package dependencies, and be deployed within your infrastructure as needed - for example one worker could be deployed on an on-premise bare-metal server with a GPU, and another worker could be deployed as a Docker image on an auto-scaling cloud cluster.
 
-An agent is a process that's responsible for executing the code required by your workflow - it will:
+An worker is a process that's responsible for executing the code required by your workflow - it will:
 
 1. Listen for commands from the orchestrator.
 2. Invoke and monitor executions of operations (in forked sub-processes).
@@ -22,10 +22,10 @@ You will be prompted to enter the host (`localhost:7777`), the project ID, and t
 
 ## Run
 
-Now the agent can be started. Run the following command:
+Now the worker can be started. Run the following command:
 
 ```bash
-coflux agent --dev hello.py
+coflux worker --dev hello.py
 ```
 
 In the web UI you will be able to see your workflow appear in the sidebar.

@@ -114,18 +114,18 @@ function GettingStarted({ projectId, spaceId }: GettingStartedProps) {
                 ]}
               />
             </Step>
-            <Step title="Run the agent">
+            <Step title="Run the worker">
               <CodeBlock
                 className="bg-slate-100"
                 prompt="$"
-                code={[`coflux agent --dev ${exampleModuleName}`]}
+                code={[`coflux worker --dev ${exampleModuleName}`]}
               />
               <Hint>
                 <p>
                   The <code className="bg-slate-100">--dev</code> flag enables
                   file watching and automatic module registration (equivalent to{" "}
                   <code className="bg-slate-100">--reload</code> and{" "}
-                  <code className="bg-slate-100">--register</code>) - the agent
+                  <code className="bg-slate-100">--register</code>) - the worker
                   will automatically restart when changes to the source code are
                   detected, and automtically register workflow definitions.
                 </p>

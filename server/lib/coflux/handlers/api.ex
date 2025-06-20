@@ -237,19 +237,19 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["stop_agent"]) do
+  defp handle(req, "POST", ["stop_worker"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
         space_name: "spaceName",
-        agent_id: {"agentId", &parse_numeric_id/1}
+        worker_id: {"workerId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.stop_agent(
+      case Orchestration.stop_worker(
              arguments.project_id,
              arguments.space_name,
-             arguments.agent_id
+             arguments.worker_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -262,19 +262,19 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["resume_agent"]) do
+  defp handle(req, "POST", ["resume_worker"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
         space_name: "spaceName",
-        agent_id: {"agentId", &parse_numeric_id/1}
+        worker_id: {"workerId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_agent(
+      case Orchestration.resume_worker(
              arguments.project_id,
              arguments.space_name,
-             arguments.agent_id
+             arguments.worker_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)

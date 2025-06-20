@@ -26,13 +26,13 @@ function Counters({ sessions }: CountersProps) {
           {idleCount ? (
             <Badge
               label={`${idleCount}`}
-              title={`${pluralise(idleCount, "idle agent")}`}
+              title={`${pluralise(idleCount, "idle worker")}`}
             />
           ) : null}
           {activeCount ? (
             <Badge
               label={`${activeCount}`}
-              title={`${pluralise(activeCount, "active agent")}`}
+              title={`${pluralise(activeCount, "active worker")}`}
               intent="info"
             />
           ) : null}
@@ -96,7 +96,7 @@ function UnmanagedItem({ sessions }: UnmanagedItemProps) {
       <div className="flex gap-1 items-center p-1 rounded-md my-0.5">
         <span className="flex-1 flex justify-between">
           <span className="text-sm text-slate-600 italic">
-            Unmanaged agents
+            Unmanaged workers
           </span>
           <Counters sessions={sessions} />
         </span>
@@ -113,7 +113,7 @@ type Props = {
   sessions: Record<string, models.Session> | undefined;
 };
 
-export default function AgentsList({
+export default function WorkersList({
   pools,
   projectId,
   spaceName,

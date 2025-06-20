@@ -1,4 +1,4 @@
-defmodule Coflux.Handlers.Agent do
+defmodule Coflux.Handlers.Worker do
   import Coflux.Handlers.Utils
 
   alias Coflux.{Orchestration, Projects}
@@ -9,20 +9,20 @@ defmodule Coflux.Handlers.Agent do
     project_id = get_query_param(qs, "project")
     session_id = get_query_param(qs, "session")
     space_name = get_query_param(qs, "space")
-    agent_id = get_query_param(qs, "launch", &String.to_integer/1)
+    worker_id = get_query_param(qs, "launch", &String.to_integer/1)
     provides = get_query_param(qs, "provides", &parse_provides/1)
     concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
 
     {:cowboy_websocket, req,
-     {project_id, session_id, space_name, agent_id, provides, concurrency}}
+     {project_id, session_id, space_name, worker_id, provides, concurrency}}
   end
 
-  def websocket_init({project_id, session_id, space_name, agent_id, provides, concurrency}) do
+  def websocket_init({project_id, session_id, space_name, worker_id, provides, concurrency}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
         # TODO: authenticate
         # TODO: monitor server?
-        case connect(project_id, session_id, space_name, agent_id, provides, concurrency) do
+        case connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
           {:ok, session_id, execution_ids} ->
             {[session_message(session_id)],
              %{
@@ -34,7 +34,7 @@ defmodule Coflux.Handlers.Agent do
           {:error, :space_invalid} ->
             {[{:close, 4000, "space_not_found"}], nil}
 
-          {:error, :no_agent} ->
+          {:error, :no_worker} ->
             {[{:close, 4000, "launch_invalid"}], nil}
 
           {:error, :no_session} ->
@@ -342,7 +342,7 @@ defmodule Coflux.Handlers.Agent do
     {[{:close, 4000, "space_not_found"}], state}
   end
 
-  defp connect(project_id, session_id, space_name, agent_id, provides, concurrency) do
+  defp connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
     if session_id do
       with {:ok, execution_ids} <- Orchestration.resume_session(project_id, session_id, self()) do
         {:ok, session_id, execution_ids}
@@ -352,7 +352,7 @@ defmodule Coflux.Handlers.Agent do
              Orchestration.start_session(
                project_id,
                space_name,
-               agent_id,
+               worker_id,
                provides,
                concurrency,
                self()

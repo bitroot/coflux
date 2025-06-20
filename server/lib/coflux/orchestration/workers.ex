@@ -1,23 +1,23 @@
-defmodule Coflux.Orchestration.Agents do
+defmodule Coflux.Orchestration.Workers do
   import Coflux.Store
 
-  def create_agent(db, pool_id) do
+  def create_worker(db, pool_id) do
     now = current_timestamp()
 
-    case insert_one(db, :agents, %{
+    case insert_one(db, :workers, %{
            pool_id: pool_id,
            created_at: now
          }) do
-      {:ok, agent_id} ->
-        {:ok, agent_id, now}
+      {:ok, worker_id} ->
+        {:ok, worker_id, now}
     end
   end
 
-  def create_agent_launch_result(db, agent_id, data, error) do
+  def create_worker_launch_result(db, worker_id, data, error) do
     now = current_timestamp()
 
-    case insert_one(db, :agent_launch_results, %{
-           agent_id: agent_id,
+    case insert_one(db, :worker_launch_results, %{
+           worker_id: worker_id,
            data: if(data, do: {:blob, :erlang.term_to_binary(data)}),
            error: if(error, do: Jason.encode!(error)),
            created_at: now
@@ -27,9 +27,9 @@ defmodule Coflux.Orchestration.Agents do
     end
   end
 
-  def create_agent_state(db, agent_id, state) do
-    case insert_one(db, :agent_states, %{
-           agent_id: agent_id,
+  def create_worker_state(db, worker_id, state) do
+    case insert_one(db, :worker_states, %{
+           worker_id: worker_id,
            state: encode_state(state),
            created_at: current_timestamp()
          }) do
@@ -37,22 +37,22 @@ defmodule Coflux.Orchestration.Agents do
     end
   end
 
-  def create_agent_stop(db, agent_id) do
+  def create_worker_stop(db, worker_id) do
     now = current_timestamp()
 
-    case insert_one(db, :agent_stops, %{
-           agent_id: agent_id,
+    case insert_one(db, :worker_stops, %{
+           worker_id: worker_id,
            created_at: now
          }) do
-      {:ok, agent_stop_id} -> {:ok, agent_stop_id, now}
+      {:ok, worker_stop_id} -> {:ok, worker_stop_id, now}
     end
   end
 
-  def create_agent_stop_result(db, agent_stop_id, error) do
+  def create_worker_stop_result(db, worker_stop_id, error) do
     now = current_timestamp()
 
-    case insert_one(db, :agent_stop_results, %{
-           agent_stop_id: agent_stop_id,
+    case insert_one(db, :worker_stop_results, %{
+           worker_stop_id: worker_stop_id,
            error: if(error, do: Jason.encode!(error)),
            created_at: now
          }) do
@@ -60,11 +60,11 @@ defmodule Coflux.Orchestration.Agents do
     end
   end
 
-  def create_agent_deactivation(db, agent_id) do
+  def create_worker_deactivation(db, worker_id) do
     now = current_timestamp()
 
-    case insert_one(db, :agent_deactivations, %{
-           agent_id: agent_id,
+    case insert_one(db, :worker_deactivations, %{
+           worker_id: worker_id,
            created_at: now
          }) do
       {:ok, _} ->
@@ -72,7 +72,7 @@ defmodule Coflux.Orchestration.Agents do
     end
   end
 
-  def get_active_agents(db) do
+  def get_active_workers(db) do
     case query(
            db,
            """
@@ -83,23 +83,23 @@ defmodule Coflux.Orchestration.Agents do
              p.name,
              p.space_id,
              (SELECT ls.state
-               FROM agent_states AS ls
-               WHERE ls.agent_id = l.id
+               FROM worker_states AS ls
+               WHERE ls.worker_id = l.id
                ORDER BY ls.created_at DESC
                LIMIT 1) AS state,
              r.data
-           FROM agents AS l
+           FROM workers AS l
            INNER JOIN pools AS p ON p.id = l.pool_id
-           LEFT JOIN agent_launch_results AS r ON r.agent_id = l.id
-           LEFT JOIN agent_stops AS s ON s.id = (
+           LEFT JOIN worker_launch_results AS r ON r.worker_id = l.id
+           LEFT JOIN worker_stops AS s ON s.id = (
              SELECT id
-             FROM agent_stops
-             WHERE agent_id = l.id
+             FROM worker_stops
+             WHERE worker_id = l.id
              ORDER BY created_at DESC
              LIMIT 1
            )
-           LEFT JOIN agent_stop_results AS sr ON sr.agent_stop_id = s.id
-           LEFT JOIN agent_deactivations AS d ON d.agent_id = l.id
+           LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
+           LEFT JOIN worker_deactivations AS d ON d.worker_id = l.id
            WHERE d.created_at IS NULL
            ORDER BY l.created_at DESC
            """
@@ -108,32 +108,32 @@ defmodule Coflux.Orchestration.Agents do
         {:ok,
          Enum.map(
            rows,
-           fn {agent_id, created_at, pool_id, pool_name, space_id, state, data} ->
-             {agent_id, created_at, pool_id, pool_name, space_id, decode_state(state),
+           fn {worker_id, created_at, pool_id, pool_name, space_id, state, data} ->
+             {worker_id, created_at, pool_id, pool_name, space_id, decode_state(state),
               if(data, do: :erlang.binary_to_term(data))}
            end
          )}
     end
   end
 
-  def get_pool_agents(db, pool_name, limit \\ 100) do
+  def get_pool_workers(db, pool_name, limit \\ 100) do
     # TODO: decode errors?
     query(
       db,
       """
       SELECT l.id, l.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error, d.created_at
-      FROM agents AS l
+      FROM workers AS l
       INNER JOIN pools AS p ON p.id = l.pool_id
-      LEFT JOIN agent_launch_results AS r ON r.agent_id = l.id
-      LEFT JOIN agent_stops AS s ON s.id = (
+      LEFT JOIN worker_launch_results AS r ON r.worker_id = l.id
+      LEFT JOIN worker_stops AS s ON s.id = (
         SELECT id
-        FROM agent_stops
-        WHERE agent_id = l.id
+        FROM worker_stops
+        WHERE worker_id = l.id
         ORDER BY created_at DESC
         LIMIT 1
       )
-      LEFT JOIN agent_stop_results AS sr ON sr.agent_stop_id = s.id
-      LEFT JOIN agent_deactivations AS d ON d.agent_id = l.id
+      LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
+      LEFT JOIN worker_deactivations AS d ON d.worker_id = l.id
       WHERE p.name = ?1
       ORDER BY l.created_at DESC
       LIMIT ?2

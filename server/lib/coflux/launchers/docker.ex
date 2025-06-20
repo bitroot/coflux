@@ -1,5 +1,5 @@
 defmodule Coflux.DockerLauncher do
-  def launch(project_id, space_name, agent_id, modules, provides, config \\ %{}) do
+  def launch(project_id, space_name, worker_id, modules, provides, config \\ %{}) do
     # TODO: option to configure docker host/socket?
     # TODO: option to configure coflux host?
     with {:ok, %{"Id" => container_id}} <-
@@ -11,7 +11,7 @@ defmodule Coflux.DockerLauncher do
                "COFLUX_HOST=localhost:7777",
                "COFLUX_SPACE=#{space_name}",
                "COFLUX_PROJECT=#{project_id}",
-               "COFLUX_LAUNCH=#{agent_id}",
+               "COFLUX_LAUNCH=#{worker_id}",
                "COFLUX_PROVIDES=#{encode_provides(provides)}"
              ]
            }),

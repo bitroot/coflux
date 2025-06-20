@@ -49,7 +49,7 @@ See the [concurrency](/concurrency) page for more details.
 
 ## Map-reduce
 
-A map-reduce-style pattern can be used to split work up to be processed by separate agents, and then combining the results together.
+A map-reduce-style pattern can be used to split work up to be processed by separate workers, and then combining the results together.
 
 For example:
 

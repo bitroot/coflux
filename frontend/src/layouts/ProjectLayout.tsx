@@ -24,7 +24,7 @@ import {
   useSessions,
 } from "../topics";
 import Header from "../components/Header";
-import AgentsList from "../components/AgentsList";
+import WorkersList from "../components/WorkersList";
 import * as api from "../api";
 import { buildUrl } from "../utils";
 import Button from "../components/common/Button";
@@ -94,7 +94,7 @@ function Sidebar({ projectId, spaceName, active, open }: SidebarProps) {
               ) : null}
             </div>
             <div className="flex flex-col max-h-[1/3] overflow-auto">
-              <AgentsList
+              <WorkersList
                 pools={pools}
                 projectId={projectId}
                 spaceName={spaceName}

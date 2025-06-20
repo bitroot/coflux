@@ -27,11 +27,11 @@ For example, a `development` space can inherit from a `production` space, allowi
 
 This makes it easier to diagnose issues that arise in a production space by retrying individual steps locally, and trying out code changes safely.
 
-## Agents
+## Workers
 
-An _agent_ is a process that hosts _modules_ (collections workflows/tasks). An agent connects to the server and is associated with a specific project and space. The agent waits for commands from the server telling it to execute specific tasks, and the agent monitors and reports progress of these executions back to the server.
+An _worker_ is a process that hosts _modules_ (collections workflows/tasks). An worker connects to the server and is associated with a specific project and space. The worker waits for commands from the server telling it to execute specific tasks, and the worker monitors and reports progress of these executions back to the server.
 
-This model of having agents connect to the server provides flexibility over where and how agents are run. During development an agent can run locally on a laptop, restarting automatically as code changes are made. Or multiple agents can run in the cloud, or on dedicated machines - or a combination. An agent can be started with specific environment variables associated with the deployment environment (e.g., production access keys).
+This model of having workers connect to the server provides flexibility over where and how workers are run. During development a worker can run locally on a laptop, restarting automatically as code changes are made. Or multiple workers can run in the cloud, or on dedicated machines - or a combination. An worker can be started with specific environment variables associated with the deployment environment (e.g., production access keys).
 
 ## Workflows
 
@@ -39,7 +39,7 @@ A _workflow_ is defined in a module, in code. Additionally, _tasks_ can be defin
 
 Workflows and tasks are collectively referred to as _targets_, although workflows are really just special forms of tasks, from which runs can be started. You can think of the distinction between workflows and tasks a bit like the distinction between public and private functions in a module.
 
-Workflows need to be registered with a project and space so that they appear in the UI. This can be done explicitly (e.g., for a production space as part of a build process), or automatically by an agent when it starts/restarts (using the `--register` or `--dev` flag).
+Workflows need to be registered with a project and space so that they appear in the UI. This can be done explicitly (e.g., for a production space as part of a build process), or automatically by a worker when it starts/restarts (using the `--register` or `--dev` flag).
 
 ## Runs
 

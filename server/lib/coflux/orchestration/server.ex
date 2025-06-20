@@ -12,16 +12,16 @@ defmodule Coflux.Orchestration.Server do
     Assets,
     CacheConfigs,
     TagSets,
-    Agents,
+    Workers,
     Manifests,
     Observations
   }
 
   @session_timeout_ms 5_000
   @sensor_rate_limit_ms 5_000
-  @connected_agent_poll_interval_ms 30_000
-  @disconnected_agent_poll_interval_ms 5_000
-  @agent_idle_timeout_ms 5_000
+  @connected_worker_poll_interval_ms 30_000
+  @disconnected_worker_poll_interval_ms 5_000
+  @worker_idle_timeout_ms 5_000
 
   defmodule State do
     defstruct project_id: nil,
@@ -38,13 +38,13 @@ defmodule Coflux.Orchestration.Server do
               # name -> id
               space_names: %{},
 
-              # agent_id -> %{created_at, pool_id, pool_name, space_id, state, data, session_id, stop_id, last_poll_at}
-              agents: %{},
+              # worker_id -> %{created_at, pool_id, pool_name, space_id, state, data, session_id, stop_id, last_poll_at}
+              workers: %{},
 
               # ref -> {pid, session_id}
               connections: %{},
 
-              # session_id -> %{external_id, connection, targets, queue, starting, executing, expire_timer, concurrency, space_id, provides, agent_id, last_idle_at}
+              # session_id -> %{external_id, connection, targets, queue, starting, executing, expire_timer, concurrency, space_id, provides, worker_id, last_idle_at}
               sessions: %{},
 
               # external_id -> session_id
@@ -90,19 +90,19 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_continue(:setup, state) do
     {:ok, spaces} = Spaces.get_all_spaces(state.db)
-    {:ok, agents} = Agents.get_active_agents(state.db)
+    {:ok, workers} = Workers.get_active_workers(state.db)
 
     space_names =
       Map.new(spaces, fn {space_id, space} ->
         {space.name, space_id}
       end)
 
-    agents =
+    workers =
       Enum.reduce(
-        agents,
+        workers,
         %{},
-        fn {agent_id, created_at, pool_id, pool_name, space_id, state, data}, agents ->
-          Map.put(agents, agent_id, %{
+        fn {worker_id, created_at, pool_id, pool_name, space_id, state, data}, workers ->
+          Map.put(workers, worker_id, %{
             created_at: created_at,
             pool_id: pool_id,
             pool_name: pool_name,
@@ -129,7 +129,7 @@ defmodule Coflux.Orchestration.Server do
         spaces: spaces,
         space_names: space_names,
         pools: pools,
-        agents: agents
+        workers: workers
       })
 
     {:ok, pending} = Runs.get_pending_assignments(state.db)
@@ -265,10 +265,10 @@ defmodule Coflux.Orchestration.Server do
           end
 
         state =
-          state.agents
-          |> Enum.reduce(state, fn {agent_id, agent}, state ->
-            if agent.space_id == space_id && agent.state == :active do
-              update_agent_state(state, agent_id, :draining, space_id, agent.pool_name)
+          state.workers
+          |> Enum.reduce(state, fn {worker_id, worker}, state ->
+            if worker.space_id == space_id && worker.state == :active do
+              update_worker_state(state, worker_id, :draining, space_id, worker.pool_name)
             else
               state
             end
@@ -289,11 +289,11 @@ defmodule Coflux.Orchestration.Server do
       case Spaces.update_pool(state.db, space_id, pool_name, pool) do
         {:ok, pool_id} ->
           state =
-            state.agents
-            |> Enum.reduce(state, fn {agent_id, agent}, state ->
-              if agent.state == :active && agent.pool_name == pool_name do
+            state.workers
+            |> Enum.reduce(state, fn {worker_id, worker}, state ->
+              if worker.state == :active && worker.pool_name == pool_name do
                 # TODO: only if pool has meaningfully changed?
-                update_agent_state(state, agent_id, :draining, space_id, pool_name)
+                update_worker_state(state, worker_id, :draining, space_id, pool_name)
               else
                 state
               end
@@ -317,12 +317,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:stop_agent, space_name, agent_id}, _from, state) do
+  def handle_call({:stop_worker, space_name, worker_id}, _from, state) do
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
-         {:ok, agent} <- lookup_agent(state, agent_id, space_id) do
+         {:ok, worker} <- lookup_worker(state, worker_id, space_id) do
       state =
         state
-        |> update_agent_state(agent_id, :draining, space_id, agent.pool_name)
+        |> update_worker_state(worker_id, :draining, space_id, worker.pool_name)
         |> flush_notifications()
 
       send(self(), :tick)
@@ -334,12 +334,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:resume_agent, space_name, agent_id}, _from, state) do
+  def handle_call({:resume_worker, space_name, worker_id}, _from, state) do
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
-         {:ok, agent} <- lookup_agent(state, agent_id, space_id) do
+         {:ok, worker} <- lookup_worker(state, worker_id, space_id) do
       state =
         state
-        |> update_agent_state(agent_id, :active, space_id, agent.pool_name)
+        |> update_worker_state(worker_id, :active, space_id, worker.pool_name)
         |> flush_notifications()
 
       send(self(), :tick)
@@ -441,13 +441,13 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:start_session, space_name, agent_id, provides, concurrency, pid},
+        {:start_session, space_name, worker_id, provides, concurrency, pid},
         _from,
         state
       ) do
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
-         {:ok, agent} <- lookup_agent(state, agent_id, space_id) do
-      case Sessions.start_session(state.db, space_id, provides, agent_id) do
+         {:ok, worker} <- lookup_worker(state, worker_id, space_id) do
+      case Sessions.start_session(state.db, space_id, provides, worker_id) do
         {:ok, session_id, external_session_id, now} ->
           ref = Process.monitor(pid)
 
@@ -462,7 +462,7 @@ defmodule Coflux.Orchestration.Server do
             concurrency: concurrency,
             space_id: space_id,
             provides: provides,
-            agent_id: agent_id,
+            worker_id: worker_id,
             last_idle_at: now
           }
 
@@ -474,21 +474,21 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               {:sessions, space_id},
               {:session, session_id,
-               %{connected: true, executions: 0, pool_name: if(agent, do: agent.pool_name)}}
+               %{connected: true, executions: 0, pool_name: if(worker, do: worker.pool_name)}}
             )
 
-          # TODO: check agent isn't already assigned to a (different (active?)) session?
+          # TODO: check worker isn't already assigned to a (different (active?)) session?
 
           state =
-            if agent do
+            if worker do
               state
               |> put_in(
-                [Access.key(:agents), agent_id, Access.key(:session_id)],
+                [Access.key(:workers), worker_id, Access.key(:session_id)],
                 session_id
               )
               |> notify_listeners(
-                {:pool, space_id, agent.pool_name},
-                {:agent_connected, agent_id, true}
+                {:pool, space_id, worker.pool_name},
+                {:worker_connected, worker_id, true}
               )
             else
               state
@@ -543,25 +543,25 @@ defmodule Coflux.Orchestration.Server do
                connected: true,
                executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
                pool_name:
-                 if(session.agent_id,
-                   do: state.agents |> Map.fetch!(session.agent_id) |> Map.fetch!(:pool_name)
+                 if(session.worker_id,
+                   do: state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
                  )
              }}
           )
 
         state =
-          if session.agent_id do
-            agent = Map.fetch!(state.agents, session.agent_id)
-            # TODO: check that agent space matches session space?
-            # TODO: check agent isn't assigned to a different session?
+          if session.worker_id do
+            worker = Map.fetch!(state.workers, session.worker_id)
+            # TODO: check that worker space matches session space?
+            # TODO: check worker isn't assigned to a different session?
             state
             |> put_in(
-              [Access.key(:agents), session.agent_id, Access.key(:session_id)],
+              [Access.key(:workers), session.worker_id, Access.key(:session_id)],
               session_id
             )
             |> notify_listeners(
-              {:pool, agent.space_id, agent.pool_name},
-              {:agent_connected, session.agent_id, true}
+              {:pool, worker.space_id, worker.pool_name},
+              {:worker_connected, session.worker_id, true}
             )
           else
             state
@@ -1168,7 +1168,7 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, error}, state}
 
       {:ok, _} ->
-        # TODO: include non-active pools that contain active agents
+        # TODO: include non-active pools that contain active workers
         pools = Map.get(state.pools, space_id, %{})
         {:ok, ref, state} = add_listener(state, {:pools, space_id}, pid)
         {:reply, {:ok, pools, ref}, state}
@@ -1179,21 +1179,21 @@ defmodule Coflux.Orchestration.Server do
     case lookup_space_by_id(state, space_id) do
       {:ok, _} ->
         pool = Map.get(state.pools[space_id], pool_name)
-        {:ok, pool_agents} = Agents.get_pool_agents(state.db, pool_name)
+        {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
 
-        # TODO: include 'active' agents that aren't in this (potentially limited) list
+        # TODO: include 'active' workers that aren't in this (potentially limited) list
 
-        agents =
+        workers =
           Map.new(
-            pool_agents,
-            fn {agent_id, starting_at, started_at, start_error, stopping_at, stopped_at,
+            pool_workers,
+            fn {worker_id, starting_at, started_at, start_error, stopping_at, stopped_at,
                 stop_error, deactivated_at} ->
-              agent = Map.get(state.agents, agent_id)
+              worker = Map.get(state.workers, worker_id)
 
               connected =
-                if agent do
-                  if agent.session_id do
-                    case Map.fetch(state.sessions, agent.session_id) do
+                if worker do
+                  if worker.session_id do
+                    case Map.fetch(state.sessions, worker.session_id) do
                       {:ok, session} -> !is_nil(session.connection)
                       :error -> false
                     end
@@ -1203,7 +1203,7 @@ defmodule Coflux.Orchestration.Server do
                 end
 
               # TODO: include pool_id?
-              {agent_id,
+              {worker_id,
                %{
                  starting_at: starting_at,
                  started_at: started_at,
@@ -1212,14 +1212,14 @@ defmodule Coflux.Orchestration.Server do
                  stopped_at: stopped_at,
                  stop_error: stop_error,
                  deactivated_at: deactivated_at,
-                 state: if(agent, do: agent.state),
+                 state: if(worker, do: worker.state),
                  connected: connected
                }}
             end
           )
 
         {:ok, ref, state} = add_listener(state, {:pool, space_id, pool_name}, pid)
-        {:reply, {:ok, pool, agents, ref}, state}
+        {:reply, {:ok, pool, workers, ref}, state}
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -1244,8 +1244,8 @@ defmodule Coflux.Orchestration.Server do
               |> Enum.count()
 
             pool_name =
-              if session.agent_id do
-                state.agents |> Map.fetch!(session.agent_id) |> Map.fetch!(:pool_name)
+              if session.worker_id do
+                state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
               end
 
             {session_id,
@@ -1747,10 +1747,10 @@ defmodule Coflux.Orchestration.Server do
     state =
       if Enum.any?(unassigned) do
         latest_pool_launch_at =
-          state.agents
+          state.workers
           |> Map.values()
-          |> Enum.reduce(%{}, fn agent, latest ->
-            Map.update(latest, agent.pool_id, agent.created_at, &max(&1, agent.created_at))
+          |> Enum.reduce(%{}, fn worker, latest ->
+            Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
           end)
 
         unassigned
@@ -1769,8 +1769,8 @@ defmodule Coflux.Orchestration.Server do
           |> Enum.uniq()
           |> Enum.filter(&(now - Map.get(latest_pool_launch_at, &1, 0) > 10_000))
           |> Enum.reduce(state, fn pool_id, state ->
-            case Agents.create_agent(state.db, pool_id) do
-              {:ok, agent_id, created_at} ->
+            case Workers.create_worker(state.db, pool_id) do
+              {:ok, worker_id, created_at} ->
                 {pool_name, pool} =
                   Enum.find(
                     state.pools[space_id],
@@ -1784,7 +1784,7 @@ defmodule Coflux.Orchestration.Server do
                   [
                     state.project_id,
                     state.spaces[space_id].name,
-                    agent_id,
+                    worker_id,
                     pool.modules,
                     pool.provides,
                     Map.delete(pool.launcher, :type)
@@ -1798,19 +1798,19 @@ defmodule Coflux.Orchestration.Server do
                       end
 
                     {:ok, started_at} =
-                      Agents.create_agent_launch_result(state.db, agent_id, data, error)
+                      Workers.create_worker_launch_result(state.db, worker_id, data, error)
 
                     state =
                       state
-                      |> put_in([Access.key(:agents), agent_id, Access.key(:data)], data)
+                      |> put_in([Access.key(:workers), worker_id, Access.key(:data)], data)
                       |> notify_listeners(
                         {:pool, space_id, pool_name},
-                        {:launch_result, agent_id, started_at, error}
+                        {:launch_result, worker_id, started_at, error}
                       )
 
                     state =
                       if error do
-                        deactivate_agent(state, agent_id)
+                        deactivate_worker(state, worker_id)
                       else
                         state
                       end
@@ -1818,7 +1818,7 @@ defmodule Coflux.Orchestration.Server do
                     flush_notifications(state)
                   end
                 )
-                |> put_in([Access.key(:agents), agent_id], %{
+                |> put_in([Access.key(:workers), worker_id], %{
                   created_at: created_at,
                   pool_id: pool_id,
                   pool_name: pool_name,
@@ -1831,7 +1831,7 @@ defmodule Coflux.Orchestration.Server do
                 })
                 |> notify_listeners(
                   {:pool, space_id, pool_name},
-                  {:agent, agent_id, created_at}
+                  {:worker, worker_id, created_at}
                 )
             end
           end)
@@ -1846,104 +1846,104 @@ defmodule Coflux.Orchestration.Server do
       |> Enum.min(fn -> nil end)
 
     state =
-      state.agents
-      |> Enum.filter(fn {_agent_id, agent} ->
+      state.workers
+      |> Enum.filter(fn {_worker_id, worker} ->
         # TODO: don't poll if a poll is in progress?
-        if agent.data do
-          if is_nil(agent.last_poll_at) do
+        if worker.data do
+          if is_nil(worker.last_poll_at) do
             true
           else
             connection =
-              if agent.session_id && Map.has_key?(state.sessions, agent.session_id),
-                do: state.sessions[agent.session_id].connection
+              if worker.session_id && Map.has_key?(state.sessions, worker.session_id),
+                do: state.sessions[worker.session_id].connection
 
             interval_ms =
               if connection,
-                do: @connected_agent_poll_interval_ms,
-                else: @disconnected_agent_poll_interval_ms
+                do: @connected_worker_poll_interval_ms,
+                else: @disconnected_worker_poll_interval_ms
 
-            now - agent.last_poll_at > interval_ms
+            now - worker.last_poll_at > interval_ms
           end
         else
           false
         end
       end)
-      |> Enum.reduce(state, fn {agent_id, agent}, state ->
-        {:ok, launcher} = Spaces.get_launcher_for_pool(state.db, agent.pool_id)
+      |> Enum.reduce(state, fn {worker_id, worker}, state ->
+        {:ok, launcher} = Spaces.get_launcher_for_pool(state.db, worker.pool_id)
 
         state
-        |> call_launcher(launcher, :poll, [agent.data], fn state, result ->
+        |> call_launcher(launcher, :poll, [worker.data], fn state, result ->
           case result do
             {:ok, {:ok, true}} ->
               state
 
             {:ok, {:ok, false}} ->
-              deactivate_agent(state, agent_id)
+              deactivate_worker(state, worker_id)
 
             :error ->
               # TODO: ?
               state
           end
         end)
-        |> put_in([Access.key(:agents), agent_id, :last_poll_at], now)
+        |> put_in([Access.key(:workers), worker_id, :last_poll_at], now)
       end)
 
     state =
-      state.agents
-      |> Enum.group_by(fn {_, agent} -> agent.pool_name end)
-      |> Enum.flat_map(fn {_pool_name, agents} ->
+      state.workers
+      |> Enum.group_by(fn {_, worker} -> worker.pool_name end)
+      |> Enum.flat_map(fn {_pool_name, workers} ->
         # TODO: consider min/max pool size
-        Enum.filter(agents, fn {_agent_id, agent} ->
+        Enum.filter(workers, fn {_worker_id, worker} ->
           # TODO: better way to check launched than checking existence of data?
-          if agent.state == :active && agent.session_id && agent.data do
-            session = Map.fetch!(state.sessions, agent.session_id)
+          if worker.state == :active && worker.session_id && worker.data do
+            session = Map.fetch!(state.sessions, worker.session_id)
             idle_time = now - session.last_idle_at
 
             if Enum.empty?(session.starting) && Enum.empty?(session.executing) &&
-                 idle_time >= @agent_idle_timeout_ms do
+                 idle_time >= @worker_idle_timeout_ms do
               true
             end
           end
         end)
       end)
-      |> Enum.reduce(state, fn {agent_id, agent}, state ->
-        update_agent_state(state, agent_id, :draining, agent.space_id, agent.pool_name)
+      |> Enum.reduce(state, fn {worker_id, worker}, state ->
+        update_worker_state(state, worker_id, :draining, worker.space_id, worker.pool_name)
       end)
 
     state =
-      state.agents
-      |> Enum.filter(fn {_agent_id, agent} ->
-        if agent.session_id do
-          if agent.state == :draining && agent.data && !agent.stop_id do
-            session = Map.fetch!(state.sessions, agent.session_id)
+      state.workers
+      |> Enum.filter(fn {_worker_id, worker} ->
+        if worker.session_id do
+          if worker.state == :draining && worker.data && !worker.stop_id do
+            session = Map.fetch!(state.sessions, worker.session_id)
             Enum.empty?(session.starting) && Enum.empty?(session.executing)
           end
         else
-          !is_nil(agent.data)
+          !is_nil(worker.data)
         end
       end)
-      |> Enum.reduce(state, fn {agent_id, agent}, state ->
-        {:ok, agent_stop_id, stopping_at} = Agents.create_agent_stop(state.db, agent_id)
-        {:ok, launcher} = Spaces.get_launcher_for_pool(state.db, agent.pool_id)
+      |> Enum.reduce(state, fn {worker_id, worker}, state ->
+        {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
+        {:ok, launcher} = Spaces.get_launcher_for_pool(state.db, worker.pool_id)
 
         state =
           state
-          |> put_in([Access.key(:agents), agent_id, :stop_id], agent_stop_id)
+          |> put_in([Access.key(:workers), worker_id, :stop_id], worker_stop_id)
           |> notify_listeners(
-            {:pool, agent.space_id, agent.pool_name},
-            {:agent_stopping, agent_id, stopping_at}
+            {:pool, worker.space_id, worker.pool_name},
+            {:worker_stopping, worker_id, stopping_at}
           )
 
-        call_launcher(state, launcher, :stop, [agent.data], fn state, result ->
+        call_launcher(state, launcher, :stop, [worker.data], fn state, result ->
           case result do
             {:ok, :ok} ->
               {:ok, stopped_at} =
-                Agents.create_agent_stop_result(state.db, agent_stop_id, nil)
+                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
 
               state
               |> notify_listeners(
-                {:pool, agent.space_id, agent.pool_name},
-                {:agent_stop_result, agent_id, stopped_at, nil}
+                {:pool, worker.space_id, worker.pool_name},
+                {:worker_stop_result, worker_id, stopped_at, nil}
               )
 
             :error ->
@@ -1951,16 +1951,16 @@ defmodule Coflux.Orchestration.Server do
               error = %{}
 
               {:ok, _} =
-                Agents.create_agent_stop_result(state.db, agent_stop_id, error)
+                Workers.create_worker_stop_result(state.db, worker_stop_id, error)
 
               state =
                 notify_listeners(
                   state,
-                  {:pool, agent.space_id, agent.pool_name},
-                  {:agent_stop_result, agent_id, nil, error}
+                  {:pool, worker.space_id, worker.pool_name},
+                  {:worker_stop_result, worker_id, nil, error}
                 )
 
-              # TODO: unset 'stop_id' of agent in state? (so it can be retried? but somehow limit rate?)
+              # TODO: unset 'stop_id' of worker in state? (so it can be retried? but somehow limit rate?)
               state
           end
         end)
@@ -1969,7 +1969,7 @@ defmodule Coflux.Orchestration.Server do
     delay_ms =
       [
         if(next_execute_after, do: trunc(next_execute_after) - System.os_time(:millisecond)),
-        if(state.agents, do: 5_000)
+        if(state.workers, do: 5_000)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.min(fn -> nil end)
@@ -2061,13 +2061,13 @@ defmodule Coflux.Orchestration.Server do
                 )
 
               state =
-                if session.agent_id do
-                  pool_name = Map.fetch!(state.agents, session.agent_id).pool_name
+                if session.worker_id do
+                  pool_name = Map.fetch!(state.workers, session.worker_id).pool_name
 
                   notify_listeners(
                     state,
                     {:pool, session.space_id, pool_name},
-                    {:agent_connected, session.agent_id, false}
+                    {:worker_connected, session.worker_id, false}
                   )
                 else
                   state
@@ -2153,17 +2153,17 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp lookup_agent(state, agent_id, expected_space_id) do
-    if agent_id do
-      case Map.fetch(state.agents, agent_id) do
+  defp lookup_worker(state, worker_id, expected_space_id) do
+    if worker_id do
+      case Map.fetch(state.workers, worker_id) do
         :error ->
-          {:error, :no_agent}
+          {:error, :no_worker}
 
-        {:ok, agent} ->
-          if agent.space_id != expected_space_id do
-            {:error, :no_agent}
+        {:ok, worker} ->
+          if worker.space_id != expected_space_id do
+            {:error, :no_worker}
           else
-            {:ok, agent}
+            {:ok, worker}
           end
       end
     else
@@ -2228,15 +2228,15 @@ defmodule Coflux.Orchestration.Server do
       )
 
     state =
-      if session.agent_id do
-        case Map.fetch(state.agents, session.agent_id) do
-          {:ok, agent} ->
-            # TODO: check that agent space matches session space?
+      if session.worker_id do
+        case Map.fetch(state.workers, session.worker_id) do
+          {:ok, worker} ->
+            # TODO: check that worker space matches session space?
             state
-            |> put_in([Access.key(:agents), session.agent_id, :session_id], nil)
+            |> put_in([Access.key(:workers), session.worker_id, :session_id], nil)
             |> notify_listeners(
-              {:pool, agent.space_id, agent.pool_name},
-              {:agent_connected, session.agent_id, false}
+              {:pool, worker.space_id, worker.pool_name},
+              {:worker_connected, session.worker_id, false}
             )
 
           :error ->
@@ -2776,9 +2776,9 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp session_active?(session, state) do
-    if session.agent_id do
-      agent = Map.fetch!(state.agents, session.agent_id)
-      agent.state == :active
+    if session.worker_id do
+      worker = Map.fetch!(state.workers, session.worker_id)
+      worker.state == :active
     else
       true
     end
@@ -2992,29 +2992,29 @@ defmodule Coflux.Orchestration.Server do
     put_in(state, [Access.key(:launcher_tasks), task.ref], callback)
   end
 
-  defp update_agent_state(state, agent_id, agent_state, space_id, pool_name) do
-    :ok = Agents.create_agent_state(state.db, agent_id, agent_state)
+  defp update_worker_state(state, worker_id, worker_state, space_id, pool_name) do
+    :ok = Workers.create_worker_state(state.db, worker_id, worker_state)
 
     state
     |> put_in(
-      [Access.key(:agents), agent_id, :state],
-      agent_state
+      [Access.key(:workers), worker_id, :state],
+      worker_state
     )
     |> notify_listeners(
       {:pool, space_id, pool_name},
-      {:agent_state, agent_id, agent_state}
+      {:worker_state, worker_id, worker_state}
     )
   end
 
-  defp deactivate_agent(state, agent_id) do
-    {:ok, deactivated_at} = Agents.create_agent_deactivation(state.db, agent_id)
+  defp deactivate_worker(state, worker_id) do
+    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id)
 
-    {agent, state} = pop_in(state, [Access.key(:agents), agent_id])
+    {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
     notify_listeners(
       state,
-      {:pool, agent.space_id, agent.pool_name},
-      {:agent_deactivated, agent_id, deactivated_at}
+      {:pool, worker.space_id, worker.pool_name},
+      {:worker_deactivated, worker_id, deactivated_at}
     )
   end
 end

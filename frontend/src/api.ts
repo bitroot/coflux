@@ -78,27 +78,27 @@ export function archiveModule(
   });
 }
 
-export function stopAgent(
+export function stopWorker(
   projectId: string,
   spaceName: string,
-  agentId: string,
+  workerId: string,
 ) {
-  return post("stop_agent", {
+  return post("stop_worker", {
     projectId,
     spaceName,
-    agentId,
+    workerId,
   });
 }
 
-export function resumeAgent(
+export function resumeWorker(
   projectId: string,
   spaceName: string,
-  agentId: string,
+  workerId: string,
 ) {
-  return post("resume_agent", {
+  return post("resume_worker", {
     projectId,
     spaceName,
-    agentId,
+    workerId,
   });
 }
 

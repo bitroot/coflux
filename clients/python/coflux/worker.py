@@ -39,7 +39,7 @@ def _encode_tags(provides: dict[str, list[str]]) -> str:
     return ";".join(f"{k}:{v}" for k, vs in provides.items() for v in vs)
 
 
-class Agent:
+class Worker:
     def __init__(
         self,
         project_id: str,
@@ -114,7 +114,7 @@ class Agent:
             print(
                 f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})..."
             )
-            url = self._url("ws", "agent", self._params())
+            url = self._url("ws", "worker", self._params())
             try:
                 async with websockets.connect(url) as websocket:
                     print("Connected.")

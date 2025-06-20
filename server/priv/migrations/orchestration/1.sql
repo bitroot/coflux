@@ -135,64 +135,64 @@ CREATE TABLE pools (
   FOREIGN KEY (pool_definition_id) REFERENCES pool_definitions ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE agents (
+CREATE TABLE workers (
   id INTEGER PRIMARY KEY,
   pool_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (pool_id) REFERENCES pools ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE agent_launch_results (
-  agent_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_launch_results (
+  worker_id INTEGER PRIMARY KEY,
   data BLOB,
   error TEXT,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents,
+  FOREIGN KEY (worker_id) REFERENCES workers,
   CHECK (
     data IS NULL
     OR error IS NULL
   )
 ) STRICT;
 
-CREATE TABLE agent_states (
-  agent_id INTEGER NOT NULL,
+CREATE TABLE worker_states (
+  worker_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: draining
   -- TODO: reason? (0: user, 1: scaling down?, 2: config update?)
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
-CREATE TABLE agent_stops (
+CREATE TABLE worker_stops (
   id INTEGER PRIMARY KEY,
-  agent_id INTEGER NOT NULL,
+  worker_id INTEGER NOT NULL,
   -- TODO: reason? (manual, scaling down, pool removed, ?)
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
-CREATE TABLE agent_stop_results (
-  agent_stop_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_stop_results (
+  worker_stop_id INTEGER PRIMARY KEY,
   error TEXT,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_stop_id) REFERENCES agent_stops
+  FOREIGN KEY (worker_stop_id) REFERENCES worker_stops
 ) STRICT;
 
-CREATE TABLE agent_deactivations (
-  agent_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_deactivations (
+  worker_id INTEGER PRIMARY KEY,
   created_at INTEGER NOT NULL,
   -- TODO: reason?
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
 CREATE TABLE sessions (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
   space_id INTEGER NOT NULL,
-  agent_id INTEGER,
+  worker_id INTEGER,
   provides_tag_set_id INTEGER,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
-  FOREIGN KEY (agent_id) REFERENCES agents ON DELETE RESTRICT,
+  FOREIGN KEY (worker_id) REFERENCES workers ON DELETE RESTRICT,
   FOREIGN KEY (provides_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 

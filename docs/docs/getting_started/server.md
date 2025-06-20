@@ -24,7 +24,7 @@ Open up the web UI at http://localhost:7777.
 
 ## Setting up a project
 
-Before we can connect an agent, we need to create a Coflux project and a space.
+Before we can connect a worker, we need to create a Coflux project and a space.
 
 In the web UI, click 'New project...', enter a project name, and click 'Create'.
 

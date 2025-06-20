@@ -21,7 +21,7 @@ from pathlib import Path
 from . import blobs, config, loader, models, serialisation, server, types, utils
 
 _EXECUTION_THRESHOLD_S = 1.0
-_AGENT_THRESHOLD_S = 5.0
+_WORKER_THRESHOLD_S = 5.0
 
 
 T = t.TypeVar("T")
@@ -915,7 +915,7 @@ class Manager:
         while True:
             now = time.time()
             executions = [e for e in self._executions.values()]
-            if self._should_send_heartbeats(executions, _AGENT_THRESHOLD_S, now):
+            if self._should_send_heartbeats(executions, _WORKER_THRESHOLD_S, now):
                 heartbeats = {e.id: e.status.value for e in executions}
                 await self._connection.notify("record_heartbeats", (heartbeats,))
                 self._last_heartbeat_sent = now

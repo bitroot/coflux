@@ -12,56 +12,56 @@ import * as models from "../models";
 import * as api from "../api";
 import { DateTime } from "luxon";
 
-type AgentRowProps = {
+type WorkerRowProps = {
   projectId: string;
   spaceName: string;
-  agentId: string;
-  agent: models.Agent;
+  workerId: string;
+  worker: models.Worker;
 };
 
-function AgentRow({ projectId, spaceName, agentId, agent }: AgentRowProps) {
+function WorkerRow({ projectId, spaceName, workerId, worker }: WorkerRowProps) {
   const handleStopClick = useCallback(() => {
-    api.stopAgent(projectId, spaceName, agentId).catch(() => {
-      alert("Failed to stop agent. Please try again.");
+    api.stopWorker(projectId, spaceName, workerId).catch(() => {
+      alert("Failed to stop worker. Please try again.");
     });
-  }, [projectId, spaceName, agentId]);
+  }, [projectId, spaceName, workerId]);
   const handleResumeClick = useCallback(() => {
-    api.resumeAgent(projectId, spaceName, agentId).catch(() => {
-      alert("Failed to resume agent. Please try again.");
+    api.resumeWorker(projectId, spaceName, workerId).catch(() => {
+      alert("Failed to resume worker. Please try again.");
     });
-  }, [projectId, spaceName, agentId]);
-  const startingAt = DateTime.fromMillis(agent.startingAt);
+  }, [projectId, spaceName, workerId]);
+  const startingAt = DateTime.fromMillis(worker.startingAt);
   return (
     <tr className="border-b border-slate-100">
       <td>{startingAt.toLocaleString(DateTime.DATETIME_SHORT_WITH_SECONDS)}</td>
       <td>
-        {agent.startError ? (
+        {worker.startError ? (
           <Badge intent="danger" label="Start error" />
-        ) : agent.stopError ? (
+        ) : worker.stopError ? (
           <Badge intent="danger" label="Stop error" />
-        ) : !agent.startedAt && !agent.deactivatedAt ? (
+        ) : !worker.startedAt && !worker.deactivatedAt ? (
           <Badge intent="info" label="Starting..." />
-        ) : agent.stoppedAt || agent.deactivatedAt ? (
+        ) : worker.stoppedAt || worker.deactivatedAt ? (
           <Badge intent="none" label="Stopped" />
-        ) : agent.stoppingAt ? (
+        ) : worker.stoppingAt ? (
           <Badge intent="info" label="Stopping" />
-        ) : agent.state == "paused" ? (
+        ) : worker.state == "paused" ? (
           <Badge intent="info" label="Paused" />
-        ) : agent.state == "draining" ? (
+        ) : worker.state == "draining" ? (
           <Badge intent="info" label="Draining" />
-        ) : agent.connected === null ? (
+        ) : worker.connected === null ? (
           <Badge intent="none" label="Connecting..." />
-        ) : agent.connected ? (
+        ) : worker.connected ? (
           <Badge intent="success" label="Connected" />
         ) : (
           <Badge intent="warning" label="Disconnected" />
         )}
       </td>
       <td>
-        {agent.startedAt &&
-          !agent.stoppingAt &&
-          !agent.deactivatedAt &&
-          (agent.state == "active" ? (
+        {worker.startedAt &&
+          !worker.stoppingAt &&
+          !worker.deactivatedAt &&
+          (worker.state == "active" ? (
             <Button
               onClick={handleStopClick}
               size="sm"
@@ -80,23 +80,23 @@ function AgentRow({ projectId, spaceName, agentId, agent }: AgentRowProps) {
   );
 }
 
-type AgentsTableProps = {
+type WorkersTableProps = {
   projectId: string;
   spaceName: string;
   title: string;
-  agents: Record<string, models.Agent>;
+  workers: Record<string, models.Worker>;
 };
 
-function AgentsTable({
+function WorkersTable({
   projectId,
   spaceName,
   title,
-  agents,
-}: AgentsTableProps) {
+  workers,
+}: WorkersTableProps) {
   return (
     <div>
       <h1 className="text-xl font-semibold text-slate-700 my-1">{title}</h1>
-      {Object.keys(agents).length ? (
+      {Object.keys(workers).length ? (
         <table className="w-full table-fixed">
           <thead className="[&_th]:py-1">
             <tr className="border-b border-slate-100">
@@ -113,15 +113,15 @@ function AgentsTable({
           </thead>
           <tbody className="[&_td]:py-1">
             {sortBy(
-              Object.entries(agents),
-              ([, agent]) => -agent.startingAt,
-            ).map(([agentId, agent]) => (
-              <AgentRow
-                key={agentId}
+              Object.entries(workers),
+              ([, worker]) => -worker.startingAt,
+            ).map(([workerId, worker]) => (
+              <WorkerRow
+                key={workerId}
                 projectId={projectId}
                 spaceName={spaceName}
-                agentId={agentId}
-                agent={agent}
+                workerId={workerId}
+                worker={worker}
               />
             ))}
           </tbody>
@@ -167,7 +167,7 @@ export default function PoolPage() {
   if (!pool) {
     return <Loading />;
   } else {
-    const activeAgents = omitBy(pool.agents, "deactivatedAt");
+    const activeWorkers = omitBy(pool.workers, "deactivatedAt");
     return (
       <>
         <div className="flex-1 flex flex-col min-h-0">
@@ -181,11 +181,11 @@ export default function PoolPage() {
           </div>
           <div className="flex-1 flex min-h-0">
             <div className="p-5 flex-1 flex flex-col gap-6 overflow-auto">
-              <AgentsTable
+              <WorkersTable
                 projectId={projectId!}
                 spaceName={spaceName!}
-                title="Agents"
-                agents={activeAgents}
+                title="Workers"
+                workers={activeWorkers}
               />
             </div>
             {pool.pool && (

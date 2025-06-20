@@ -13,7 +13,7 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Agent, config, decorators, loader, models
+from . import Worker, config, decorators, loader, models
 
 T = t.TypeVar("T")
 
@@ -176,7 +176,7 @@ def _init(
         if register:
             _register_manifests(project, space, host, targets)
 
-        with Agent(
+        with Worker(
             project,
             space,
             host,
@@ -187,8 +187,8 @@ def _init(
             concurrency,
             launch_id,
             targets,
-        ) as agent:
-            asyncio.run(agent.run())
+        ) as worker:
+            asyncio.run(worker.run())
     except KeyboardInterrupt:
         pass
 
@@ -551,13 +551,13 @@ def pools():
     "modules",
     "-m",
     "--module",
-    help="Modules to be hosted by agents in the pool",
+    help="Modules to be hosted by workers in the pool",
     multiple=True,
     required=True,
 )
 @click.option(
     "--provides",
-    help="Features that agents in the pool provide (to be matched with features that tasks require)",
+    help="Features that workers in the pool provide (to be matched with features that tasks require)",
     multiple=True,
 )
 @click.option(
@@ -686,7 +686,7 @@ def register(
     click.secho("Manifest(s) registered.", fg="green")
 
 
-@cli.command("agent")
+@cli.command("worker")
 @click.option(
     "-p",
     "--project",
@@ -716,7 +716,7 @@ def register(
 )
 @click.option(
     "--provides",
-    help="Features that this agent provides (to be matched with features that tasks require)",
+    help="Features that this worker provides (to be matched with features that tasks require)",
     multiple=True,
     envvar="COFLUX_PROVIDES",
     default=_encode_provides(_load_config().provides),
@@ -753,7 +753,7 @@ def register(
     help="Enable development mode (implies `--watch` and `--register`)",
 )
 @click.argument("module_name", nargs=-1)
-def agent(
+def worker(
     project: str,
     space: str,
     host: str,
@@ -766,7 +766,7 @@ def agent(
     module_name: tuple[str, ...],
 ) -> None:
     """
-    Start an agent.
+    Start a worker.
 
     Hosts the specified modules. Paths to scripts can be passed instead of module names.
 

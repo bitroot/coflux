@@ -18,7 +18,7 @@ Build Docker image:
 docker build -t coflux_edgedetection .
 ```
 
-Run agent:
+Run worker:
 
 ```bash
 docker run --rm -t \

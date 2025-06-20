@@ -29,12 +29,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:update_pool, space_name, pool_name, pool})
   end
 
-  def stop_agent(project_id, space_name, agent_id) do
-    call_server(project_id, {:stop_agent, space_name, agent_id})
+  def stop_worker(project_id, space_name, worker_id) do
+    call_server(project_id, {:stop_worker, space_name, worker_id})
   end
 
-  def resume_agent(project_id, space_name, agent_id) do
-    call_server(project_id, {:resume_agent, space_name, agent_id})
+  def resume_worker(project_id, space_name, worker_id) do
+    call_server(project_id, {:resume_worker, space_name, worker_id})
   end
 
   def register_manifests(project_id, space_name, manifests) do
@@ -49,10 +49,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:get_workflow, space_name, module, target_name})
   end
 
-  def start_session(project_id, space_name, agent_id, provides, concurrency, pid) do
+  def start_session(project_id, space_name, worker_id, provides, concurrency, pid) do
     call_server(
       project_id,
-      {:start_session, space_name, agent_id, provides, concurrency, pid}
+      {:start_session, space_name, worker_id, provides, concurrency, pid}
     )
   end
 

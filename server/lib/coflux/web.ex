@@ -16,7 +16,7 @@ defmodule Coflux.Web do
       {:_,
        [
          {"/blobs/:key", Handlers.Blobs, []},
-         {"/agent", Handlers.Agent, []},
+         {"/worker", Handlers.Worker, []},
          {"/topics", TopicalHandler, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},
          {"/static/[...]", :cowboy_static, {:priv_dir, @otp_app, "static"}},
