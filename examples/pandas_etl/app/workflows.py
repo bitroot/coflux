@@ -1,25 +1,29 @@
-import coflux as cf
 import csv
-from faker import Faker
-from pathlib import Path
 import random
-import pandas as pd
+import typing as t
+from pathlib import Path
+
+import coflux as cf
 import matplotlib.pyplot as plt
+import pandas as pd
+from faker import Faker
 
 fake = Faker()
 
 
-def _write_csv_asset(filename, fieldnames, data):
+def _write_csv_asset(
+    filename: str, fieldnames: list[str], data: t.Iterable[dict]
+) -> cf.Asset:
     file_path = Path.cwd().joinpath(filename)
     with open(file_path, mode="w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(data)
-    return cf.persist_asset(file_path)
+    return cf.asset(file_path)
 
 
 @cf.task()
-def generate_customers(count: int):
+def generate_customers(count: int) -> cf.Asset:
     return _write_csv_asset(
         "customers.csv",
         ["id", "name", "address", "email"],
@@ -36,7 +40,7 @@ def generate_customers(count: int):
 
 
 @cf.task()
-def generate_categories(count: int):
+def generate_categories(count: int) -> cf.Asset:
     return _write_csv_asset(
         "categories.csv",
         ["id", "name"],
@@ -44,14 +48,14 @@ def generate_categories(count: int):
     )
 
 
-def _load_ids(asset):
-    with open(cf.restore_asset(asset), newline="") as file:
+def _load_ids(asset_: cf.Execution[cf.Asset], path: str):
+    with open(asset_.result()[path].restore(), newline="") as file:
         return {row["id"] for row in csv.DictReader(file)}
 
 
 @cf.task(wait={"categories_"})
-def generate_products(count: int, categories_: cf.Execution[cf.Asset]):
-    category_ids = list(_load_ids(categories_.result()))
+def generate_products(count: int, categories_: cf.Execution[cf.Asset]) -> cf.Asset:
+    category_ids = list(_load_ids(categories_, "categories.csv"))
     return _write_csv_asset(
         "products.csv",
         ["id", "name", "category_id", "unit_price"],
@@ -69,10 +73,12 @@ def generate_products(count: int, categories_: cf.Execution[cf.Asset]):
 
 @cf.task(wait={"products_", "customers_"})
 def generate_sales(
-    count: int, products_: cf.Execution[cf.Asset], customers_: cf.Execution[cf.Asset]
-):
-    product_ids = list(_load_ids(products_.result()))
-    customer_ids = list(_load_ids(customers_.result()))
+    count: int,
+    products_: cf.Execution[cf.Asset],
+    customers_: cf.Execution[cf.Asset],
+) -> cf.Asset:
+    product_ids = list(_load_ids(products_, "products.csv"))
+    customer_ids = list(_load_ids(customers_, "customers.csv"))
     return _write_csv_asset(
         "transactions.csv",
         [
@@ -98,7 +104,7 @@ def generate_sales(
 
 
 @cf.task(memo=True)
-def load_dataset():
+def load_dataset() -> dict[str, cf.Execution[cf.Asset]]:
     customers_ = generate_customers.submit(2000)
     categories_ = generate_categories.submit(25)
     products_ = generate_products.submit(500, categories_)
@@ -111,15 +117,19 @@ def load_dataset():
     }
 
 
-def _load_csv(execution):
-    return pd.read_csv(cf.restore_asset(execution.result()))
+def _load_csv(asset_: cf.Execution[cf.Asset], path: str) -> pd.DataFrame:
+    print(asset_.result())
+    return pd.read_csv(asset_.result()[path].restore())
 
 
 @cf.task(wait={"dataset_"})
-def generate_sales_summary(dataset_):
+def generate_sales_summary(
+    dataset_: cf.Execution[dict[str, cf.Execution[cf.Asset]]],
+) -> pd.DataFrame:
     dataset = dataset_.result()
-    sales_data = _load_csv(dataset["sales"])
-    product_data = _load_csv(dataset["products"])
+    print(dataset)
+    sales_data = _load_csv(dataset["sales"], "transactions.csv")
+    product_data = _load_csv(dataset["products"], "products.csv")
 
     sales_summary = (
         sales_data.groupby("product_id")
@@ -148,7 +158,7 @@ def generate_sales_summary(dataset_):
 
 
 @cf.task(wait=True)
-def write_sales_summary(sales_summary_):
+def write_sales_summary(sales_summary_: cf.Execution[pd.DataFrame]) -> cf.Asset:
     sales_summary = sales_summary_.result()
     return _write_csv_asset(
         "sales_summary.csv",
@@ -158,11 +168,11 @@ def write_sales_summary(sales_summary_):
 
 
 @cf.task(wait=True)
-def render_chart(sales_summary_, dataset_):
+def render_chart(sales_summary_, dataset_) -> cf.Asset:
     sales_summary = sales_summary_.result()
     categories_asset = dataset_.result()["categories"].result()
 
-    with open(cf.restore_asset(categories_asset), newline="") as file:
+    with open(categories_asset.restore()["categories.csv"], newline="") as file:
         categories_by_id = {row["id"]: row["name"] for row in csv.DictReader(file)}
 
     category_sales = (
@@ -179,14 +189,12 @@ def render_chart(sales_summary_, dataset_):
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
 
-    path = Path.cwd().joinpath("sales_summary_chart.png")
-    plt.savefig(path)
-
-    return cf.persist_asset(path)
+    plt.savefig("sales_summary_chart.png")
+    return cf.asset(match="*.png")
 
 
 @cf.workflow()
-def workflow():
+def workflow() -> None:
     dataset = load_dataset.submit()
     sales_summary = generate_sales_summary.submit(dataset)
     write_sales_summary.submit(sales_summary)
