@@ -36,5 +36,5 @@ When you call the stub in the context of a workflow, the function itself won't b
 ```python
 @cf.stub("other.workflows")
 def random_int(max: int) -> int:
-    return 4  # dummy value for testing
+    return 4  # Dummy value for testing
 ```

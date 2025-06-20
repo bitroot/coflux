@@ -98,7 +98,12 @@ class Asset:
     def __contains__(self, path: str) -> bool:
         return any(e.path == path for e in self.entries)
 
-    def restore(self, *, match: str | None = None, at: Path | str | None = None):
+    def restore(
+        self,
+        *,
+        match: str | None = None,
+        at: Path | str | None = None,
+    ) -> dict[str, Path]:
         # TODO: parallelise
         matcher = utils.GlobMatcher(match) if match else None
         return {
