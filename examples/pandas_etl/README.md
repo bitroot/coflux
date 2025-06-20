@@ -12,24 +12,22 @@ This also renders a chart from the summary, which can be viewed in the web UI:
 
 # Running
 
-Build Docker image:
+Requires `uv`.
+
+Install dependencies:
 
 ```bash
-docker build -t coflux_pandasetl .
+uv sync
 ```
 
-Run agent:
+Configure Coflux:
 
 ```bash
-docker run --rm -t \
-  --add-host host.docker.internal:host-gateway \
-  -e COFLUX_HOST=host.docker.internal:7777 \
-  -e COFLUX_PROJECT=... \
-  coflux_pandasetl
+uv run configure --project=... --space=...
 ```
 
-Or with reload (allowing you to update the code without rebuilding/restarting):
+Run worker in development mode:
 
 ```bash
-  docker run ... -v "$(pwd):/app" coflux_pandasetl --reload
+uv run coflux worker --dev app.workflows
 ```

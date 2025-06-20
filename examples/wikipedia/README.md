@@ -6,26 +6,24 @@ This example makes calls to the Wikipedia API to get the most viewed articles fo
 
 It makes use of caching/memoising, and shows how dependencies (e.g., the nltk model) can be bundled in a Docker file to simplify deployment.
 
-## Running
+# Running
 
-Build Docker image:
+Requires `uv`.
+
+Install dependencies:
 
 ```bash
-docker build -t coflux_wikipedia .
+uv sync
 ```
 
-Run worker:
+Configure Coflux:
 
 ```bash
-docker run --rm -t \
-  --add-host host.docker.internal:host-gateway \
-  -e COFLUX_HOST=host.docker.internal:7777 \
-  -e COFLUX_PROJECT=... \
-  coflux_wikipedia
+uv run configure --project=... --space=...
 ```
 
-Or with reload (allowing you to update the code without rebuilding/restarting):
+Run worker in development mode:
 
 ```bash
-docker run ... -v "$(pwd):/app" coflux_wikipedia --reload
+uv run coflux worker --dev wikipedia.workflows
 ```

@@ -1,46 +1,49 @@
-import coflux as cf
-import requests
-import cv2
-import skimage as sk
-import numpy as np
 from pathlib import Path
+
+import cv2
+import numpy as np
+import requests
+import skimage as sk
+
+import coflux as cf
 
 
 @cf.task(memo=True)
-def fetch_photo(i: int = 0):
+def fetch_photo(i: int = 0) -> cf.Asset:
     r = requests.get("https://picsum.photos/1000")
     r.raise_for_status()
-    path = Path("photo.jpg")
-    path.write_bytes(r.content)
-    return cf.persist_asset(path)
+    Path("result.jpg").write_bytes(r.content)
+    return cf.asset()
 
 
 def _restore_image(image_f: cf.Execution[cf.Asset]):
-    path = cf.restore_asset(image_f.result())
+    path = image_f.result()["result.jpg"].restore()
     return cv2.imread(str(path))
 
 
-def _persist_image(img):
+def _persist_image(img) -> cf.Asset:
     cv2.imwrite("result.jpg", img)
-    return cf.persist_asset("result.jpg")
+    return cf.asset("result.jpg")
 
 
 @cf.task(wait=True)
-def to_grayscale(image_f: cf.Execution[cf.Asset]):
+def to_grayscale(image_f: cf.Execution[cf.Asset]) -> cf.Asset:
     img = _restore_image(image_f)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     return _persist_image(img)
 
 
 @cf.task(wait=True)
-def apply_blur(image_f: cf.Execution[cf.Asset]):
+def apply_blur(image_f: cf.Execution[cf.Asset]) -> cf.Asset:
     img = _restore_image(image_f)
     img = cv2.GaussianBlur(img, (5, 5), 0)
     return _persist_image(img)
 
 
 @cf.task(wait={"image_f"})
-def detect_edges(image_f: cf.Execution[cf.Asset], kernel_size=5, threshold=128):
+def detect_edges(
+    image_f: cf.Execution[cf.Asset], kernel_size=5, threshold=128
+) -> np.ndarray:
     img = _restore_image(image_f)
     cf.log_info("Input: {shape}", shape=img.shape, nonzeros=np.count_nonzero(img))
     img = cv2.Canny(img, 50, 150)
@@ -51,7 +54,7 @@ def detect_edges(image_f: cf.Execution[cf.Asset], kernel_size=5, threshold=128):
 
 
 @cf.task(wait=True)
-def detect_contours(edges_f: cf.Execution, image_f: cf.Execution[cf.Asset]):
+def detect_contours(edges_f: cf.Execution, image_f: cf.Execution[cf.Asset]) -> cf.Asset:
     img = _restore_image(image_f)
     edges = edges_f.result()
     cf.log_info("Edges: {shape}", shape=edges.shape)
@@ -61,7 +64,7 @@ def detect_contours(edges_f: cf.Execution, image_f: cf.Execution[cf.Asset]):
 
 
 @cf.workflow()
-def pipeline():
+def pipeline() -> cf.Execution[cf.Asset]:
     original_f = fetch_photo.submit()
     grayscale_f = to_grayscale.submit(original_f)
     blurred_f = apply_blur.submit(grayscale_f)

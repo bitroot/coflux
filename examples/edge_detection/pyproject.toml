@@ -1,16 +1,16 @@
 [project]
-name = "slack-bot"
+name = "edge-detection"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "coflux",
- "slack-sdk>=3.35.0",
+    "numpy>=2.3.0",
+    "opencv-python>=4.11.0.86",
+    "requests>=2.32.4",
+    "scikit-image>=0.25.2",
 ]
-
-[tool.uv.sources]
-coflux = { path = "../../clients/python", editable = true }
 
 [tool.pyright]
 venvPath = "."
