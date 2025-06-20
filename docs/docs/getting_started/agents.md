@@ -18,7 +18,7 @@ Use the `configure` command to populate a configuration file. A configuration fi
 coflux configure
 ```
 
-You will be prompted to enter the host (`localhost:7777`), the project ID, and the workspace name.
+You will be prompted to enter the host (`localhost:7777`), the project ID, and the space name.
 
 ## Run
 

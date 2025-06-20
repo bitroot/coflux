@@ -25,7 +25,7 @@ import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
 import { buildGraph, Graph, Edge } from "../graph";
-import WorkspaceLabel from "./WorkspaceLabel";
+import SpaceLabel from "./SpaceLabel";
 import AssetIcon from "./AssetIcon";
 import { buildUrl } from "../utils";
 import AssetLink from "./AssetLink";
@@ -148,7 +148,7 @@ type StepNodeProps = {
   runId: string;
   isActive: boolean;
   isStale: boolean;
-  runWorkspaceId: string;
+  runSpaceId: string;
 };
 
 function StepNode({
@@ -159,7 +159,7 @@ function StepNode({
   runId,
   isActive,
   isStale,
-  runWorkspaceId,
+  runSpaceId,
 }: StepNodeProps) {
   const execution = step.executions[attempt];
   const { isHovered } = useHoverContext();
@@ -219,12 +219,12 @@ function StepNode({
               >
                 {step.target}
               </span>
-              {execution && execution.workspaceId != runWorkspaceId && (
-                <WorkspaceLabel
+              {execution && execution.spaceId != runSpaceId && (
+                <SpaceLabel
                   projectId={projectId}
-                  workspaceId={execution.workspaceId}
+                  spaceId={execution.spaceId}
                   size="sm"
-                  warning="This execution ran in a different workspace"
+                  warning="This execution ran in a different space"
                   compact
                 />
               )}
@@ -536,7 +536,7 @@ type Props = {
   height: number;
   activeStepId: string | undefined;
   activeAttempt: number | undefined;
-  runWorkspaceId: string;
+  runSpaceId: string;
 };
 
 export default function RunGraph({
@@ -547,7 +547,7 @@ export default function RunGraph({
   height: containerHeight,
   activeStepId,
   activeAttempt,
-  runWorkspaceId,
+  runSpaceId,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [offsetOverride, setOffsetOverride] = useState<[number, number]>();
@@ -737,7 +737,7 @@ export default function RunGraph({
                           activeStepId,
                           activeAttempt,
                         )}
-                        runWorkspaceId={runWorkspaceId}
+                        runSpaceId={runSpaceId}
                       />
                     </div>
                   ) : node.type == "asset" ? (

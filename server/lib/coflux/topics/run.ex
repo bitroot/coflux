@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Run do
-  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :workspace_id]
+  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :space_id]
 
   alias Coflux.Orchestration
 
@@ -8,7 +8,7 @@ defmodule Coflux.Topics.Run do
   def init(params) do
     project_id = Keyword.fetch!(params, :project_id)
     external_run_id = Keyword.fetch!(params, :run_id)
-    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
+    space_id = String.to_integer(Keyword.fetch!(params, :space_id))
 
     case Orchestration.subscribe_run(
            project_id,
@@ -19,7 +19,7 @@ defmodule Coflux.Topics.Run do
         {:error, :not_found}
 
       {:ok, run, parent, steps, _ref} ->
-        run_workspace_id =
+        run_space_id =
           steps
           |> Map.values()
           |> Enum.reject(& &1.parent_id)
@@ -27,15 +27,15 @@ defmodule Coflux.Topics.Run do
           |> Map.fetch!(:executions)
           |> Map.values()
           |> Enum.min_by(& &1.created_at)
-          |> Map.fetch!(:workspace_id)
+          |> Map.fetch!(:space_id)
 
-        workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
+        space_ids = Enum.uniq([run_space_id, space_id])
 
         {:ok,
-         Topic.new(build_run(run, parent, steps, workspace_ids), %{
+         Topic.new(build_run(run, parent, steps, space_ids), %{
            project_id: project_id,
            external_run_id: external_run_id,
-           workspace_ids: workspace_ids
+           space_ids: space_ids
          })}
     end
   end
@@ -45,8 +45,8 @@ defmodule Coflux.Topics.Run do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
-    if workspace_id in topic.state.workspace_ids do
+  defp process_notification(topic, {:step, external_step_id, step, space_id}) do
+    if space_id in topic.state.space_ids do
       Topic.set(topic, [:steps, external_step_id], %{
         module: step.module,
         target: step.target,
@@ -67,16 +67,16 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
+         {:execution, step_id, attempt, execution_id, space_id, created_at, execute_after,
           dependencies}
        ) do
-    if workspace_id in topic.state.workspace_ids do
+    if space_id in topic.state.space_ids do
       Topic.set(
         topic,
         [:steps, step_id, :executions, Integer.to_string(attempt)],
         %{
           executionId: Integer.to_string(execution_id),
-          workspaceId: Integer.to_string(workspace_id),
+          spaceId: Integer.to_string(space_id),
           createdAt: created_at,
           executeAfter: execute_after,
           assignedAt: nil,
@@ -177,7 +177,7 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp build_run(run, parent, steps, workspace_ids) do
+  defp build_run(run, parent, steps, space_ids) do
     %{
       createdAt: run.created_at,
       parent: if(parent, do: build_execution(parent)),
@@ -186,7 +186,7 @@ defmodule Coflux.Topics.Run do
         |> Enum.filter(fn {_, step} ->
           step.executions
           |> Map.values()
-          |> Enum.any?(&(&1.workspace_id in workspace_ids))
+          |> Enum.any?(&(&1.space_id in space_ids))
         end)
         |> Map.new(fn {step_id, step} ->
           {step_id,
@@ -204,13 +204,13 @@ defmodule Coflux.Topics.Run do
              executions:
                step.executions
                |> Enum.filter(fn {_, execution} ->
-                 execution.workspace_id in workspace_ids
+                 execution.space_id in space_ids
                end)
                |> Map.new(fn {attempt, execution} ->
                  {Integer.to_string(attempt),
                   %{
                     executionId: Integer.to_string(execution.execution_id),
-                    workspaceId: Integer.to_string(execution.workspace_id),
+                    spaceId: Integer.to_string(execution.space_id),
                     createdAt: execution.created_at,
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,

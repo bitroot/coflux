@@ -8,7 +8,7 @@ import Loading from "../components/Loading";
 import ModuleQueue from "../components/ModuleQueue";
 import useNow from "../hooks/useNow";
 import { useSetActive } from "../layouts/ProjectLayout";
-import { useWorkspaces, useExecutions } from "../topics";
+import { useSpaces, useExecutions } from "../topics";
 import { findKey } from "lodash";
 
 function splitExecutions(
@@ -46,13 +46,13 @@ function splitExecutions(
 export default function ModulePage() {
   const { project: projectId, module: moduleName } = useParams();
   const [searchParams] = useSearchParams();
-  const workspaceName = searchParams.get("workspace") || undefined;
-  const workspaces = useWorkspaces(projectId);
-  const workspaceId = findKey(
-    workspaces,
-    (e) => e.name == workspaceName && e.state != "archived",
+  const spaceName = searchParams.get("space") || undefined;
+  const spaces = useSpaces(projectId);
+  const spaceId = findKey(
+    spaces,
+    (e) => e.name == spaceName && e.state != "archived",
   );
-  const executions = useExecutions(projectId, moduleName, workspaceId);
+  const executions = useExecutions(projectId, moduleName, spaceId);
   useTitlePart(moduleName);
   useSetActive(moduleName ? ["module", moduleName] : undefined);
   const now = useNow(500);
@@ -75,7 +75,7 @@ export default function ModulePage() {
         <div className="flex-1 flex gap-4 min-h-0">
           <ModuleQueue
             projectId={projectId!}
-            workspaceName={workspaceName!}
+            spaceName={spaceName!}
             title="Executing"
             executions={executing}
             now={now}
@@ -83,7 +83,7 @@ export default function ModulePage() {
           />
           <ModuleQueue
             projectId={projectId!}
-            workspaceName={workspaceName!}
+            spaceName={spaceName!}
             title="Due"
             executions={overdue}
             now={now}
@@ -91,7 +91,7 @@ export default function ModulePage() {
           />
           <ModuleQueue
             projectId={projectId!}
-            workspaceName={workspaceName!}
+            spaceName={spaceName!}
             title="Scheduled"
             executions={scheduled}
             now={now}

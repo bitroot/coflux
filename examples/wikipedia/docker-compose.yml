@@ -8,7 +8,7 @@ services:
       - "../../clients/python:/packages"
     environment:
       PROJECT: project_1
-      WORKSPACE: dev/two
+      SPACE: dev/two
       HOST: host.docker.internal:7070
       MODULE: wikipedia.workflows
       VERSION: 1

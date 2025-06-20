@@ -7,7 +7,7 @@ import RunSelector from "./RunSelector";
 import Button from "./common/Button";
 import { buildUrl } from "../utils";
 import RunDialog from "./RunDialog";
-import WorkspaceLabel from "./WorkspaceLabel";
+import SpaceLabel from "./SpaceLabel";
 import { useRun, useWorkflow } from "../topics";
 import { maxBy, minBy } from "lodash";
 
@@ -38,8 +38,8 @@ type Props = {
   target: string | undefined;
   projectId: string;
   runId?: string;
-  activeWorkspaceId: string | undefined;
-  activeWorkspaceName: string | undefined;
+  activeSpaceId: string | undefined;
+  activeSpaceName: string | undefined;
 };
 
 export default function WorkflowHeader({
@@ -47,13 +47,13 @@ export default function WorkflowHeader({
   target,
   projectId,
   runId,
-  activeWorkspaceId,
-  activeWorkspaceName,
+  activeSpaceId,
+  activeSpaceName,
 }: Props) {
   const navigate = useNavigate();
   const [runDialogOpen, setRunDialogOpen] = useState(false);
-  const workflow = useWorkflow(projectId, module, target, activeWorkspaceId);
-  const run = useRun(projectId, runId, activeWorkspaceId);
+  const workflow = useWorkflow(projectId, module, target, activeSpaceId);
+  const run = useRun(projectId, runId, activeSpaceId);
   const handleRunSubmit = useCallback(
     (arguments_: ["json", string][]) => {
       const configuration = workflow!.configuration!;
@@ -65,7 +65,7 @@ export default function WorkflowHeader({
           projectId,
           module!,
           target!,
-          activeWorkspaceName!,
+          activeSpaceName!,
           arguments_,
           {
             waitFor: configuration.waitFor,
@@ -80,12 +80,12 @@ export default function WorkflowHeader({
           setRunDialogOpen(false);
           navigate(
             buildUrl(`/projects/${projectId}/runs/${runId}`, {
-              workspace: activeWorkspaceName,
+              space: activeSpaceName,
             }),
           );
         });
     },
-    [navigate, projectId, module, target, activeWorkspaceName, workflow],
+    [navigate, projectId, module, target, activeSpaceName, workflow],
   );
   const initialStepId =
     run &&
@@ -109,7 +109,7 @@ export default function WorkflowHeader({
     setRunDialogOpen(true);
   }, []);
   const handleRunDialogClose = useCallback(() => setRunDialogOpen(false), []);
-  const runWorkspaceId = run?.steps[initialStepId!].executions[1].workspaceId;
+  const runSpaceId = run?.steps[initialStepId!].executions[1].spaceId;
   const isRunning =
     run &&
     Object.values(run.steps).some((s) =>
@@ -135,14 +135,14 @@ export default function WorkflowHeader({
               runs={workflow?.runs}
               projectId={projectId}
               runId={runId}
-              activeWorkspaceName={activeWorkspaceName}
+              activeSpaceName={activeSpaceName}
             />
 
-            {runWorkspaceId && runWorkspaceId != activeWorkspaceId && (
-              <WorkspaceLabel
+            {runSpaceId && runSpaceId != activeSpaceId && (
+              <SpaceLabel
                 projectId={projectId}
-                workspaceId={runWorkspaceId}
-                warning="This run is from a different workspace"
+                spaceId={runSpaceId}
+                warning="This run is from a different space"
               />
             )}
             {isRunning && <CancelButton onCancel={handleCancel} />}
@@ -155,18 +155,18 @@ export default function WorkflowHeader({
             <Button
               onClick={handleRunClick}
               left={<IconBolt size={16} />}
-              disabled={!activeWorkspaceId || !workflow.parameters}
+              disabled={!activeSpaceId || !workflow.parameters}
             >
               Run...
             </Button>
-            {activeWorkspaceId && workflow.parameters && (
+            {activeSpaceId && workflow.parameters && (
               <RunDialog
                 projectId={projectId}
                 module={module}
                 target={target}
                 parameters={workflow.parameters}
                 instruction={workflow.instruction}
-                activeWorkspaceId={activeWorkspaceId}
+                activeSpaceId={activeSpaceId}
                 open={runDialogOpen}
                 onRun={handleRunSubmit}
                 onClose={handleRunDialogClose}

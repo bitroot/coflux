@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Sessions do
 
   import Coflux.Store
 
-  def start_session(db, workspace_id, provides, agent_id) do
+  def start_session(db, space_id, provides, agent_id) do
     with_transaction(db, fn ->
       case generate_external_id(db, :sessions, 30) do
         {:ok, external_id} ->
@@ -19,7 +19,7 @@ defmodule Coflux.Orchestration.Sessions do
 
           case insert_one(db, :sessions, %{
                  external_id: external_id,
-                 workspace_id: workspace_id,
+                 space_id: space_id,
                  agent_id: agent_id,
                  provides_tag_set_id: provides_tag_set_id,
                  created_at: now

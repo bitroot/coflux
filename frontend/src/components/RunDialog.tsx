@@ -7,7 +7,7 @@ import Input from "./common/Input";
 import Button from "./common/Button";
 import { RequestError } from "../api";
 import Alert from "./common/Alert";
-import WorkspaceLabel from "./WorkspaceLabel";
+import SpaceLabel from "./SpaceLabel";
 import { micromark } from "micromark";
 import Select from "./common/Select";
 
@@ -343,7 +343,7 @@ type Props = {
   target: string | undefined;
   parameters: models.Parameter[];
   instruction: string | null;
-  activeWorkspaceId: string;
+  activeSpaceId: string;
   open: boolean;
   onRun: (arguments_: ["json", string][]) => Promise<void>;
   onClose: () => void;
@@ -355,7 +355,7 @@ export default function RunDialog({
   target,
   parameters,
   instruction,
-  activeWorkspaceId,
+  activeSpaceId,
   open,
   onRun,
   onClose,
@@ -402,10 +402,7 @@ export default function RunDialog({
               {target}
             </span>
           </div>
-          <WorkspaceLabel
-            projectId={projectId}
-            workspaceId={activeWorkspaceId}
-          />
+          <SpaceLabel projectId={projectId} spaceId={activeSpaceId} />
         </div>
       }
       size="lg"

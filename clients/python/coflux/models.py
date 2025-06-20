@@ -51,6 +51,7 @@ def _get_channel():
     return execution.get_channel()
 
 
+# TODO: make non-tuple?
 class Execution[T](t.NamedTuple):
     id: int
 
@@ -61,6 +62,7 @@ class Execution[T](t.NamedTuple):
         _get_channel().cancel_execution(self.id)
 
 
+# TODO: (make non-tuple?)
 class AssetEntry(t.NamedTuple):
     path: str
     blob_key: str

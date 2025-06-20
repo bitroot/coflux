@@ -43,7 +43,7 @@ class Agent:
     def __init__(
         self,
         project_id: str,
-        workspace_name: str,
+        space_name: str,
         server_host: str,
         provides: dict[str, list[str]],
         serialiser_configs: list[config.SerialiserConfig],
@@ -54,7 +54,7 @@ class Agent:
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
         self._project_id = project_id
-        self._workspace_name = workspace_name
+        self._space_name = space_name
         self._launch_id = launch_id
         self._server_host = server_host
         self._provides = provides
@@ -97,7 +97,7 @@ class Agent:
     def _params(self):
         params = {
             "project": self._project_id,
-            "workspace": self._workspace_name,
+            "space": self._space_name,
         }
         if self._connection.session_id:
             params["session"] = self._connection.session_id
@@ -112,7 +112,7 @@ class Agent:
     async def run(self) -> None:
         while True:
             print(
-                f"Connecting ({self._server_host}, {self._project_id}, {self._workspace_name})..."
+                f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})..."
             )
             url = self._url("ws", "agent", self._params())
             try:
@@ -140,8 +140,8 @@ class Agent:
                 if reason == "project_not_found":
                     print("Project not found")
                     return
-                elif reason == "workspace_not_found":
-                    print("Workspace not found")
+                elif reason == "space_not_found":
+                    print("Space not found")
                     return
                 elif reason == "session_invalid":
                     print("Session expired. Resetting and reconnecting...")

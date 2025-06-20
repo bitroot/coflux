@@ -6,7 +6,7 @@ Enhancements:
 
 Changes:
 
-- Renames 'environments' to 'workspaces'.
+- Renames 'environments' to 'spaces'.
 - Renames 'repositories' to 'modules'.
 
 ## 0.6.1

@@ -47,8 +47,8 @@ type Props = {
   target: string | undefined;
   projectId: string;
   runId?: string;
-  activeWorkspaceId: string | undefined;
-  activeWorkspaceName: string | undefined;
+  activeSpaceId: string | undefined;
+  activeSpaceName: string | undefined;
 };
 
 export default function SensorHeader({
@@ -56,13 +56,13 @@ export default function SensorHeader({
   target,
   projectId,
   runId,
-  activeWorkspaceId,
-  activeWorkspaceName,
+  activeSpaceId,
+  activeSpaceName,
 }: Props) {
   const navigate = useNavigate();
   const [runDialogOpen, setRunDialogOpen] = useState(false);
-  const sensor = useSensor(projectId, module, target, activeWorkspaceId);
-  const run = useRun(projectId, runId, activeWorkspaceId);
+  const sensor = useSensor(projectId, module, target, activeSpaceId);
+  const run = useRun(projectId, runId, activeSpaceId);
   const handleRunSubmit = useCallback(
     (arguments_: ["json", string][]) => {
       const configuration = sensor!.configuration!;
@@ -71,7 +71,7 @@ export default function SensorHeader({
           projectId,
           module!,
           target!,
-          activeWorkspaceName!,
+          activeSpaceName!,
           arguments_,
           {
             requires: configuration.requires,
@@ -81,12 +81,12 @@ export default function SensorHeader({
           setRunDialogOpen(false);
           navigate(
             buildUrl(`/projects/${projectId}/runs/${runId}`, {
-              workspace: activeWorkspaceName,
+              space: activeSpaceName,
             }),
           );
         });
     },
-    [navigate, projectId, module, target, activeWorkspaceName, sensor],
+    [navigate, projectId, module, target, activeSpaceName, sensor],
   );
   const initialStepId =
     run && Object.keys(run.steps).find((stepId) => !run.steps[stepId].parentId);
@@ -103,8 +103,8 @@ export default function SensorHeader({
     }
   }, [projectId, latestExecutionId]);
   const handleResume = useCallback(() => {
-    api.rerunStep(projectId, initialStepId!, activeWorkspaceName!);
-  }, [projectId, initialStepId, activeWorkspaceName]);
+    api.rerunStep(projectId, initialStepId!, activeSpaceName!);
+  }, [projectId, initialStepId, activeSpaceName]);
   const handleStartClick = useCallback(() => {
     setRunDialogOpen(true);
   }, []);
@@ -135,7 +135,7 @@ export default function SensorHeader({
                 runs={sensor.runs}
                 projectId={projectId}
                 runId={runId}
-                activeWorkspaceName={activeWorkspaceName}
+                activeSpaceName={activeSpaceName}
               />
             )}
             <StopResumeButton
@@ -152,18 +152,18 @@ export default function SensorHeader({
             <Button
               onClick={handleStartClick}
               left={<IconPlayerPlay size={16} />}
-              disabled={!activeWorkspaceId || !sensor.parameters}
+              disabled={!activeSpaceId || !sensor.parameters}
             >
               Start...
             </Button>
-            {activeWorkspaceId && sensor.parameters && (
+            {activeSpaceId && sensor.parameters && (
               <RunDialog
                 projectId={projectId}
                 module={module}
                 target={target}
                 parameters={sensor.parameters}
                 instruction={sensor.instruction}
-                activeWorkspaceId={activeWorkspaceId}
+                activeSpaceId={activeSpaceId}
                 open={runDialogOpen}
                 onRun={handleRunSubmit}
                 onClose={handleRunDialogClose}

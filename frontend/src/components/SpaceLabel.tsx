@@ -1,9 +1,9 @@
 import { ReactNode } from "react";
 import classNames from "classnames";
 import { IconExclamationCircle } from "@tabler/icons-react";
-import { useWorkspaces } from "../topics";
+import { useSpaces } from "../topics";
 
-function classNameForWorkspace(
+function classNameForSpace(
   name: string | undefined,
   interactive: boolean | undefined,
 ) {
@@ -27,7 +27,7 @@ function classNameForWorkspace(
 
 type Props = {
   projectId: string;
-  workspaceId: string;
+  spaceId: string;
   size?: "sm" | "md";
   interactive?: boolean;
   warning?: string;
@@ -35,17 +35,17 @@ type Props = {
   compact?: boolean;
 };
 
-export default function WorkspaceLabel({
+export default function SpaceLabel({
   projectId,
-  workspaceId,
+  spaceId,
   size,
   interactive,
   warning,
   accessory,
   compact,
 }: Props) {
-  const workspaces = useWorkspaces(projectId);
-  const workspace = workspaces?.[workspaceId];
+  const spaces = useSpaces(projectId);
+  const space = spaces?.[spaceId];
   return (
     <span
       className={classNames(
@@ -53,7 +53,7 @@ export default function WorkspaceLabel({
         size == "sm"
           ? "px-1 py-px rounded-md h-5"
           : "px-1.5 py-0.5 rounded-lg h-6",
-        classNameForWorkspace(workspace?.name, interactive),
+        classNameForSpace(space?.name, interactive),
       )}
       title={warning}
     >
@@ -68,10 +68,10 @@ export default function WorkspaceLabel({
           className={classNames(
             "whitespace-nowrap overflow-hidden text-ellipsis",
             size == "sm" ? "px-px text-xs" : "px-0.5 text-sm",
-            workspace?.state == "archived" && "line-through opacity-50",
+            space?.state == "archived" && "line-through opacity-50",
           )}
         >
-          {workspace?.name}
+          {space?.name}
         </span>
       )}
       {accessory}
