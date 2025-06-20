@@ -1,23 +1,23 @@
 <p align="center">
-  <img src="logo.svg" width="350" alt="Coflux" />
+  <img src="logo.svg" width="250" alt="Coflux" />
 </p>
 
-Coflux is an open-source workflow engine. Use it to orchestrate and observe computational workflows, defined in plain Python. Suitable for data pipelines, background tasks, chat bots.
+Coflux is an open-source workflow engine. Use it to orchestrate and observe computational workflows defined in plain Python. Suitable for data pipelines, background tasks, agentic systems.
 
 ```python
-from coflux import workflow, task
+import coflux as cf
 import requests
 
-@task(retries=2)
-def fetch_splines(url):
+@cf.task(retries=2)
+def fetch_splines(url: str) -> list:
     return requests.get(url).json()
 
-@task()
-def reticulate(splines):
+@cf.task()
+def reticulate(splines: list) -> list:
     return list(reversed(splines))
 
-@workflow()
-def my_workflow(url):
+@cf.workflow()
+def my_workflow(url: str) -> None:
     reticulate(fetch_splines(url))
 ```
 
