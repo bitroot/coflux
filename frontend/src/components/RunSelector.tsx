@@ -17,7 +17,7 @@ import Button from "./common/Button";
 function getRunUrl(
   projectId: string,
   runId: string,
-  workspaceName: string | undefined,
+  spaceName: string | undefined,
   pathname: string,
 ) {
   // TODO: better way to determine page
@@ -25,21 +25,21 @@ function getRunUrl(
   const page = parts.length == 6 ? parts[5] : undefined;
   return buildUrl(
     `/projects/${projectId}/runs/${runId}${page ? "/" + page : ""}`,
-    { workspace: workspaceName },
+    { space: spaceName },
   );
 }
 
 type OptionsProps = {
   runs: Record<string, Pick<models.Run, "createdAt">> | undefined;
   projectId: string | null;
-  activeWorkspaceName: string | undefined;
+  activeSpaceName: string | undefined;
   selectedRunId: string;
 };
 
 function Options({
   runs,
   projectId,
-  activeWorkspaceName,
+  activeSpaceName,
   selectedRunId,
 }: OptionsProps) {
   const location = useLocation();
@@ -48,7 +48,7 @@ function Options({
   } else if (!Object.keys(runs).length) {
     return (
       <p className="p-2 italic whitespace-nowrap text-sm">
-        No runs in this workspace
+        No runs in this space
       </p>
     );
   } else {
@@ -64,7 +64,7 @@ function Options({
                   to={getRunUrl(
                     projectId!,
                     runId,
-                    activeWorkspaceName,
+                    activeSpaceName,
                     location.pathname,
                   )}
                   className="flex items-baseline gap-1 text-sm p-1 data-active:bg-slate-100 rounded-sm"
@@ -117,7 +117,7 @@ function getNextPrevious(
 
 type NextPreviousButtonProps = {
   projectId: string | null;
-  activeWorkspaceName: string | undefined;
+  activeSpaceName: string | undefined;
   runs: Record<string, Pick<models.Run, "createdAt">> | undefined;
   currentRunId: string;
   direction: "next" | "previous";
@@ -125,7 +125,7 @@ type NextPreviousButtonProps = {
 
 function NextPreviousButton({
   projectId,
-  activeWorkspaceName,
+  activeSpaceName,
   runs,
   currentRunId,
   direction,
@@ -147,12 +147,7 @@ function NextPreviousButton({
         as={Link}
         variant="secondary"
         outline={true}
-        to={getRunUrl(
-          projectId!,
-          runId,
-          activeWorkspaceName,
-          location.pathname,
-        )}
+        to={getRunUrl(projectId!, runId, activeSpaceName, location.pathname)}
         className={className}
       >
         <Icon size={16} />
@@ -176,7 +171,7 @@ type Props = {
   runs: Record<string, Pick<models.Run, "createdAt">> | undefined;
   projectId: string | null;
   runId: string;
-  activeWorkspaceName: string | undefined;
+  activeSpaceName: string | undefined;
   className?: string;
 };
 
@@ -184,7 +179,7 @@ export default function RunSelector({
   runs,
   projectId,
   runId,
-  activeWorkspaceName,
+  activeSpaceName,
   className,
 }: Props) {
   return (
@@ -192,7 +187,7 @@ export default function RunSelector({
       <NextPreviousButton
         direction="previous"
         projectId={projectId}
-        activeWorkspaceName={activeWorkspaceName}
+        activeSpaceName={activeSpaceName}
         runs={runs}
         currentRunId={runId}
       />
@@ -216,7 +211,7 @@ export default function RunSelector({
           <Options
             runs={runs}
             projectId={projectId}
-            activeWorkspaceName={activeWorkspaceName}
+            activeSpaceName={activeSpaceName}
             selectedRunId={runId}
           />
         </MenuItems>
@@ -224,7 +219,7 @@ export default function RunSelector({
       <NextPreviousButton
         direction="next"
         projectId={projectId}
-        activeWorkspaceName={activeWorkspaceName}
+        activeSpaceName={activeSpaceName}
         runs={runs}
         currentRunId={runId}
       />

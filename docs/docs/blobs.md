@@ -6,7 +6,7 @@ Separating the storage of data means that the Coflux server doesn't need to have
 
 By default Coflux will use a blob store embedded in the Coflux server, which saves blobs to the filesystem.
 
-This can be configured explicitly in the CLI configuration file (which is used by agents; the configuration file can be initialised with the CLI using `coflux configure`):
+This can be configured explicitly in the CLI configuration file (which is used by workers; the configuration file can be initialised with the CLI using `coflux configure`):
 
 ```toml
 [[blobs.stores]]
@@ -38,7 +38,7 @@ prefix = "blobs"  # optional
 region = "eu-west-1"  # optional
 ```
 
-Ensure that AWS credentials are available to the agent - for example by setting `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables.
+Ensure that AWS credentials are available to the worker - for example by setting `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables.
 
 ## Multiple stores
 
@@ -48,5 +48,4 @@ This is useful when adding a new store, as the original store can still be read 
 
 ## UI
 
-This configuration is only used by the CLI (e.g., for running agents). To support loading blobs in the UI, stores can be configured from the project settings dialog. Settings entered in the UI (including access keys) are stored in the browser in local storage. When blobs are loaded in the UI, they're cached in the browser in session storage.
-
+This configuration is only used by the CLI (e.g., for running workers). To support loading blobs in the UI, stores can be configured from the project settings dialog. Settings entered in the UI (including access keys) are stored in the browser in local storage. When blobs are loaded in the UI, they're cached in the browser in session storage.

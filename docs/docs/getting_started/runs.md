@@ -1,6 +1,6 @@
 # 5. Submitting runs
 
-We've defined our workflow, started the Coflux server, and started an agent. The final step is to submit a run of our workflow.
+We've defined our workflow, started the Coflux server, and started a worker. The final step is to submit a run of our workflow.
 
 ## Using the web UI
 

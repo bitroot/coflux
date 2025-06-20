@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
         "getting_started/install",
         "getting_started/server",
         "getting_started/workflows",
-        "getting_started/agents",
+        "getting_started/workers",
         "getting_started/runs",
       ],
     },

@@ -1,22 +1,22 @@
 defmodule Coflux.Topics.Pool do
-  use Topical.Topic, route: ["projects", :project_id, "pools", :workspace_id, :pool_name]
+  use Topical.Topic, route: ["projects", :project_id, "pools", :space_id, :pool_name]
 
   alias Coflux.Orchestration
 
   def init(params) do
     project_id = Keyword.fetch!(params, :project_id)
-    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
+    space_id = String.to_integer(Keyword.fetch!(params, :space_id))
     pool_name = Keyword.fetch!(params, :pool_name)
 
-    case Orchestration.subscribe_pool(project_id, workspace_id, pool_name, self()) do
-      {:ok, pool, agents, ref} ->
+    case Orchestration.subscribe_pool(project_id, space_id, pool_name, self()) do
+      {:ok, pool, workers, ref} ->
         {:ok,
          Topic.new(
            %{
              pool: build_pool(pool),
-             agents:
-               Map.new(agents, fn {agent_id, agent} ->
-                 {Integer.to_string(agent_id), build_agent(agent)}
+             workers:
+               Map.new(workers, fn {worker_id, worker} ->
+                 {Integer.to_string(worker_id), build_worker(worker)}
                end)
            },
            %{ref: ref}
@@ -36,8 +36,8 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:pool], build_pool(pool))
   end
 
-  defp process_notification(topic, {:agent, agent_id, starting_at}) do
-    Topic.set(topic, [:agents, Integer.to_string(agent_id)], %{
+  defp process_notification(topic, {:worker, worker_id, starting_at}) do
+    Topic.set(topic, [:workers, Integer.to_string(worker_id)], %{
       startingAt: starting_at,
       startedAt: nil,
       startError: nil,
@@ -49,33 +49,33 @@ defmodule Coflux.Topics.Pool do
     })
   end
 
-  defp process_notification(topic, {:launch_result, agent_id, started_at, error}) do
+  defp process_notification(topic, {:launch_result, worker_id, started_at, error}) do
     topic
-    |> Topic.set([:agents, Integer.to_string(agent_id), :startedAt], started_at)
-    |> Topic.set([:agents, Integer.to_string(agent_id), :startError], error)
+    |> Topic.set([:workers, Integer.to_string(worker_id), :startedAt], started_at)
+    |> Topic.set([:workers, Integer.to_string(worker_id), :startError], error)
   end
 
-  defp process_notification(topic, {:agent_stopping, agent_id, stopping_at}) do
-    Topic.set(topic, [:agents, Integer.to_string(agent_id), :stoppingAt], stopping_at)
+  defp process_notification(topic, {:worker_stopping, worker_id, stopping_at}) do
+    Topic.set(topic, [:workers, Integer.to_string(worker_id), :stoppingAt], stopping_at)
   end
 
-  defp process_notification(topic, {:agent_stop_result, agent_id, stopped_at, error}) do
+  defp process_notification(topic, {:worker_stop_result, worker_id, stopped_at, error}) do
     # TODO: don't set 'stopped_at' if error?
     topic
-    |> Topic.set([:agents, Integer.to_string(agent_id), :stoppedAt], stopped_at)
-    |> Topic.set([:agents, Integer.to_string(agent_id), :stopError], error)
+    |> Topic.set([:workers, Integer.to_string(worker_id), :stoppedAt], stopped_at)
+    |> Topic.set([:workers, Integer.to_string(worker_id), :stopError], error)
   end
 
-  defp process_notification(topic, {:agent_deactivated, agent_id, deactivated_at}) do
-    Topic.set(topic, [:agents, Integer.to_string(agent_id), :deactivatedAt], deactivated_at)
+  defp process_notification(topic, {:worker_deactivated, worker_id, deactivated_at}) do
+    Topic.set(topic, [:workers, Integer.to_string(worker_id), :deactivatedAt], deactivated_at)
   end
 
-  defp process_notification(topic, {:agent_state, agent_id, state}) do
-    Topic.set(topic, [:agents, Integer.to_string(agent_id), :state], state)
+  defp process_notification(topic, {:worker_state, worker_id, state}) do
+    Topic.set(topic, [:workers, Integer.to_string(worker_id), :state], state)
   end
 
-  defp process_notification(topic, {:agent_connected, agent_id, connected}) do
-    Topic.set(topic, [:agents, Integer.to_string(agent_id), :connected], connected)
+  defp process_notification(topic, {:worker_connected, worker_id, connected}) do
+    Topic.set(topic, [:workers, Integer.to_string(worker_id), :connected], connected)
   end
 
   defp build_launcher(launcher) do
@@ -99,17 +99,17 @@ defmodule Coflux.Topics.Pool do
     end
   end
 
-  defp build_agent(agent) do
+  defp build_worker(worker) do
     %{
       # TODO: launcher ID? (and/or launcher?)
-      startingAt: agent.starting_at,
-      startedAt: agent.started_at,
-      startError: agent.start_error,
-      stoppingAt: agent.stopping_at,
-      stopError: agent.stop_error,
-      deactivatedAt: agent.deactivated_at,
-      state: agent.state,
-      connected: agent.connected
+      startingAt: worker.starting_at,
+      startedAt: worker.started_at,
+      startError: worker.start_error,
+      stoppingAt: worker.stopping_at,
+      stopError: worker.stop_error,
+      deactivatedAt: worker.deactivated_at,
+      state: worker.state,
+      connected: worker.connected
     }
   end
 end

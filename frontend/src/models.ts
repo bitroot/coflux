@@ -2,7 +2,7 @@ export type Project = {
   name: string;
 };
 
-export type Workspace = {
+export type Space = {
   name: string;
   baseId: string | null;
   state: "active" | "paused" | "archived";
@@ -177,7 +177,7 @@ export type Child = {
 
 export type Execution = {
   executionId: string;
-  workspaceId: string;
+  spaceId: string;
   createdAt: number;
   executeAfter: number | null;
   assignedAt: number | null;
@@ -221,7 +221,7 @@ export type LogMessage = [
   Record<string, Value>,
 ];
 
-export type Agent = {
+export type Worker = {
   startingAt: number;
   startedAt?: number;
   startError?: unknown;

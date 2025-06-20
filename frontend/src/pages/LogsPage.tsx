@@ -6,7 +6,7 @@ import * as models from "../models";
 import { useContext } from "../layouts/RunLayout";
 import RunLogs from "../components/RunLogs";
 import StepLink from "../components/StepLink";
-import { useWorkspaces, useLogs } from "../topics";
+import { useSpaces, useLogs } from "../topics";
 
 type StepIdentifierProps = {
   runId: string;
@@ -49,13 +49,13 @@ export default function LogsPage() {
   const { run } = useContext();
   const { project: projectId, run: runId } = useParams();
   const [searchParams] = useSearchParams();
-  const activeWorkspaceName = searchParams.get("workspace") || undefined;
-  const workspaces = useWorkspaces(projectId);
-  const activeWorkspaceId = findKey(
-    workspaces,
-    (e) => e.name == activeWorkspaceName && e.state != "archived",
+  const activeSpaceName = searchParams.get("space") || undefined;
+  const spaces = useSpaces(projectId);
+  const activeSpaceId = findKey(
+    spaces,
+    (e) => e.name == activeSpaceName && e.state != "archived",
   );
-  const logs = useLogs(projectId, runId, activeWorkspaceId);
+  const logs = useLogs(projectId, runId, activeSpaceId);
   if (runId && logs) {
     return (
       <div className="p-5">

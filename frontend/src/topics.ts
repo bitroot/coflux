@@ -7,62 +7,62 @@ export function useProjects() {
   return projects;
 }
 
-export function useWorkspaces(projectId: string | undefined) {
-  const [workspaces] = useTopic<Record<string, models.Workspace>>(
+export function useSpaces(projectId: string | undefined) {
+  const [spaces] = useTopic<Record<string, models.Space>>(
     "projects",
     projectId,
-    "workspaces",
+    "spaces",
   );
-  return workspaces;
+  return spaces;
 }
 
 export function useModules(
   projectId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [modules] = useTopic<Record<string, models.Module>>(
     "projects",
     projectId,
     "modules",
-    workspaceId,
+    spaceId,
   );
   return modules;
 }
 
 export function usePools(
   projectId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [pools] = useTopic<models.Pools>(
     "projects",
     projectId,
     "pools",
-    workspaceId,
+    spaceId,
   );
   return pools;
 }
 
 export function usePool(
   projectId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
   poolName: string | undefined,
 ) {
   const [pool] = useTopic<{
     pool: models.Pool | null;
-    agents: Record<string, models.Agent>;
-  }>("projects", projectId, "pools", workspaceId, poolName);
+    workers: Record<string, models.Worker>;
+  }>("projects", projectId, "pools", spaceId, poolName);
   return pool;
 }
 
 export function useSessions(
   projectId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [sessions] = useTopic<Record<string, models.Session>>(
     "projects",
     projectId,
     "sessions",
-    workspaceId,
+    spaceId,
   );
   return sessions;
 }
@@ -71,7 +71,7 @@ export function useWorkflow(
   projectId: string | undefined,
   moduleName: string | undefined,
   targetName: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [target] = useTopic<models.Workflow>(
     "projects",
@@ -79,7 +79,7 @@ export function useWorkflow(
     "workflows",
     moduleName,
     targetName,
-    workspaceId,
+    spaceId,
   );
   return target;
 }
@@ -88,7 +88,7 @@ export function useSensor(
   projectId: string | undefined,
   module: string | undefined,
   targetName: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [target] = useTopic<models.Sensor>(
     "projects",
@@ -96,7 +96,7 @@ export function useSensor(
     "sensors",
     module,
     targetName,
-    workspaceId,
+    spaceId,
   );
   return target;
 }
@@ -104,14 +104,14 @@ export function useSensor(
 export function useExecutions(
   projectId: string | undefined,
   moduleName: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [executions] = useTopic<Record<string, models.QueuedExecution>>(
     "projects",
     projectId,
     "modules",
     moduleName,
-    workspaceId,
+    spaceId,
   );
   return executions;
 }
@@ -119,14 +119,14 @@ export function useExecutions(
 export function useRun(
   projectId: string | undefined,
   runId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [run, { loading }] = useTopic<models.Run>(
     "projects",
     projectId,
     "runs",
     runId,
-    workspaceId,
+    spaceId,
   );
   return loading ? undefined : run;
 }
@@ -134,7 +134,7 @@ export function useRun(
 export function useLogs(
   projectId: string | undefined,
   runId: string | undefined,
-  workspaceId: string | undefined,
+  spaceId: string | undefined,
 ) {
   const [logs] = useTopic<models.LogMessage[]>(
     "projects",
@@ -142,7 +142,7 @@ export function useLogs(
     "runs",
     runId,
     "logs",
-    workspaceId,
+    spaceId,
   );
   return logs;
 }

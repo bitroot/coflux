@@ -13,7 +13,7 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Agent, config, decorators, loader, models
+from . import Worker, config, decorators, loader, models
 
 T = t.TypeVar("T")
 
@@ -32,7 +32,7 @@ def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
 
 
 def _encode_provides(
-    provides: dict[str, list[str] | str | bool] | None
+    provides: dict[str, list[str] | str | bool] | None,
 ) -> tuple[str, ...] | None:
     if not provides:
         return None
@@ -79,7 +79,7 @@ def _load_modules(
 
 def _register_manifests(
     project_id: str,
-    workspace_name: str,
+    space_name: str,
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
 ) -> None:
@@ -152,7 +152,7 @@ def _register_manifests(
         "register_manifests",
         json={
             "projectId": project_id,
-            "workspaceName": workspace_name,
+            "spaceName": space_name,
             "manifests": manifests,
         },
     )
@@ -161,7 +161,7 @@ def _register_manifests(
 def _init(
     *modules: types.ModuleType | str,
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     provides: dict[str, list[str]],
     serialiser_configs: list[config.SerialiserConfig],
@@ -174,11 +174,11 @@ def _init(
     try:
         targets = _load_modules(list(modules))
         if register:
-            _register_manifests(project, workspace, host, targets)
+            _register_manifests(project, space, host, targets)
 
-        with Agent(
+        with Worker(
             project,
-            workspace,
+            space,
             host,
             provides,
             serialiser_configs,
@@ -187,8 +187,8 @@ def _init(
             concurrency,
             launch_id,
             targets,
-        ) as agent:
-            asyncio.run(agent.run())
+        ) as worker:
+            asyncio.run(worker.run())
     except KeyboardInterrupt:
         pass
 
@@ -273,11 +273,11 @@ def _load_config() -> config.Config:
     prompt=True,
 )
 @click.option(
-    "workspace",
+    "space",
     "-w",
-    "--workspace",
-    help="Workspace name",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    default=_load_config().space,
     show_default=True,
     prompt=True,
 )
@@ -292,7 +292,7 @@ def _load_config() -> config.Config:
 def configure(
     host: str | None,
     project: str | None,
-    workspace: str | None,
+    space: str | None,
 ):
     """
     Populate/update the configuration file.
@@ -303,7 +303,7 @@ def configure(
     path = _config_path()
     data = _read_config(path)
     data["project"] = project
-    data["workspace"] = workspace
+    data["space"] = space
     data.setdefault("server", {})["host"] = host
     _write_config(path, data)
 
@@ -313,14 +313,14 @@ def configure(
 
 
 @cli.group()
-def workspaces():
+def spaces():
     """
-    Manage workspaces.
+    Manage spaces.
     """
     pass
 
 
-@workspaces.command("create")
+@spaces.command("create")
 @click.option(
     "-p",
     "--project",
@@ -341,25 +341,23 @@ def workspaces():
 )
 @click.option(
     "--base",
-    help="The base workspace to inherit from",
+    help="The base space to inherit from",
 )
 @click.argument("name")
-def workspaces_create(
+def spaces_create(
     project: str,
     host: str,
     base: str | None,
     name: str,
 ):
     """
-    Creates a workspace within the project.
+    Creates a space within the project.
     """
     base_id = None
     if base:
-        workspaces = _api_request(
-            "GET", host, "get_workspaces", params={"project": project}
-        )
-        workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
-        base_id = workspace_ids_by_name.get(base)
+        spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+        space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
+        base_id = space_ids_by_name.get(base)
         if not base_id:
             click.BadOptionUsage("base", "Not recognised")
 
@@ -367,17 +365,17 @@ def workspaces_create(
     _api_request(
         "POST",
         host,
-        "create_workspace",
+        "create_space",
         json={
             "projectId": project,
             "name": name,
             "baseId": base_id,
         },
     )
-    click.secho(f"Created workspace '{name}'.", fg="green")
+    click.secho(f"Created space '{name}'.", fg="green")
 
 
-@workspaces.command("update")
+@spaces.command("update")
 @click.option(
     "-p",
     "--project",
@@ -389,10 +387,10 @@ def workspaces_create(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="The (current) name of the workspace",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="The (current) name of the space",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -407,45 +405,43 @@ def workspaces_create(
 )
 @click.option(
     "--name",
-    help="The new name of the workspace",
+    help="The new name of the space",
 )
 @click.option(
     "--base",
-    help="The new base workspace to inherit from",
+    help="The new base space to inherit from",
 )
 @click.option(
     "--no-base",
     is_flag=True,
-    help="Unset the base workspace",
+    help="Unset the base space",
 )
-def workspaces_update(
+def spaces_update(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     name: str | None,
     base: str | None,
     no_base: bool,
 ):
     """
-    Updates a workspace within the project.
+    Updates a space within the project.
     """
-    workspaces = _api_request(
-        "GET", host, "get_workspaces", params={"project": project}
-    )
-    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
-    workspace_id = workspace_ids_by_name.get(workspace)
-    if not workspace_id:
-        raise click.BadOptionUsage("workspace", "Not recognised")
+    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
+    space_id = space_ids_by_name.get(space)
+    if not space_id:
+        raise click.BadOptionUsage("space", "Not recognised")
 
     base_id = None
     if base:
-        base_id = workspace_ids_by_name.get(base)
+        base_id = space_ids_by_name.get(base)
         if not base_id:
             raise click.BadOptionUsage("base", "Not recognised")
 
     payload = {
         "projectId": project,
-        "workspaceId": workspace_id,
+        "spaceId": space_id,
     }
     if name is not None:
         payload["name"] = name
@@ -456,12 +452,12 @@ def workspaces_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_workspace", json=payload)
+    _api_request("POST", host, "update_space", json=payload)
 
-    click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
+    click.secho(f"Updated space '{name or space}'.", fg="green")
 
 
-@workspaces.command("archive")
+@spaces.command("archive")
 @click.option(
     "-p",
     "--project",
@@ -473,10 +469,10 @@ def workspaces_update(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -489,32 +485,31 @@ def workspaces_update(
     show_default=True,
     required=True,
 )
-def workspaces_archive(
+def spaces_archive(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
 ):
     """
-    Archives a workspace.
+    Archives a space.
     """
-    workspaces = _api_request(
-        "GET", host, "get_workspaces", params={"project": project}
-    )
-    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
-    workspace_id = workspace_ids_by_name.get(workspace)
-    if not workspace_id:
-        raise click.BadOptionUsage("workspace", "Not recognised")
+    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
+    space_id = space_ids_by_name.get(space)
+    if not space_id:
+        raise click.BadOptionUsage("space", "Not recognised")
 
     _api_request(
         "POST",
         host,
-        "archive_workspace",
+        "archive_space",
         json={
             "projectId": project,
-            "workspaceId": workspace_id,
+            "spaceId": space_id,
         },
     )
-    click.secho(f"Archived workspace '{workspace}'.", fg="green")
+    click.secho(f"Archived space '{space}'.", fg="green")
+
 
 @cli.group()
 def pools():
@@ -522,6 +517,7 @@ def pools():
     Manage pools.
     """
     pass
+
 
 @pools.command("update")
 @click.option(
@@ -535,10 +531,10 @@ def pools():
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -555,13 +551,13 @@ def pools():
     "modules",
     "-m",
     "--module",
-    help="Modules to be hosted by agents in the pool",
+    help="Modules to be hosted by workers in the pool",
     multiple=True,
     required=True,
 )
 @click.option(
     "--provides",
-    help="Features that agents in the pool provide (to be matched with features that tasks require)",
+    help="Features that workers in the pool provide (to be matched with features that tasks require)",
     multiple=True,
 )
 @click.option(
@@ -576,13 +572,13 @@ def pools():
 @click.argument("name")
 def pools_update(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     modules: tuple[str, ...],
     provides: tuple[str, ...] | None,
     launcher: t.Literal["docker"] | None,
     image: str | None,
-    name: str
+    name: str,
 ):
     """
     Updates a pool.
@@ -591,21 +587,12 @@ def pools_update(
     launcher_ = None
     if launcher == "docker":
         launcher_ = {"type": "docker", "image": image}
-    pool = {
-        "modules": list(modules),
-        "provides": provides_,
-        "launcher": launcher_
-    }
+    pool = {"modules": list(modules), "provides": provides_, "launcher": launcher_}
     _api_request(
         "POST",
         host,
         "update_pool",
-        json={
-            "projectId": project,
-            "workspaceName": workspace,
-            "poolName": name,
-            "pool": pool
-        },
+        json={"projectId": project, "spaceName": space, "poolName": name, "pool": pool},
     )
 
 
@@ -621,10 +608,10 @@ def pools_update(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -638,12 +625,7 @@ def pools_update(
     required=True,
 )
 @click.argument("name")
-def pools_delete(
-    project: str,
-    workspace: str,
-    host: str,
-    name: str
-):
+def pools_delete(project: str, space: str, host: str, name: str):
     """
     Deletes a pool.
     """
@@ -651,12 +633,7 @@ def pools_delete(
         "POST",
         host,
         "update_pool",
-        json={
-            "projectId": project,
-            "workspaceName": workspace,
-            "poolName": name,
-            "pool": None
-        },
+        json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
     )
 
 
@@ -672,10 +649,10 @@ def pools_delete(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -691,7 +668,7 @@ def pools_delete(
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     module_name: tuple[str, ...],
 ) -> None:
@@ -705,11 +682,11 @@ def register(
     if not module_name:
         raise click.ClickException("No module(s) specified.")
     targets = _load_modules(list(module_name))
-    _register_manifests(project, workspace, host, targets)
+    _register_manifests(project, space, host, targets)
     click.secho("Manifest(s) registered.", fg="green")
 
 
-@cli.command("agent")
+@cli.command("worker")
 @click.option(
     "-p",
     "--project",
@@ -721,10 +698,10 @@ def register(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    envvar="COFLUX_WORKSPACE",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -739,7 +716,7 @@ def register(
 )
 @click.option(
     "--provides",
-    help="Features that this agent provides (to be matched with features that tasks require)",
+    help="Features that this worker provides (to be matched with features that tasks require)",
     multiple=True,
     envvar="COFLUX_PROVIDES",
     default=_encode_provides(_load_config().provides),
@@ -776,9 +753,9 @@ def register(
     help="Enable development mode (implies `--watch` and `--register`)",
 )
 @click.argument("module_name", nargs=-1)
-def agent(
+def worker(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     provides: tuple[str, ...] | None,
     launch: str | None,
@@ -789,7 +766,7 @@ def agent(
     module_name: tuple[str, ...],
 ) -> None:
     """
-    Start an agent.
+    Start a worker.
 
     Hosts the specified modules. Paths to scripts can be passed instead of module names.
 
@@ -802,7 +779,7 @@ def agent(
     args = (*module_name,)
     kwargs = {
         "project": project,
-        "workspace": workspace,
+        "space": space,
         "host": host,
         "provides": provides_,
         "serialiser_configs": config and config.serialisers,
@@ -837,9 +814,9 @@ def agent(
 )
 @click.option(
     "-w",
-    "--workspace",
-    help="Workspace name",
-    default=_load_config().workspace,
+    "--space",
+    help="Space name",
+    default=_load_config().space,
     show_default=True,
     required=True,
 )
@@ -856,7 +833,7 @@ def agent(
 @click.argument("argument", nargs=-1)
 def submit(
     project: str,
-    workspace: str,
+    space: str,
     host: str,
     module: str,
     target: str,
@@ -872,7 +849,7 @@ def submit(
         "get_workflow",
         params={
             "project": project,
-            "workspace": workspace,
+            "space": space,
             "module": module,
             "target": target,
         },
@@ -887,7 +864,7 @@ def submit(
         "submit_workflow",
         json={
             "projectId": project,
-            "workspaceName": workspace,
+            "spaceName": space,
             "module": module,
             "target": target,
             "arguments": [["json", a] for a in argument],

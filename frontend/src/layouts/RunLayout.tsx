@@ -17,7 +17,7 @@ import StepDetail from "../components/StepDetail";
 import usePrevious from "../hooks/usePrevious";
 import { buildUrl } from "../utils";
 import Loading from "../components/Loading";
-import { useWorkspaces, useRun } from "../topics";
+import { useSpaces, useRun } from "../topics";
 import HoverContext from "../components/HoverContext";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
@@ -59,7 +59,7 @@ type DetailPanelProps = {
   attemptNumber: number | undefined;
   run: models.Run;
   projectId: string;
-  activeWorkspaceId: string;
+  activeSpaceId: string;
   className?: string;
   width: number;
   activeTab: number;
@@ -72,7 +72,7 @@ function DetailPanel({
   attemptNumber,
   run,
   projectId,
-  activeWorkspaceId,
+  activeSpaceId,
   className,
   width,
   activeTab,
@@ -83,8 +83,8 @@ function DetailPanel({
   const stepIdOrPrevious = stepId || previousStepId;
   const attemptNumberOrPrevious = attemptNumber || previousAttemptNumber;
   const handleRerunStep = useCallback(
-    (stepId: string, workspaceName: string) => {
-      return api.rerunStep(projectId, stepId, workspaceName);
+    (stepId: string, spaceName: string) => {
+      return api.rerunStep(projectId, stepId, spaceName);
     },
     [projectId],
   );
@@ -116,7 +116,7 @@ function DetailPanel({
               attempt={attemptNumberOrPrevious || 1}
               run={run}
               projectId={projectId}
-              activeWorkspaceId={activeWorkspaceId}
+              activeSpaceId={activeSpaceId}
               className="flex-1 w-full"
               onRerunStep={handleRerunStep}
               activeTab={activeTab}
@@ -143,17 +143,17 @@ export default function RunLayout() {
   const activeAttemptNumber = searchParams.has("attempt")
     ? parseInt(searchParams.get("attempt")!, 10)
     : undefined;
-  const activeWorkspaceName = searchParams.get("workspace") || undefined;
+  const activeSpaceName = searchParams.get("space") || undefined;
   const activeTab = parseInt(searchParams.get("tab") || "", 10) || 0;
   const maximised = !!searchParams.get("maximised");
   const assetIdentifier = searchParams.get("asset");
   const activeGroupIdentifier = searchParams.get("group");
-  const workspaces = useWorkspaces(projectId);
-  const activeWorkspaceId = findKey(
-    workspaces,
-    (e) => e.name == activeWorkspaceName && e.state != "archived",
+  const spaces = useSpaces(projectId);
+  const activeSpaceId = findKey(
+    spaces,
+    (e) => e.name == activeSpaceName && e.state != "archived",
   );
-  const run = useRun(projectId, runId, activeWorkspaceId);
+  const run = useRun(projectId, runId, activeSpaceId);
   const initialStep = run && Object.values(run.steps).find((s) => !s.parentId);
   useTitlePart(initialStep && `${initialStep.target} (${initialStep.module})`);
   useSetActive(
@@ -187,8 +187,8 @@ export default function RunLayout() {
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}
-              activeWorkspaceId={activeWorkspaceId}
-              activeWorkspaceName={activeWorkspaceName}
+              activeSpaceId={activeSpaceId}
+              activeSpaceName={activeSpaceName}
             />
           ) : initialStep.type == "workflow" ? (
             <WorkflowHeader
@@ -196,8 +196,8 @@ export default function RunLayout() {
               target={initialStep.target}
               projectId={projectId!}
               runId={runId}
-              activeWorkspaceId={activeWorkspaceId}
-              activeWorkspaceName={activeWorkspaceName}
+              activeSpaceId={activeSpaceId}
+              activeSpaceName={activeSpaceName}
             />
           ) : null}
           <div className="grow flex flex-col">
@@ -230,7 +230,7 @@ export default function RunLayout() {
             attemptNumber={activeAttemptNumber}
             run={run}
             projectId={projectId!}
-            activeWorkspaceId={activeWorkspaceId!}
+            activeSpaceId={activeSpaceId!}
             className={classNames(
               maximised
                 ? "fixed inset-0 px-10 py-10 bg-black/40"

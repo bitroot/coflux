@@ -26,13 +26,13 @@ function Counters({ sessions }: CountersProps) {
           {idleCount ? (
             <Badge
               label={`${idleCount}`}
-              title={`${pluralise(idleCount, "idle agent")}`}
+              title={`${pluralise(idleCount, "idle worker")}`}
             />
           ) : null}
           {activeCount ? (
             <Badge
               label={`${activeCount}`}
-              title={`${pluralise(activeCount, "active agent")}`}
+              title={`${pluralise(activeCount, "active worker")}`}
               intent="info"
             />
           ) : null}
@@ -49,7 +49,7 @@ function Counters({ sessions }: CountersProps) {
 type PoolItemProps = {
   poolName: string;
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   activePool: string | undefined;
   sessions: models.Session[];
 };
@@ -57,7 +57,7 @@ type PoolItemProps = {
 function PoolItem({
   poolName,
   projectId,
-  workspaceName,
+  spaceName,
   activePool,
   sessions,
 }: PoolItemProps) {
@@ -65,7 +65,7 @@ function PoolItem({
     <li>
       <Link
         to={buildUrl(`/projects/${projectId}/pools/${poolName}`, {
-          workspace: workspaceName,
+          space: spaceName,
         })}
         className={classNames(
           "flex gap-1 items-center pl-1 pr-2 py-0.5 rounded-md my-0.5",
@@ -96,7 +96,7 @@ function UnmanagedItem({ sessions }: UnmanagedItemProps) {
       <div className="flex gap-1 items-center p-1 rounded-md my-0.5">
         <span className="flex-1 flex justify-between">
           <span className="text-sm text-slate-600 italic">
-            Unmanaged agents
+            Unmanaged workers
           </span>
           <Counters sessions={sessions} />
         </span>
@@ -108,15 +108,15 @@ function UnmanagedItem({ sessions }: UnmanagedItemProps) {
 type Props = {
   pools: models.Pools | undefined;
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   activePool: string | undefined;
   sessions: Record<string, models.Session> | undefined;
 };
 
-export default function AgentsList({
+export default function WorkersList({
   pools,
   projectId,
-  workspaceName,
+  spaceName,
   activePool,
   sessions,
 }: Props) {
@@ -157,7 +157,7 @@ export default function AgentsList({
                         key={name}
                         poolName={name}
                         projectId={projectId}
-                        workspaceName={workspaceName}
+                        spaceName={spaceName}
                         sessions={Object.values(sessions).filter(
                           (s) => s.poolName == name,
                         )}

@@ -1,6 +1,6 @@
 defmodule Coflux.Topics.Sensor do
   use Topical.Topic,
-    route: ["projects", :project_id, "sensors", :module, :target, :workspace_id]
+    route: ["projects", :project_id, "sensors", :module, :target, :space_id]
 
   alias Coflux.Orchestration
 
@@ -8,13 +8,13 @@ defmodule Coflux.Topics.Sensor do
     project_id = Keyword.fetch!(params, :project_id)
     module = Keyword.fetch!(params, :module)
     target_name = Keyword.fetch!(params, :target)
-    workspace_id = String.to_integer(Keyword.fetch!(params, :workspace_id))
+    space_id = String.to_integer(Keyword.fetch!(params, :space_id))
 
     case Orchestration.subscribe_sensor(
            project_id,
            module,
            target_name,
-           workspace_id,
+           space_id,
            self()
          ) do
       {:ok, sensor, instruction, runs, ref} ->

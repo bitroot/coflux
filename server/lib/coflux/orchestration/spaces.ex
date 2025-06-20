@@ -1,47 +1,47 @@
-defmodule Coflux.Orchestration.Workspaces do
+defmodule Coflux.Orchestration.Spaces do
   alias Coflux.Orchestration.TagSets
 
   import Coflux.Store
 
-  def get_all_workspaces(db) do
+  def get_all_spaces(db) do
     case query(
            db,
            """
            SELECT
              w.id,
              (SELECT ws.state
-               FROM workspace_states AS ws
-               WHERE ws.workspace_id = w.id
+               FROM space_states AS ws
+               WHERE ws.space_id = w.id
                ORDER BY ws.created_at DESC
                LIMIT 1) AS state,
              (SELECT wn.name
-               FROM workspace_names AS wn
-               WHERE wn.workspace_id = w.id
+               FROM space_names AS wn
+               WHERE wn.space_id = w.id
                ORDER BY wn.created_at DESC
                LIMIT 1) AS name,
              (SELECT wb.base_id
-               FROM workspace_bases AS wb
-               WHERE wb.workspace_id = w.id
+               FROM space_bases AS wb
+               WHERE wb.space_id = w.id
                ORDER BY wb.created_at DESC
                LIMIT 1) AS base_id
-           FROM workspaces AS w
+           FROM spaces AS w
            """
          ) do
       {:ok, rows} ->
-        workspaces =
-          Enum.reduce(rows, %{}, fn {workspace_id, state, name, base_id}, result ->
-            Map.put(result, workspace_id, %{
+        spaces =
+          Enum.reduce(rows, %{}, fn {space_id, state, name, base_id}, result ->
+            Map.put(result, space_id, %{
               name: name,
               base_id: base_id,
               state: decode_state(state)
             })
           end)
 
-        {:ok, workspaces}
+        {:ok, spaces}
     end
   end
 
-  def get_workspace_pools(db, workspace_id) do
+  def get_space_pools(db, space_id) do
     case query(
            db,
            """
@@ -50,12 +50,12 @@ defmodule Coflux.Orchestration.Workspaces do
            JOIN (
                SELECT name, MAX(created_at) AS created_at
                FROM pools
-               WHERE workspace_id = ?1
+               WHERE space_id = ?1
                GROUP BY name
            ) latest ON p.name = latest.name AND p.created_at = latest.created_at
-           WHERE p.workspace_id = ?1 AND p.pool_definition_id IS NOT NULL
+           WHERE p.space_id = ?1 AND p.pool_definition_id IS NOT NULL
            """,
-           {workspace_id}
+           {space_id}
          ) do
       {:ok, rows} ->
         {:ok,
@@ -66,85 +66,85 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp workspace_name_used?(db, workspace_name) do
+  defp space_name_used?(db, space_name) do
     # TODO: neater way to do this?
     case query(
            db,
            """
            SELECT
              (SELECT ws.state
-               FROM workspace_states AS ws
-               WHERE ws.workspace_id = w.id
+               FROM space_states AS ws
+               WHERE ws.space_id = w.id
                ORDER BY ws.created_at DESC
                LIMIT 1) AS state,
              (SELECT wn.name
-               FROM workspace_names AS wn
-               WHERE wn.workspace_id = w.id
+               FROM space_names AS wn
+               WHERE wn.space_id = w.id
                ORDER BY wn.created_at DESC
                LIMIT 1) AS name
-           FROM workspaces AS w
+           FROM spaces AS w
            """
          ) do
       {:ok, rows} ->
         {:ok,
          Enum.any?(rows, fn {state, name} ->
-           name == workspace_name && decode_state(state) != :archived
+           name == space_name && decode_state(state) != :archived
          end)}
     end
   end
 
-  defp has_active_child_workspaces?(db, workspace_id) do
+  defp has_active_child_spaces?(db, space_id) do
     # TODO: neater way to do this?
     case query(
            db,
            """
            SELECT
              (SELECT ws.state
-               FROM workspace_states AS ws
-               WHERE ws.workspace_id = w.id
+               FROM space_states AS ws
+               WHERE ws.space_id = w.id
                ORDER BY ws.created_at DESC
                LIMIT 1) AS state,
              (SELECT wb.base_id
-               FROM workspace_bases AS wb
-               WHERE wb.workspace_id = w.id
+               FROM space_bases AS wb
+               WHERE wb.space_id = w.id
                ORDER BY wb.created_at DESC
                LIMIT 1) AS base_id
-           FROM workspaces AS w
+           FROM spaces AS w
            """
          ) do
       {:ok, rows} ->
         {:ok,
          Enum.any?(rows, fn {state, base_id} ->
-           base_id == workspace_id && decode_state(state) != :archived
+           base_id == space_id && decode_state(state) != :archived
          end)}
     end
   end
 
-  # TODO: change to 'get_active_workspace_by_id'?
-  defp get_workspace_by_id(db, workspace_id) do
+  # TODO: change to 'get_active_space_by_id'?
+  defp get_space_by_id(db, space_id) do
     case query_one(
            db,
            """
            SELECT
              (SELECT ws.state
-               FROM workspace_states AS ws
-               WHERE ws.workspace_id = w.id
+               FROM space_states AS ws
+               WHERE ws.space_id = w.id
                ORDER BY ws.created_at DESC
                LIMIT 1) AS state,
              (SELECT wn.name
-               FROM workspace_names AS wn
-               WHERE wn.workspace_id = w.id
+               FROM space_names AS wn
+               WHERE wn.space_id = w.id
                ORDER BY wn.created_at DESC
                LIMIT 1) AS name,
              (SELECT wb.base_id
-               FROM workspace_bases AS wb
-               WHERE wb.workspace_id = w.id
+               FROM space_bases AS wb
+               WHERE wb.space_id = w.id
                ORDER BY wb.created_at DESC
                LIMIT 1) AS base_id
-           FROM workspaces AS w
+           FROM spaces AS w
            WHERE w.id = ?1
            """,
-           {workspace_id}
+           {space_id}
          ) do
       {:ok, {state, name, base_id}} ->
         {:ok, %{state: decode_state(state), name: name, base_id: base_id}}
@@ -154,17 +154,17 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  def create_workspace(db, name, base_id) do
+  def create_space(db, name, base_id) do
     with_transaction(db, fn ->
-      workspace = %{
+      space = %{
         state: :active,
         name: name,
         base_id: base_id
       }
 
-      {workspace, errors} =
+      {space, errors} =
         validate(
-          workspace,
+          space,
           name: &validate_name(&1, db),
           base_id: &validate_base_id(&1, db)
         )
@@ -173,31 +173,31 @@ defmodule Coflux.Orchestration.Workspaces do
         {:error, errors}
       else
         now = current_timestamp()
-        {:ok, workspace_id} = insert_one(db, :workspaces, %{})
-        {:ok, _} = insert_workspace_state(db, workspace_id, workspace.state, now)
-        {:ok, _} = insert_workspace_name(db, workspace_id, workspace.name, now)
-        {:ok, _} = insert_workspace_base(db, workspace_id, workspace.base_id, now)
+        {:ok, space_id} = insert_one(db, :spaces, %{})
+        {:ok, _} = insert_space_state(db, space_id, space.state, now)
+        {:ok, _} = insert_space_name(db, space_id, space.name, now)
+        {:ok, _} = insert_space_base(db, space_id, space.base_id, now)
 
-        {:ok, workspace_id, workspace}
+        {:ok, space_id, space}
       end
     end)
   end
 
-  def update_workspace(db, workspace_id, updates) do
+  def update_space(db, space_id, updates) do
     with_transaction(db, fn ->
-      case get_workspace_by_id(db, workspace_id) do
+      case get_space_by_id(db, space_id) do
         {:ok, nil} ->
           {:error, :not_found}
 
         {:ok, %{state: :archived}} ->
           {:error, :not_found}
 
-        {:ok, workspace} ->
+        {:ok, space} ->
           {updates, errors} =
             validate(
               updates,
               name: &validate_name(&1, db),
-              base_id: &validate_base_id(&1, db, workspace_id)
+              base_id: &validate_base_id(&1, db, space_id)
             )
 
           if Enum.any?(errors) do
@@ -205,26 +205,26 @@ defmodule Coflux.Orchestration.Workspaces do
           else
             now = current_timestamp()
 
-            if Map.has_key?(updates, :name) && updates.name != workspace.name do
-              {:ok, _} = insert_workspace_name(db, workspace_id, updates.name, now)
+            if Map.has_key?(updates, :name) && updates.name != space.name do
+              {:ok, _} = insert_space_name(db, space_id, updates.name, now)
             end
 
-            if Map.has_key?(updates, :base_id) && updates.base_id != workspace.base_id do
-              {:ok, _} = insert_workspace_base(db, workspace_id, updates.base_id, now)
+            if Map.has_key?(updates, :base_id) && updates.base_id != space.base_id do
+              {:ok, _} = insert_space_base(db, space_id, updates.base_id, now)
             end
 
-            # TODO: don't return workspace - move this to separate function?
-            {:ok, workspace} = get_workspace_by_id(db, workspace_id)
+            # TODO: don't return space - move this to separate function?
+            {:ok, space} = get_space_by_id(db, space_id)
 
-            {:ok, workspace}
+            {:ok, space}
           end
       end
     end)
   end
 
-  def pause_workspace(db, workspace_id) do
+  def pause_space(db, space_id) do
     with_transaction(db, fn ->
-      case get_workspace_by_id(db, workspace_id) do
+      case get_space_by_id(db, space_id) do
         {:ok, nil} ->
           {:error, :not_found}
 
@@ -232,7 +232,7 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :active}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :paused, current_timestamp())
+          {:ok, _} = insert_space_state(db, space_id, :paused, current_timestamp())
           :ok
 
         {:ok, %{state: :paused}} ->
@@ -241,9 +241,9 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def resume_workspace(db, workspace_id) do
+  def resume_space(db, space_id) do
     with_transaction(db, fn ->
-      case get_workspace_by_id(db, workspace_id) do
+      case get_space_by_id(db, space_id) do
         {:ok, nil} ->
           {:error, :not_found}
 
@@ -251,7 +251,7 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :paused}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :active, current_timestamp())
+          {:ok, _} = insert_space_state(db, space_id, :active, current_timestamp())
           :ok
 
         {:ok, %{state: :active}} ->
@@ -260,9 +260,9 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def archive_workspace(db, workspace_id) do
+  def archive_space(db, space_id) do
     with_transaction(db, fn ->
-      case get_workspace_by_id(db, workspace_id) do
+      case get_space_by_id(db, space_id) do
         {:ok, nil} ->
           {:error, :not_found}
 
@@ -270,13 +270,13 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, _} ->
-          case has_active_child_workspaces?(db, workspace_id) do
+          case has_active_child_spaces?(db, space_id) do
             {:ok, true} ->
               {:error, :descendants}
 
             {:ok, false} ->
               {:ok, _} =
-                insert_workspace_state(db, workspace_id, :archived, current_timestamp())
+                insert_space_state(db, space_id, :archived, current_timestamp())
 
               :ok
           end
@@ -284,7 +284,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def update_pool(db, workspace_id, pool_name, pool) do
+  def update_pool(db, space_id, pool_name, pool) do
     # TODO: validate pool (check launcher is specified)
 
     with_transaction(db, fn ->
@@ -297,7 +297,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
 
       {existing_pool_id, existing_pool_definition_id} =
-        case get_latest_pool(db, workspace_id, pool_name) do
+        case get_latest_pool(db, space_id, pool_name) do
           {:ok, {existing_pool_id, existing_pool_definition_id}} ->
             {existing_pool_id, existing_pool_definition_id}
 
@@ -306,7 +306,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
 
       if pool_definition_id != existing_pool_definition_id do
-        insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, now)
+        insert_space_pool(db, space_id, pool_name, pool_definition_id, now)
       else
         {:ok, existing_pool_id}
       end
@@ -319,7 +319,7 @@ defmodule Coflux.Orchestration.Workspaces do
 
   defp validate_name(name, db) do
     if is_valid_name?(name) do
-      case workspace_name_used?(db, name) do
+      case space_name_used?(db, name) do
         {:ok, false} -> :ok
         {:ok, true} -> {:error, :exists}
       end
@@ -328,29 +328,29 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp get_ancestor_ids(db, workspace_id, ancestor_ids \\ []) do
-    case get_workspace_by_id(db, workspace_id) do
+  defp get_ancestor_ids(db, space_id, ancestor_ids \\ []) do
+    case get_space_by_id(db, space_id) do
       {:ok, %{base_id: nil}} ->
         {:ok, ancestor_ids}
 
       {:ok, %{base_id: base_id}} ->
-        get_ancestor_ids(db, base_id, [workspace_id | ancestor_ids])
+        get_ancestor_ids(db, base_id, [space_id | ancestor_ids])
     end
   end
 
-  defp validate_base_id(base_id, db, workspace_id \\ nil) do
+  defp validate_base_id(base_id, db, space_id \\ nil) do
     if is_nil(base_id) do
       :ok
     else
-      case get_workspace_by_id(db, base_id) do
+      case get_space_by_id(db, base_id) do
         {:ok, base} ->
           if !base || base.state == :archived do
             {:error, :invalid}
           else
-            if workspace_id do
+            if space_id do
               case get_ancestor_ids(db, base_id) do
                 {:ok, ancestor_ids} ->
-                  if workspace_id in ancestor_ids do
+                  if space_id in ancestor_ids do
                     {:error, :invalid}
                   else
                     :ok
@@ -502,17 +502,17 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp get_latest_pool(db, workspace_id, pool_name) do
+  defp get_latest_pool(db, space_id, pool_name) do
     query_one(
       db,
       """
       SELECT id, pool_definition_id
       FROM pools
-      WHERE workspace_id = ?1 AND name = ?2
+      WHERE space_id = ?1 AND name = ?2
       ORDER BY created_at DESC
       LIMIT 1
       """,
-      {workspace_id, pool_name}
+      {space_id, pool_name}
     )
   end
 
@@ -560,33 +560,33 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp insert_workspace_state(db, workspace_id, state, created_at) do
-    insert_one(db, :workspace_states, %{
-      workspace_id: workspace_id,
+  defp insert_space_state(db, space_id, state, created_at) do
+    insert_one(db, :space_states, %{
+      space_id: space_id,
       state: encode_state(state),
       created_at: created_at
     })
   end
 
-  defp insert_workspace_name(db, workspace_id, name, created_at) do
-    insert_one(db, :workspace_names, %{
-      workspace_id: workspace_id,
+  defp insert_space_name(db, space_id, name, created_at) do
+    insert_one(db, :space_names, %{
+      space_id: space_id,
       name: name,
       created_at: created_at
     })
   end
 
-  defp insert_workspace_base(db, workspace_id, base_id, created_at) do
-    insert_one(db, :workspace_bases, %{
-      workspace_id: workspace_id,
+  defp insert_space_base(db, space_id, base_id, created_at) do
+    insert_one(db, :space_bases, %{
+      space_id: space_id,
       base_id: base_id,
       created_at: created_at
     })
   end
 
-  defp insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, created_at) do
+  defp insert_space_pool(db, space_id, pool_name, pool_definition_id, created_at) do
     insert_one(db, :pools, %{
-      workspace_id: workspace_id,
+      space_id: space_id,
       name: pool_name,
       pool_definition_id: pool_definition_id,
       created_at: created_at

@@ -17,14 +17,14 @@ import { findKey } from "lodash";
 import TargetsList from "../components/TargetsList";
 import { useTitlePart } from "../components/TitleContext";
 import {
-  useWorkspaces,
+  useSpaces,
   usePools,
   useProjects,
   useModules,
   useSessions,
 } from "../topics";
 import Header from "../components/Header";
-import AgentsList from "../components/AgentsList";
+import WorkersList from "../components/WorkersList";
 import * as api from "../api";
 import { buildUrl } from "../utils";
 import Button from "../components/common/Button";
@@ -33,20 +33,20 @@ import { Transition } from "@headlessui/react";
 
 type SidebarProps = {
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   active: Active;
   open: boolean;
 };
 
-function Sidebar({ projectId, workspaceName, active, open }: SidebarProps) {
-  const workspaces = useWorkspaces(projectId);
-  const workspaceId = findKey(
-    workspaces,
-    (e) => e.name == workspaceName && e.state != "archived",
+function Sidebar({ projectId, spaceName, active, open }: SidebarProps) {
+  const spaces = useSpaces(projectId);
+  const spaceId = findKey(
+    spaces,
+    (e) => e.name == spaceName && e.state != "archived",
   );
-  const modules = useModules(projectId, workspaceId);
-  const pools = usePools(projectId, workspaceId);
-  const sessions = useSessions(projectId, workspaceId);
+  const modules = useModules(projectId, spaceId);
+  const pools = usePools(projectId, spaceId);
+  const sessions = useSessions(projectId, spaceId);
   return (
     <Transition
       as={Fragment}
@@ -67,7 +67,7 @@ function Sidebar({ projectId, workspaceName, active, open }: SidebarProps) {
                   <div className="flex-1 overflow-auto min-h-0">
                     <TargetsList
                       projectId={projectId}
-                      workspaceName={workspaceName}
+                      spaceName={spaceName}
                       activeModule={
                         active?.[0] == "module" || active?.[0] == "target"
                           ? active?.[1]
@@ -94,10 +94,10 @@ function Sidebar({ projectId, workspaceName, active, open }: SidebarProps) {
               ) : null}
             </div>
             <div className="flex flex-col max-h-[1/3] overflow-auto">
-              <AgentsList
+              <WorkersList
                 pools={pools}
                 projectId={projectId}
-                workspaceName={workspaceName}
+                spaceName={spaceName}
                 activePool={active?.[0] == "pool" ? active?.[1] : undefined}
                 sessions={sessions}
               />
@@ -122,7 +122,7 @@ type OutletContext = {
 export default function ProjectLayout() {
   const { project: projectId } = useParams();
   const [searchParams] = useSearchParams();
-  const workspaceName = searchParams.get("workspace") || undefined;
+  const spaceName = searchParams.get("space") || undefined;
   const [active, setActive] = useState<Active>();
   const projects = useProjects();
   const project = (projectId && projects && projects[projectId]) || undefined;
@@ -133,29 +133,26 @@ export default function ProjectLayout() {
     () => setSidebarOpen(!sidebarOpen),
     [sidebarOpen, setSidebarOpen],
   );
-  useTitlePart(
-    project && workspaceName && `${project.name} (${workspaceName})`,
-  );
+  useTitlePart(project && spaceName && `${project.name} (${spaceName})`);
   useEffect(() => {
-    if (projectId && !workspaceName) {
+    if (projectId && !spaceName) {
       // TODO: handle error
-      api.getWorkspaces(projectId).then((workspaces) => {
-        // TODO: better way to choose workspace
-        const defaultWorkspaceName = Object.values(workspaces)[0].name;
-        navigate(
-          buildUrl(location.pathname, { workspace: defaultWorkspaceName }),
-          { replace: true },
-        );
+      api.getSpaces(projectId).then((spaces) => {
+        // TODO: better way to choose space
+        const defaultSpaceName = Object.values(spaces)[0].name;
+        navigate(buildUrl(location.pathname, { space: defaultSpaceName }), {
+          replace: true,
+        });
       });
     }
-  }, [navigate, location, projectId, workspaceName]);
+  }, [navigate, location, projectId, spaceName]);
   return (
     <Fragment>
-      <Header projectId={projectId!} activeWorkspaceName={workspaceName} />
+      <Header projectId={projectId!} activeSpaceName={spaceName} />
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <Sidebar
           projectId={projectId!}
-          workspaceName={workspaceName!}
+          spaceName={spaceName!}
           active={active}
           open={sidebarOpen}
         />

@@ -1,4 +1,3 @@
-from .agent import Agent
 from .context import (
     asset,
     checkpoint,
@@ -12,6 +11,7 @@ from .context import (
 )
 from .decorators import sensor, stub, task, workflow
 from .models import Asset, Execution
+from .worker import Worker
 
 __all__ = [
     "workflow",
@@ -29,5 +29,5 @@ __all__ = [
     "asset",
     "Execution",
     "Asset",
-    "Agent",
+    "Worker",
 ]

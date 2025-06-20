@@ -33,24 +33,24 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_workspaces"]) do
+  defp handle(req, "GET", ["get_spaces"]) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
 
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
-        case Orchestration.get_workspaces(project_id) do
-          {:ok, workspaces} ->
+        case Orchestration.get_spaces(project_id) do
+          {:ok, spaces} ->
             json_response(
               req,
-              Map.new(workspaces, fn {workspace_id, workspace} ->
+              Map.new(spaces, fn {space_id, space} ->
                 base_id =
-                  if workspace.base_id,
-                    do: Integer.to_string(workspace.base_id)
+                  if space.base_id,
+                    do: Integer.to_string(space.base_id)
 
-                {workspace_id,
+                {space_id,
                  %{
-                   "name" => workspace.name,
+                   "name" => space.name,
                    "baseId" => base_id
                  }}
               end)
@@ -62,7 +62,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["create_workspace"]) do
+  defp handle(req, "POST", ["create_space"]) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -76,13 +76,13 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.create_workspace(
+      case Orchestration.create_space(
              arguments.project_id,
              arguments.name,
              arguments[:base_id]
            ) do
-        {:ok, workspace_id} ->
-          json_response(req, %{id: workspace_id})
+        {:ok, space_id} ->
+          json_response(req, %{id: space_id})
 
         {:error, errors} ->
           errors =
@@ -98,13 +98,13 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["update_workspace"]) do
+  defp handle(req, "POST", ["update_space"]) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
         %{
           project_id: "projectId",
-          workspace_id: {"workspaceId", &parse_numeric_id/1}
+          space_id: {"spaceId", &parse_numeric_id/1}
         },
         %{
           name: "name",
@@ -113,9 +113,9 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.update_workspace(
+      case Orchestration.update_space(
              arguments.project_id,
-             arguments.workspace_id,
+             arguments.space_id,
              Map.take(arguments, [:name, :base_id])
            ) do
         :ok ->
@@ -138,17 +138,17 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["pause_workspace"]) do
+  defp handle(req, "POST", ["pause_space"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
+        space_id: {"spaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.pause_workspace(
+      case Orchestration.pause_space(
              arguments.project_id,
-             arguments.workspace_id
+             arguments.space_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -161,17 +161,17 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["resume_workspace"]) do
+  defp handle(req, "POST", ["resume_space"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
+        space_id: {"spaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_workspace(
+      case Orchestration.resume_space(
              arguments.project_id,
-             arguments.workspace_id
+             arguments.space_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -184,23 +184,23 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["archive_workspace"]) do
+  defp handle(req, "POST", ["archive_space"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
+        space_id: {"spaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_workspace(
+      case Orchestration.archive_space(
              arguments.project_id,
-             arguments.workspace_id
+             arguments.space_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
 
         {:error, :descendants} ->
-          json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
+          json_error_response(req, "bad_request", details: %{"spaceId" => "has_dependencies"})
 
         {:error, :not_found} ->
           json_error_response(req, "not_found", code: 404)
@@ -214,7 +214,7 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
+        space_name: "spaceName",
         pool_name: {"poolName", &parse_pool_name/1},
         pool: {"pool", &parse_pool/1}
       })
@@ -222,7 +222,7 @@ defmodule Coflux.Handlers.Api do
     if Enum.empty?(errors) do
       case Orchestration.update_pool(
              arguments.project_id,
-             arguments.workspace_name,
+             arguments.space_name,
              arguments.pool_name,
              arguments.pool
            ) do
@@ -237,19 +237,19 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["stop_agent"]) do
+  defp handle(req, "POST", ["stop_worker"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
-        agent_id: {"agentId", &parse_numeric_id/1}
+        space_name: "spaceName",
+        worker_id: {"workerId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.stop_agent(
+      case Orchestration.stop_worker(
              arguments.project_id,
-             arguments.workspace_name,
-             arguments.agent_id
+             arguments.space_name,
+             arguments.worker_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -262,19 +262,19 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["resume_agent"]) do
+  defp handle(req, "POST", ["resume_worker"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
-        agent_id: {"agentId", &parse_numeric_id/1}
+        space_name: "spaceName",
+        worker_id: {"workerId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_agent(
+      case Orchestration.resume_worker(
              arguments.project_id,
-             arguments.workspace_name,
-             arguments.agent_id
+             arguments.space_name,
+             arguments.worker_id
            ) do
         :ok ->
           :cowboy_req.reply(204, req)
@@ -291,14 +291,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
+        space_name: "spaceName",
         manifests: {"manifests", &parse_manifests/1}
       })
 
     if Enum.empty?(errors) do
       case Orchestration.register_manifests(
              arguments.project_id,
-             arguments.workspace_name,
+             arguments.space_name,
              arguments.manifests
            ) do
         :ok ->
@@ -313,14 +313,14 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
+        space_name: "spaceName",
         module_name: "moduleName"
       })
 
     if Enum.empty?(errors) do
       case Orchestration.archive_module(
              arguments.project_id,
-             arguments.workspace_name,
+             arguments.space_name,
              arguments.module_name
            ) do
         :ok ->
@@ -334,11 +334,11 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "GET", ["get_workflow"]) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
-    workspace_name = get_query_param(qs, "workspace")
+    space_name = get_query_param(qs, "space")
     module = get_query_param(qs, "module")
     target_name = get_query_param(qs, "target")
 
-    case Orchestration.get_workflow(project_id, workspace_name, module, target_name) do
+    case Orchestration.get_workflow(project_id, space_name, module, target_name) do
       {:ok, nil} ->
         json_error_response(req, "not_found", status: 404)
 
@@ -355,7 +355,7 @@ defmodule Coflux.Handlers.Api do
           project_id: "projectId",
           module: "module",
           target: "target",
-          workspace_name: "workspaceName",
+          space_name: "spaceName",
           arguments: {"arguments", &parse_arguments/1}
         },
         %{
@@ -375,7 +375,7 @@ defmodule Coflux.Handlers.Api do
              arguments.target,
              :workflow,
              arguments.arguments,
-             workspace: arguments.workspace_name,
+             space: arguments.space_name,
              execute_after: arguments[:execute_after],
              wait_for: arguments[:wait_for],
              cache: arguments[:cache],
@@ -404,7 +404,7 @@ defmodule Coflux.Handlers.Api do
           project_id: "projectId",
           module: "module",
           target: "target",
-          workspace_name: "workspaceName",
+          space_name: "spaceName",
           arguments: {"arguments", &parse_arguments/1}
         },
         %{
@@ -419,7 +419,7 @@ defmodule Coflux.Handlers.Api do
              arguments.target,
              :sensor,
              arguments.arguments,
-             workspace: arguments.workspace_name,
+             space: arguments.space_name,
              requires: arguments[:requires]
            ) do
         {:ok, run_id, step_id, execution_id} ->
@@ -461,7 +461,7 @@ defmodule Coflux.Handlers.Api do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
-        workspace_name: "workspaceName",
+        space_name: "spaceName",
         step_id: "stepId"
       })
 
@@ -469,13 +469,13 @@ defmodule Coflux.Handlers.Api do
       case Orchestration.rerun_step(
              arguments.project_id,
              arguments.step_id,
-             arguments.workspace_name
+             arguments.space_name
            ) do
         {:ok, execution_id, attempt} ->
           json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
 
-        {:error, :workspace_invalid} ->
-          json_error_response(req, "bad_request", details: %{"workspace" => "invalid"})
+        {:error, :space_invalid} ->
+          json_error_response(req, "bad_request", details: %{"space" => "invalid"})
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -486,12 +486,12 @@ defmodule Coflux.Handlers.Api do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     # TODO: handle parse error
-    {:ok, workspace_id} = parse_numeric_id(get_query_param(qs, "workspaceId"))
+    {:ok, space_id} = parse_numeric_id(get_query_param(qs, "spaceId"))
     query = get_query_param(qs, "query")
 
     case Topical.execute(
            Coflux.TopicalRegistry,
-           ["projects", project_id, "search", workspace_id],
+           ["projects", project_id, "search", space_id],
            "query",
            {query}
          ) do

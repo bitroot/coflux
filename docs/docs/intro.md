@@ -15,5 +15,5 @@ The first section in this guide describes the steps involved in defining and run
 1. [Installing the Python package](./getting_started/install.md)
 2. [Starting the server](./getting_started/server.md)
 3. [Defining a workflow](./getting_started/workflows.md)
-4. [Running an agent](./getting_started/agents.md)
+4. [Running a worker](./getting_started/workers.md)
 5. [Submitting and observing a run](./getting_started/runs.md)

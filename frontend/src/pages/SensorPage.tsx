@@ -5,7 +5,7 @@ import { Navigate, useParams, useSearchParams } from "react-router-dom";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { buildUrl } from "../utils";
 import Loading from "../components/Loading";
-import { useWorkspaces, useSensor } from "../topics";
+import { useSpaces, useSensor } from "../topics";
 import { useTitlePart } from "../components/TitleContext";
 import SensorHeader from "../components/SensorHeader";
 
@@ -16,18 +16,13 @@ export default function SensorPage() {
     target: targetName,
   } = useParams();
   const [searchParams] = useSearchParams();
-  const activeWorkspaceName = searchParams.get("workspace") || undefined;
-  const workspaces = useWorkspaces(projectId);
-  const activeWorkspaceId = findKey(
-    workspaces,
-    (e) => e.name == activeWorkspaceName && e.state != "archived",
+  const activeSpaceName = searchParams.get("space") || undefined;
+  const spaces = useSpaces(projectId);
+  const activeSpaceId = findKey(
+    spaces,
+    (e) => e.name == activeSpaceName && e.state != "archived",
   );
-  const sensor = useSensor(
-    projectId,
-    moduleName,
-    targetName,
-    activeWorkspaceId,
-  );
+  const sensor = useSensor(projectId, moduleName, targetName, activeSpaceId);
   useTitlePart(`${targetName} (${moduleName})`);
   useSetActive(
     moduleName && targetName ? ["target", moduleName, targetName] : undefined,
@@ -44,7 +39,7 @@ export default function SensorPage() {
         <Navigate
           replace
           to={buildUrl(`/projects/${projectId}/runs/${latestRunId}`, {
-            workspace: activeWorkspaceName,
+            space: activeSpaceName,
           })}
         />
       );
@@ -55,8 +50,8 @@ export default function SensorPage() {
             module={moduleName}
             target={targetName}
             projectId={projectId!}
-            activeWorkspaceId={activeWorkspaceId}
-            activeWorkspaceName={activeWorkspaceName}
+            activeSpaceId={activeSpaceId}
+            activeSpaceName={activeSpaceName}
           />
           <div className="p-5 flex-1 flex flex-col gap-2 items-center justify-center text-slate-300">
             <h1 className="text-2xl">This sensor hasn't been run yet</h1>

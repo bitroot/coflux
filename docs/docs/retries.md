@@ -1,6 +1,6 @@
 # Automatic retries
 
-A step can fail for a number of reasons. One case is where an exception is raised in the code. Other cases might involve network issues, or an agent restarting while executing (causing the execution to be identified as 'abandoned').
+A step can fail for a number of reasons. One case is where an exception is raised in the code. Other cases might involve network issues, or a worker restarting while executing (causing the execution to be identified as 'abandoned').
 
 By default, Coflux takes a cautious _at-most-once_ approach to execution, to avoid unintentionally executing a task that might have significant side-effects more than once.
 

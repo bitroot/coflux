@@ -50,8 +50,8 @@ import RunLogs from "./RunLogs";
 import StepLink from "./StepLink";
 import AssetLink from "./AssetLink";
 import AssetIcon from "./AssetIcon";
-import WorkspaceLabel from "./WorkspaceLabel";
-import { useWorkspaces, useLogs } from "../topics";
+import SpaceLabel from "./SpaceLabel";
+import { useSpaces, useLogs } from "../topics";
 import Tabs, { Tab } from "./common/Tabs";
 import Select from "./common/Select";
 import Value from "./Value";
@@ -59,12 +59,12 @@ import TagSet from "./TagSet";
 import ExecutionStatus from "./ExecutionStatus";
 import { getAssetName } from "../assets";
 
-function getRunWorkspaceId(run: models.Run) {
+function getRunSpaceId(run: models.Run) {
   const initialStepId = minBy(
     Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
     (stepId) => run.steps[stepId].createdAt,
   )!;
-  return run.steps[initialStepId].executions[1].workspaceId;
+  return run.steps[initialStepId].executions[1].spaceId;
 }
 
 function getNextPrevious(
@@ -90,7 +90,7 @@ function getNextPrevious(
 
 type NextPreviousButtonProps = {
   direction: "next" | "previous";
-  activeWorkspaceName: string | undefined;
+  activeSpaceName: string | undefined;
   stepId: string;
   currentAttempt: number;
   executions: Record<number, models.Execution>;
@@ -100,7 +100,7 @@ type NextPreviousButtonProps = {
 
 function NextPreviousButton({
   direction,
-  activeWorkspaceName,
+  activeSpaceName,
   stepId,
   currentAttempt,
   executions,
@@ -124,7 +124,7 @@ function NextPreviousButton({
         variant="secondary"
         outline={true}
         to={buildUrl(location.pathname, {
-          workspace: activeWorkspaceName,
+          space: activeSpaceName,
           step: stepId,
           attempt,
           tab: activeTab,
@@ -170,7 +170,7 @@ function AttemptSelectorOption({
 
 type AttemptSelectorProps = {
   selected: number;
-  activeWorkspaceName: string | undefined;
+  activeSpaceName: string | undefined;
   stepId: string;
   step: models.Step;
   activeTab: number;
@@ -179,7 +179,7 @@ type AttemptSelectorProps = {
 
 function AttemptSelector({
   selected,
-  activeWorkspaceName,
+  activeSpaceName,
   stepId,
   step,
   activeTab,
@@ -190,7 +190,7 @@ function AttemptSelector({
     <div className="flex shadow-xs">
       <NextPreviousButton
         direction="previous"
-        activeWorkspaceName={activeWorkspaceName}
+        activeSpaceName={activeSpaceName}
         stepId={stepId}
         currentAttempt={selected}
         executions={step.executions}
@@ -225,7 +225,7 @@ function AttemptSelector({
                 <MenuItem key={attempt}>
                   <Link
                     to={buildUrl(location.pathname, {
-                      workspace: activeWorkspaceName,
+                      space: activeSpaceName,
                       step: stepId,
                       attempt,
                       tab: activeTab,
@@ -250,7 +250,7 @@ function AttemptSelector({
       </Menu>
       <NextPreviousButton
         direction="next"
-        activeWorkspaceName={activeWorkspaceName}
+        activeSpaceName={activeSpaceName}
         stepId={stepId}
         currentAttempt={selected}
         executions={step.executions}
@@ -261,23 +261,23 @@ function AttemptSelector({
   );
 }
 
-function getWorkspaceDescendantIds(
-  workspaces: Record<string, models.Workspace>,
+function getSpaceDescendantIds(
+  spaces: Record<string, models.Space>,
   parentId: string | null,
 ): string[] {
-  return Object.entries(workspaces)
+  return Object.entries(spaces)
     .filter(([, e]) => e.baseId == parentId && e.state != "archived")
-    .flatMap(([workspaceId]) => [
-      workspaceId,
-      ...getWorkspaceDescendantIds(workspaces, workspaceId),
+    .flatMap(([spaceId]) => [
+      spaceId,
+      ...getSpaceDescendantIds(spaces, spaceId),
     ]);
 }
 
-function getWorkspaceOptions(
-  workspaces: Record<string, models.Workspace>,
+function getSpaceOptions(
+  spaces: Record<string, models.Space>,
   parentId: string,
 ) {
-  return [parentId, ...getWorkspaceDescendantIds(workspaces, parentId)];
+  return [parentId, ...getSpaceDescendantIds(spaces, parentId)];
 }
 
 function getBaseExecution(step: models.Step, run: models.Run) {
@@ -296,41 +296,40 @@ type RerunButtonProps = {
   run: models.Run;
   stepId: string;
   step: models.Step;
-  executionWorkspaceId: string;
-  workspaces: Record<string, models.Workspace> | undefined;
-  onRerunStep: (stepId: string, workspaceName: string) => Promise<unknown>;
+  executionSpaceId: string;
+  spaces: Record<string, models.Space> | undefined;
+  onRerunStep: (stepId: string, spaceName: string) => Promise<unknown>;
 };
 
 function RerunButton({
   run,
   stepId,
   step,
-  executionWorkspaceId,
-  workspaces,
+  executionSpaceId,
+  spaces,
   onRerunStep,
 }: RerunButtonProps) {
   const [rerunning, setRerunning] = useState(false);
-  const baseWorkspaceId = getBaseExecution(step, run).workspaceId;
-  const [workspaceId, setWorkspaceId] = useState<string>(executionWorkspaceId);
-  const childWorkspaceIds =
-    workspaces && getWorkspaceOptions(workspaces, baseWorkspaceId);
-  const workspaceOptions = (childWorkspaceIds || []).reduce(
-    (acc, workspaceId) => ({
+  const baseSpaceId = getBaseExecution(step, run).spaceId;
+  const [spaceId, setSpaceId] = useState<string>(executionSpaceId);
+  const childSpaceIds = spaces && getSpaceOptions(spaces, baseSpaceId);
+  const spaceOptions = (childSpaceIds || []).reduce(
+    (acc, spaceId) => ({
       ...acc,
-      [workspaceId]: workspaces![workspaceId].name,
+      [spaceId]: spaces![spaceId].name,
     }),
     {},
   );
   const handleRerunClick = useCallback(
     (close: () => void) => {
-      const workspaceName = workspaces![workspaceId || baseWorkspaceId].name;
+      const spaceName = spaces![spaceId || baseSpaceId].name;
       setRerunning(true);
-      onRerunStep(stepId, workspaceName).finally(() => {
+      onRerunStep(stepId, spaceName).finally(() => {
         setRerunning(false);
         close();
       });
     },
-    [workspaces, workspaceId, baseWorkspaceId, onRerunStep, stepId],
+    [spaces, spaceId, baseSpaceId, onRerunStep, stepId],
   );
   return (
     <div className="flex shadow-xs relative">
@@ -356,9 +355,9 @@ function RerunButton({
               <div className="absolute border-b-10 border-b-white border-x-transparent border-x-10 top-[-10px] right-[30px] w-[20px] h-[10px]"></div>
               <div className="flex items-center gap-1">
                 <Select
-                  options={workspaceOptions}
-                  value={workspaceId}
-                  onChange={setWorkspaceId}
+                  options={spaceOptions}
+                  value={spaceId}
+                  onChange={setSpaceId}
                   className="flex-1"
                 />
                 <Button
@@ -378,42 +377,42 @@ function RerunButton({
 
 type HeaderProps = {
   projectId: string;
-  activeWorkspaceId: string;
-  runWorkspaceId: string;
+  activeSpaceId: string;
+  runSpaceId: string;
   run: models.Run;
   stepId: string;
   step: models.Step;
   attempt: number;
-  workspaces: Record<string, models.Workspace> | undefined;
+  spaces: Record<string, models.Space> | undefined;
   activeTab: number;
   maximised: boolean;
   onRerunStep: (
     stepId: string,
-    workspaceName: string,
+    spaceName: string,
   ) => Promise<{ attempt: number }>;
 };
 
 function Header({
   projectId,
-  activeWorkspaceId,
-  runWorkspaceId,
+  activeSpaceId,
+  runSpaceId,
   run,
   stepId,
   step,
   attempt,
-  workspaces,
+  spaces,
   activeTab,
   maximised,
   onRerunStep,
 }: HeaderProps) {
-  const activeWorkspaceName = workspaces?.[activeWorkspaceId].name;
+  const activeSpaceName = spaces?.[activeSpaceId].name;
   const navigate = useNavigate();
   const location = useLocation();
   const changeAttempt = useCallback(
-    (attempt: number, workspaceName?: string) => {
+    (attempt: number, spaceName?: string) => {
       navigate(
         buildUrl(location.pathname, {
-          workspace: workspaceName || activeWorkspaceName,
+          space: spaceName || activeSpaceName,
           step: stepId,
           attempt,
           tab: activeTab,
@@ -421,22 +420,22 @@ function Header({
         }),
       );
     },
-    [stepId, activeWorkspaceName, navigate, location, activeTab, maximised],
+    [stepId, activeSpaceName, navigate, location, activeTab, maximised],
   );
   const handleRerunStep = useCallback(
-    (stepId: string, workspaceName: string) => {
-      return onRerunStep(stepId, workspaceName).then(({ attempt }) => {
+    (stepId: string, spaceName: string) => {
+      return onRerunStep(stepId, spaceName).then(({ attempt }) => {
         // TODO: wait for attempt to be synced to topic
-        changeAttempt(attempt, workspaceName);
+        changeAttempt(attempt, spaceName);
       });
     },
     [changeAttempt, onRerunStep],
   );
-  const executionWorkspaceId = step.executions[attempt]?.workspaceId;
+  const executionSpaceId = step.executions[attempt]?.spaceId;
   const handleMaximiseClick = useCallback(() => {
     navigate(
       buildUrl(location.pathname, {
-        workspace: activeWorkspaceName,
+        space: activeSpaceName,
         step: stepId,
         attempt,
         tab: activeTab,
@@ -446,7 +445,7 @@ function Header({
   }, [
     navigate,
     location,
-    activeWorkspaceName,
+    activeSpaceName,
     stepId,
     attempt,
     activeTab,
@@ -455,10 +454,10 @@ function Header({
   const handleCloseClick = useCallback(() => {
     navigate(
       buildUrl(location.pathname, {
-        workspace: activeWorkspaceName,
+        space: activeSpaceName,
       }),
     );
-  }, [navigate, location, activeWorkspaceName]);
+  }, [navigate, location, activeSpaceName]);
   return (
     <div className="p-4 flex items-start">
       <div className="flex-1 flex flex-col gap-2">
@@ -494,8 +493,8 @@ function Header({
               run={run}
               stepId={stepId}
               step={step}
-              executionWorkspaceId={executionWorkspaceId}
-              workspaces={workspaces}
+              executionSpaceId={executionSpaceId}
+              spaces={spaces}
               onRerunStep={handleRerunStep}
             />
             <Button
@@ -525,17 +524,17 @@ function Header({
         <div className="flex flex-wrap items-center gap-2">
           <AttemptSelector
             selected={attempt}
-            activeWorkspaceName={activeWorkspaceName}
+            activeSpaceName={activeSpaceName}
             stepId={stepId}
             activeTab={activeTab}
             maximised={maximised}
             step={step}
           />
-          {executionWorkspaceId != runWorkspaceId && (
-            <WorkspaceLabel
+          {executionSpaceId != runSpaceId && (
+            <SpaceLabel
               projectId={projectId}
-              workspaceId={executionWorkspaceId}
-              warning="This execution ran in a different workspace"
+              spaceId={executionSpaceId}
+              warning="This execution ran in a different space"
             />
           )}
         </div>
@@ -1197,16 +1196,16 @@ type LogsSectionProps = {
   projectId: string;
   runId: string;
   execution: models.Execution;
-  activeWorkspaceId: string;
+  activeSpaceId: string;
 };
 
 function LogsSection({
   projectId,
   runId,
   execution,
-  activeWorkspaceId,
+  activeSpaceId,
 }: LogsSectionProps) {
-  const logs = useLogs(projectId, runId, activeWorkspaceId);
+  const logs = useLogs(projectId, runId, activeSpaceId);
   const executionLogs =
     logs && logs.filter((l) => l[0] == execution.executionId);
   const scheduledAt = DateTime.fromMillis(
@@ -1249,12 +1248,12 @@ type Props = {
   attempt: number;
   run: models.Run;
   projectId: string;
-  activeWorkspaceId: string;
+  activeSpaceId: string;
   className?: string;
   style?: CSSProperties;
   onRerunStep: (
     stepId: string,
-    workspaceName: string,
+    spaceName: string,
   ) => Promise<{ attempt: number }>;
   activeTab: number;
   maximised: boolean;
@@ -1266,7 +1265,7 @@ export default function StepDetail({
   attempt,
   run,
   projectId,
-  activeWorkspaceId,
+  activeSpaceId,
   className,
   style,
   onRerunStep,
@@ -1275,16 +1274,16 @@ export default function StepDetail({
 }: Props) {
   const step = run.steps[stepId];
   const execution: models.Execution | undefined = step.executions[attempt];
-  const runWorkspaceId = getRunWorkspaceId(run);
+  const runSpaceId = getRunSpaceId(run);
   const navigate = useNavigate();
   const location = useLocation();
-  const workspaces = useWorkspaces(projectId);
-  const activeWorkspaceName = workspaces?.[activeWorkspaceId].name;
+  const spaces = useSpaces(projectId);
+  const activeSpaceName = spaces?.[activeSpaceId].name;
   const handleTabChange = useCallback(
     (tab: number) => {
       navigate(
         buildUrl(location.pathname, {
-          workspace: activeWorkspaceName,
+          space: activeSpaceName,
           step: stepId,
           attempt,
           tab,
@@ -1292,19 +1291,19 @@ export default function StepDetail({
         }),
       );
     },
-    [navigate, location, activeWorkspaceName, stepId, attempt, maximised],
+    [navigate, location, activeSpaceName, stepId, attempt, maximised],
   );
   return (
     <div className={classNames("flex flex-col", className)} style={style}>
       <Header
         projectId={projectId}
-        activeWorkspaceId={activeWorkspaceId}
-        runWorkspaceId={runWorkspaceId}
+        activeSpaceId={activeSpaceId}
+        runSpaceId={runSpaceId}
         run={run}
         stepId={stepId}
         step={step}
         attempt={attempt}
-        workspaces={workspaces}
+        spaces={spaces}
         onRerunStep={onRerunStep}
         activeTab={activeTab}
         maximised={maximised}
@@ -1354,7 +1353,7 @@ export default function StepDetail({
               projectId={projectId}
               runId={runId}
               execution={execution}
-              activeWorkspaceId={activeWorkspaceId}
+              activeSpaceId={activeSpaceId}
             />
           )}
         </StepDetailTab>

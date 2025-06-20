@@ -14,7 +14,7 @@ Build Docker image:
 docker build -t coflux_wikipedia .
 ```
 
-Run agent:
+Run worker:
 
 ```bash
 docker run --rm -t \

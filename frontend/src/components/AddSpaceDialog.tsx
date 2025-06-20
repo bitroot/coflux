@@ -15,23 +15,23 @@ import { randomName } from "../utils";
 function translateError(error: string | undefined) {
   switch (error) {
     case "invalid":
-      return "Invalid workspace name";
+      return "Invalid space name";
     case "exists":
-      return "Workspace already exists";
+      return "Space already exists";
     default:
       return error;
   }
 }
 
 type Props = {
-  workspaces: Record<string, models.Workspace>;
+  spaces: Record<string, models.Space>;
   open: boolean;
   hideCancel?: boolean;
   onClose: () => void;
 };
 
-export default function AddWorkspaceDialog({
-  workspaces,
+export default function AddSpaceDialog({
+  spaces,
   open,
   hideCancel,
   onClose,
@@ -48,9 +48,9 @@ export default function AddWorkspaceDialog({
       setAdding(true);
       setErrors(undefined);
       api
-        .createWorkspace(activeProjectId!, name, baseId)
+        .createSpace(activeProjectId!, name, baseId)
         .then(() => {
-          navigate(`/projects/${activeProjectId}?workspace=${name}`);
+          navigate(`/projects/${activeProjectId}?space=${name}`);
           setName(randomName());
           setBaseId(null);
           onClose();
@@ -69,12 +69,12 @@ export default function AddWorkspaceDialog({
     },
     [navigate, name, baseId, activeProjectId, onClose],
   );
-  const workspaceNames = Object.entries(workspaces)
+  const spaceNames = Object.entries(spaces)
     .filter(([, e]) => e.state != "archived")
     .reduce((acc, [id, e]) => ({ ...acc, [id]: e.name }), {});
   return (
     <Dialog
-      title="Add workspace"
+      title="Add space"
       open={open}
       size="md"
       className="p-6"
@@ -82,11 +82,11 @@ export default function AddWorkspaceDialog({
     >
       {errors && (
         <Alert variant="warning">
-          <p>Failed to create workspace. Please check errors below.</p>
+          <p>Failed to create space. Please check errors below.</p>
         </Alert>
       )}
       <form onSubmit={handleSubmit}>
-        <Field label="Workspace name" error={translateError(errors?.workspace)}>
+        <Field label="Space name" error={translateError(errors?.space)}>
           <Input
             type="text"
             value={name}
@@ -94,9 +94,9 @@ export default function AddWorkspaceDialog({
             onChange={setName}
           />
         </Field>
-        <Field label="Base workspace" error={translateError(errors?.base)}>
+        <Field label="Base space" error={translateError(errors?.base)}>
           <Select
-            options={workspaceNames}
+            options={spaceNames}
             empty="(None)"
             size="md"
             value={baseId}

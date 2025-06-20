@@ -5,7 +5,7 @@ import { findKey } from "lodash";
 
 import { randomName } from "../utils";
 import CodeBlock from "../components/CodeBlock";
-import { useWorkspaces, useProjects, useModules } from "../topics";
+import { useSpaces, useProjects, useModules } from "../topics";
 import {
   Disclosure,
   DisclosureButton,
@@ -56,21 +56,21 @@ function Step({ title, children }: StepProps) {
 
 type GettingStartedProps = {
   projectId: string;
-  workspaceId: string | undefined;
+  spaceId: string | undefined;
 };
 
-function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
+function GettingStarted({ projectId, spaceId }: GettingStartedProps) {
   const projects = useProjects();
   const project = (projectId && projects && projects[projectId]) || undefined;
   const packageName = generatePackageName(project?.name);
-  const workspaces = useWorkspaces(projectId);
-  const workspaceName = workspaceId && workspaces?.[workspaceId].name;
-  const exampleWorkspaceName = useMemo(() => randomName(), []);
+  const spaces = useSpaces(projectId);
+  const spaceName = spaceId && spaces?.[spaceId].name;
+  const exampleSpaceName = useMemo(() => randomName(), []);
   const exampleModuleName = `${packageName}.workflows`;
-  const anyWorkspaces =
-    workspaces &&
-    Object.values(workspaces).filter((e) => e.state != "archived").length > 0;
-  if (anyWorkspaces) {
+  const anySpaces =
+    spaces &&
+    Object.values(spaces).filter((e) => e.state != "archived").length > 0;
+  if (anySpaces) {
     return (
       <div className="overflow-auto">
         <div className="bg-slate-50 border border-slate-100 rounded-lg mx-auto my-6 w-2/3 p-3 text-slate-600">
@@ -91,7 +91,7 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
                 className="bg-slate-100"
                 prompt="$"
                 code={[
-                  `coflux configure \\\n  --host=${window.location.host} \\\n  --project=${projectId} \\\n  --workspace=${workspaceName || exampleWorkspaceName}`,
+                  `coflux configure \\\n  --host=${window.location.host} \\\n  --project=${projectId} \\\n  --space=${spaceName || exampleSpaceName}`,
                 ]}
               />
               <Hint>
@@ -114,18 +114,18 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
                 ]}
               />
             </Step>
-            <Step title="Run the agent">
+            <Step title="Run the worker">
               <CodeBlock
                 className="bg-slate-100"
                 prompt="$"
-                code={[`coflux agent --dev ${exampleModuleName}`]}
+                code={[`coflux worker --dev ${exampleModuleName}`]}
               />
               <Hint>
                 <p>
                   The <code className="bg-slate-100">--dev</code> flag enables
                   file watching and automatic module registration (equivalent to{" "}
                   <code className="bg-slate-100">--reload</code> and{" "}
-                  <code className="bg-slate-100">--register</code>) - the agent
+                  <code className="bg-slate-100">--register</code>) - the worker
                   will automatically restart when changes to the source code are
                   detected, and automtically register workflow definitions.
                 </p>
@@ -146,8 +146,8 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
               />
               <Hint>
                 <p>
-                  When you save the file, the workspace will automatically
-                  appear in the sidebar.
+                  When you save the file, the space will automatically appear in
+                  the sidebar.
                 </p>
               </Hint>
             </Step>
@@ -163,19 +163,19 @@ function GettingStarted({ projectId, workspaceId }: GettingStartedProps) {
 export default function ProjectPage() {
   const { project: projectId } = useParams();
   const [searchParams] = useSearchParams();
-  const workspaceName = searchParams.get("workspace") || undefined;
-  const workspaces = useWorkspaces(projectId);
-  const workspaceId = findKey(
-    workspaces,
-    (e) => e.name == workspaceName && e.state != "archived",
+  const spaceName = searchParams.get("space") || undefined;
+  const spaces = useSpaces(projectId);
+  const spaceId = findKey(
+    spaces,
+    (e) => e.name == spaceName && e.state != "archived",
   );
-  const modules = useModules(projectId, workspaceId);
+  const modules = useModules(projectId, spaceId);
   if (
     projectId &&
     modules &&
     !Object.values(modules).some((r) => r.workflows.length || r.sensors.length)
   ) {
-    return <GettingStarted projectId={projectId} workspaceId={workspaceId} />;
+    return <GettingStarted projectId={projectId} spaceId={spaceId} />;
   } else {
     return <div></div>;
   }

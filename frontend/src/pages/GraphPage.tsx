@@ -5,12 +5,12 @@ import { minBy } from "lodash";
 import RunGraph from "../components/RunGraph";
 import { useContext } from "../layouts/RunLayout";
 
-function getRunWorkspaceId(run: models.Run) {
+function getRunSpaceId(run: models.Run) {
   const initialStepId = minBy(
     Object.keys(run.steps).filter((id) => !run.steps[id].parentId),
     (stepId) => run.steps[stepId].createdAt,
   )!;
-  return run.steps[initialStepId].executions[1].workspaceId;
+  return run.steps[initialStepId].executions[1].spaceId;
 }
 
 export default function GraphPage() {
@@ -30,7 +30,7 @@ export default function GraphPage() {
       runId={runId!}
       activeStepId={activeStepId}
       activeAttempt={activeAttempt}
-      runWorkspaceId={getRunWorkspaceId(run)}
+      runSpaceId={getRunSpaceId(run)}
     />
   );
 }

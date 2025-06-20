@@ -23,7 +23,7 @@ import {
   useState,
 } from "react";
 import * as api from "../api";
-import { useWorkspaces } from "../topics";
+import { useSpaces } from "../topics";
 import { Link, useNavigate } from "react-router-dom";
 
 type Run = {
@@ -69,17 +69,17 @@ function MatchOption({ icon: Icon, name, hint, href }: MatchOptionProps) {
   );
 }
 
-function buildRunUrl(projectId: string, workspaceName: string, run: Run) {
-  return `/projects/${projectId}/runs/${run.runId}?workspace=${workspaceName}&step=${run.stepId}&attempt=${run.attempt}`;
+function buildRunUrl(projectId: string, spaceName: string, run: Run) {
+  return `/projects/${projectId}/runs/${run.runId}?space=${spaceName}&step=${run.stepId}&attempt=${run.attempt}`;
 }
 
 type Props = {
   projectId: string;
-  workspaceId: string;
+  spaceId: string;
 };
 
-export default function SearchInput({ projectId, workspaceId }: Props) {
-  const workspaces = useWorkspaces(projectId);
+export default function SearchInput({ projectId, spaceId }: Props) {
+  const spaces = useSpaces(projectId);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController>(null);
@@ -111,14 +111,14 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
     [navigate],
   );
   const performSearch = useCallback(
-    (projectId: string, workspaceId: string, query: string) => {
+    (projectId: string, spaceId: string, query: string) => {
       abortControllerRef.current?.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
       setError(undefined);
       setLoading(true);
       api
-        .search(projectId, workspaceId, query)
+        .search(projectId, spaceId, query)
         .then((data) => setMatches(data.matches))
         .catch(setError)
         .finally(() => setLoading(false));
@@ -136,15 +136,15 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
     if (query) {
       setLoading(true);
       debounceTimeoutRef.current = setTimeout(() => {
-        performSearch(projectId, workspaceId, query);
+        performSearch(projectId, spaceId, query);
       }, 200);
     } else {
       abortControllerRef.current?.abort();
       setLoading(false);
       setMatches(undefined);
     }
-  }, [projectId, workspaceId, query, performSearch]);
-  const workspaceName = workspaces?.[workspaceId].name;
+  }, [projectId, spaceId, query, performSearch]);
+  const spaceName = spaces?.[spaceId].name;
   return (
     <Combobox immediate onChange={handleChange}>
       <div className="flex items-center p-1 mr-1 gap-2 bg-slate-100 rounded-lg flex-1 max-w-56 text-left text-inherit text-sm relative">
@@ -181,7 +181,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
                   <MatchOption
                     icon={IconBox}
                     name={match.name}
-                    href={`/projects/${projectId}/modules/${match.name}?workspace=${workspaceName}`}
+                    href={`/projects/${projectId}/modules/${match.name}?space=${spaceName}`}
                   />
                 ) : match.type == "workflow" ? (
                   <MatchOption
@@ -190,8 +190,8 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
                     hint={match.module}
                     href={
                       match.run
-                        ? buildRunUrl(projectId, workspaceName!, match.run)
-                        : `/projects/${projectId}/workflows/${match.module}/${match.name}?workspace=${workspaceName}`
+                        ? buildRunUrl(projectId, spaceName!, match.run)
+                        : `/projects/${projectId}/workflows/${match.module}/${match.name}?space=${spaceName}`
                     }
                   />
                 ) : match.type == "sensor" ? (
@@ -201,8 +201,8 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
                     hint={match.module}
                     href={
                       match.run
-                        ? buildRunUrl(projectId, workspaceName!, match.run)
-                        : `/projects/${projectId}/sensors/${match.module}/${match.name}?workspace=${workspaceName}`
+                        ? buildRunUrl(projectId, spaceName!, match.run)
+                        : `/projects/${projectId}/sensors/${match.module}/${match.name}?space=${spaceName}`
                     }
                   />
                 ) : match.type == "task" && match.run ? (
@@ -210,7 +210,7 @@ export default function SearchInput({ projectId, workspaceId }: Props) {
                     icon={IconPoint}
                     name={match.name}
                     hint={match.module}
-                    href={buildRunUrl(projectId, workspaceName!, match.run)}
+                    href={buildRunUrl(projectId, spaceName!, match.run)}
                   />
                 ) : null}
               </Fragment>

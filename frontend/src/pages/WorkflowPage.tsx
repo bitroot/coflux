@@ -5,7 +5,7 @@ import { Navigate, useParams, useSearchParams } from "react-router-dom";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { buildUrl } from "../utils";
 import Loading from "../components/Loading";
-import { useWorkspaces, useWorkflow } from "../topics";
+import { useSpaces, useWorkflow } from "../topics";
 import { useTitlePart } from "../components/TitleContext";
 import WorkflowHeader from "../components/WorkflowHeader";
 
@@ -16,17 +16,17 @@ export default function WorkflowPage() {
     target: targetName,
   } = useParams();
   const [searchParams] = useSearchParams();
-  const activeWorkspaceName = searchParams.get("workspace") || undefined;
-  const workspaces = useWorkspaces(projectId);
-  const activeWorkspaceId = findKey(
-    workspaces,
-    (e) => e.name == activeWorkspaceName && e.state != "archived",
+  const activeSpaceName = searchParams.get("space") || undefined;
+  const spaces = useSpaces(projectId);
+  const activeSpaceId = findKey(
+    spaces,
+    (e) => e.name == activeSpaceName && e.state != "archived",
   );
   const workflow = useWorkflow(
     projectId,
     moduleName,
     targetName,
-    activeWorkspaceId,
+    activeSpaceId,
   );
   useTitlePart(`${targetName} (${moduleName})`);
   useSetActive(
@@ -44,7 +44,7 @@ export default function WorkflowPage() {
         <Navigate
           replace
           to={buildUrl(`/projects/${projectId}/runs/${latestRunId}`, {
-            workspace: activeWorkspaceName,
+            space: activeSpaceName,
           })}
         />
       );
@@ -55,8 +55,8 @@ export default function WorkflowPage() {
             module={moduleName}
             target={targetName}
             projectId={projectId!}
-            activeWorkspaceId={activeWorkspaceId}
-            activeWorkspaceName={activeWorkspaceName}
+            activeSpaceId={activeSpaceId}
+            activeSpaceName={activeSpaceName}
           />
           <div className="p-4 flex-1 flex flex-col gap-2 items-center justify-center text-center text-slate-300">
             <h1 className="text-2xl">This workflow hasn't been run yet</h1>

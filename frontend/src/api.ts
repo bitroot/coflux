@@ -50,55 +50,55 @@ export function createProject(projectName: string) {
   return post("create_project", { projectName });
 }
 
-export function createWorkspace(
+export function createSpace(
   projectId: string,
   name: string,
   baseId: string | null,
 ) {
-  return post("create_workspace", { projectId, name, baseId });
+  return post("create_space", { projectId, name, baseId });
 }
 
-export function pauseWorkspace(projectId: string, workspaceId: string) {
-  return post("pause_workspace", { projectId, workspaceId });
+export function pauseSpace(projectId: string, spaceId: string) {
+  return post("pause_space", { projectId, spaceId });
 }
 
-export function resumeWorkspace(projectId: string, workspaceId: string) {
-  return post("resume_workspace", { projectId, workspaceId });
+export function resumeSpace(projectId: string, spaceId: string) {
+  return post("resume_space", { projectId, spaceId });
 }
 
 export function archiveModule(
   projectId: string,
-  workspaceName: string,
+  spaceName: string,
   moduleName: string,
 ) {
   return post("archive_module", {
     projectId,
-    workspaceName,
+    spaceName,
     moduleName,
   });
 }
 
-export function stopAgent(
+export function stopWorker(
   projectId: string,
-  workspaceName: string,
-  agentId: string,
+  spaceName: string,
+  workerId: string,
 ) {
-  return post("stop_agent", {
+  return post("stop_worker", {
     projectId,
-    workspaceName,
-    agentId,
+    spaceName,
+    workerId,
   });
 }
 
-export function resumeAgent(
+export function resumeWorker(
   projectId: string,
-  workspaceName: string,
-  agentId: string,
+  spaceName: string,
+  workerId: string,
 ) {
-  return post("resume_agent", {
+  return post("resume_worker", {
     projectId,
-    workspaceName,
-    agentId,
+    spaceName,
+    workerId,
   });
 }
 
@@ -106,7 +106,7 @@ export function submitWorkflow(
   projectId: string,
   module: string,
   target: string,
-  workspaceName: string,
+  spaceName: string,
   arguments_: ["json", string][],
   options?: Partial<{
     waitFor: number[];
@@ -133,7 +133,7 @@ export function submitWorkflow(
     projectId,
     module,
     target,
-    workspaceName,
+    spaceName,
     arguments: arguments_,
   });
 }
@@ -142,7 +142,7 @@ export function startSensor(
   projectId: string,
   module: string,
   target: string,
-  workspaceName: string,
+  spaceName: string,
   arguments_: ["json", string][],
   options?: Partial<{
     requires: Record<string, string[]>;
@@ -153,7 +153,7 @@ export function startSensor(
     projectId,
     module,
     target,
-    workspaceName,
+    spaceName,
     arguments: arguments_,
   });
 }
@@ -161,23 +161,23 @@ export function startSensor(
 export function rerunStep(
   projectId: string,
   stepId: string,
-  workspaceName: string,
+  spaceName: string,
 ): Promise<{ attempt: number }> {
-  return post("rerun_step", { projectId, stepId, workspaceName });
+  return post("rerun_step", { projectId, stepId, spaceName });
 }
 
 export function cancelExecution(projectId: string, executionId: string) {
   return post("cancel_execution", { projectId, executionId });
 }
 
-export function search(projectId: string, workspaceId: string, query: string) {
-  return get("search", { project: projectId, workspaceId, query });
+export function search(projectId: string, spaceId: string, query: string) {
+  return get("search", { project: projectId, spaceId, query });
 }
 
-export function getWorkspaces(
+export function getSpaces(
   projectId: string,
-): Promise<Record<string, Pick<models.Workspace, "name" | "baseId">>> {
-  return get("get_workspaces", { project: projectId });
+): Promise<Record<string, Pick<models.Space, "name" | "baseId">>> {
+  return get("get_spaces", { project: projectId });
 }
 
 export function getAsset(

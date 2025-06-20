@@ -14,7 +14,7 @@ Build Docker image:
 docker build -t coflux_slackbot .
 ```
 
-Run agent:
+Run worker:
 
 ```bash
 docker run --rm -t \

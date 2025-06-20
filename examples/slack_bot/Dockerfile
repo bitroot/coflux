@@ -1,8 +1,8 @@
 FROM python:3.11
 
 ENV POETRY_VIRTUALENVS_CREATE=false \
-  POETRY_HOME=/usr/local \
-  PYTHONPATH=/app
+    POETRY_HOME=/usr/local \
+    PYTHONPATH=/app
 
 RUN curl -sSL https://install.python-poetry.org | python3 -
 
@@ -13,4 +13,4 @@ RUN poetry install --no-interaction --no-ansi
 
 COPY . ./
 
-ENTRYPOINT ["coflux", "agent", "slackbot.workflows"]
+ENTRYPOINT ["coflux", "worker", "slackbot.workflows"]

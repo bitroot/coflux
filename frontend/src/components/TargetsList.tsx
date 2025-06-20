@@ -51,7 +51,7 @@ type ModuleHeaderProps = {
   module: models.Module;
   isActive: boolean;
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   now: DateTime<true>;
 };
 
@@ -60,7 +60,7 @@ function ModuleHeader({
   module,
   isActive,
   projectId,
-  workspaceName,
+  spaceName,
   now,
 }: ModuleHeaderProps) {
   const nextDueDiff = module.nextDueAt
@@ -75,7 +75,7 @@ function ModuleHeader({
     <Link
       to={buildUrl(
         `/projects/${projectId}/modules/${encodeURIComponent(moduleName)}`,
-        { workspace: workspaceName },
+        { space: spaceName },
       )}
       className={classNames(
         "flex-1 rounded-md",
@@ -126,20 +126,20 @@ function ModuleHeader({
 
 type ModuleMenuProps = {
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   moduleName: string;
 };
 
-function ModuleMenu({ projectId, workspaceName, moduleName }: ModuleMenuProps) {
+function ModuleMenu({ projectId, spaceName, moduleName }: ModuleMenuProps) {
   const handleArchiveClick = useCallback(() => {
     if (
       confirm(
         `Are you sure you want to archive '${moduleName}'? It will be hidden until it's re-registered.`,
       )
     ) {
-      api.archiveModule(projectId, workspaceName, moduleName);
+      api.archiveModule(projectId, spaceName, moduleName);
     }
-  }, [projectId, workspaceName, moduleName]);
+  }, [projectId, spaceName, moduleName]);
   return (
     <Menu>
       <MenuButton className="text-slate-600 p-1 hover:bg-slate-200 rounded-sm">
@@ -168,7 +168,7 @@ function ModuleMenu({ projectId, workspaceName, moduleName }: ModuleMenuProps) {
 
 type Props = {
   projectId: string;
-  workspaceName: string;
+  spaceName: string;
   activeModule: string | undefined;
   activeTarget: string | undefined;
   modules: Record<string, models.Module>;
@@ -176,7 +176,7 @@ type Props = {
 
 export default function TargetsList({
   projectId,
-  workspaceName,
+  spaceName,
   activeModule,
   activeTarget,
   modules,
@@ -193,12 +193,12 @@ export default function TargetsList({
                 module={module}
                 isActive={activeModule == moduleName && !activeTarget}
                 projectId={projectId}
-                workspaceName={workspaceName}
+                spaceName={spaceName}
                 now={now}
               />
               <ModuleMenu
                 projectId={projectId}
-                workspaceName={workspaceName}
+                spaceName={spaceName}
                 moduleName={moduleName}
               />
             </div>
@@ -216,7 +216,7 @@ export default function TargetsList({
                         `/projects/${projectId}/workflows/${encodeURIComponent(
                           moduleName,
                         )}/${name}`,
-                        { workspace: workspaceName },
+                        { space: spaceName },
                       )}
                       isActive={isActive}
                     />
@@ -234,7 +234,7 @@ export default function TargetsList({
                         `/projects/${projectId}/sensors/${encodeURIComponent(
                           moduleName,
                         )}/${name}`,
-                        { workspace: workspaceName },
+                        { space: spaceName },
                       )}
                       isActive={isActive}
                     />

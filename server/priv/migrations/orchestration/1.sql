@@ -70,37 +70,37 @@ CREATE TABLE sensors (
   FOREIGN KEY (parameter_set_id) REFERENCES parameter_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE workspaces (id INTEGER PRIMARY KEY) STRICT;
+CREATE TABLE spaces (id INTEGER PRIMARY KEY) STRICT;
 
-CREATE TABLE workspace_manifests (
-  workspace_id INTEGER NOT NULL,
+CREATE TABLE space_manifests (
+  space_id INTEGER NOT NULL,
   module TEXT NOT NULL,
   manifest_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE workspace_states (
-  workspace_id INTEGER NOT NULL,
+CREATE TABLE space_states (
+  space_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: archived
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE workspace_names (
-  workspace_id INTEGER NOT NULL,
+CREATE TABLE space_names (
+  space_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE workspace_bases (
-  workspace_id INTEGER NOT NULL,
+CREATE TABLE space_bases (
+  space_id INTEGER NOT NULL,
   base_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
-  FOREIGN KEY (base_id) REFERENCES workspaces ON DELETE CASCADE
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
+  FOREIGN KEY (base_id) REFERENCES spaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE launchers (
@@ -127,72 +127,72 @@ CREATE TABLE pool_definition_modules (
 
 CREATE TABLE pools (
   id INTEGER PRIMARY KEY,
-  workspace_id INTEGER NOT NULL,
+  space_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   pool_definition_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
   FOREIGN KEY (pool_definition_id) REFERENCES pool_definitions ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE agents (
+CREATE TABLE workers (
   id INTEGER PRIMARY KEY,
   pool_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (pool_id) REFERENCES pools ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE agent_launch_results (
-  agent_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_launch_results (
+  worker_id INTEGER PRIMARY KEY,
   data BLOB,
   error TEXT,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents,
+  FOREIGN KEY (worker_id) REFERENCES workers,
   CHECK (
     data IS NULL
     OR error IS NULL
   )
 ) STRICT;
 
-CREATE TABLE agent_states (
-  agent_id INTEGER NOT NULL,
+CREATE TABLE worker_states (
+  worker_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: draining
   -- TODO: reason? (0: user, 1: scaling down?, 2: config update?)
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
-CREATE TABLE agent_stops (
+CREATE TABLE worker_stops (
   id INTEGER PRIMARY KEY,
-  agent_id INTEGER NOT NULL,
+  worker_id INTEGER NOT NULL,
   -- TODO: reason? (manual, scaling down, pool removed, ?)
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
-CREATE TABLE agent_stop_results (
-  agent_stop_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_stop_results (
+  worker_stop_id INTEGER PRIMARY KEY,
   error TEXT,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (agent_stop_id) REFERENCES agent_stops
+  FOREIGN KEY (worker_stop_id) REFERENCES worker_stops
 ) STRICT;
 
-CREATE TABLE agent_deactivations (
-  agent_id INTEGER PRIMARY KEY,
+CREATE TABLE worker_deactivations (
+  worker_id INTEGER PRIMARY KEY,
   created_at INTEGER NOT NULL,
   -- TODO: reason?
-  FOREIGN KEY (agent_id) REFERENCES agents
+  FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
 CREATE TABLE sessions (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
-  workspace_id INTEGER NOT NULL,
-  agent_id INTEGER,
+  space_id INTEGER NOT NULL,
+  worker_id INTEGER,
   provides_tag_set_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
-  FOREIGN KEY (agent_id) REFERENCES agents ON DELETE RESTRICT,
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
+  FOREIGN KEY (worker_id) REFERENCES workers ON DELETE RESTRICT,
   FOREIGN KEY (provides_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
@@ -249,12 +249,12 @@ CREATE TABLE executions (
   id INTEGER PRIMARY KEY,
   step_id INTEGER NOT NULL,
   attempt INTEGER NOT NULL,
-  workspace_id INTEGER NOT NULL,
+  space_id INTEGER NOT NULL,
   execute_after INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE (step_id, attempt),
   FOREIGN KEY (step_id) REFERENCES steps ON DELETE CASCADE,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
+  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE assets (
