@@ -77,31 +77,31 @@ defmodule Coflux.Orchestration.Workers do
            db,
            """
            SELECT
-             l.id,
-             l.created_at,
+             w.id,
+             w.created_at,
              p.id,
              p.name,
              p.space_id,
-             (SELECT ls.state
-               FROM worker_states AS ls
-               WHERE ls.worker_id = l.id
-               ORDER BY ls.created_at DESC
+             (SELECT ws.state
+               FROM worker_states AS ws
+               WHERE ws.worker_id = w.id
+               ORDER BY ws.created_at DESC
                LIMIT 1) AS state,
              r.data
-           FROM workers AS l
-           INNER JOIN pools AS p ON p.id = l.pool_id
-           LEFT JOIN worker_launch_results AS r ON r.worker_id = l.id
+           FROM workers AS w
+           INNER JOIN pools AS p ON p.id = w.pool_id
+           LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
            LEFT JOIN worker_stops AS s ON s.id = (
              SELECT id
              FROM worker_stops
-             WHERE worker_id = l.id
+             WHERE worker_id = w.id
              ORDER BY created_at DESC
              LIMIT 1
            )
            LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
-           LEFT JOIN worker_deactivations AS d ON d.worker_id = l.id
+           LEFT JOIN worker_deactivations AS d ON d.worker_id = w.id
            WHERE d.created_at IS NULL
-           ORDER BY l.created_at DESC
+           ORDER BY w.created_at DESC
            """
          ) do
       {:ok, rows} ->
@@ -121,21 +121,21 @@ defmodule Coflux.Orchestration.Workers do
     query(
       db,
       """
-      SELECT l.id, l.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error, d.created_at
-      FROM workers AS l
-      INNER JOIN pools AS p ON p.id = l.pool_id
-      LEFT JOIN worker_launch_results AS r ON r.worker_id = l.id
+      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error, d.created_at
+      FROM workers AS w
+      INNER JOIN pools AS p ON p.id = w.pool_id
+      LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
       LEFT JOIN worker_stops AS s ON s.id = (
         SELECT id
         FROM worker_stops
-        WHERE worker_id = l.id
+        WHERE worker_id = w.id
         ORDER BY created_at DESC
         LIMIT 1
       )
       LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
-      LEFT JOIN worker_deactivations AS d ON d.worker_id = l.id
+      LEFT JOIN worker_deactivations AS d ON d.worker_id = w.id
       WHERE p.name = ?1
-      ORDER BY l.created_at DESC
+      ORDER BY w.created_at DESC
       LIMIT ?2
       """,
       {pool_name, limit}
