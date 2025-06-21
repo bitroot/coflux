@@ -37,9 +37,8 @@ def _encode_provides(
     if not provides:
         return None
     return tuple(
-        f"{k}:{str(v).lower() if isinstance(v, bool) else v}"
+        f"{k}:{','.join((str(v).lower() if isinstance(v, bool) else v) for v in (vs if isinstance(vs, list) else [vs]))}"
         for k, vs in provides.items()
-        for v in (vs if isinstance(vs, list) else [vs])
     )
 
 
@@ -47,9 +46,10 @@ def _parse_provides(argument: tuple[str, ...] | None) -> dict[str, list[str]]:
     if not argument:
         return {}
     result: dict[str, list[str]] = {}
-    for part in (p for a in argument for p in a.split(" ") if p):
-        key, value = part.split(":", 1) if ":" in part else (part, "true")
-        result.setdefault(key, []).append(value)
+    for part in (p for a in argument for p in a.split(";") if p):
+        key, values = part.split(":", 1) if ":" in part else (part, "true")
+        for value in values.split(","):
+            result.setdefault(key, []).append(value)
     return result
 
 
@@ -156,6 +156,28 @@ def _register_manifests(
             "manifests": manifests,
         },
     )
+
+
+def _truncate(text: str, max_width: int) -> str:
+    if max_width is None or len(text) <= max_width:
+        return text
+    return text[: max_width - 1] + "…"
+
+
+def _print_table(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    max_width: int = 30,
+) -> None:
+    if max_width is not None:
+        headers = tuple(_truncate(h, max_width) for h in headers)
+        rows = [tuple(_truncate(cell, max_width) for cell in row) for row in rows]
+    widths = [max(len(col_val) for col_val in col) for col in zip(headers, *rows)]
+    click.echo(
+        "  ".join(click.style(h.ljust(w), bold=True) for h, w in zip(headers, widths))
+    )
+    for row in rows:
+        click.echo("  ".join(str(cell).ljust(w) for cell, w in zip(row, widths)))
 
 
 def _init(
@@ -318,6 +340,47 @@ def spaces():
     Manage spaces.
     """
     pass
+
+
+@spaces.command("list")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+def spaces_list(
+    project: str,
+    host: str,
+):
+    """
+    Lists spaces.
+    """
+    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    if spaces:
+        # TODO: draw as tree
+        _print_table(
+            ("Name", "Base"),
+            [
+                (
+                    space["name"],
+                    spaces[space["baseId"]]["name"] if space["baseId"] else "(None)",
+                )
+                for space in spaces.values()
+            ],
+        )
 
 
 @spaces.command("create")
@@ -517,6 +580,59 @@ def pools():
     Manage pools.
     """
     pass
+
+
+@pools.command("list")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-w",
+    "--space",
+    help="Space name",
+    envvar="COFLUX_SPACE",
+    default=_load_config().space,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+def pools_list(project: str, space: str, host: str):
+    """
+    Lists pools.
+    """
+    pools = _api_request(
+        "GET",
+        host,
+        "get_pools",
+        json={"projectId": project, "spaceName": space},
+    )
+    if pools:
+        _print_table(
+            ("Name", "Launcher", "Modules", "Provides"),
+            [
+                (
+                    pool_name,
+                    pool["launcherType"],
+                    ",".join(pool["modules"]),
+                    " ".join(_encode_provides(pool["provides"]) or []),
+                )
+                for pool_name, pool in pools.items()
+            ],
+        )
 
 
 @pools.command("update")

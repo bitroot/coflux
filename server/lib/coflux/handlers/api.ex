@@ -210,6 +210,35 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "GET", ["get_pools"]) do
+    {:ok, arguments, errors, req} =
+      read_arguments(req, %{
+        project_id: "projectId",
+        space_name: "spaceName"
+      })
+
+    if Enum.empty?(errors) do
+      case Orchestration.get_pools(arguments.project_id, arguments.space_name) do
+        {:ok, pools} ->
+          json_response(
+            req,
+            Map.new(pools, fn {pool_name, pool} ->
+              {
+                pool_name,
+                %{
+                  "provides" => pool.provides,
+                  "modules" => pool.modules,
+                  "launcherType" => pool.launcher.type
+                }
+              }
+            end)
+          )
+      end
+    else
+      json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, "POST", ["update_pool"]) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{

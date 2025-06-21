@@ -412,8 +412,8 @@ defmodule Coflux.Orchestration.Spaces do
     data =
       Enum.intersperse(
         [
-          if(launcher_id, do: Integer.to_string(launcher_id), else: ""),
-          Integer.to_string(provides_tag_set_id),
+          Integer.to_string(launcher_id || 0),
+          Integer.to_string(provides_tag_set_id || 0),
           Enum.join(Enum.sort(modules), "\n")
         ],
         0

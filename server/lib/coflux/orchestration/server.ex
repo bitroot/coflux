@@ -284,6 +284,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:get_pools, space_name}, _from, state) do
+    with {:ok, space_id, _} <- lookup_space_by_name(state, space_name) do
+      case Spaces.get_space_pools(state.db, space_id) do
+        {:ok, pools} ->
+          {:reply, {:ok, pools}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
   def handle_call({:update_pool, space_name, pool_name, pool}, _from, state) do
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name) do
       case Spaces.update_pool(state.db, space_id, pool_name, pool) do

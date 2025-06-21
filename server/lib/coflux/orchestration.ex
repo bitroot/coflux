@@ -25,6 +25,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:archive_space, space_name})
   end
 
+  def get_pools(project_id, space_name) do
+    call_server(project_id, {:get_pools, space_name})
+  end
+
   def update_pool(project_id, space_name, pool_name, pool) do
     call_server(project_id, {:update_pool, space_name, pool_name, pool})
   end
