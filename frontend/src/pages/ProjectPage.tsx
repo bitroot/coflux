@@ -146,8 +146,8 @@ function GettingStarted({ projectId, spaceId }: GettingStartedProps) {
               />
               <Hint>
                 <p>
-                  When you save the file, the space will automatically appear in
-                  the sidebar.
+                  When you save the file, the workflow will automatically appear
+                  in the sidebar.
                 </p>
               </Hint>
             </Step>
