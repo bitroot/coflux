@@ -21,5 +21,5 @@ ADD . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked
 
-ENTRYPOINT ["uv", "run", "coflux"]
-CMD ["worker", "app.workflows"]
+ENTRYPOINT ["uv", "run", "coflux", "worker"]
+CMD ["app.workflows"]
