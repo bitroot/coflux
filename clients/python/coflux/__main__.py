@@ -37,9 +37,8 @@ def _encode_provides(
     if not provides:
         return None
     return tuple(
-        f"{k}:{str(v).lower() if isinstance(v, bool) else v}"
+        f"{k}:{','.join((str(v).lower() if isinstance(v, bool) else v) for v in (vs if isinstance(vs, list) else [vs]))}"
         for k, vs in provides.items()
-        for v in (vs if isinstance(vs, list) else [vs])
     )
 
 
@@ -47,9 +46,10 @@ def _parse_provides(argument: tuple[str, ...] | None) -> dict[str, list[str]]:
     if not argument:
         return {}
     result: dict[str, list[str]] = {}
-    for part in (p for a in argument for p in a.split(" ") if p):
-        key, value = part.split(":", 1) if ":" in part else (part, "true")
-        result.setdefault(key, []).append(value)
+    for part in (p for a in argument for p in a.split(";") if p):
+        key, values = part.split(":", 1) if ":" in part else (part, "true")
+        for value in values.split(","):
+            result.setdefault(key, []).append(value)
     return result
 
 
