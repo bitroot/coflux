@@ -194,17 +194,25 @@ export default function PoolPage() {
                   <h3 className="uppercase text-sm font-bold text-slate-400">
                     Modules
                   </h3>
-                  <ul className="list-disc ml-5 marker:text-slate-600">
-                    {pool.pool.modules.map((module) => (
-                      <li key={module}>{module}</li>
-                    ))}
-                  </ul>
+                  {pool.pool.modules.length ? (
+                    <ul className="list-disc ml-5 marker:text-slate-600">
+                      {pool.pool.modules.map((module) => (
+                        <li key={module}>{module}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="italic">None</p>
+                  )}
                 </div>
                 <div>
                   <h3 className="uppercase text-sm font-bold text-slate-400">
                     Provides
                   </h3>
-                  <TagSet tagSet={pool.pool.provides} />
+                  {Object.keys(pool.pool.provides).length ? (
+                    <TagSet tagSet={pool.pool.provides} />
+                  ) : (
+                    <p className="italic">None</p>
+                  )}
                 </div>
                 {pool.pool.launcher && (
                   <div>
