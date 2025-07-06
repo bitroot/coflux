@@ -30,6 +30,57 @@ function findGroup(run: models.Run, identifier: string) {
   return { name, steps };
 }
 
+type StepsListProps = {
+  stepIds: string[];
+  run: models.Run;
+  runId: string;
+  projectId: string;
+};
+
+function StepsList({ stepIds, run, runId, projectId }: StepsListProps) {
+  return (
+    <ul className="flex flex-col mb-3">
+      {stepIds.map((stepId) => {
+        const step = run.steps[stepId];
+        const attempt = max(
+          Object.keys(step.executions).map((a) => parseInt(a, 10)),
+        )!;
+        return (
+          <li key={stepId} className="py-0.5">
+            <StepLink
+              runId={runId}
+              stepId={stepId}
+              attempt={attempt}
+              className={classNames(
+                "px-2 py-1 cursor-pointer rounded-sm flex flex-col data-active:bg-slate-100 hover:bg-slate-50",
+              )}
+              activeClassName="bg-slate-100"
+            >
+              <div>
+                {step.arguments.length > 0 ? (
+                  <ol className="flex flex-wrap gap-x-3 list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
+                    {step.arguments.map((argument, index) => (
+                      <li key={index}>
+                        <Value
+                          value={argument}
+                          projectId={projectId}
+                          className="align-middle"
+                        />
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="text-slate-400 italic text-sm">No arguments</p>
+                )}
+              </div>
+            </StepLink>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 type BranchStatus = ReturnType<typeof getBranchStatus>;
 
 const statusLabels: Record<BranchStatus, string> = {
@@ -55,14 +106,14 @@ const statusIntents: Record<
   assigning: "info",
 };
 
-type StepsListProps = {
+type GroupStepsProps = {
   run: models.Run;
   stepIds: string[];
   runId: string;
   projectId: string;
 };
 
-function StepsList({ run, stepIds, runId, projectId }: StepsListProps) {
+function GroupSteps({ run, stepIds, runId, projectId }: GroupStepsProps) {
   const stepsByStatus: Partial<Record<BranchStatus, string[]>> = groupBy(
     stepIds,
     (stepId) => getBranchStatus(run, stepId),
@@ -104,49 +155,12 @@ function StepsList({ run, stepIds, runId, projectId }: StepsListProps) {
                           <h2 className="font-mono">{target}</h2>
                         </span>
                       </div>
-                      <ul className="flex flex-col mb-3">
-                        {stepIds.map((stepId) => {
-                          const step = run.steps[stepId];
-                          const attempt = max(
-                            Object.keys(step.executions).map((a) =>
-                              parseInt(a, 10),
-                            ),
-                          )!;
-                          return (
-                            <li key={stepId} className="py-0.5">
-                              <StepLink
-                                runId={runId}
-                                stepId={stepId}
-                                attempt={attempt}
-                                className={classNames(
-                                  "px-2 py-1 cursor-pointer rounded-sm flex flex-col data-active:bg-slate-100 hover:bg-slate-50",
-                                )}
-                                activeClassName="bg-slate-100"
-                              >
-                                <div>
-                                  {step.arguments.length > 0 ? (
-                                    <ol className="flex flex-wrap gap-x-3 list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
-                                      {step.arguments.map((argument, index) => (
-                                        <li key={index}>
-                                          <Value
-                                            value={argument}
-                                            projectId={projectId}
-                                            className="align-middle"
-                                          />
-                                        </li>
-                                      ))}
-                                    </ol>
-                                  ) : (
-                                    <p className="text-slate-400 italic text-sm">
-                                      No arguments
-                                    </p>
-                                  )}
-                                </div>
-                              </StepLink>
-                            </li>
-                          );
-                        })}
-                      </ul>
+                      <StepsList
+                        stepIds={stepIds}
+                        run={run}
+                        runId={runId}
+                        projectId={projectId}
+                      />
                     </li>
                   );
                 })}
@@ -189,7 +203,7 @@ export default function GroupDialog({
             {group.name || <em>Unnamed group</em>}
           </h2>
 
-          <StepsList
+          <GroupSteps
             run={run}
             stepIds={group.steps}
             runId={runId}
