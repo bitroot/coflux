@@ -13,7 +13,8 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Worker, blobs, config, decorators, loader, models, utils
+from . import Worker, config, decorators, loader, models, utils
+from .blobs import Manager as BlobManager
 
 T = t.TypeVar("T")
 
@@ -782,6 +783,41 @@ def pools_delete(project: str, space: str, host: str, name: str):
 
 
 @cli.group()
+def blobs():
+    """
+    Manage blobs.
+    """
+    pass
+
+
+@blobs.command("get")
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.argument("key")
+def blobs_get(host: str, key: str):
+    """
+    Gets a blob by key and writes the content to stdout.
+    """
+    config = _load_config()
+    if not config.blobs.stores:
+        raise click.ClickException("Blob store not configured")
+
+    out = click.get_binary_stream("stdout")
+    with BlobManager(config.blobs.stores, host) as blob_manager:
+        blob = blob_manager.get(key)
+        for chunk in iter(lambda: blob.read(64 * 1024), b""):
+            out.write(chunk)
+        out.flush()
+
+
+@cli.group()
 def assets():
     """
     Manage assets.
@@ -885,13 +921,12 @@ def assets_download(
                 raise click.ClickException(f"Cannot overwrite non-file: {path}")
 
     config = _load_config()
-    blob_store_configs = config and config.blobs and config.blobs.stores
-    if not blob_store_configs:
+    if not config.blobs.stores:
         raise click.ClickException("Blob store not configured")
 
     total_size = sum(v["size"] for v in entries.values())
 
-    with blobs.Manager(blob_store_configs, host) as blob_manager:
+    with BlobManager(config.blobs.stores, host) as blob_manager:
         click.echo(f"Downloading {len(entries)} files ({_human_size(total_size)})...")
         # TODO: parallelise downloads
         with click.progressbar(entries.items(), label="") as bar:
