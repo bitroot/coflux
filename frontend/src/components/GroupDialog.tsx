@@ -58,7 +58,7 @@ function StepsList({ stepIds, run, runId, projectId }: StepsListProps) {
             >
               <div>
                 {step.arguments.length > 0 ? (
-                  <ol className="flex flex-wrap gap-x-3 list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
+                  <ol className="flex flex-wrap items-center gap-x-3 list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
                     {step.arguments.map((argument, index) => (
                       <li key={index}>
                         <Value
