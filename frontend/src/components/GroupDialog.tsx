@@ -111,15 +111,28 @@ type GroupStepsProps = {
   stepIds: string[];
   runId: string;
   projectId: string;
+  activeStepId: string | undefined;
 };
 
-function GroupSteps({ run, stepIds, runId, projectId }: GroupStepsProps) {
+function GroupSteps({
+  run,
+  stepIds,
+  runId,
+  projectId,
+  activeStepId,
+}: GroupStepsProps) {
   const stepsByStatus: Partial<Record<BranchStatus, string[]>> = groupBy(
     stepIds,
     (stepId) => getBranchStatus(run, stepId),
   );
+  const defaultIndex =
+    activeStepId !== undefined
+      ? Object.values(stepsByStatus).findIndex((stepIds) =>
+          stepIds.includes(activeStepId),
+        )
+      : undefined;
   return (
-    <Tabs className="px-4">
+    <Tabs className="px-4" defaultIndex={defaultIndex}>
       {Object.entries(stepsByStatus).map(([status, stepIds]) => {
         const stepsByTarget = groupBy(stepIds, (stepId) => {
           const step = run.steps[stepId];
@@ -178,6 +191,7 @@ type Props = {
   run: models.Run;
   identifier: string | null;
   projectId: string;
+  activeStepId: string | undefined;
 };
 
 export default function GroupDialog({
@@ -185,6 +199,7 @@ export default function GroupDialog({
   run,
   identifier,
   projectId,
+  activeStepId,
 }: Props) {
   const [searchParams] = useSearchParams();
   const { pathname } = useLocation();
@@ -208,6 +223,7 @@ export default function GroupDialog({
             stepIds={group.steps}
             runId={runId}
             projectId={projectId}
+            activeStepId={activeStepId}
           />
         </div>
       ) : identifier ? (

@@ -180,6 +180,7 @@ export default function RunLayout() {
           run={run}
           identifier={activeGroupIdentifier}
           projectId={projectId!}
+          activeStepId={activeStepId}
         />
         <div
           className="flex-1 flex flex-col relative"
