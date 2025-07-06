@@ -1587,9 +1587,8 @@ defmodule Coflux.Orchestration.Server do
       end)
 
     {state, assigned, unassigned} =
-      executions_due
-      |> Enum.reverse()
-      |> Enum.reduce(
+      Enum.reduce(
+        executions_due,
         {state, [], []},
         fn
           execution, {state, assigned, unassigned} ->
