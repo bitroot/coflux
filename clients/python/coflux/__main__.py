@@ -189,7 +189,7 @@ def _truncate(text: str, max_width: int) -> str:
 def _print_table(
     headers: tuple[str, ...],
     rows: list[tuple[str, ...]],
-    max_width: int = 30,
+    max_width: int | None = 30,
 ) -> None:
     if max_width is not None:
         headers = tuple(_truncate(h, max_width) for h in headers)
@@ -854,6 +854,62 @@ def _human_size(bytes: int) -> str:
     return f"{bytes:.1f}TiB"
 
 
+@assets.command("inspect")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "--match",
+    help="Glob-style matcher to filter files",
+)
+@click.argument("id")
+def assets_inspect(project: str, host: str, match: str | None, id: str):
+    """
+    Inspect an asset.
+    """
+
+    asset = _get_asset(host, project, id)
+    if not asset:
+        raise click.ClickException(f"Asset '{id}' not found in project")
+
+    click.echo(f"Name: {asset['name'] or '(untitled)'}")
+
+    entries = asset["entries"]
+    if match:
+        matcher = utils.GlobMatcher(match)
+        entries = {k: v for k, v in entries.items() if matcher.match(k)}
+        click.echo(f"Matched {len(entries)} of {len(asset['entries'])} entries.")
+
+    _print_table(
+        ("Path", "Size", "Type", "Blob key"),
+        [
+            (
+                key,
+                _human_size(value["size"]),
+                value["metadata"].get("type") or "(unknown)",
+                value["blobKey"],
+            )
+            for key, value in entries.items()
+        ],
+        max_width=None,
+    )
+
+
 @assets.command("download")
 @click.option(
     "-p",
@@ -884,7 +940,10 @@ def _human_size(bytes: int) -> str:
     is_flag=True,
     help="Overwrites any existing files if present",
 )
-@click.option("--match", help="Glob-style matcher to filter files")
+@click.option(
+    "--match",
+    help="Glob-style matcher to filter files",
+)
 @click.argument("id")
 def assets_download(
     project: str,
