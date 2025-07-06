@@ -13,7 +13,8 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Worker, config, decorators, loader, models
+from . import Worker, config, decorators, loader, models, utils
+from .blobs import Manager as BlobManager
 
 T = t.TypeVar("T")
 
@@ -188,7 +189,7 @@ def _truncate(text: str, max_width: int) -> str:
 def _print_table(
     headers: tuple[str, ...],
     rows: list[tuple[str, ...]],
-    max_width: int = 30,
+    max_width: int | None = 30,
 ) -> None:
     if max_width is not None:
         headers = tuple(_truncate(h, max_width) for h in headers)
@@ -779,6 +780,219 @@ def pools_delete(project: str, space: str, host: str, name: str):
         "update_pool",
         json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
     )
+
+
+@cli.group()
+def blobs():
+    """
+    Manage blobs.
+    """
+    pass
+
+
+@blobs.command("get")
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.argument("key")
+def blobs_get(host: str, key: str):
+    """
+    Gets a blob by key and writes the content to stdout.
+    """
+    config = _load_config()
+    if not config.blobs.stores:
+        raise click.ClickException("Blob store not configured")
+
+    out = click.get_binary_stream("stdout")
+    with BlobManager(config.blobs.stores, host) as blob_manager:
+        blob = blob_manager.get(key)
+        for chunk in iter(lambda: blob.read(64 * 1024), b""):
+            out.write(chunk)
+        out.flush()
+
+
+@cli.group()
+def assets():
+    """
+    Manage assets.
+    """
+    pass
+
+
+def _get_asset(host: str, project_id: str, asset_id: str) -> dict | None:
+    try:
+        return _api_request(
+            "GET",
+            host,
+            "get_asset",
+            params={
+                "project": project_id,
+                "asset": asset_id,
+            },
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        else:
+            raise
+
+
+def _human_size(bytes: int) -> str:
+    if bytes < 1024:
+        return f"{bytes} bytes"
+    value = bytes / 1024
+    for unit in ("KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{value:3.1f}{unit}"
+        value /= 1024
+    return f"{bytes:.1f}TiB"
+
+
+@assets.command("inspect")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "--match",
+    help="Glob-style matcher to filter files",
+)
+@click.argument("id")
+def assets_inspect(project: str, host: str, match: str | None, id: str):
+    """
+    Inspect an asset.
+    """
+
+    asset = _get_asset(host, project, id)
+    if not asset:
+        raise click.ClickException(f"Asset '{id}' not found in project")
+
+    click.echo(f"Name: {asset['name'] or '(untitled)'}")
+
+    entries = asset["entries"]
+    if match:
+        matcher = utils.GlobMatcher(match)
+        entries = {k: v for k, v in entries.items() if matcher.match(k)}
+        click.echo(f"Matched {len(entries)} of {len(asset['entries'])} entries.")
+
+    _print_table(
+        ("Path", "Size", "Type", "Blob key"),
+        [
+            (
+                key,
+                _human_size(value["size"]),
+                value["metadata"].get("type") or "(unknown)",
+                value["blobKey"],
+            )
+            for key, value in entries.items()
+        ],
+        max_width=None,
+    )
+
+
+@assets.command("download")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "--to",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=".",
+    help="The local path to download the contents to",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrites any existing files if present",
+)
+@click.option(
+    "--match",
+    help="Glob-style matcher to filter files",
+)
+@click.argument("id")
+def assets_download(
+    project: str,
+    host: str,
+    to: Path,
+    force: bool,
+    match: str | None,
+    id: str,
+):
+    """
+    Downloads the contents of an asset.
+    """
+
+    asset = _get_asset(host, project, id)
+    if not asset:
+        raise click.ClickException(f"Asset '{id}' not found in project")
+
+    entries = asset["entries"]
+    if match:
+        matcher = utils.GlobMatcher(match)
+        entries = {k: v for k, v in entries.items() if matcher.match(k)}
+        click.echo(f"Matched {len(entries)} of {len(asset['entries'])} entries.")
+
+    if not entries:
+        click.echo("Nothing to download")
+        return
+
+    for key in entries.keys():
+        path = to.joinpath(key)
+        if path.exists():
+            if not force:
+                raise click.ClickException(f"File already exists at path: {path}")
+            elif not path.is_file():
+                raise click.ClickException(f"Cannot overwrite non-file: {path}")
+
+    config = _load_config()
+    if not config.blobs.stores:
+        raise click.ClickException("Blob store not configured")
+
+    total_size = sum(v["size"] for v in entries.values())
+
+    with BlobManager(config.blobs.stores, host) as blob_manager:
+        click.echo(f"Downloading {len(entries)} files ({_human_size(total_size)})...")
+        # TODO: parallelise downloads
+        with click.progressbar(entries.items(), label="") as bar:
+            for key, entry in bar:
+                path = to.joinpath(key)
+                path.parent.mkdir(exist_ok=True, parents=True)
+                blob_manager.download(entry["blobKey"], path)
 
 
 @cli.command("register")
