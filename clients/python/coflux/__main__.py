@@ -158,6 +158,27 @@ def _register_manifests(
     )
 
 
+def _get_pool(
+    host: str, project_id: str, space_name: str, pool_name: str
+) -> dict | None:
+    try:
+        return _api_request(
+            "GET",
+            host,
+            "get_pool",
+            params={
+                "project": project_id,
+                "space": space_name,
+                "pool": pool_name,
+            },
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        else:
+            raise
+
+
 def _truncate(text: str, max_width: int) -> str:
     if max_width is None or len(text) <= max_width:
         return text
@@ -626,7 +647,7 @@ def pools_list(project: str, space: str, host: str):
             [
                 (
                     pool_name,
-                    pool["launcherType"],
+                    pool["launcherType"] or "",
                     ",".join(pool["modules"]),
                     " ".join(_encode_provides(pool["provides"]) or []),
                 )
@@ -669,7 +690,6 @@ def pools_list(project: str, space: str, host: str):
     "--module",
     help="Modules to be hosted by workers in the pool",
     multiple=True,
-    required=True,
 )
 @click.option(
     "--provides",
@@ -677,38 +697,46 @@ def pools_list(project: str, space: str, host: str):
     multiple=True,
 )
 @click.option(
-    "--launcher",
-    type=click.Choice(["docker"]),
-    help="The type of launcher to use",
-)
-@click.option(
-    "--image",
-    help="The Docker image. Only valid for --launcher=docker.",
+    "--docker-image",
+    help="The Docker image.",
 )
 @click.argument("name")
 def pools_update(
     project: str,
     space: str,
     host: str,
-    modules: tuple[str, ...],
+    modules: tuple[str, ...] | None,
     provides: tuple[str, ...] | None,
-    launcher: t.Literal["docker"] | None,
-    image: str | None,
+    docker_image: str | None,
     name: str,
 ):
     """
     Updates a pool.
     """
-    provides_ = _parse_provides(provides)
-    launcher_ = None
-    if launcher == "docker":
-        launcher_ = {"type": "docker", "image": image}
-    pool = {"modules": list(modules), "provides": provides_, "launcher": launcher_}
+    pool = _get_pool(host, project, space, name) or {}
+
+    # TODO: support explicitly unsetting 'provides' (and modules, etc?)
+
+    if modules is not None:
+        pool["modules"] = list(modules)
+    if provides is not None:
+        pool["provides"] = _parse_provides(provides)
+    if docker_image:
+        if "launcher" not in pool or pool["launcher"]["type"] != "docker":
+            pool["launcher"] = {}
+        pool["launcher"]["type"] = "docker"
+        pool["launcher"]["image"] = docker_image
+
     _api_request(
         "POST",
         host,
         "update_pool",
-        json={"projectId": project, "spaceName": space, "poolName": name, "pool": pool},
+        json={
+            "projectId": project,
+            "spaceName": space,
+            "poolName": name,
+            "pool": pool,
+        },
     )
 
 

@@ -38,7 +38,7 @@ defmodule Coflux.Topics.Pools do
     %{
       modules: pool.modules,
       provides: pool.provides,
-      launcher: build_launcher(pool.launcher)
+      launcher: pool.launcher && build_launcher(pool.launcher)
     }
   end
 

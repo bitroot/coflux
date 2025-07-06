@@ -546,7 +546,7 @@ defmodule Coflux.Orchestration.Spaces do
             {:ok, rows} -> Enum.map(rows, fn {pattern} -> pattern end)
           end
 
-        {:ok, launcher} = get_launcher(db, launcher_id)
+        {:ok, launcher} = if launcher_id, do: get_launcher(db, launcher_id), else: {:ok, nil}
 
         {:ok,
          %{

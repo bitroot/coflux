@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useSpaces, usePool } from "../topics";
-import { findKey, sortBy, omitBy } from "lodash";
+import { findKey, sortBy } from "lodash";
 import { useSetActive } from "../layouts/ProjectLayout";
 import { IconLayoutGrid, IconBrandDocker } from "@tabler/icons-react";
 import TagSet from "../components/TagSet";
@@ -167,7 +167,6 @@ export default function PoolPage() {
   if (!pool) {
     return <Loading />;
   } else {
-    const activeWorkers = omitBy(pool.workers, "deactivatedAt");
     return (
       <>
         <div className="flex-1 flex flex-col min-h-0">
@@ -185,7 +184,7 @@ export default function PoolPage() {
                 projectId={projectId!}
                 spaceName={spaceName!}
                 title="Workers"
-                workers={activeWorkers}
+                workers={pool.workers}
               />
             </div>
             {pool.pool && (
@@ -194,17 +193,25 @@ export default function PoolPage() {
                   <h3 className="uppercase text-sm font-bold text-slate-400">
                     Modules
                   </h3>
-                  <ul className="list-disc ml-5 marker:text-slate-600">
-                    {pool.pool.modules.map((module) => (
-                      <li key={module}>{module}</li>
-                    ))}
-                  </ul>
+                  {pool.pool.modules.length ? (
+                    <ul className="list-disc ml-5 marker:text-slate-600">
+                      {pool.pool.modules.map((module) => (
+                        <li key={module}>{module}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="italic">None</p>
+                  )}
                 </div>
                 <div>
                   <h3 className="uppercase text-sm font-bold text-slate-400">
                     Provides
                   </h3>
-                  <TagSet tagSet={pool.pool.provides} />
+                  {Object.keys(pool.pool.provides).length ? (
+                    <TagSet tagSet={pool.pool.provides} />
+                  ) : (
+                    <p className="italic">None</p>
+                  )}
                 </div>
                 {pool.pool.launcher && (
                   <div>

@@ -154,7 +154,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -177,7 +177,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -203,7 +203,7 @@ defmodule Coflux.Handlers.Api do
           json_error_response(req, "bad_request", details: %{"spaceId" => "has_dependencies"})
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -228,7 +228,7 @@ defmodule Coflux.Handlers.Api do
                 %{
                   "provides" => pool.provides,
                   "modules" => pool.modules,
-                  "launcherType" => pool.launcher.type
+                  "launcherType" => if(pool.launcher, do: pool.launcher.type)
                 }
               }
             end)
@@ -236,6 +236,31 @@ defmodule Coflux.Handlers.Api do
       end
     else
       json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "GET", ["get_pool"]) do
+    qs = :cowboy_req.parse_qs(req)
+    project_id = get_query_param(qs, "project")
+    space_name = get_query_param(qs, "space")
+    pool_name = get_query_param(qs, "pool")
+
+    case Orchestration.get_pools(project_id, space_name) do
+      {:ok, pools} ->
+        case Map.fetch(pools, pool_name) do
+          {:ok, pool} ->
+            json_response(
+              req,
+              %{
+                "provides" => pool.provides,
+                "modules" => pool.modules,
+                "launcher" => pool.launcher
+              }
+            )
+
+          :error ->
+            json_error_response(req, "not_found", status: 404)
+        end
     end
   end
 
@@ -259,7 +284,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -284,7 +309,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -309,7 +334,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
