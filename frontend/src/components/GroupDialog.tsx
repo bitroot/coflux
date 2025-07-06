@@ -107,6 +107,16 @@ const statusIntents: Record<
   assigning: "info",
 };
 
+const statuses: BranchStatus[] = [
+  "assigning",
+  "running",
+  "completed",
+  "deferred",
+  "suspended",
+  "aborted",
+  "errored",
+];
+
 type GroupStepsProps = {
   run: models.Run;
   stepIds: string[];
@@ -134,55 +144,58 @@ function GroupSteps({
       : undefined;
   return (
     <Tabs className="px-4" defaultIndex={defaultIndex}>
-      {Object.entries(stepsByStatus).map(([status, stepIds]) => {
-        const stepsByTarget = groupBy(stepIds, (stepId) => {
-          const step = run.steps[stepId];
-          return `${step.module}/${step.target}`;
-        });
-        return (
-          <Tab
-            key={status}
-            label={
-              <>
-                {statusLabels[status as BranchStatus]}{" "}
-                <Badge
-                  label={stepIds.length.toString()}
-                  intent={statusIntents[status as BranchStatus]}
-                />
-              </>
-            }
-          >
-            <div className="h-[50vh] overflow-auto relative">
-              <ul className="px-4">
-                {Object.values(stepsByTarget).map((stepIds) => {
-                  const { module, target } = run.steps[stepIds[0]];
-                  return (
-                    <li key={`${module}/${target}`}>
-                      <div className="flex items-baseline flex-wrap gap-1 leading-tight sticky top-0 bg-white pt-4 pb-2">
-                        <div className="flex items-baseline gap-1">
-                          <span className="text-slate-400 text-sm">
-                            {module}
+      {statuses
+        .filter((s) => stepsByStatus[s])
+        .map((status) => {
+          const stepIds = stepsByStatus[status]!;
+          const stepsByTarget = groupBy(stepIds, (stepId) => {
+            const step = run.steps[stepId];
+            return `${step.module}/${step.target}`;
+          });
+          return (
+            <Tab
+              key={status}
+              label={
+                <>
+                  {statusLabels[status]}{" "}
+                  <Badge
+                    label={stepIds.length.toString()}
+                    intent={statusIntents[status]}
+                  />
+                </>
+              }
+            >
+              <div className="h-[50vh] overflow-auto relative">
+                <ul className="px-4">
+                  {Object.values(stepsByTarget).map((stepIds) => {
+                    const { module, target } = run.steps[stepIds[0]];
+                    return (
+                      <li key={`${module}/${target}`}>
+                        <div className="flex items-baseline flex-wrap gap-1 leading-tight sticky top-0 bg-white pt-4 pb-2">
+                          <div className="flex items-baseline gap-1">
+                            <span className="text-slate-400 text-sm">
+                              {module}
+                            </span>
+                            <span className="text-slate-400">/</span>
+                          </div>
+                          <span className="flex items-baseline gap-1">
+                            <h2 className="font-mono">{target}</h2>
                           </span>
-                          <span className="text-slate-400">/</span>
                         </div>
-                        <span className="flex items-baseline gap-1">
-                          <h2 className="font-mono">{target}</h2>
-                        </span>
-                      </div>
-                      <StepsList
-                        stepIds={stepIds}
-                        run={run}
-                        runId={runId}
-                        projectId={projectId}
-                      />
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          </Tab>
-        );
-      })}
+                        <StepsList
+                          stepIds={stepIds}
+                          run={run}
+                          runId={runId}
+                          projectId={projectId}
+                        />
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            </Tab>
+          );
+        })}
     </Tabs>
   );
 }
