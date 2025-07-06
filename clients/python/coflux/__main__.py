@@ -13,7 +13,7 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Worker, config, decorators, loader, models
+from . import Worker, blobs, config, decorators, loader, models, utils
 
 T = t.TypeVar("T")
 
@@ -779,6 +779,126 @@ def pools_delete(project: str, space: str, host: str, name: str):
         "update_pool",
         json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
     )
+
+
+@cli.group()
+def assets():
+    """
+    Manage assets.
+    """
+    pass
+
+
+def _get_asset(host: str, project_id: str, asset_id: str) -> dict | None:
+    try:
+        return _api_request(
+            "GET",
+            host,
+            "get_asset",
+            params={
+                "project": project_id,
+                "asset": asset_id,
+            },
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        else:
+            raise
+
+
+def _human_size(bytes: int) -> str:
+    if bytes < 1024:
+        return f"{bytes} bytes"
+    value = bytes / 1024
+    for unit in ("KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{value:3.1f}{unit}"
+        value /= 1024
+    return f"{bytes:.1f}TiB"
+
+
+@assets.command("download")
+@click.option(
+    "-p",
+    "--project",
+    help="Project ID",
+    envvar="COFLUX_PROJECT",
+    default=_load_config().project,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "-h",
+    "--host",
+    help="Host to connect to",
+    envvar="COFLUX_HOST",
+    default=_load_config().server.host,
+    show_default=True,
+    required=True,
+)
+@click.option(
+    "--target",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=".",
+    help="The local path to download the contents to",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrites any existing files if present",
+)
+@click.option("--match", help="Glob-style matcher to filter files")
+@click.argument("id")
+def assets_download(
+    project: str,
+    host: str,
+    target: Path,
+    force: bool,
+    match: str | None,
+    id: str,
+):
+    """
+    Downloads the contents of an asset.
+    """
+
+    asset = _get_asset(host, project, id)
+    if not asset:
+        raise click.ClickException(f"Asset '{id}' not found in project")
+
+    entries = asset["entries"]
+    if match:
+        matcher = utils.GlobMatcher(match)
+        entries = {k: v for k, v in entries.items() if matcher.match(k)}
+        click.echo(f"Matched {len(entries)} of {len(asset['entries'])} entries.")
+
+    if not entries:
+        click.echo("Nothing to download")
+        return
+
+    for key in entries.keys():
+        path = target.joinpath(key)
+        if path.exists():
+            if not force:
+                raise click.ClickException(f"File already exists at path: {path}")
+            elif not path.is_file():
+                raise click.ClickException(f"Cannot overwrite non-file: {path}")
+
+    config = _load_config()
+    blob_store_configs = config and config.blobs and config.blobs.stores
+    if not blob_store_configs:
+        raise click.ClickException("Blob store not configured")
+
+    total_size = sum(v["size"] for v in entries.values())
+
+    with blobs.Manager(blob_store_configs, host) as blob_manager:
+        click.echo(f"Downloading {len(entries)} files ({_human_size(total_size)})...")
+        # TODO: parallelise downloads
+        with click.progressbar(entries.items(), label="") as bar:
+            for key, entry in bar:
+                path = target.joinpath(key)
+                path.parent.mkdir(exist_ok=True, parents=True)
+                blob_manager.download(entry["blobKey"], path)
 
 
 @cli.command("register")
