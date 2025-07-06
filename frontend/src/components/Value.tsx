@@ -17,7 +17,7 @@ import {
   MenuItems,
   MenuSeparator,
 } from "@headlessui/react";
-import { humanSize } from "../utils";
+import { humanSize, pluralise } from "../utils";
 import StepLink from "./StepLink";
 import AssetLink from "./AssetLink";
 import AssetIcon from "./AssetIcon";
@@ -29,14 +29,20 @@ type DataProps = {
   data: models.Data;
   references: models.Reference[];
   projectId: string;
-  concise?: boolean;
+  concise: boolean | undefined;
 };
 
 function Data({ data, references, projectId, concise }: DataProps) {
   const blobStoresSetting = useSetting(projectId, "blobStores");
   if (Array.isArray(data)) {
     return (
-      <Fragment>
+      <span
+        title={
+          concise && data.length > 1
+            ? pluralise(data.length, "item")
+            : undefined
+        }
+      >
         [
         {(concise ? data.slice(0, 1) : data).map((item, index) => (
           <Fragment key={index}>
@@ -50,7 +56,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
           </Fragment>
         ))}
         {concise && data.length > 1 ? "…" : null}]
-      </Fragment>
+      </span>
     );
   } else if (data && typeof data == "object" && "type" in data) {
     switch (data.type) {
@@ -90,6 +96,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     data={item}
                     references={references}
                     projectId={projectId}
+                    concise={concise}
                   />
                   {index < data.items.length - 1 && ",\u00a0"}
                 </Fragment>
@@ -101,7 +108,13 @@ function Data({ data, references, projectId, concise }: DataProps) {
       case "dict": {
         const pairs = chunk(data.items, 2);
         return (
-          <Fragment>
+          <span
+            title={
+              concise && pairs.length > 1
+                ? pluralise(pairs.length, "item")
+                : undefined
+            }
+          >
             {"{"}
             {(concise ? pairs.slice(0, 1) : pairs).map(
               ([key, value], index) => (
@@ -113,6 +126,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     data={key}
                     references={references}
                     projectId={projectId}
+                    concise={concise}
                   />
                   <IconArrowRightBar
                     size={20}
@@ -123,13 +137,14 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     data={value}
                     references={references}
                     projectId={projectId}
+                    concise={concise}
                   />
                 </div>
               ),
             )}
-            {concise && data.items.length > 1 ? "…" : null}
+            {concise && pairs.length > 1 ? "…" : null}
             {"}"}
-          </Fragment>
+          </span>
         );
       }
       case "ref": {
