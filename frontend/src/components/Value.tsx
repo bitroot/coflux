@@ -29,21 +29,27 @@ type DataProps = {
   data: models.Data;
   references: models.Reference[];
   projectId: string;
+  concise?: boolean;
 };
 
-function Data({ data, references, projectId }: DataProps) {
+function Data({ data, references, projectId, concise }: DataProps) {
   const blobStoresSetting = useSetting(projectId, "blobStores");
   if (Array.isArray(data)) {
     return (
       <Fragment>
         [
-        {data.map((item, index) => (
+        {(concise ? data.slice(0, 1) : data).map((item, index) => (
           <Fragment key={index}>
-            <Data data={item} references={references} projectId={projectId} />
+            <Data
+              data={item}
+              references={references}
+              projectId={projectId}
+              concise={concise}
+            />
             {index < data.length - 1 && ",\u00a0"}
           </Fragment>
         ))}
-        ]
+        {concise && data.length > 1 ? "…" : null}]
       </Fragment>
     );
   } else if (data && typeof data == "object" && "type" in data) {
@@ -55,16 +61,20 @@ function Data({ data, references, projectId }: DataProps) {
           return (
             <Fragment>
               {"{"}
-              {data.items.map((item, index) => (
-                <Fragment key={index}>
-                  <Data
-                    data={item}
-                    references={references}
-                    projectId={projectId}
-                  />
-                  {index < data.items.length - 1 && ",\u00a0"}
-                </Fragment>
-              ))}
+              {(concise ? data.items.slice(0, 1) : data.items).map(
+                (item, index) => (
+                  <Fragment key={index}>
+                    <Data
+                      data={item}
+                      references={references}
+                      projectId={projectId}
+                      concise={concise}
+                    />
+                    {index < data.items.length - 1 && ",\u00a0"}
+                  </Fragment>
+                ),
+              )}
+              {concise && data.items.length > 1 ? "…" : null}
               {"}"}
             </Fragment>
           );
@@ -73,97 +83,117 @@ function Data({ data, references, projectId }: DataProps) {
         return (
           <Fragment>
             (
-            {data.items.map((item, index) => (
-              <Fragment key={index}>
-                <Data
-                  data={item}
-                  references={references}
-                  projectId={projectId}
-                />
-                {index < data.items.length - 1 && ",\u00a0"}
-              </Fragment>
-            ))}
-            )
+            {(concise ? data.items.slice(0, 1) : data.items).map(
+              (item, index) => (
+                <Fragment key={index}>
+                  <Data
+                    data={item}
+                    references={references}
+                    projectId={projectId}
+                  />
+                  {index < data.items.length - 1 && ",\u00a0"}
+                </Fragment>
+              ),
+            )}
+            {concise && data.items.length > 1 ? "…" : null})
           </Fragment>
         );
-      case "dict":
+      case "dict": {
+        const pairs = chunk(data.items, 2);
         return (
           <Fragment>
             {"{"}
-            {chunk(data.items, 2).map(([key, value], index) => (
-              <div
-                key={index}
-                className="pl-4 border-l border-slate-100 ml-1 whitespace-nowrap"
-              >
-                <Data
-                  data={key}
-                  references={references}
-                  projectId={projectId}
-                />
-                <IconArrowRightBar
-                  size={20}
-                  strokeWidth={1}
-                  className="text-slate-400 mx-1 inline-block"
-                />
-                <Data
-                  data={value}
-                  references={references}
-                  projectId={projectId}
-                />
-              </div>
-            ))}
+            {(concise ? pairs.slice(0, 1) : pairs).map(
+              ([key, value], index) => (
+                <div
+                  key={index}
+                  className="pl-4 border-l border-slate-100 ml-1 whitespace-nowrap"
+                >
+                  <Data
+                    data={key}
+                    references={references}
+                    projectId={projectId}
+                  />
+                  <IconArrowRightBar
+                    size={20}
+                    strokeWidth={1}
+                    className="text-slate-400 mx-1 inline-block"
+                  />
+                  <Data
+                    data={value}
+                    references={references}
+                    projectId={projectId}
+                  />
+                </div>
+              ),
+            )}
+            {concise && data.items.length > 1 ? "…" : null}
             {"}"}
           </Fragment>
         );
+      }
       case "ref": {
         const reference = references[data.index];
         switch (reference.type) {
           case "fragment": {
-            const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
-            return (
-              <Menu>
-                <MenuButton className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
+            if (concise) {
+              return (
+                <span className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
                   {reference.format}
                   <span className="text-slate-500">
                     ({humanSize(reference.size)})
                   </span>
-                  <IconChevronDown
-                    size={16}
-                    className="text-slate-600"
-                    strokeWidth={1.5}
-                  />
-                </MenuButton>
-                <MenuItems
-                  transition
-                  anchor="bottom"
-                  className="bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
-                >
-                  <dl className="flex flex-col gap-1 p-2">
-                    {Object.entries(reference.metadata).map(([key, value]) => (
-                      <div key={key}>
-                        <dt className="text-xs text-slate-500">{key}</dt>
-                        <dd className="text-sm text-slate-900">
-                          {typeof value == "string"
-                            ? value
-                            : JSON.stringify(value)}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                  <MenuSeparator className="my-1 h-px bg-slate-100" />
-                  <MenuItem>
-                    <a
-                      href={primaryBlobStore.url(reference.blobKey)}
-                      download
-                      className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
-                    >
-                      <IconDownload size={16} />
-                      Download
-                    </a>
-                  </MenuItem>
-                </MenuItems>
-              </Menu>
-            );
+                </span>
+              );
+            } else {
+              const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
+              return (
+                <Menu>
+                  <MenuButton className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
+                    {reference.format}
+                    <span className="text-slate-500">
+                      ({humanSize(reference.size)})
+                    </span>
+                    <IconChevronDown
+                      size={16}
+                      className="text-slate-600"
+                      strokeWidth={1.5}
+                    />
+                  </MenuButton>
+                  <MenuItems
+                    transition
+                    anchor="bottom"
+                    className="bg-white shadow-xl rounded-md origin-top transition duration-200 ease-out data-closed:scale-95 data-closed:opacity-0"
+                  >
+                    <dl className="flex flex-col gap-1 p-2">
+                      {Object.entries(reference.metadata).map(
+                        ([key, value]) => (
+                          <div key={key}>
+                            <dt className="text-xs text-slate-500">{key}</dt>
+                            <dd className="text-sm text-slate-900">
+                              {typeof value == "string"
+                                ? value
+                                : JSON.stringify(value)}
+                            </dd>
+                          </div>
+                        ),
+                      )}
+                    </dl>
+                    <MenuSeparator className="my-1 h-px bg-slate-100" />
+                    <MenuItem>
+                      <a
+                        href={primaryBlobStore.url(reference.blobKey)}
+                        download
+                        className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
+                      >
+                        <IconDownload size={16} />
+                        Download
+                      </a>
+                    </MenuItem>
+                  </MenuItems>
+                </Menu>
+              );
+            }
           }
           case "execution": {
             const execution = reference.execution;
@@ -197,7 +227,15 @@ function Data({ data, references, projectId }: DataProps) {
   } else if (typeof data == "string") {
     return (
       <span className="text-slate-400 whitespace-nowrap">
-        "<span className="text-green-700">{data}</span>"
+        "
+        <span
+          className="text-green-700"
+          title={concise && data.length > 10 ? data : undefined}
+        >
+          {concise ? data.slice(0, 10) : data}
+          {concise && data.length > 10 ? "…" : null}
+        </span>
+        "
       </span>
     );
   } else if (typeof data == "number") {
@@ -281,6 +319,7 @@ type ValueProps = {
   projectId: string;
   className?: string;
   block?: boolean;
+  concise?: boolean;
 };
 
 export default function Value({
@@ -288,6 +327,7 @@ export default function Value({
   projectId,
   className,
   block,
+  concise,
 }: ValueProps) {
   const [, setCount] = useState(0);
   const handleUnloadClick = useCallback(() => {
@@ -321,9 +361,10 @@ export default function Value({
               data={data}
               references={value.references}
               projectId={projectId}
+              concise={concise}
             />
           </div>
-          {value.type == "blob" && (
+          {!concise && value.type == "blob" && (
             <Button
               size="sm"
               outline={true}
@@ -334,7 +375,7 @@ export default function Value({
             </Button>
           )}
         </Fragment>
-      ) : value.type == "blob" ? (
+      ) : !concise && value.type == "blob" ? (
         <LoadBlobLink value={value} projectId={projectId} />
       ) : null}
     </span>
