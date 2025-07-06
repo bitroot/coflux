@@ -1309,7 +1309,7 @@ export default function StepDetail({
         maximised={maximised}
       />
       <Tabs
-        className={"flex-1 flex flex-col min-h-0"}
+        className="px-4"
         selectedIndex={activeTab}
         onChange={handleTabChange}
       >

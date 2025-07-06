@@ -52,7 +52,7 @@ export default function Dialog({
           )}
         >
           {title && (
-            <DialogTitle className="text-2xl font-bold text-slate-900 mb-4">
+            <DialogTitle className="text-2xl font-bold text-slate-900 mb-3">
               {title}
             </DialogTitle>
           )}

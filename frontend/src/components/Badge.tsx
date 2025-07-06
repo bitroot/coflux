@@ -7,15 +7,15 @@ type Intent = "success" | "danger" | "warning" | "info" | "none";
 function classNameForIntent(intent: Intent) {
   switch (intent) {
     case "success":
-      return "bg-green-100 text-green-500";
+      return "bg-green-100 text-green-800";
     case "danger":
-      return "bg-red-100 text-red-500";
+      return "bg-red-100 text-red-800";
     case "warning":
-      return "bg-yellow-100 text-yellow-500";
+      return "bg-yellow-100 text-yellow-800";
     case "info":
-      return "bg-blue-100 text-blue-500";
+      return "bg-blue-100 text-blue-800";
     case "none":
-      return "bg-slate-100 text-slate-500";
+      return "bg-slate-100 text-slate-800";
   }
 }
 
