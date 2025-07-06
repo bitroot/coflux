@@ -296,7 +296,7 @@ def _load_config() -> config.Config:
 )
 @click.option(
     "space",
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     default=_load_config().space,
@@ -449,7 +449,7 @@ def spaces_create(
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="The (current) name of the space",
     envvar="COFLUX_SPACE",
@@ -531,7 +531,7 @@ def spaces_update(
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
@@ -593,7 +593,7 @@ def pools():
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
@@ -646,7 +646,7 @@ def pools_list(project: str, space: str, host: str):
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
@@ -723,7 +723,7 @@ def pools_update(
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
@@ -813,7 +813,7 @@ def register(
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
@@ -882,7 +882,7 @@ def worker(
     module_name: tuple[str, ...],
 ) -> None:
     """
-    Start a worker.
+    Starts a worker.
 
     Hosts the specified modules. Paths to scripts can be passed instead of module names.
 
@@ -930,7 +930,7 @@ def worker(
     required=True,
 )
 @click.option(
-    "-w",
+    "-s",
     "--space",
     help="Space name",
     envvar="COFLUX_SPACE",
