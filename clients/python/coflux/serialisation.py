@@ -92,9 +92,12 @@ class PandasSerialiser(Serialiser):
     ) -> tuple[str, io.BytesIO, dict[str, t.Any]] | None:
         # TODO: support series
         if pandas and isinstance(value, pandas.DataFrame):
-            buffer = io.BytesIO()
-            value.to_parquet(buffer)
-            return "parquet", buffer, {"shape": value.shape}
+            try:
+                buffer = io.BytesIO()
+                value.to_parquet(buffer)
+                return "parquet", buffer, {"shape": value.shape}
+            except ImportError:
+                return None
 
     def deserialise(
         self, format: str, buffer: io.BytesIO, metadata: dict[str, t.Any]
