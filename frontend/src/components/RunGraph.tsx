@@ -24,7 +24,13 @@ import {
 import * as models from "../models";
 import StepLink from "./StepLink";
 import { useHoverContext } from "./HoverContext";
-import { buildGraph, Graph, Edge } from "../graph";
+import {
+  buildGraph,
+  Graph,
+  Edge,
+  getExecutionStatus,
+  getBranchStatus,
+} from "../graph";
 import SpaceLabel from "./SpaceLabel";
 import AssetIcon from "./AssetIcon";
 import { buildUrl } from "../utils";
@@ -32,34 +38,6 @@ import AssetLink from "./AssetLink";
 import { countBy, isEqual, max } from "lodash";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { getAssetName } from "../assets";
-
-function getExecutionStatus(execution: models.Execution) {
-  const result =
-    execution.result?.type == "deferred" ||
-    execution.result?.type == "cached" ||
-    execution.result?.type == "spawned"
-      ? execution.result.result
-      : execution.result;
-  if (
-    execution.result?.type == "cached" ||
-    execution.result?.type == "deferred"
-  ) {
-    return "deferred";
-  } else if (!result && !execution?.assignedAt) {
-    // TODO: consider previous result?
-    return "assigning";
-  } else if (!result) {
-    return "running";
-  } else if (result.type == "error") {
-    return "errored";
-  } else if (result.type == "abandoned" || result.type == "cancelled") {
-    return "aborted";
-  } else if (result.type == "suspended") {
-    return "suspended";
-  } else {
-    return "completed";
-  }
-}
 
 function resolveExecutionResult(
   run: models.Run,
@@ -130,7 +108,10 @@ function isStepStale(
   }
 }
 
-const stepNodeStatusClassNames = {
+const stepNodeStatusClassNames: Record<
+  ReturnType<typeof getExecutionStatus>,
+  string
+> = {
   deferred: "border-slate-200 bg-white",
   assigning: "border-blue-200 bg-blue-50",
   running: "border-blue-400 bg-blue-100",
@@ -387,18 +368,10 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
   const groupId = parseInt(parts[2], 10);
   const execution = run.steps[stepId]?.executions[attempt];
   const groupName = execution.groups[groupId];
-  const executions = execution.children
+  const statuses = execution.children
     .filter((c) => c.groupId == groupId)
-    .map((c) => c.stepId)
-    .map(
-      (sId) =>
-        run.steps[sId].executions[
-          max(
-            Object.keys(run.steps[sId].executions).map((a) => parseInt(a, 10)),
-          )!
-        ],
-    );
-  const counts = countBy(executions, getExecutionStatus);
+    .map((c) => getBranchStatus(run, c.stepId));
+  const counts = countBy(statuses);
   return (
     <div className="flex items-center gap-2">
       <div className="flex min-w-0 overflow-hidden mr-auto">

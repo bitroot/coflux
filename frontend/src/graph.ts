@@ -511,3 +511,53 @@ export function buildGraph(
       };
     });
 }
+
+export function getExecutionStatus(execution: models.Execution) {
+  const result =
+    execution.result?.type == "spawned"
+      ? execution.result.result
+      : execution.result;
+  if (
+    execution.result?.type == "cached" ||
+    execution.result?.type == "deferred"
+  ) {
+    return "deferred";
+  } else if (!result && !execution?.assignedAt) {
+    // TODO: consider previous result?
+    return "assigning";
+  } else if (!result) {
+    return "running";
+  } else if (result.type == "error") {
+    return "errored";
+  } else if (result.type == "abandoned" || result.type == "cancelled") {
+    return "aborted";
+  } else if (result.type == "suspended") {
+    return "suspended";
+  } else {
+    return "completed";
+  }
+}
+
+function getBranchStatuses(
+  run: models.Run,
+  stepId: string,
+): ReturnType<typeof getExecutionStatus>[] {
+  const executions = run.steps[stepId].executions;
+  const attempt = max(Object.keys(executions).map((a) => parseInt(a, 10)))!;
+  const execution = executions[attempt];
+  return [
+    getExecutionStatus(execution),
+    ...execution.children.flatMap((c) => getBranchStatuses(run, c.stepId)),
+  ];
+}
+
+export function getBranchStatus(run: models.Run, stepId: string) {
+  const statuses = getBranchStatuses(run, stepId);
+  return (
+    (
+      ["errored", "aborted", "running", "assigning", "suspended"] as ReturnType<
+        typeof getExecutionStatus
+      >[]
+    ).find((s) => statuses.includes(s)) || "completed"
+  );
+}
