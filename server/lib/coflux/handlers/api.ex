@@ -154,7 +154,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -177,7 +177,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -203,7 +203,7 @@ defmodule Coflux.Handlers.Api do
           json_error_response(req, "bad_request", details: %{"spaceId" => "has_dependencies"})
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -284,7 +284,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -309,7 +309,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
@@ -334,7 +334,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
 
         {:error, :not_found} ->
-          json_error_response(req, "not_found", code: 404)
+          json_error_response(req, "not_found", status: 404)
       end
     else
       json_error_response(req, "bad_request", details: errors)
