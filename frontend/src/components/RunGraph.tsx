@@ -5,6 +5,7 @@ import {
   WheelEvent as ReactWheelEvent,
   useRef,
   useEffect,
+  ComponentProps,
 } from "react";
 import classNames from "classnames";
 import {
@@ -35,9 +36,10 @@ import SpaceLabel from "./SpaceLabel";
 import AssetIcon from "./AssetIcon";
 import { buildUrl } from "../utils";
 import AssetLink from "./AssetLink";
-import { countBy, isEqual, max } from "lodash";
+import { countBy, isEqual } from "lodash";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { getAssetName } from "../assets";
+import Badge from "./Badge";
 
 function resolveExecutionResult(
   run: models.Run,
@@ -344,14 +346,17 @@ function ChildNode({ child }: ChildNodeProps) {
   );
 }
 
-const groupHeaderStatusClassNames = {
-  deferred: "bg-slate-100 text-slate-500",
-  assigning: "bg-blue-100 text-slate-500",
-  running: "bg-blue-200 text-blue-800",
-  errored: "bg-red-200 text-red-800",
-  aborted: "bg-yellow-200 text-yellow-800",
-  suspended: "bg-slate-100 text-slate-500",
-  completed: "bg-green-200 text-green-800",
+const statusIntents: Record<
+  ReturnType<typeof getBranchStatus>,
+  ComponentProps<typeof Badge>["intent"]
+> = {
+  errored: "danger",
+  aborted: "warning",
+  suspended: "info",
+  deferred: "info",
+  completed: "none",
+  running: "info",
+  assigning: "info",
 };
 
 type GroupHeaderProps = {
@@ -389,7 +394,7 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
           ...Object.fromEntries(searchParams),
           group: identifier,
         })}
-        className="flex items-center gap-0.5 rounded-md p-0.5 bg-white border border-slate-200 hover:border-slate-400 pointer-events-auto"
+        className="flex items-center gap-0.5 rounded-lg p-0.5 bg-white border border-slate-200 hover:border-slate-400 pointer-events-auto"
       >
         {(
           [
@@ -400,20 +405,16 @@ function GroupHeader({ identifier, run }: GroupHeaderProps) {
             "suspended",
             "aborted",
             "errored",
-          ] as ReturnType<typeof getExecutionStatus>[]
+          ] as ReturnType<typeof getBranchStatus>[]
         ).map(
           (status) =>
             !!counts[status] && (
-              <span
+              <Badge
                 key={status}
-                className={classNames(
-                  "px-1 rounded text-sm",
-                  groupHeaderStatusClassNames[status],
-                )}
+                label={`×${counts[status]}`}
                 title={`${counts[status]} ${status}`}
-              >
-                ×{counts[status]}
-              </span>
+                intent={statusIntents[status]}
+              />
             ),
         )}
         <IconSelector size={16} className="text-slate-500" />
