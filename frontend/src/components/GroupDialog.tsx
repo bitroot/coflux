@@ -68,73 +68,93 @@ function StepsList({ run, stepIds, runId, projectId }: StepsListProps) {
     (stepId) => getBranchStatus(run, stepId),
   );
   return (
-    <Tabs>
-      {Object.entries(stepsByStatus).map(([status, stepIds]) => (
-        <Tab
-          key={status}
-          label={
-            <>
-              {statusLabels[status as BranchStatus]}{" "}
-              <Badge
-                label={stepIds.length.toString()}
-                intent={statusIntents[status as BranchStatus]}
-              />
-            </>
-          }
-        >
-          <ul className="pt-2 flex flex-col h-80 overflow-auto">
-            {stepIds.map((stepId) => {
-              const step = run.steps[stepId];
-              const attempt = max(
-                Object.keys(step.executions).map((a) => parseInt(a, 10)),
-              )!;
-              return (
-                <li key={stepId} className="py-0.5">
-                  <StepLink
-                    runId={runId}
-                    stepId={stepId}
-                    attempt={attempt}
-                    className={classNames(
-                      "px-2 py-1 cursor-pointer rounded-sm flex flex-col data-active:bg-slate-100 hover:bg-slate-50",
-                    )}
-                    activeClassName="bg-slate-100"
-                  >
-                    <div className="flex items-center gap-1">
-                      <div className="flex-1 flex items-baseline flex-wrap gap-1 leading-tight">
+    <Tabs className="px-4">
+      {Object.entries(stepsByStatus).map(([status, stepIds]) => {
+        const stepsByTarget = groupBy(stepIds, (stepId) => {
+          const step = run.steps[stepId];
+          return `${step.module}/${step.target}`;
+        });
+        return (
+          <Tab
+            key={status}
+            label={
+              <>
+                {statusLabels[status as BranchStatus]}{" "}
+                <Badge
+                  label={stepIds.length.toString()}
+                  intent={statusIntents[status as BranchStatus]}
+                />
+              </>
+            }
+          >
+            <div className="h-[50vh] overflow-auto relative">
+              <ul className="px-4">
+                {Object.values(stepsByTarget).map((stepIds) => {
+                  const { module, target } = run.steps[stepIds[0]];
+                  return (
+                    <li key={`${module}/${target}`}>
+                      <div className="flex items-baseline flex-wrap gap-1 leading-tight sticky top-0 bg-white pt-4 pb-2">
                         <div className="flex items-baseline gap-1">
                           <span className="text-slate-400 text-sm">
-                            {step.module}
+                            {module}
                           </span>
                           <span className="text-slate-400">/</span>
                         </div>
                         <span className="flex items-baseline gap-1">
-                          <h2 className="font-mono">{step.target}</h2>
+                          <h2 className="font-mono">{target}</h2>
                         </span>
                       </div>
-                      <div className="flex gap-1 items-center">#{attempt}</div>
-                    </div>
-                    <div>
-                      {step.arguments.length > 0 && (
-                        <ol className="list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
-                          {step.arguments.map((argument, index) => (
-                            <li key={index}>
-                              <Value
-                                value={argument}
-                                projectId={projectId}
-                                className="align-middle"
-                              />
+                      <ul className="flex flex-col mb-3">
+                        {stepIds.map((stepId) => {
+                          const step = run.steps[stepId];
+                          const attempt = max(
+                            Object.keys(step.executions).map((a) =>
+                              parseInt(a, 10),
+                            ),
+                          )!;
+                          return (
+                            <li key={stepId} className="py-0.5">
+                              <StepLink
+                                runId={runId}
+                                stepId={stepId}
+                                attempt={attempt}
+                                className={classNames(
+                                  "px-2 py-1 cursor-pointer rounded-sm flex flex-col data-active:bg-slate-100 hover:bg-slate-50",
+                                )}
+                                activeClassName="bg-slate-100"
+                              >
+                                <div>
+                                  {step.arguments.length > 0 ? (
+                                    <ol className="flex flex-wrap gap-x-3 list-decimal list-inside marker:text-slate-400 marker:text-xs space-y-1">
+                                      {step.arguments.map((argument, index) => (
+                                        <li key={index}>
+                                          <Value
+                                            value={argument}
+                                            projectId={projectId}
+                                            className="align-middle"
+                                          />
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  ) : (
+                                    <p className="text-slate-400 italic text-sm">
+                                      No arguments
+                                    </p>
+                                  )}
+                                </div>
+                              </StepLink>
                             </li>
-                          ))}
-                        </ol>
-                      )}
-                    </div>
-                  </StepLink>
-                </li>
-              );
-            })}
-          </ul>
-        </Tab>
-      ))}
+                          );
+                        })}
+                      </ul>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </Tab>
+        );
+      })}
     </Tabs>
   );
 }
@@ -162,20 +182,20 @@ export default function GroupDialog({
     );
   }, [searchParams, pathname, navigate]);
   return (
-    <Dialog
-      open={!!identifier}
-      title={group ? group.name || <em>Unnamed group</em> : undefined}
-      onClose={handleDialogClose}
-      size="lg"
-      className="p-6"
-    >
+    <Dialog open={!!identifier} onClose={handleDialogClose} size="lg">
       {group ? (
-        <StepsList
-          run={run}
-          stepIds={group.steps}
-          runId={runId}
-          projectId={projectId}
-        />
+        <div className="flex flex-col">
+          <h2 className="text-lg font-bold pt-5 px-4 pb-2">
+            {group.name || <em>Unnamed group</em>}
+          </h2>
+
+          <StepsList
+            run={run}
+            stepIds={group.steps}
+            runId={runId}
+            projectId={projectId}
+          />
+        </div>
       ) : identifier ? (
         <p>Unrecognised group</p>
       ) : null}
