@@ -882,7 +882,7 @@ def worker(
     module_name: tuple[str, ...],
 ) -> None:
     """
-    Start a worker.
+    Starts a worker.
 
     Hosts the specified modules. Paths to scripts can be passed instead of module names.
 
