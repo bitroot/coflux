@@ -20,21 +20,24 @@ export function Tab({ className, children }: TabProps) {
 }
 
 type Props = ComponentProps<typeof TabGroup> & {
+  className?: string;
   children: ReactElement<TabProps> | ReactElement<TabProps>[];
 };
 
-export default function Tabs({ children, ...props }: Props) {
+export default function Tabs({ className, children, ...props }: Props) {
   const tabs = Array.isArray(children) ? children : [children];
   return (
     <TabGroup {...props}>
-      <TabList className="border-b border-slate-200 px-4">
+      <TabList className={classNames("border-b border-slate-200", className)}>
         {tabs.map((c, i) => (
           <HeadlessTab
             key={i}
             disabled={c.props.disabled}
-            className="text-sm px-2 py-2 border-cyan-500 data-selected:border-b-2 data-selected:font-semibold outline-hidden disabled:opacity-30 cursor-pointer"
+            className="text-sm px-0.5 py-1 border-cyan-500 data-selected:border-b-2 text-slate-600 data-selected:text-slate-900 outline-hidden disabled:opacity-30 not-disabled:cursor-pointer group"
           >
-            {c.props.label}
+            <span className="block px-1.5 py-0.5 rounded-md group-hover:bg-slate-50">
+              {c.props.label}
+            </span>
           </HeadlessTab>
         ))}
       </TabList>

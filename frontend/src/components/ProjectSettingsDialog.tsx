@@ -438,7 +438,7 @@ export default function SettingsDialog({ projectId, open, onClose }: Props) {
       size="lg"
     >
       <form onSubmit={handleSubmit}>
-        <Tabs>
+        <Tabs className="px-4">
           <SettingsTab label="Blob stores">
             <BlobStoresSettings
               stores={settings.blobStores}

@@ -43,12 +43,16 @@ function Tab({ page, children }: TabProps) {
       end={true}
       className={({ isActive }) =>
         classNames(
-          "px-2 py-2 text-sm",
-          isActive && "inline-block border-b-2 border-cyan-500 font-semibold",
+          "px-0.5 py-1 text-sm group",
+          isActive
+            ? "inline-block border-b-2 border-cyan-500 text-slate-900"
+            : "text-slate-600",
         )
       }
     >
-      {children}
+      <span className="block px-1.5 py-0.5 rounded-md group-hover:bg-slate-50">
+        {children}
+      </span>
     </NavLink>
   );
 }
@@ -201,7 +205,7 @@ export default function RunLayout() {
             />
           ) : null}
           <div className="grow flex flex-col">
-            <div className="border-b px-5">
+            <div className="border-b px-5 flex">
               {initialStep.type == "sensor" && (
                 <Tab page="children">Children</Tab>
               )}
