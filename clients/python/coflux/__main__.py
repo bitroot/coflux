@@ -930,7 +930,7 @@ def assets_inspect(project: str, host: str, match: str | None, id: str):
     required=True,
 )
 @click.option(
-    "--target",
+    "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
     default=".",
     help="The local path to download the contents to",
@@ -948,7 +948,7 @@ def assets_inspect(project: str, host: str, match: str | None, id: str):
 def assets_download(
     project: str,
     host: str,
-    target: Path,
+    to: Path,
     force: bool,
     match: str | None,
     id: str,
@@ -972,7 +972,7 @@ def assets_download(
         return
 
     for key in entries.keys():
-        path = target.joinpath(key)
+        path = to.joinpath(key)
         if path.exists():
             if not force:
                 raise click.ClickException(f"File already exists at path: {path}")
@@ -990,7 +990,7 @@ def assets_download(
         # TODO: parallelise downloads
         with click.progressbar(entries.items(), label="") as bar:
             for key, entry in bar:
-                path = target.joinpath(key)
+                path = to.joinpath(key)
                 path.parent.mkdir(exist_ok=True, parents=True)
                 blob_manager.download(entry["blobKey"], path)
 
