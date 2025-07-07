@@ -43,6 +43,7 @@ import {
   resolveAssetsForRun,
 } from "../assets";
 import { micromark } from "micromark";
+import BlobKey from "./BlobKey";
 
 function parseIdentifier(value: string | null): [string | undefined, string] {
   if (value) {
@@ -329,12 +330,12 @@ function FilesList({ entries, assetId, selected }: FilesListProps) {
 
 type FileInfoProps = {
   entry: models.AssetEntry;
-  blobStore: BlobStore;
+  blobStore: BlobStore | undefined;
 };
 
 function FileInfo({ entry, blobStore }: FileInfoProps) {
   return (
-    <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-5">
+    <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-6">
       <div className="flex flex-col items-center">
         <IconFile
           size={40}
@@ -344,17 +345,21 @@ function FileInfo({ entry, blobStore }: FileInfoProps) {
         <h1>{entry.path}</h1>
         <p className="text-slate-500 text-sm">{humanSize(entry.size)}</p>
       </div>
-      <Button
-        as="a"
-        variant="secondary"
-        outline={true}
-        href={blobStore.url(entry.blobKey)}
-        download={true}
-        className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
-      >
-        <IconDownload size={16} />
-        Download
-      </Button>
+      {blobStore ? (
+        <Button
+          as="a"
+          variant="secondary"
+          outline={true}
+          href={blobStore.url(entry.blobKey)}
+          download={true}
+          className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
+        >
+          <IconDownload size={16} />
+          Download
+        </Button>
+      ) : (
+        <BlobKey blobKey={entry.blobKey} />
+      )}
     </div>
   );
 }
@@ -480,7 +485,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const blobStoresSetting = useSetting(projectId, "blobStores");
-  const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
+  const blobStore = createBlobStore(blobStoresSetting[0]);
   const [assetId, selected] = parseIdentifier(identifier);
   const [asset, setAsset] = useState<models.Asset | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -549,29 +554,29 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
             />
           </div>
           {entry ? (
-            type == "text/markdown" ? (
+            type == "text/markdown" && blobStore ? (
               <MarkdownPreview
-                blobStore={primaryBlobStore}
+                blobStore={blobStore}
                 blobKey={entry.blobKey}
                 className="flex-1 overflow-auto p-4"
               />
-            ) : type == "application/pdf" ? (
+            ) : type == "application/pdf" && blobStore ? (
               <iframe
-                src={primaryBlobStore.url(entry.blobKey)}
+                src={blobStore.url(entry.blobKey)}
                 className="flex-1"
               ></iframe>
-            ) : type?.startsWith("text/") ? (
+            ) : type?.startsWith("text/") && blobStore ? (
               <iframe
-                src={primaryBlobStore.url(entry.blobKey)}
+                src={blobStore.url(entry.blobKey)}
                 sandbox="allow-downloads allow-forms allow-modals allow-scripts"
                 className="flex-1"
               ></iframe>
-            ) : type?.startsWith("image/") ? (
-              <ImagePreview src={primaryBlobStore.url(entry.blobKey)} />
+            ) : type?.startsWith("image/") && blobStore ? (
+              <ImagePreview src={blobStore.url(entry.blobKey)} />
             ) : (
               <FileInfo
                 entry={{ ...entry, path: selected }}
-                blobStore={primaryBlobStore}
+                blobStore={blobStore}
               />
             )
           ) : (

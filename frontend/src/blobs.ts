@@ -70,11 +70,15 @@ class S3BlobStore implements BlobStore {
   }
 }
 
-export function createBlobStore(settings: settings.BlobStoreSettings) {
-  switch (settings.type) {
+export function createBlobStore(
+  settings: settings.BlobStoreSettings | undefined,
+) {
+  switch (settings?.type) {
     case "http":
       return new HttpBlobStore(settings);
     case "s3":
       return new S3BlobStore(settings);
+    default:
+      return undefined;
   }
 }
