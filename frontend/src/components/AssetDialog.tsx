@@ -4,6 +4,7 @@ import * as api from "../api";
 import {
   Fragment,
   ReactNode,
+  RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -193,13 +194,31 @@ function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
 }
 
 type ToolbarProps = {
+  asset: models.Asset;
+  assetId: string | undefined;
+  selected: string;
   maximised: boolean;
   onToggleMaximise: () => void;
 };
 
-function Toolbar({ maximised, onToggleMaximise }: ToolbarProps) {
+function Toolbar({
+  asset,
+  assetId,
+  selected,
+  maximised,
+  onToggleMaximise,
+}: ToolbarProps) {
   return (
-    <div className="p-3">
+    <div className="flex items-center gap-3 p-3">
+      {selected == "" ? (
+        assetId && (
+          <span className="text-sm text-slate-600">
+            <span className="text-slate-400">Asset ID:</span> {assetId}
+          </span>
+        )
+      ) : selected && !selected.endsWith("/") ? (
+        <BlobKey blobKey={asset.entries[selected].blobKey} />
+      ) : null}
       <Button
         variant="secondary"
         outline={true}
@@ -547,6 +566,9 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
               run={run}
             />
             <Toolbar
+              asset={asset}
+              assetId={assetId}
+              selected={selected}
               maximised={maximised}
               onToggleMaximise={handleToggleMaximise}
             />
