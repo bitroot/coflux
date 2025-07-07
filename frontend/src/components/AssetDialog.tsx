@@ -1,7 +1,15 @@
 import Dialog from "./common/Dialog";
 import * as models from "../models";
 import * as api from "../api";
-import { Fragment, ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  Fragment,
+  ReactNode,
+  RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   Link,
   useLocation,
@@ -15,7 +23,6 @@ import {
   IconAlertTriangle,
   IconChevronDown,
   IconDownload,
-  IconFile,
   IconFiles,
   IconFolder,
   IconLoader2,
@@ -33,6 +40,8 @@ import {
   getIconForFileType,
   resolveAssetsForRun,
 } from "../assets";
+import { micromark } from "micromark";
+import BlobKey from "./BlobKey";
 
 function parseIdentifier(value: string | null): [string | undefined, string] {
   if (value) {
@@ -185,13 +194,31 @@ function LocationBar({ asset, selected, assetId, run }: LocationBarProps) {
 }
 
 type ToolbarProps = {
+  asset: models.Asset;
+  assetId: string | undefined;
+  selected: string;
   maximised: boolean;
   onToggleMaximise: () => void;
 };
 
-function Toolbar({ maximised, onToggleMaximise }: ToolbarProps) {
+function Toolbar({
+  asset,
+  assetId,
+  selected,
+  maximised,
+  onToggleMaximise,
+}: ToolbarProps) {
   return (
-    <div className="p-3">
+    <div className="flex items-center gap-3 p-3">
+      {selected == "" ? (
+        assetId && (
+          <span className="text-sm text-slate-600">
+            <span className="text-slate-400">Asset ID:</span> {assetId}
+          </span>
+        )
+      ) : selected && !selected.endsWith("/") ? (
+        <BlobKey blobKey={asset.entries[selected].blobKey} />
+      ) : null}
       <Button
         variant="secondary"
         outline={true}
@@ -319,32 +346,147 @@ function FilesList({ entries, assetId, selected }: FilesListProps) {
 
 type FileInfoProps = {
   entry: models.AssetEntry;
-  blobStore: BlobStore;
+  blobStore: BlobStore | undefined;
 };
 
 function FileInfo({ entry, blobStore }: FileInfoProps) {
+  const Icon = getIconForFileType(entry.metadata["type"] as string);
   return (
-    <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-5">
+    <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-6">
       <div className="flex flex-col items-center">
-        <IconFile
-          size={40}
+        <Icon
+          size={100}
           strokeWidth={1}
-          className="shrink-0 text-slate-500 mb-2"
+          className="shrink-0 text-slate-200 mb-2"
         />
         <h1>{entry.path}</h1>
         <p className="text-slate-500 text-sm">{humanSize(entry.size)}</p>
       </div>
-      <Button
-        as="a"
-        variant="secondary"
-        outline={true}
-        href={blobStore.url(entry.blobKey)}
-        download={true}
-        className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
-      >
-        <IconDownload size={16} />
-        Download
-      </Button>
+      {blobStore ? (
+        <Button
+          as="a"
+          variant="secondary"
+          outline={true}
+          href={blobStore.url(entry.blobKey)}
+          download={true}
+          className="text-sm m-1 p-1 rounded-md data-active:bg-slate-100 flex items-center gap-1"
+        >
+          <IconDownload size={16} />
+          Download
+        </Button>
+      ) : (
+        <BlobKey blobKey={entry.blobKey} size="md" />
+      )}
+    </div>
+  );
+}
+
+type MarkdownPreviewProps = {
+  blobStore: BlobStore;
+  blobKey: string;
+  className?: string;
+};
+
+function MarkdownPreview({
+  blobStore,
+  blobKey,
+  className,
+}: MarkdownPreviewProps) {
+  const [error, setError] = useState<unknown>();
+  const [html, setHtml] = useState<string>();
+  useEffect(() => {
+    setHtml(undefined);
+    setError(undefined);
+    blobStore
+      .load(blobKey)
+      .then((source) => {
+        if (!source) {
+          throw new Error("Blob not found");
+        }
+        setHtml(micromark(source));
+      })
+      .catch(setError);
+  }, [blobStore, blobKey]);
+  return (
+    <div className={className}>
+      {error ? (
+        <Alert icon={IconAlertTriangle} variant="danger">
+          <p>Failed to load asset. Please try again.</p>
+        </Alert>
+      ) : html === undefined ? (
+        <div>
+          <IconLoader2 size={24} className="animate-spin text-slate-300" />
+          <p className="text-slate-500">Loading...</p>
+        </div>
+      ) : (
+        <div
+          className="prose prose-slate"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      )}
+    </div>
+  );
+}
+
+function useIsScaledDown(
+  imgRef: RefObject<HTMLImageElement | null>,
+  src: string,
+): boolean {
+  const [scaledDown, setScaledDown] = useState(false);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+
+    const check = () => {
+      const { naturalWidth: nW, naturalHeight: nH } = img;
+      const { width: rW, height: rH } = img.getBoundingClientRect();
+      setScaledDown(rW < nW || rH < nH);
+    };
+
+    if (img.complete) {
+      check();
+    } else {
+      img.addEventListener("load", check);
+    }
+
+    const ro = new ResizeObserver(check);
+    ro.observe(img);
+
+    return () => {
+      img.removeEventListener("load", check);
+      ro.disconnect();
+    };
+  }, [imgRef, src]);
+
+  return scaledDown;
+}
+
+type ImagePreviewProps = {
+  src: string;
+};
+
+function ImagePreview({ src }: ImagePreviewProps) {
+  const [zoomed, setZoomed] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const isScaledDown = useIsScaledDown(imgRef, src);
+  const handleClick = useCallback(() => setZoomed((z) => !z), []);
+  return (
+    <div
+      className={classNames(
+        "flex-1",
+        zoomed ? "overflow-auto" : "flex min-h-0 min-w-0",
+      )}
+    >
+      <img
+        src={src}
+        ref={imgRef}
+        className={classNames(
+          zoomed ? "max-w-none m-auto" : "mx-auto object-scale-down",
+          zoomed ? "cursor-zoom-out" : isScaledDown ? "cursor-zoom-in" : null,
+        )}
+        onClick={isScaledDown || zoomed ? handleClick : undefined}
+      />
     </div>
   );
 }
@@ -360,7 +502,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const blobStoresSetting = useSetting(projectId, "blobStores");
-  const primaryBlobStore = createBlobStore(blobStoresSetting[0]);
+  const blobStore = createBlobStore(blobStoresSetting[0]);
   const [assetId, selected] = parseIdentifier(identifier);
   const [asset, setAsset] = useState<models.Asset | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -424,28 +566,39 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
               run={run}
             />
             <Toolbar
+              asset={asset}
+              assetId={assetId}
+              selected={selected}
               maximised={maximised}
               onToggleMaximise={handleToggleMaximise}
             />
           </div>
-          {entry && type?.startsWith("text/") ? (
-            <iframe
-              src={primaryBlobStore.url(entry.blobKey)}
-              sandbox="allow-downloads allow-forms allow-modals allow-scripts"
-              className="flex-1"
-            ></iframe>
-          ) : entry && type?.startsWith("image/") ? (
-            <div className="flex-1 flex min-h-0 min-w-0">
-              <img
-                src={primaryBlobStore.url(entry.blobKey)}
-                className="object-contain mx-auto"
+          {entry ? (
+            type == "text/markdown" && blobStore ? (
+              <MarkdownPreview
+                blobStore={blobStore}
+                blobKey={entry.blobKey}
+                className="flex-1 overflow-auto p-4"
               />
-            </div>
-          ) : entry ? (
-            <FileInfo
-              entry={{ ...entry, path: selected }}
-              blobStore={primaryBlobStore}
-            />
+            ) : type == "application/pdf" && blobStore ? (
+              <iframe
+                src={blobStore.url(entry.blobKey)}
+                className="flex-1"
+              ></iframe>
+            ) : type?.startsWith("text/") && blobStore ? (
+              <iframe
+                src={blobStore.url(entry.blobKey)}
+                sandbox="allow-downloads allow-forms allow-modals allow-scripts"
+                className="flex-1"
+              ></iframe>
+            ) : type?.startsWith("image/") && blobStore ? (
+              <ImagePreview src={blobStore.url(entry.blobKey)} />
+            ) : (
+              <FileInfo
+                entry={{ ...entry, path: selected }}
+                blobStore={blobStore}
+              />
+            )
           ) : (
             <FilesList
               entries={asset.entries}

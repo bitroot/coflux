@@ -100,7 +100,6 @@ function BlobStoreSettings({
         <button
           className="hover:enabled:bg-slate-200 rounded-sm p-1 disabled:text-slate-300"
           type="button"
-          disabled={count <= 1}
           onClick={handleRemoveClick}
         >
           <IconX size={16} />

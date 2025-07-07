@@ -7,6 +7,7 @@ defmodule Coflux.Handlers.Root do
         """
         <!DOCTYPE html>
         <html lang="en">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <link rel="stylesheet" href="/static/app.css" />
         <link rel="icon" href="/static/icon.svg" />
         <div id="root"></div>
