@@ -22,7 +22,6 @@ import {
   IconAlertTriangle,
   IconChevronDown,
   IconDownload,
-  IconFile,
   IconFiles,
   IconFolder,
   IconLoader2,
