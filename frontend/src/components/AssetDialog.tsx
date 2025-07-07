@@ -483,6 +483,11 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
                 blobKey={entry.blobKey}
                 className="flex-1 overflow-auto p-4"
               />
+            ) : type == "application/pdf" ? (
+              <iframe
+                src={primaryBlobStore.url(entry.blobKey)}
+                className="flex-1"
+              ></iframe>
             ) : type?.startsWith("text/") ? (
               <iframe
                 src={primaryBlobStore.url(entry.blobKey)}
