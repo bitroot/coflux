@@ -1,12 +1,14 @@
 import { useState, useCallback } from "react";
 import { truncate } from "lodash";
 import { IconCopy, IconCheck } from "@tabler/icons-react";
+import classNames from "classnames";
 
 type BlobKeyProps = {
   blobKey: string;
+  size?: "md" | "sm";
 };
 
-export default function BlobKey({ blobKey }: BlobKeyProps) {
+export default function BlobKey({ blobKey, size = "md" }: BlobKeyProps) {
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(async () => {
     await navigator.clipboard.writeText(blobKey);
@@ -15,11 +17,16 @@ export default function BlobKey({ blobKey }: BlobKeyProps) {
   }, [blobKey]);
   return (
     <button
-      className="flex gap-1 rounded-md bg-slate-50 items-center px-1.5 py-1 text-slate-600 group focus:outline-none"
+      className="flex gap-1 rounded-md bg-slate-50 items-center px-1.5 py-1 text-slate-500 group focus:outline-none"
       title="Blob key (click to copy)"
       onClick={handleCopy}
     >
-      <span className="text-xs leading-none">
+      <span
+        className={classNames(
+          size == "sm" ? "text-xs" : "text-sm",
+          "leading-none",
+        )}
+      >
         {truncate(blobKey, { length: 12, omission: "…" })}
       </span>
       {copied ? (

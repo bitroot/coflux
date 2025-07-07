@@ -4,8 +4,6 @@ import * as api from "../api";
 import {
   Fragment,
   ReactNode,
-  RefObject,
-  RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -334,13 +332,14 @@ type FileInfoProps = {
 };
 
 function FileInfo({ entry, blobStore }: FileInfoProps) {
+  const Icon = getIconForFileType(entry.metadata["type"] as string);
   return (
     <div className="flex-1 overflow-auto p-5 flex flex-col items-center justify-center gap-6">
       <div className="flex flex-col items-center">
-        <IconFile
-          size={40}
+        <Icon
+          size={100}
           strokeWidth={1}
-          className="shrink-0 text-slate-500 mb-2"
+          className="shrink-0 text-slate-200 mb-2"
         />
         <h1>{entry.path}</h1>
         <p className="text-slate-500 text-sm">{humanSize(entry.size)}</p>
@@ -358,7 +357,7 @@ function FileInfo({ entry, blobStore }: FileInfoProps) {
           Download
         </Button>
       ) : (
-        <BlobKey blobKey={entry.blobKey} />
+        <BlobKey blobKey={entry.blobKey} size="md" />
       )}
     </div>
   );

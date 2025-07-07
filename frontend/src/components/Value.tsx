@@ -196,7 +196,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                           ),
                         )}
                       </dl>
-                      <BlobKey blobKey={reference.blobKey} />
+                      <BlobKey blobKey={reference.blobKey} size="sm" />
                     </div>
                     {blobStore && (
                       <Fragment>
