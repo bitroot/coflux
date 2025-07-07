@@ -33,6 +33,7 @@ import {
   getIconForFileType,
   resolveAssetsForRun,
 } from "../assets";
+import { micromark } from "micromark";
 
 function parseIdentifier(value: string | null): [string | undefined, string] {
   if (value) {
@@ -349,6 +350,53 @@ function FileInfo({ entry, blobStore }: FileInfoProps) {
   );
 }
 
+type MarkdownPreviewProps = {
+  blobStore: BlobStore;
+  blobKey: string;
+  className?: string;
+};
+
+function MarkdownPreview({
+  blobStore,
+  blobKey,
+  className,
+}: MarkdownPreviewProps) {
+  const [error, setError] = useState<unknown>();
+  const [html, setHtml] = useState<string>();
+  useEffect(() => {
+    setHtml(undefined);
+    setError(undefined);
+    blobStore
+      .load(blobKey)
+      .then((source) => {
+        if (!source) {
+          throw new Error("Blob not found");
+        }
+        setHtml(micromark(source));
+      })
+      .catch(setError);
+  }, [blobStore, blobKey]);
+  return (
+    <div className={className}>
+      {error ? (
+        <Alert icon={IconAlertTriangle} variant="danger">
+          <p>Failed to load asset. Please try again.</p>
+        </Alert>
+      ) : html === undefined ? (
+        <div>
+          <IconLoader2 size={24} className="animate-spin text-slate-300" />
+          <p className="text-slate-500">Loading...</p>
+        </div>
+      ) : (
+        <div
+          className="prose prose-slate"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      )}
+    </div>
+  );
+}
+
 type Props = {
   identifier: string | null;
   projectId: string;
@@ -428,24 +476,32 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
               onToggleMaximise={handleToggleMaximise}
             />
           </div>
-          {entry && type?.startsWith("text/") ? (
-            <iframe
-              src={primaryBlobStore.url(entry.blobKey)}
-              sandbox="allow-downloads allow-forms allow-modals allow-scripts"
-              className="flex-1"
-            ></iframe>
-          ) : entry && type?.startsWith("image/") ? (
-            <div className="flex-1 flex min-h-0 min-w-0">
-              <img
-                src={primaryBlobStore.url(entry.blobKey)}
-                className="object-contain mx-auto"
+          {entry ? (
+            type == "text/markdown" ? (
+              <MarkdownPreview
+                blobStore={primaryBlobStore}
+                blobKey={entry.blobKey}
+                className="flex-1 overflow-auto p-4"
               />
-            </div>
-          ) : entry ? (
-            <FileInfo
-              entry={{ ...entry, path: selected }}
-              blobStore={primaryBlobStore}
-            />
+            ) : type?.startsWith("text/") ? (
+              <iframe
+                src={primaryBlobStore.url(entry.blobKey)}
+                sandbox="allow-downloads allow-forms allow-modals allow-scripts"
+                className="flex-1"
+              ></iframe>
+            ) : type?.startsWith("image/") ? (
+              <div className="flex-1 flex min-h-0 min-w-0">
+                <img
+                  src={primaryBlobStore.url(entry.blobKey)}
+                  className="object-contain mx-auto"
+                />
+              </div>
+            ) : (
+              <FileInfo
+                entry={{ ...entry, path: selected }}
+                blobStore={primaryBlobStore}
+              />
+            )
           ) : (
             <FilesList
               entries={asset.entries}
