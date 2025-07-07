@@ -1,7 +1,16 @@
 import Dialog from "./common/Dialog";
 import * as models from "../models";
 import * as api from "../api";
-import { Fragment, ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  Fragment,
+  ReactNode,
+  RefObject,
+  RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   Link,
   useLocation,
@@ -397,6 +406,69 @@ function MarkdownPreview({
   );
 }
 
+function useIsScaledDown(
+  imgRef: RefObject<HTMLImageElement | null>,
+  src: string,
+): boolean {
+  const [scaledDown, setScaledDown] = useState(false);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+
+    const check = () => {
+      const { naturalWidth: nW, naturalHeight: nH } = img;
+      const { width: rW, height: rH } = img.getBoundingClientRect();
+      setScaledDown(rW < nW || rH < nH);
+    };
+
+    if (img.complete) {
+      check();
+    } else {
+      img.addEventListener("load", check);
+    }
+
+    const ro = new ResizeObserver(check);
+    ro.observe(img);
+
+    return () => {
+      img.removeEventListener("load", check);
+      ro.disconnect();
+    };
+  }, [imgRef, src]);
+
+  return scaledDown;
+}
+
+type ImagePreviewProps = {
+  src: string;
+};
+
+function ImagePreview({ src }: ImagePreviewProps) {
+  const [zoomed, setZoomed] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const isScaledDown = useIsScaledDown(imgRef, src);
+  const handleClick = useCallback(() => setZoomed((z) => !z), []);
+  return (
+    <div
+      className={classNames(
+        "flex-1",
+        zoomed ? "overflow-auto" : "flex min-h-0 min-w-0",
+      )}
+    >
+      <img
+        src={src}
+        ref={imgRef}
+        className={classNames(
+          zoomed ? "max-w-none m-auto" : "mx-auto object-scale-down",
+          zoomed ? "cursor-zoom-out" : isScaledDown ? "cursor-zoom-in" : null,
+        )}
+        onClick={isScaledDown || zoomed ? handleClick : undefined}
+      />
+    </div>
+  );
+}
+
 type Props = {
   identifier: string | null;
   projectId: string;
@@ -495,12 +567,7 @@ export default function AssetDialog({ identifier, projectId, run }: Props) {
                 className="flex-1"
               ></iframe>
             ) : type?.startsWith("image/") ? (
-              <div className="flex-1 flex min-h-0 min-w-0">
-                <img
-                  src={primaryBlobStore.url(entry.blobKey)}
-                  className="object-contain mx-auto"
-                />
-              </div>
+              <ImagePreview src={primaryBlobStore.url(entry.blobKey)} />
             ) : (
               <FileInfo
                 entry={{ ...entry, path: selected }}
