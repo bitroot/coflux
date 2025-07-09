@@ -66,6 +66,7 @@ function StepsList({ stepIds, run, runId, projectId }: StepsListProps) {
                           projectId={projectId}
                           className="align-middle"
                           concise={true}
+                          interactive={false}
                         />
                       </li>
                     ))}
