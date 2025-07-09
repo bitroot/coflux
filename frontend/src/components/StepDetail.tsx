@@ -37,13 +37,7 @@ import {
 
 import * as models from "../models";
 import Badge from "./Badge";
-import {
-  buildUrl,
-  humanSize,
-  humanSize,
-  pluralise,
-  truncatePath,
-} from "../utils";
+import { buildUrl, humanSize, pluralise, truncatePath } from "../utils";
 import Loading from "./Loading";
 import Button from "./common/Button";
 import RunLogs from "./RunLogs";
