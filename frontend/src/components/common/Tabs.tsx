@@ -27,7 +27,7 @@ type Props = ComponentProps<typeof TabGroup> & {
 export default function Tabs({ className, children, ...props }: Props) {
   const tabs = Array.isArray(children) ? children : [children];
   return (
-    <TabGroup {...props}>
+    <TabGroup {...props} as={Fragment}>
       <TabList className={classNames("border-b border-slate-200", className)}>
         {tabs.map((c, i) => (
           <HeadlessTab
