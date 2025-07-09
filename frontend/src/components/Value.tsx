@@ -302,7 +302,7 @@ async function loadBlob(
 ) {
   for (const settings of blobStoresSetting) {
     const store = createBlobStore(settings);
-    const result = await store.load(blobKey);
+    const result = await store?.load(blobKey);
     if (result !== undefined) {
       return result;
     }
