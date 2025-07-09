@@ -30,10 +30,17 @@ type DataProps = {
   data: models.Data;
   references: models.Reference[];
   projectId: string;
-  concise: boolean | undefined;
+  concise: boolean;
+  interactive: boolean;
 };
 
-function Data({ data, references, projectId, concise }: DataProps) {
+function Data({
+  data,
+  references,
+  projectId,
+  concise,
+  interactive,
+}: DataProps) {
   const blobStoresSetting = useSetting(projectId, "blobStores");
   if (Array.isArray(data)) {
     return (
@@ -52,6 +59,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
               references={references}
               projectId={projectId}
               concise={concise}
+              interactive={interactive}
             />
             {index < data.length - 1 && ",\u00a0"}
           </Fragment>
@@ -76,6 +84,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                       references={references}
                       projectId={projectId}
                       concise={concise}
+                      interactive={interactive}
                     />
                     {index < data.items.length - 1 && ",\u00a0"}
                   </Fragment>
@@ -98,6 +107,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     references={references}
                     projectId={projectId}
                     concise={concise}
+                    interactive={interactive}
                   />
                   {index < data.items.length - 1 && ",\u00a0"}
                 </Fragment>
@@ -128,6 +138,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     references={references}
                     projectId={projectId}
                     concise={concise}
+                    interactive={interactive}
                   />
                   <IconArrowRightBar
                     size={20}
@@ -139,6 +150,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
                     references={references}
                     projectId={projectId}
                     concise={concise}
+                    interactive={interactive}
                   />
                 </div>
               ),
@@ -152,16 +164,7 @@ function Data({ data, references, projectId, concise }: DataProps) {
         const reference = references[data.index];
         switch (reference.type) {
           case "fragment": {
-            if (concise) {
-              return (
-                <span className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
-                  {reference.format}
-                  <span className="text-slate-500">
-                    ({humanSize(reference.size)})
-                  </span>
-                </span>
-              );
-            } else {
+            if (interactive) {
               const blobStore = createBlobStore(blobStoresSetting[0]);
               return (
                 <Menu>
@@ -216,33 +219,52 @@ function Data({ data, references, projectId, concise }: DataProps) {
                   </MenuItems>
                 </Menu>
               );
+            } else {
+              return (
+                <span className="bg-slate-100 rounded-sm px-1.5 py-0.5 text-xs font-sans inline-flex gap-1">
+                  {reference.format}
+                  <span className="text-slate-500">
+                    ({humanSize(reference.size)})
+                  </span>
+                </span>
+              );
             }
           }
           case "execution": {
             const execution = reference.execution;
-            return (
-              <StepLink
-                runId={execution.runId}
-                stepId={execution.stepId}
-                attempt={execution.attempt}
-                className="bg-slate-100 rounded-sm px-0.5 hover:bg-slate-200 ring-offset-1 ring-slate-400"
-                hoveredClassName="ring-2"
-              >
-                <IconFunction size={16} className="inline-block" />
-              </StepLink>
-            );
+            if (interactive) {
+              return (
+                <StepLink
+                  runId={execution.runId}
+                  stepId={execution.stepId}
+                  attempt={execution.attempt}
+                  className="bg-slate-100 rounded-sm px-0.5 hover:bg-slate-200 ring-offset-1 ring-slate-400"
+                  hoveredClassName="ring-2"
+                >
+                  <IconFunction size={16} className="inline-block" />
+                </StepLink>
+              );
+            } else {
+              return <IconFunction size={16} className="inline-block" />;
+            }
           }
           case "asset": {
-            return (
-              <AssetLink
-                assetId={reference.assetId}
-                asset={reference.asset}
-                className="bg-slate-100 rounded-sm px-0.5 ring-offset-1 ring-slate-400"
-                hoveredClassName="ring-2"
-              >
+            if (interactive) {
+              return (
+                <AssetLink
+                  assetId={reference.assetId}
+                  asset={reference.asset}
+                  className="bg-slate-100 rounded-sm px-0.5 ring-offset-1 ring-slate-400"
+                  hoveredClassName="ring-2"
+                >
+                  <AssetIcon asset={reference.asset} className="inline-block" />
+                </AssetLink>
+              );
+            } else {
+              return (
                 <AssetIcon asset={reference.asset} className="inline-block" />
-              </AssetLink>
-            );
+              );
+            }
           }
         }
       }
@@ -343,6 +365,7 @@ type ValueProps = {
   className?: string;
   block?: boolean;
   concise?: boolean;
+  interactive?: boolean;
 };
 
 export default function Value({
@@ -350,7 +373,8 @@ export default function Value({
   projectId,
   className,
   block,
-  concise,
+  concise = false,
+  interactive = true,
 }: ValueProps) {
   const [, setCount] = useState(0);
   const handleUnloadClick = useCallback(() => {
@@ -385,6 +409,7 @@ export default function Value({
               references={value.references}
               projectId={projectId}
               concise={concise}
+              interactive={interactive}
             />
           </div>
           {!concise && value.type == "blob" && (
