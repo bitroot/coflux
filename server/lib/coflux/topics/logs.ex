@@ -85,7 +85,7 @@ defmodule Coflux.Topics.Logs do
 
   defp build_message({execution_id, timestamp, level, template, values}) do
     [
-      execution_id,
+      Integer.to_string(execution_id),
       timestamp,
       encode_level(level),
       template,
