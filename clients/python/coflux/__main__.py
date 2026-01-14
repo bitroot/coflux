@@ -6,6 +6,7 @@ import sys
 import time
 import types
 import typing as t
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
 import click
@@ -21,6 +22,14 @@ T = t.TypeVar("T")
 
 def _callback(_changes: set[tuple[watchfiles.Change, str]]) -> None:
     print("Change detected. Reloading...")
+
+
+def _get_default_image() -> str:
+    try:
+        v = pkg_version("coflux")
+        return f"ghcr.io/bitroot/coflux:{v}"
+    except PackageNotFoundError:
+        return "ghcr.io/bitroot/coflux"
 
 
 def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
@@ -259,7 +268,7 @@ def cli():
 )
 @click.option(
     "--image",
-    default="ghcr.io/bitroot/coflux",
+    default=_get_default_image(),
     help="The Docker image to run",
 )
 def server(port: int, data_dir: Path, image: str):
