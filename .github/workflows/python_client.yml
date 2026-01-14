@@ -16,6 +16,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check version matches server
+        shell: python
+        run: |
+          import tomllib
+          from pathlib import Path
+
+          server_version = Path("server/VERSION").read_text().strip()
+          with open("clients/python/pyproject.toml", "rb") as f:
+              client_version = tomllib.load(f)["tool"]["poetry"]["version"]
+
+          if server_version != client_version:
+              raise SystemExit(
+                  f"Version mismatch: server/VERSION is {server_version}, "
+                  f"but pyproject.toml is {client_version}"
+              )
+          print(f"Versions match: {server_version}")
+
       - name: Install poetry
         run: pipx install poetry
 
