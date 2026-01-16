@@ -32,9 +32,16 @@ def _get_default_image() -> str:
         return "ghcr.io/bitroot/coflux"
 
 
+_API_VERSION = "0.8"
+
+
 def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
+    headers = kwargs.pop("headers", {})
+    headers["X-API-Version"] = _API_VERSION
     with httpx.Client() as client:
-        response = client.request(method, f"http://{host}/api/{action}", **kwargs)
+        response = client.request(
+            method, f"http://{host}/api/{action}", headers=headers, **kwargs
+        )
         # TODO: return errors
         response.raise_for_status()
         is_json = response.headers.get("Content-Type") == "application/json"

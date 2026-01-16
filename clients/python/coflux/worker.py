@@ -8,6 +8,8 @@ import websockets
 
 from . import config, execution, models, server, types
 
+_API_VERSION = "0.8"
+
 
 def _parse_reference(reference: t.Any) -> types.Reference:
     match reference:
@@ -96,6 +98,7 @@ class Worker:
 
     def _params(self):
         params = {
+            "version": _API_VERSION,
             "project": self._project_id,
             "space": self._space_name,
         }

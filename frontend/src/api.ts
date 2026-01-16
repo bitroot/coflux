@@ -1,6 +1,8 @@
 import { toPairs } from "lodash";
 import * as models from "./models";
 
+const API_VERSION = "0.8";
+
 export class RequestError extends Error {
   readonly code: string;
   readonly details: Record<string, string>;
@@ -28,7 +30,10 @@ async function handleResponse(res: Response) {
 async function post(name: string, data: Record<string, unknown>) {
   const res = await fetch(`/api/${name}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Version": API_VERSION,
+    },
     body: JSON.stringify(data),
   });
   return await handleResponse(res);
@@ -40,9 +45,11 @@ async function get(name: string, params?: Record<string, string>) {
     toPairs(params)
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join("&");
-  const res = await fetch(
-    `/api/${name}${queryString ? `?${queryString}` : ""}`,
-  );
+  const res = await fetch(`/api/${name}${queryString ? `?${queryString}` : ""}`, {
+    headers: {
+      "X-API-Version": API_VERSION,
+    },
+  });
   return await handleResponse(res);
 }
 
