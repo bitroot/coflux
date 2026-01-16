@@ -15,6 +15,7 @@ defmodule Coflux.Web do
     :cowboy_router.compile([
       {:_,
        [
+         {"/.well-known/com.coflux", Handlers.WellKnown, []},
          {"/blobs/:key", Handlers.Blobs, []},
          {"/worker", Handlers.Worker, []},
          {"/topics", TopicalHandler, registry: Coflux.TopicalRegistry},
