@@ -5,7 +5,7 @@ defmodule Coflux.Handlers.Worker do
 
   def init(req, opts) do
     qs = :cowboy_req.parse_qs(req)
-    expected_version = get_query_param(qs, "apiVersion")
+    expected_version = get_query_param(qs, "version")
 
     case Version.check(expected_version) do
       :ok ->
