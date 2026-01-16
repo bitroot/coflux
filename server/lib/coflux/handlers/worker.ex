@@ -3,18 +3,55 @@ defmodule Coflux.Handlers.Worker do
 
   alias Coflux.{Orchestration, Projects}
 
-  def init(req, _opts) do
-    qs = :cowboy_req.parse_qs(req)
-    # TODO: validate
-    project_id = get_query_param(qs, "project")
-    session_id = get_query_param(qs, "session")
-    space_name = get_query_param(qs, "space")
-    worker_id = get_query_param(qs, "launch", &String.to_integer/1)
-    provides = get_query_param(qs, "provides", &parse_provides/1)
-    concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
+  @version Mix.Project.config()[:version]
+  @api_version (case Version.parse(@version) do
+                  {:ok, %Version{major: 0, minor: minor}} -> "0.#{minor}"
+                  {:ok, %Version{major: major}} -> "#{major}"
+                  :error -> @version
+                end)
 
-    {:cowboy_websocket, req,
-     {project_id, session_id, space_name, worker_id, provides, concurrency}}
+  def init(req, opts) do
+    qs = :cowboy_req.parse_qs(req)
+
+    case check_api_version(qs) do
+      :ok ->
+        # TODO: validate
+        project_id = get_query_param(qs, "project")
+        session_id = get_query_param(qs, "session")
+        space_name = get_query_param(qs, "space")
+        worker_id = get_query_param(qs, "launch", &String.to_integer/1)
+        provides = get_query_param(qs, "provides", &parse_provides/1)
+        concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
+
+        {:cowboy_websocket, req,
+         {project_id, session_id, space_name, worker_id, provides, concurrency}}
+
+      {:error, expected_version} ->
+        req =
+          json_error_response(req, "version_mismatch",
+            status: 409,
+            details: %{
+              "server" => @version,
+              "expected" => expected_version
+            }
+          )
+
+        {:ok, req, opts}
+    end
+  end
+
+  defp check_api_version(qs) do
+    case List.keyfind(qs, "apiVersion", 0) do
+      nil ->
+        :ok
+
+      {"apiVersion", expected_version} ->
+        if expected_version == @api_version do
+          :ok
+        else
+          {:error, expected_version}
+        end
+    end
   end
 
   def websocket_init({project_id, session_id, space_name, worker_id, provides, concurrency}) do
