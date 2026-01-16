@@ -1,12 +1,7 @@
 defmodule Coflux.Handlers.WellKnown do
   import Coflux.Handlers.Utils
 
-  @version Mix.Project.config()[:version]
-  @api_version (case Version.parse(@version) do
-                  {:ok, %Version{major: 0, minor: minor}} -> "0.#{minor}"
-                  {:ok, %Version{major: major}} -> "#{major}"
-                  :error -> @version
-                end)
+  alias Coflux.Version
 
   def init(req, opts) do
     req = handle(req, :cowboy_req.method(req))
@@ -14,7 +9,7 @@ defmodule Coflux.Handlers.WellKnown do
   end
 
   defp handle(req, "GET") do
-    json_response(req, %{"version" => @version, "apiVersion" => @api_version})
+    json_response(req, %{"version" => Version.version(), "apiVersion" => Version.api_version()})
   end
 
   defp handle(req, _method) do

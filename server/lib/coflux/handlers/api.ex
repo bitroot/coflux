@@ -1,14 +1,20 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Projects, MapUtils}
+  alias Coflux.{Orchestration, Projects, MapUtils, Version}
 
   @projects_server Coflux.ProjectsServer
   @max_parameters 20
 
   def init(req, opts) do
+    expected_version =
+      case :cowboy_req.header("x-api-version", req) do
+        :undefined -> nil
+        value -> value
+      end
+
     req =
-      case check_api_version(req) do
+      case Version.check(expected_version) do
         :ok ->
           handle(req, :cowboy_req.method(req), :cowboy_req.path_info(req))
 
@@ -23,35 +29,6 @@ defmodule Coflux.Handlers.Api do
       end
 
     {:ok, req, opts}
-  end
-
-  defp check_api_version(req) do
-    case :cowboy_req.header("x-api-version", req) do
-      :undefined ->
-        :ok
-
-      expected_version ->
-        server_version = Application.spec(:coflux, :vsn) |> to_string()
-
-        if versions_compatible?(server_version, expected_version) do
-          :ok
-        else
-          {:error, server_version, expected_version}
-        end
-    end
-  end
-
-  defp versions_compatible?(server_version, expected_version) do
-    case Version.parse(server_version) do
-      {:ok, %Version{major: 0, minor: server_minor}} ->
-        expected_version == "0.#{server_minor}"
-
-      {:ok, %Version{major: server_major}} ->
-        expected_version == "#{server_major}"
-
-      :error ->
-        true
-    end
   end
 
   defp handle(req, "POST", ["create_project"]) do
