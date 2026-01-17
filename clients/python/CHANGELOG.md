@@ -4,6 +4,7 @@ Enhancements:
 
 - Adds `list` CLI commands for spaces and pools.
 - Adds `download` CLI commands for assets and blobs.
+- Implemented checks for API versions.
 
 Fixes:
 
