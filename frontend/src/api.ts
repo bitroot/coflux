@@ -45,11 +45,14 @@ async function get(name: string, params?: Record<string, string>) {
     toPairs(params)
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join("&");
-  const res = await fetch(`/api/${name}${queryString ? `?${queryString}` : ""}`, {
-    headers: {
-      "X-API-Version": API_VERSION,
+  const res = await fetch(
+    `/api/${name}${queryString ? `?${queryString}` : ""}`,
+    {
+      headers: {
+        "X-API-Version": API_VERSION,
+      },
     },
-  });
+  );
   return await handleResponse(res);
 }
 
