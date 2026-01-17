@@ -1,13 +1,33 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Projects, MapUtils}
+  alias Coflux.{Orchestration, Projects, MapUtils, Version}
 
   @projects_server Coflux.ProjectsServer
   @max_parameters 20
 
   def init(req, opts) do
-    req = handle(req, :cowboy_req.method(req), :cowboy_req.path_info(req))
+    expected_version =
+      case :cowboy_req.header("x-api-version", req) do
+        :undefined -> nil
+        value -> value
+      end
+
+    req =
+      case Version.check(expected_version) do
+        :ok ->
+          handle(req, :cowboy_req.method(req), :cowboy_req.path_info(req))
+
+        {:error, server_version, expected_version} ->
+          json_error_response(req, "version_mismatch",
+            status: 409,
+            details: %{
+              "server" => server_version,
+              "expected" => expected_version
+            }
+          )
+      end
+
     {:ok, req, opts}
   end
 

@@ -16,6 +16,7 @@ import watchfiles
 
 from . import Worker, config, decorators, loader, models, utils
 from .blobs import Manager as BlobManager
+from .version import API_VERSION, VersionMismatchError
 
 T = t.TypeVar("T")
 
@@ -33,8 +34,18 @@ def _get_default_image() -> str:
 
 
 def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
+    headers = kwargs.pop("headers", {})
+    if API_VERSION:
+        headers["X-API-Version"] = API_VERSION
     with httpx.Client() as client:
-        response = client.request(method, f"http://{host}/api/{action}", **kwargs)
+        response = client.request(
+            method, f"http://{host}/api/{action}", headers=headers, **kwargs
+        )
+        if response.status_code == 409:
+            data = response.json()
+            if data.get("error") == "version_mismatch":
+                details = data["details"]
+                raise VersionMismatchError(details["server"], details["expected"])
         # TODO: return errors
         response.raise_for_status()
         is_json = response.headers.get("Content-Type") == "application/json"
