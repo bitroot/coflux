@@ -1,20 +1,37 @@
 defmodule Coflux.Handlers.Worker do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Projects}
+  alias Coflux.{Orchestration, Projects, Version}
 
-  def init(req, _opts) do
+  def init(req, opts) do
     qs = :cowboy_req.parse_qs(req)
-    # TODO: validate
-    project_id = get_query_param(qs, "project")
-    session_id = get_query_param(qs, "session")
-    space_name = get_query_param(qs, "space")
-    worker_id = get_query_param(qs, "launch", &String.to_integer/1)
-    provides = get_query_param(qs, "provides", &parse_provides/1)
-    concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
+    expected_version = get_query_param(qs, "version")
 
-    {:cowboy_websocket, req,
-     {project_id, session_id, space_name, worker_id, provides, concurrency}}
+    case Version.check(expected_version) do
+      :ok ->
+        # TODO: validate
+        project_id = get_query_param(qs, "project")
+        session_id = get_query_param(qs, "session")
+        space_name = get_query_param(qs, "space")
+        worker_id = get_query_param(qs, "launch", &String.to_integer/1)
+        provides = get_query_param(qs, "provides", &parse_provides/1)
+        concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
+
+        {:cowboy_websocket, req,
+         {project_id, session_id, space_name, worker_id, provides, concurrency}}
+
+      {:error, server_version, expected_version} ->
+        req =
+          json_error_response(req, "version_mismatch",
+            status: 409,
+            details: %{
+              "server" => server_version,
+              "expected" => expected_version
+            }
+          )
+
+        {:ok, req, opts}
+    end
   end
 
   def websocket_init({project_id, session_id, space_name, worker_id, provides, concurrency}) do

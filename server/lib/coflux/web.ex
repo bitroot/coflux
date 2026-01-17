@@ -2,7 +2,6 @@ defmodule Coflux.Web do
   @otp_app Mix.Project.config()[:app]
 
   alias Coflux.Handlers
-  alias Topical.Adapters.Cowboy.WebsocketHandler, as: TopicalHandler
 
   def child_spec(opts) do
     port = Keyword.fetch!(opts, :port)
@@ -15,9 +14,10 @@ defmodule Coflux.Web do
     :cowboy_router.compile([
       {:_,
        [
+         {"/.well-known/com.coflux", Handlers.WellKnown, []},
          {"/blobs/:key", Handlers.Blobs, []},
          {"/worker", Handlers.Worker, []},
-         {"/topics", TopicalHandler, registry: Coflux.TopicalRegistry},
+         {"/topics", Handlers.Topics, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},
          {"/static/[...]", :cowboy_static, {:priv_dir, @otp_app, "static"}},
          {"/[...]", Handlers.Root, []}
