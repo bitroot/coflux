@@ -1,3 +1,15 @@
+## 0.8.1
+
+Enhancements:
+
+- Improvements to asset dialog, including supporting markdown/PDF previews.
+- Improvements to group selection UI.
+- Added support for validating expected API version.
+
+Changes:
+
+- Reverses prioritisation of execution (oldest first).
+
 ## 0.8.0
 
 Enhancements:

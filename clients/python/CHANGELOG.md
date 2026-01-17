@@ -1,3 +1,17 @@
+## 0.8.1
+
+Enhancements:
+
+- Adds `list` CLI commands for spaces and pools.
+- Adds `download` CLI commands for assets and blobs.
+- Implemented checks for API versions.
+
+Fixes:
+
+- Fixes CLI flag for specifying space (was `-w`, now `-s`).
+- Handles missing parquet dependency gracefully.
+- The CLI `server` command now uses a Docker image version matching the package version.
+
 ## 0.8.0
 
 Enhancements:
