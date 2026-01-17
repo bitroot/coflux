@@ -4,8 +4,17 @@ defmodule Coflux.Handlers.WellKnown do
   alias Coflux.Version
 
   def init(req, opts) do
-    req = handle(req, :cowboy_req.method(req))
-    {:ok, req, opts}
+    req = set_cors_headers(req)
+
+    case :cowboy_req.method(req) do
+      "OPTIONS" ->
+        req = :cowboy_req.reply(204, req)
+        {:ok, req, opts}
+
+      method ->
+        req = handle(req, method)
+        {:ok, req, opts}
+    end
   end
 
   defp handle(req, "GET") do

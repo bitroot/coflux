@@ -1,14 +1,75 @@
 defmodule Coflux.Handlers.Utils do
+  @default_allowed_origins ["https://studio.coflux.com"]
+
   def set_cors_headers(req) do
-    :cowboy_req.set_resp_headers(
-      %{
-        "access-control-allow-origin" => "*",
-        "access-control-allow-methods" => "OPTIONS, GET, POST, PUT, PATCH, DELETE",
-        "access-control-allow-headers" => "content-type,authorization",
-        "access-control-max-age" => "86400"
-      },
-      req
-    )
+    origin = :cowboy_req.header("origin", req, nil)
+    allowed_origin = get_allowed_origin(origin)
+
+    headers = %{
+      "access-control-allow-methods" => "OPTIONS, GET, POST, PUT, PATCH, DELETE",
+      "access-control-allow-headers" => "content-type,authorization,x-api-version",
+      "access-control-max-age" => "86400"
+    }
+
+    headers =
+      if allowed_origin do
+        Map.put(headers, "access-control-allow-origin", allowed_origin)
+      else
+        headers
+      end
+
+    :cowboy_req.set_resp_headers(headers, req)
+  end
+
+  defp get_allowed_origin(nil), do: nil
+  defp get_allowed_origin(""), do: nil
+
+  defp get_allowed_origin(origin) do
+    allowed_origins = get_allowed_origins()
+
+    if Enum.any?(allowed_origins, &origin_matches?(origin, &1)) do
+      origin
+    else
+      nil
+    end
+  end
+
+  defp get_allowed_origins do
+    case System.get_env("COFLUX_ALLOW_ORIGINS") do
+      nil ->
+        @default_allowed_origins
+
+      value ->
+        value
+        |> String.split(",")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+    end
+  end
+
+  defp origin_matches?(origin, pattern) do
+    cond do
+      origin == pattern ->
+        true
+
+      String.contains?(pattern, "*") ->
+        wildcard_matches?(origin, pattern)
+
+      true ->
+        false
+    end
+  end
+
+  defp wildcard_matches?(origin, pattern) do
+    case String.split(pattern, "*", parts: 2) do
+      [prefix, suffix] ->
+        String.starts_with?(origin, prefix) &&
+          String.ends_with?(origin, suffix) &&
+          String.length(origin) > String.length(prefix) + String.length(suffix)
+
+      _ ->
+        false
+    end
   end
 
   def json_response(req, status \\ 200, result) do
