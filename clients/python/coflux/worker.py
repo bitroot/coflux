@@ -7,8 +7,7 @@ import urllib.parse
 import websockets
 
 from . import config, execution, models, server, types
-
-_API_VERSION = "0.8"
+from .version import API_VERSION, check_server
 
 
 def _parse_reference(reference: t.Any) -> types.Reference:
@@ -98,10 +97,11 @@ class Worker:
 
     def _params(self):
         params = {
-            "version": _API_VERSION,
             "project": self._project_id,
             "space": self._space_name,
         }
+        if API_VERSION:
+            params["version"] = API_VERSION
         if self._connection.session_id:
             params["session"] = self._connection.session_id
         elif self._launch_id:
@@ -113,6 +113,7 @@ class Worker:
         return params
 
     async def run(self) -> None:
+        check_server(self._server_host)
         while True:
             print(
                 f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})..."
