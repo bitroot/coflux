@@ -37,6 +37,3 @@ coflux-*.tar
 
 # Node modules
 /node_modules/
-
-# Frontend bundle
-/priv/static/app.*

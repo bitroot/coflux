@@ -1,6 +1,4 @@
 defmodule Coflux.Web do
-  @otp_app Mix.Project.config()[:app]
-
   alias Coflux.Handlers
 
   def child_spec(opts) do
@@ -19,7 +17,6 @@ defmodule Coflux.Web do
          {"/worker", Handlers.Worker, []},
          {"/topics", Handlers.Topics, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},
-         {"/static/[...]", :cowboy_static, {:priv_dir, @otp_app, "static"}},
          {"/[...]", Handlers.Root, []}
        ]}
     ])

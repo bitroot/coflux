@@ -2,8 +2,6 @@
 clients/
 docs/
 examples/
-frontend/node_modules/
-frontend/out/
 server/.elixir_ls/
 server/_build/
 server/data/
