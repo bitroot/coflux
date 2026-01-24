@@ -24,7 +24,7 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the auth mode: `:none` or `:token` (default).
+  Returns the auth mode: `:none` (default) or `:token`.
   """
   def auth_mode do
     :persistent_term.get(:coflux_auth_mode)
@@ -49,7 +49,7 @@ defmodule Coflux.Config do
   end
 
   defp parse_auth_mode do
-    case System.get_env("COFLUX_AUTH_MODE", "token") do
+    case System.get_env("COFLUX_AUTH_MODE", "none") do
       "none" -> :none
       "token" -> :token
       other -> raise "Invalid COFLUX_AUTH_MODE: #{inspect(other)}. Must be \"none\" or \"token\"."
