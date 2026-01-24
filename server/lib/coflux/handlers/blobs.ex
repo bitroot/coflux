@@ -5,10 +5,16 @@ defmodule Coflux.Handlers.Blobs do
 
   def init(req, opts) do
     bindings = :cowboy_req.bindings(req)
+    req = set_cors_headers(req)
 
-    req
-    |> set_cors_headers()
-    |> handle(:cowboy_req.method(req), bindings[:key], opts)
+    case :cowboy_req.method(req) do
+      "OPTIONS" ->
+        req = :cowboy_req.reply(204, req)
+        {:ok, req, opts}
+
+      method ->
+        handle(req, method, bindings[:key], opts)
+    end
   end
 
   defp handle(req, "HEAD", key, opts) do

@@ -1,13 +1,3 @@
-FROM node:20 AS npm_build
-WORKDIR /app
-
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-
-COPY frontend/ ./
-RUN npm run build
-
-
 FROM elixir:1.18.3 AS mix_build
 WORKDIR /app
 
@@ -18,7 +8,6 @@ COPY server/mix.exs server/mix.lock server/VERSION ./
 RUN mix deps.get --only prod
 
 COPY server/ ./
-COPY --from=npm_build /app/out/ priv/static/
 
 RUN MIX_ENV=prod mix release
 

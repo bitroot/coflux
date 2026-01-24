@@ -2,7 +2,7 @@
 
 Coflux is an open-source workflow engine. Use it to orchestrate and observe computational workflows, defined in plain Python. Suitable for data pipelines, background tasks, chat bots.
 
-This is the server component, which includes the orchestrator and the frontend. It gets packaged up into a Docker image.
+This is the server component, which includes the orchestrator. It gets packaged up into a Docker image. The web UI is hosted separately at [studio.coflux.com](https://studio.coflux.com).
 
 Refer to the [docs](https://docs.coflux.com) for more details.
 
@@ -18,11 +18,4 @@ Then start the server (with IEx):
 
 ```bash
 $ iex -S mix
-```
-
-And build the frontend with:
-
-``` bash
-$ cd ../frontend
-$ npm run dev
 ```

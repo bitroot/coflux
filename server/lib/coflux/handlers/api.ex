@@ -7,28 +7,35 @@ defmodule Coflux.Handlers.Api do
   @max_parameters 20
 
   def init(req, opts) do
+    req = set_cors_headers(req)
+
     expected_version =
       case :cowboy_req.header("x-api-version", req) do
         :undefined -> nil
         value -> value
       end
 
-    req =
-      case Version.check(expected_version) do
-        :ok ->
-          handle(req, :cowboy_req.method(req), :cowboy_req.path_info(req))
+    case Version.check(expected_version) do
+      :ok ->
+        case :cowboy_req.method(req) do
+          "OPTIONS" ->
+            req = :cowboy_req.reply(204, req)
+            {:ok, req, opts}
 
-        {:error, server_version, expected_version} ->
-          json_error_response(req, "version_mismatch",
-            status: 409,
-            details: %{
-              "server" => server_version,
-              "expected" => expected_version
-            }
-          )
-      end
+          method ->
+            req = handle(req, method, :cowboy_req.path_info(req))
+            {:ok, req, opts}
+        end
 
-    {:ok, req, opts}
+      {:error, server_version, expected_version} ->
+        json_error_response(req, "version_mismatch",
+          status: 409,
+          details: %{
+            "server" => server_version,
+            "expected" => expected_version
+          }
+        )
+    end
   end
 
   defp handle(req, "POST", ["create_project"]) do
