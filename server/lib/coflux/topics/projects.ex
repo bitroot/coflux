@@ -5,8 +5,14 @@ defmodule Coflux.Topics.Projects do
 
   @server Coflux.ProjectsServer
 
-  def init(_params) do
-    {ref, projects} = Projects.subscribe(@server, self())
+  def connect(params, context) do
+    namespace = Map.get(context, :namespace)
+    {:ok, Map.put(params, :namespace, namespace)}
+  end
+
+  def init(params) do
+    namespace = Map.get(params, :namespace)
+    {ref, projects} = Projects.subscribe(@server, self(), namespace)
     {:ok, Topic.new(projects, %{ref: ref})}
   end
 

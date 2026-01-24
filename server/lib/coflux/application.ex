@@ -1,14 +1,18 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Projects, Orchestration, Topics}
+  alias Coflux.{Config, Projects, Orchestration, Topics}
+  alias Coflux.Auth.TokenStore
 
   @impl true
   def start(_type, _args) do
     port = String.to_integer(System.get_env("PORT", "7777"))
 
+    Config.init()
+
     children =
       [
+        TokenStore,
         {Projects, name: Coflux.ProjectsServer},
         # TODO: separate launch supervisor per project? (and specify max_children?)
         {Task.Supervisor, name: Coflux.LauncherSupervisor},

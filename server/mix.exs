@@ -25,7 +25,7 @@ defmodule Coflux.MixProject do
       {:cowboy, "~> 2.9"},
       {:exqlite, "~> 0.13"},
       {:jason, "~> 1.4"},
-      {:topical, "~> 0.2"},
+      {:topical, "~> 0.3"},
       {:briefly, "~> 0.5.0"},
       {:unzip, "~> 0.12.0"},
       {:mime, "~> 2.0"},

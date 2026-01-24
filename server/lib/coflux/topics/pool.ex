@@ -3,10 +3,20 @@ defmodule Coflux.Topics.Pool do
 
   alias Coflux.Orchestration
 
+  import Coflux.TopicUtils, only: [validate_project_access: 2]
+
+  def connect(params, context) do
+    namespace = Map.get(context, :namespace)
+
+    with :ok <- validate_project_access(params.project_id, namespace) do
+      {:ok, params}
+    end
+  end
+
   def init(params) do
-    project_id = Keyword.fetch!(params, :project_id)
-    space_id = String.to_integer(Keyword.fetch!(params, :space_id))
-    pool_name = Keyword.fetch!(params, :pool_name)
+    project_id = Map.fetch!(params, :project_id)
+    space_id = String.to_integer(Map.fetch!(params, :space_id))
+    pool_name = Map.fetch!(params, :pool_name)
 
     case Orchestration.subscribe_pool(project_id, space_id, pool_name, self()) do
       {:ok, pool, workers, ref} ->

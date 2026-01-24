@@ -4,10 +4,20 @@ defmodule Coflux.Topics.Module do
 
   alias Coflux.Orchestration
 
+  import Coflux.TopicUtils, only: [validate_project_access: 2]
+
+  def connect(params, context) do
+    namespace = Map.get(context, :namespace)
+
+    with :ok <- validate_project_access(params.project_id, namespace) do
+      {:ok, params}
+    end
+  end
+
   def init(params) do
-    project_id = Keyword.fetch!(params, :project_id)
-    module = Keyword.fetch!(params, :module)
-    space_id = String.to_integer(Keyword.fetch!(params, :space_id))
+    project_id = Map.fetch!(params, :project_id)
+    module = Map.fetch!(params, :module)
+    space_id = String.to_integer(Map.fetch!(params, :space_id))
 
     {:ok, executions, ref} =
       Orchestration.subscribe_module(project_id, module, space_id, self())

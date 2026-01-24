@@ -1,4 +1,15 @@
 defmodule Coflux.TopicUtils do
+  alias Coflux.Projects
+
+  @projects_server Coflux.ProjectsServer
+
+  def validate_project_access(project_id, namespace) do
+    case Projects.get_project_by_id(@projects_server, project_id, namespace) do
+      {:ok, _project} -> :ok
+      :error -> {:error, :not_found}
+    end
+  end
+
   def build_value(value) do
     case value do
       {:raw, data, references} ->

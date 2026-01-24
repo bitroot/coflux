@@ -3,8 +3,18 @@ defmodule Coflux.Topics.Spaces do
 
   alias Coflux.Orchestration
 
+  import Coflux.TopicUtils, only: [validate_project_access: 2]
+
+  def connect(params, context) do
+    namespace = Map.get(context, :namespace)
+
+    with :ok <- validate_project_access(params.project_id, namespace) do
+      {:ok, params}
+    end
+  end
+
   def init(params) do
-    project_id = Keyword.fetch!(params, :project_id)
+    project_id = Map.fetch!(params, :project_id)
     {:ok, spaces, ref} = Orchestration.subscribe_spaces(project_id, self())
 
     spaces =
