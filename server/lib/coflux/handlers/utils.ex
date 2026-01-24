@@ -1,5 +1,33 @@
 defmodule Coflux.Handlers.Utils do
-  @default_allowed_origins ["https://studio.coflux.com"]
+  alias Coflux.Config
+
+  @doc """
+  Resolves the namespace from the request hostname.
+
+  Returns `{:ok, namespace}` where namespace is a string or nil,
+  or `{:error, :invalid_host}` if hostname doesn't match base domain.
+  """
+  def resolve_namespace(req) do
+    hostname = :cowboy_req.host(req)
+
+    case Config.base_domain() do
+      nil ->
+        {:ok, nil}
+
+      base_domain ->
+        cond do
+          hostname == base_domain ->
+            {:ok, nil}
+
+          String.ends_with?(hostname, "." <> base_domain) ->
+            namespace = String.replace_suffix(hostname, "." <> base_domain, "")
+            {:ok, namespace}
+
+          true ->
+            {:error, :invalid_host}
+        end
+    end
+  end
 
   def set_cors_headers(req) do
     origin = :cowboy_req.header("origin", req, nil)
@@ -35,16 +63,7 @@ defmodule Coflux.Handlers.Utils do
   end
 
   defp get_allowed_origins do
-    case System.get_env("COFLUX_ALLOW_ORIGINS") do
-      nil ->
-        @default_allowed_origins
-
-      value ->
-        value
-        |> String.split(",")
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-    end
+    Config.allowed_origins()
   end
 
   defp origin_matches?(origin, pattern) do

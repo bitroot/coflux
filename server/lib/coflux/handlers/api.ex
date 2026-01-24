@@ -2,9 +2,18 @@ defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
   alias Coflux.{Orchestration, Projects, MapUtils, Version}
+  alias Coflux.Handlers.Auth
 
   @projects_server Coflux.ProjectsServer
   @max_parameters 20
+
+  # Helper to check project access and return appropriate error response
+  defp with_project_access(req, project_id, namespace, fun) do
+    case Projects.get_project_by_id(@projects_server, project_id, namespace) do
+      {:ok, _project} -> fun.()
+      :error -> json_error_response(req, "not_found", status: 404)
+    end
+  end
 
   def init(req, opts) do
     req = set_cors_headers(req)
@@ -23,8 +32,19 @@ defmodule Coflux.Handlers.Api do
             {:ok, req, opts}
 
           method ->
-            req = handle(req, method, :cowboy_req.path_info(req))
-            {:ok, req, opts}
+            with {:ok, namespace} <- resolve_namespace(req),
+                 :ok <- Auth.check(req, namespace) do
+              req = handle(req, method, :cowboy_req.path_info(req), namespace)
+              {:ok, req, opts}
+            else
+              {:error, :invalid_host} ->
+                req = json_error_response(req, "invalid_host", status: 400)
+                {:ok, req, opts}
+
+              {:error, :unauthorized} ->
+                req = json_error_response(req, "unauthorized", status: 401)
+                {:ok, req, opts}
+            end
         end
 
       {:error, server_version, expected_version} ->
@@ -38,12 +58,12 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["create_project"]) do
+  defp handle(req, "POST", ["create_project"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{project_name: "projectName"})
 
     if Enum.empty?(errors) do
-      case Projects.create_project(@projects_server, arguments.project_name) do
+      case Projects.create_project(@projects_server, arguments.project_name, namespace) do
         {:ok, project_id} ->
           json_response(req, %{"projectId" => project_id})
 
@@ -60,36 +80,32 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_spaces"]) do
+  defp handle(req, "GET", ["get_spaces"], namespace) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
 
-    case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
-      {:ok, _} ->
-        case Orchestration.get_spaces(project_id) do
-          {:ok, spaces} ->
-            json_response(
-              req,
-              Map.new(spaces, fn {space_id, space} ->
-                base_id =
-                  if space.base_id,
-                    do: Integer.to_string(space.base_id)
+    with_project_access(req, project_id, namespace, fn ->
+      case Orchestration.get_spaces(project_id) do
+        {:ok, spaces} ->
+          json_response(
+            req,
+            Map.new(spaces, fn {space_id, space} ->
+              base_id =
+                if space.base_id,
+                  do: Integer.to_string(space.base_id)
 
-                {space_id,
-                 %{
-                   "name" => space.name,
-                   "baseId" => base_id
-                 }}
-              end)
-            )
-        end
-
-      :error ->
-        json_error_response(req, "not_found", status: 404)
-    end
+              {space_id,
+               %{
+                 "name" => space.name,
+                 "baseId" => base_id
+               }}
+            end)
+          )
+      end
+    end)
   end
 
-  defp handle(req, "POST", ["create_space"]) do
+  defp handle(req, "POST", ["create_space"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -103,29 +119,31 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.create_space(
-             arguments.project_id,
-             arguments.name,
-             arguments[:base_id]
-           ) do
-        {:ok, space_id} ->
-          json_response(req, %{id: space_id})
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.create_space(
+               arguments.project_id,
+               arguments.name,
+               arguments[:base_id]
+             ) do
+          {:ok, space_id} ->
+            json_response(req, %{id: space_id})
 
-        {:error, errors} ->
-          errors =
-            MapUtils.translate_keys(errors, %{
-              name: "name",
-              base_id: "baseId"
-            })
+          {:error, errors} ->
+            errors =
+              MapUtils.translate_keys(errors, %{
+                name: "name",
+                base_id: "baseId"
+              })
 
-          json_error_response(req, "bad_request", details: errors)
-      end
+            json_error_response(req, "bad_request", details: errors)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["update_space"]) do
+  defp handle(req, "POST", ["update_space"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -140,32 +158,34 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.update_space(
-             arguments.project_id,
-             arguments.space_id,
-             Map.take(arguments, [:name, :base_id])
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.update_space(
+               arguments.project_id,
+               arguments.space_id,
+               Map.take(arguments, [:name, :base_id])
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
 
-        {:error, errors} ->
-          errors =
-            MapUtils.translate_keys(errors, %{
-              name: "name",
-              base_id: "baseId"
-            })
+          {:error, errors} ->
+            errors =
+              MapUtils.translate_keys(errors, %{
+                name: "name",
+                base_id: "baseId"
+              })
 
-          json_error_response(req, "bad_request", details: errors)
-      end
+            json_error_response(req, "bad_request", details: errors)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["pause_space"]) do
+  defp handle(req, "POST", ["pause_space"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -173,22 +193,24 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.pause_space(
-             arguments.project_id,
-             arguments.space_id
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.pause_space(
+               arguments.project_id,
+               arguments.space_id
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["resume_space"]) do
+  defp handle(req, "POST", ["resume_space"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -196,22 +218,24 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_space(
-             arguments.project_id,
-             arguments.space_id
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.resume_space(
+               arguments.project_id,
+               arguments.space_id
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["archive_space"]) do
+  defp handle(req, "POST", ["archive_space"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -219,25 +243,27 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_space(
-             arguments.project_id,
-             arguments.space_id
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.archive_space(
+               arguments.project_id,
+               arguments.space_id
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :descendants} ->
-          json_error_response(req, "bad_request", details: %{"spaceId" => "has_dependencies"})
+          {:error, :descendants} ->
+            json_error_response(req, "bad_request", details: %{"spaceId" => "has_dependencies"})
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["get_pools"]) do
+  defp handle(req, "GET", ["get_pools"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -245,53 +271,57 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.get_pools(arguments.project_id, arguments.space_name) do
-        {:ok, pools} ->
-          json_response(
-            req,
-            Map.new(pools, fn {pool_name, pool} ->
-              {
-                pool_name,
-                %{
-                  "provides" => pool.provides,
-                  "modules" => pool.modules,
-                  "launcherType" => if(pool.launcher, do: pool.launcher.type)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.get_pools(arguments.project_id, arguments.space_name) do
+          {:ok, pools} ->
+            json_response(
+              req,
+              Map.new(pools, fn {pool_name, pool} ->
+                {
+                  pool_name,
+                  %{
+                    "provides" => pool.provides,
+                    "modules" => pool.modules,
+                    "launcherType" => if(pool.launcher, do: pool.launcher.type)
+                  }
                 }
-              }
-            end)
-          )
-      end
+              end)
+            )
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["get_pool"]) do
+  defp handle(req, "GET", ["get_pool"], namespace) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     space_name = get_query_param(qs, "space")
     pool_name = get_query_param(qs, "pool")
 
-    case Orchestration.get_pools(project_id, space_name) do
-      {:ok, pools} ->
-        case Map.fetch(pools, pool_name) do
-          {:ok, pool} ->
-            json_response(
-              req,
-              %{
-                "provides" => pool.provides,
-                "modules" => pool.modules,
-                "launcher" => pool.launcher
-              }
-            )
+    with_project_access(req, project_id, namespace, fn ->
+      case Orchestration.get_pools(project_id, space_name) do
+        {:ok, pools} ->
+          case Map.fetch(pools, pool_name) do
+            {:ok, pool} ->
+              json_response(
+                req,
+                %{
+                  "provides" => pool.provides,
+                  "modules" => pool.modules,
+                  "launcher" => pool.launcher
+                }
+              )
 
-          :error ->
-            json_error_response(req, "not_found", status: 404)
-        end
-    end
+            :error ->
+              json_error_response(req, "not_found", status: 404)
+          end
+      end
+    end)
   end
 
-  defp handle(req, "POST", ["update_pool"]) do
+  defp handle(req, "POST", ["update_pool"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -301,24 +331,26 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.update_pool(
-             arguments.project_id,
-             arguments.space_name,
-             arguments.pool_name,
-             arguments.pool
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.update_pool(
+               arguments.project_id,
+               arguments.space_name,
+               arguments.pool_name,
+               arguments.pool
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["stop_worker"]) do
+  defp handle(req, "POST", ["stop_worker"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -327,23 +359,25 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.stop_worker(
-             arguments.project_id,
-             arguments.space_name,
-             arguments.worker_id
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.stop_worker(
+               arguments.project_id,
+               arguments.space_name,
+               arguments.worker_id
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["resume_worker"]) do
+  defp handle(req, "POST", ["resume_worker"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -352,23 +386,25 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_worker(
-             arguments.project_id,
-             arguments.space_name,
-             arguments.worker_id
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.resume_worker(
+               arguments.project_id,
+               arguments.space_name,
+               arguments.worker_id
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-      end
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["register_manifests"]) do
+  defp handle(req, "POST", ["register_manifests"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -377,20 +413,22 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.register_manifests(
-             arguments.project_id,
-             arguments.space_name,
-             arguments.manifests
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
-      end
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.register_manifests(
+               arguments.project_id,
+               arguments.space_name,
+               arguments.manifests
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["archive_module"]) do
+  defp handle(req, "POST", ["archive_module"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -399,36 +437,40 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_module(
-             arguments.project_id,
-             arguments.space_name,
-             arguments.module_name
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
-      end
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.archive_module(
+               arguments.project_id,
+               arguments.space_name,
+               arguments.module_name
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["get_workflow"]) do
+  defp handle(req, "GET", ["get_workflow"], namespace) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     space_name = get_query_param(qs, "space")
     module = get_query_param(qs, "module")
     target_name = get_query_param(qs, "target")
 
-    case Orchestration.get_workflow(project_id, space_name, module, target_name) do
-      {:ok, nil} ->
-        json_error_response(req, "not_found", status: 404)
+    with_project_access(req, project_id, namespace, fn ->
+      case Orchestration.get_workflow(project_id, space_name, module, target_name) do
+        {:ok, nil} ->
+          json_error_response(req, "not_found", status: 404)
 
-      {:ok, workflow} ->
-        json_response(req, compose_workflow(workflow))
-    end
+        {:ok, workflow} ->
+          json_response(req, compose_workflow(workflow))
+      end
+    end)
   end
 
-  defp handle(req, "POST", ["submit_workflow"]) do
+  defp handle(req, "POST", ["submit_workflow"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -450,34 +492,36 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.start_run(
-             arguments.project_id,
-             arguments.module,
-             arguments.target,
-             :workflow,
-             arguments.arguments,
-             space: arguments.space_name,
-             execute_after: arguments[:execute_after],
-             wait_for: arguments[:wait_for],
-             cache: arguments[:cache],
-             defer: arguments[:defer],
-             delay: arguments[:delay],
-             retries: arguments[:retries],
-             requires: arguments[:requires]
-           ) do
-        {:ok, run_id, step_id, execution_id} ->
-          json_response(req, %{
-            "runId" => run_id,
-            "stepId" => step_id,
-            "executionId" => execution_id
-          })
-      end
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.start_run(
+               arguments.project_id,
+               arguments.module,
+               arguments.target,
+               :workflow,
+               arguments.arguments,
+               space: arguments.space_name,
+               execute_after: arguments[:execute_after],
+               wait_for: arguments[:wait_for],
+               cache: arguments[:cache],
+               defer: arguments[:defer],
+               delay: arguments[:delay],
+               retries: arguments[:retries],
+               requires: arguments[:requires]
+             ) do
+          {:ok, run_id, step_id, execution_id} ->
+            json_response(req, %{
+              "runId" => run_id,
+              "stepId" => step_id,
+              "executionId" => execution_id
+            })
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["start_sensor"]) do
+  defp handle(req, "POST", ["start_sensor"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -494,28 +538,30 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.start_run(
-             arguments.project_id,
-             arguments.module,
-             arguments.target,
-             :sensor,
-             arguments.arguments,
-             space: arguments.space_name,
-             requires: arguments[:requires]
-           ) do
-        {:ok, run_id, step_id, execution_id} ->
-          json_response(req, %{
-            "runId" => run_id,
-            "stepId" => step_id,
-            "executionId" => execution_id
-          })
-      end
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.start_run(
+               arguments.project_id,
+               arguments.module,
+               arguments.target,
+               :sensor,
+               arguments.arguments,
+               space: arguments.space_name,
+               requires: arguments[:requires]
+             ) do
+          {:ok, run_id, step_id, execution_id} ->
+            json_response(req, %{
+              "runId" => run_id,
+              "stepId" => step_id,
+              "executionId" => execution_id
+            })
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["cancel_execution"]) do
+  defp handle(req, "POST", ["cancel_execution"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -526,19 +572,21 @@ defmodule Coflux.Handlers.Api do
     execution_id = String.to_integer(arguments.execution_id)
 
     if Enum.empty?(errors) do
-      case Orchestration.cancel_execution(
-             arguments.project_id,
-             execution_id
-           ) do
-        :ok ->
-          json_response(req, %{})
-      end
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.cancel_execution(
+               arguments.project_id,
+               execution_id
+             ) do
+          :ok ->
+            json_response(req, %{})
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["rerun_step"]) do
+  defp handle(req, "POST", ["rerun_step"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         project_id: "projectId",
@@ -547,55 +595,62 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.rerun_step(
-             arguments.project_id,
-             arguments.step_id,
-             arguments.space_name
-           ) do
-        {:ok, execution_id, attempt} ->
-          json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.rerun_step(
+               arguments.project_id,
+               arguments.step_id,
+               arguments.space_name
+             ) do
+          {:ok, execution_id, attempt} ->
+            json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
 
-        {:error, :space_invalid} ->
-          json_error_response(req, "bad_request", details: %{"space" => "invalid"})
-      end
+          {:error, :space_invalid} ->
+            json_error_response(req, "bad_request", details: %{"space" => "invalid"})
+        end
+      end)
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["search"]) do
+  defp handle(req, "GET", ["search"], namespace) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     # TODO: handle parse error
     {:ok, space_id} = parse_numeric_id(get_query_param(qs, "spaceId"))
     query = get_query_param(qs, "query")
 
-    case Topical.execute(
-           Coflux.TopicalRegistry,
-           ["projects", project_id, "search", space_id],
-           "query",
-           {query}
-         ) do
-      {:ok, matches} ->
-        json_response(req, %{"matches" => matches})
-    end
+    with_project_access(req, project_id, namespace, fn ->
+      case Topical.execute(
+             Coflux.TopicalRegistry,
+             ["projects", project_id, "search", space_id],
+             "query",
+             {query},
+             %{namespace: namespace}
+           ) do
+        {:ok, matches} ->
+          json_response(req, %{"matches" => matches})
+      end
+    end)
   end
 
-  defp handle(req, "GET", ["get_asset"]) do
+  defp handle(req, "GET", ["get_asset"], namespace) do
     qs = :cowboy_req.parse_qs(req)
     project_id = get_query_param(qs, "project")
     asset_id = get_query_param(qs, "asset")
 
-    case Orchestration.get_asset_by_external_id(project_id, asset_id) do
-      {:error, :not_found} ->
-        json_error_response(req, "not_found", status: 404)
+    with_project_access(req, project_id, namespace, fn ->
+      case Orchestration.get_asset_by_external_id(project_id, asset_id) do
+        {:error, :not_found} ->
+          json_error_response(req, "not_found", status: 404)
 
-      {:ok, name, entries} ->
-        json_response(req, compose_asset(name, entries))
-    end
+        {:ok, name, entries} ->
+          json_response(req, compose_asset(name, entries))
+      end
+    end)
   end
 
-  defp handle(req, _method, _path) do
+  defp handle(req, _method, _path, _namespace) do
     json_error_response(req, "not_found", status: 404)
   end
 

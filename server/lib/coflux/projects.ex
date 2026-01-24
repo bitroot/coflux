@@ -7,16 +7,23 @@ defmodule Coflux.Projects do
     GenServer.start_link(__MODULE__, {}, opts)
   end
 
-  def create_project(server, project_name) do
-    GenServer.call(server, {:create_project, project_name})
+  def create_project(server, project_name, namespace \\ nil) do
+    GenServer.call(server, {:create_project, project_name, namespace})
   end
 
-  def get_project_by_id(server, project_id) do
-    GenServer.call(server, {:get_project_by_id, project_id})
+  @doc """
+  Gets a project by ID, optionally validating namespace access.
+
+  Returns:
+    - {:ok, project} if project exists and namespace matches (if provided)
+    - :error if project doesn't exist or belongs to a different namespace
+  """
+  def get_project_by_id(server, project_id, namespace \\ nil) do
+    GenServer.call(server, {:get_project_by_id, project_id, namespace})
   end
 
-  def subscribe(server, pid) do
-    GenServer.call(server, {:subscribe, pid})
+  def subscribe(server, pid, namespace \\ nil) do
+    GenServer.call(server, {:subscribe, pid, namespace})
   end
 
   def unsubscribe(server, ref) do
@@ -41,10 +48,11 @@ defmodule Coflux.Projects do
     {:ok, %{projects: projects, subscribers: %{}}}
   end
 
-  def handle_call({:create_project, project_name}, _from, state) do
+  def handle_call({:create_project, project_name, namespace}, _from, state) do
     existing_project_names =
       state.projects
       |> Map.values()
+      |> Enum.filter(&(&1.namespace == namespace))
       |> MapSet.new(& &1.name)
 
     errors =
@@ -63,7 +71,7 @@ defmodule Coflux.Projects do
       state =
         put_in(
           state.projects[project_id],
-          %{name: project_name}
+          %{name: project_name, namespace: namespace}
         )
 
       save_projects(state)
@@ -72,14 +80,33 @@ defmodule Coflux.Projects do
     end
   end
 
-  def handle_call({:get_project_by_id, project_id}, _from, state) do
-    {:reply, Map.fetch(state.projects, project_id), state}
+  def handle_call({:get_project_by_id, project_id, namespace}, _from, state) do
+    result =
+      case Map.fetch(state.projects, project_id) do
+        {:ok, project} ->
+          if project.namespace == namespace do
+            {:ok, project}
+          else
+            :error
+          end
+
+        :error ->
+          :error
+      end
+
+    {:reply, result, state}
   end
 
-  def handle_call({:subscribe, pid}, _from, state) do
+  def handle_call({:subscribe, pid, namespace}, _from, state) do
     ref = Process.monitor(pid)
-    state = put_in(state.subscribers[ref], pid)
-    {:reply, {ref, state.projects}, state}
+    state = put_in(state.subscribers[ref], {pid, namespace})
+
+    filtered_projects =
+      state.projects
+      |> Enum.filter(fn {_id, project} -> project.namespace == namespace end)
+      |> Map.new()
+
+    {:reply, {ref, filtered_projects}, state}
   end
 
   def handle_cast({:unsubscribe, ref}, state) do
@@ -101,14 +128,29 @@ defmodule Coflux.Projects do
   end
 
   defp notify_subscribers(state, project_id) do
-    Enum.each(state.subscribers, fn {ref, pid} ->
-      project = Map.fetch!(state.projects, project_id)
-      send(pid, {:project, ref, project_id, project})
+    project = Map.fetch!(state.projects, project_id)
+
+    Enum.each(state.subscribers, fn {ref, {pid, namespace}} ->
+      if project.namespace == namespace do
+        send(pid, {:project, ref, project_id, project})
+      end
     end)
   end
 
   defp save_projects(state) do
-    content = Jason.encode!(state.projects)
+    projects_for_json =
+      Map.new(state.projects, fn {id, project} ->
+        json_project =
+          if project.namespace do
+            %{"name" => project.name, "namespace" => project.namespace}
+          else
+            %{"name" => project.name}
+          end
+
+        {id, json_project}
+      end)
+
+    content = Jason.encode!(projects_for_json)
     path = get_path()
     :ok = File.mkdir_p!(Path.dirname(path))
     File.write!(path, content)
@@ -126,7 +168,8 @@ defmodule Coflux.Projects do
 
   defp build_project(project) do
     %{
-      name: Map.fetch!(project, "name")
+      name: Map.fetch!(project, "name"),
+      namespace: Map.get(project, "namespace")
     }
   end
 
