@@ -109,8 +109,9 @@ defmodule Coflux.Handlers.Worker do
           cache,
           defer,
           memo,
-          execute_after,
+          delay,
           retries,
+          recurrent,
           requires
         ] = message["params"]
 
@@ -123,12 +124,13 @@ defmodule Coflux.Handlers.Worker do
                  parse_type(type),
                  Enum.map(arguments, &parse_value/1),
                  group_id: group_id,
-                 execute_after: execute_after,
                  wait_for: wait_for,
                  cache: parse_cache(cache),
                  defer: parse_defer(defer),
                  memo: memo,
+                 delay: delay || 0,
                  retries: parse_retries(retries),
+                 recurrent: recurrent == true,
                  requires: requires
                ) do
             {:ok, _run_id, _step_id, execution_id} ->
@@ -151,24 +153,6 @@ defmodule Coflux.Handlers.Worker do
               state.project_id,
               executions,
               state.session_id
-            )
-
-          {[], state}
-        else
-          {[{:close, 4000, "execution_invalid"}], nil}
-        end
-
-      "record_checkpoint" ->
-        [execution_id, arguments] = message["params"]
-
-        if is_recognised_execution?(execution_id, state) do
-          arguments = Enum.map(arguments, &parse_value/1)
-
-          :ok =
-            Orchestration.record_checkpoint(
-              state.project_id,
-              execution_id,
-              arguments
             )
 
           {[], state}
@@ -403,7 +387,6 @@ defmodule Coflux.Handlers.Worker do
     case type do
       "workflow" -> :workflow
       "task" -> :task
-      "sensor" -> :sensor
     end
   end
 
@@ -478,7 +461,7 @@ defmodule Coflux.Handlers.Worker do
   def parse_retries(value) do
     if value do
       %{
-        limit: Map.fetch!(value, "limit"),
+        limit: Map.get(value, "limit"),
         delay_min: Map.fetch!(value, "delay_min"),
         delay_max: Map.fetch!(value, "delay_max")
       }

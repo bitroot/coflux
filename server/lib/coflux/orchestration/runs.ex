@@ -24,6 +24,8 @@ defmodule Coflux.Orchestration.Runs do
         retry_limit,
         retry_delay_min,
         retry_delay_max,
+        recurrent,
+        delay,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -55,6 +57,8 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_limit,
         s.retry_delay_min,
         s.retry_delay_max,
+        s.recurrent,
+        s.delay,
         s.requires_tag_set_id,
         s.created_at
       FROM steps AS s
@@ -135,7 +139,7 @@ defmodule Coflux.Orchestration.Runs do
     parent_id = Keyword.get(opts, :parent_id)
     now = current_timestamp()
 
-    # TODO: check that 'type' is :workflow or :sensor?
+    # TODO: check that 'type' is :workflow?
 
     with_transaction(db, fn ->
       {:ok, run_id, external_run_id} = insert_run(db, parent_id, idempotency_key, now)
@@ -261,9 +265,13 @@ defmodule Coflux.Orchestration.Runs do
     cache = Keyword.get(opts, :cache)
     defer = Keyword.get(opts, :defer)
     memo = Keyword.get(opts, :memo)
-    execute_after = Keyword.get(opts, :execute_after)
     retries = Keyword.get(opts, :retries)
+    recurrent = Keyword.get(opts, :recurrent, false)
+    delay = Keyword.get(opts, :delay, 0)
     requires = Keyword.get(opts, :requires) || %{}
+
+    # Calculate execute_after from delay
+    execute_after = if delay > 0, do: now + delay
 
     memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
 
@@ -324,9 +332,11 @@ defmodule Coflux.Orchestration.Runs do
               cache_config_id,
               defer_key,
               memo_key,
-              if(retries, do: retries.limit, else: 0),
+              if(retries, do: retries.limit || -1, else: 0),
               if(retries, do: retries.delay_min, else: 0),
               if(retries, do: retries.delay_max, else: 0),
+              recurrent,
+              delay,
               requires_tag_set_id,
               now
             )
@@ -681,6 +691,7 @@ defmodule Coflux.Orchestration.Runs do
         retry_limit,
         retry_delay_min,
         retry_delay_max,
+        recurrent,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -735,6 +746,27 @@ defmodule Coflux.Orchestration.Runs do
          ) do
       {:ok, rows} ->
         {:ok, Map.new(rows)}
+    end
+  end
+
+  @doc """
+  Gets result types for executions of a step, ordered most recent first.
+  """
+  def get_step_result_types(db, step_id, limit) do
+    case query(
+           db,
+           """
+           SELECT r.type
+           FROM executions AS e
+           INNER JOIN results AS r ON r.execution_id = e.id
+           WHERE e.step_id = ?1
+           ORDER BY e.created_at DESC
+           LIMIT ?2
+           """,
+           {step_id, limit}
+         ) do
+      {:ok, rows} ->
+        {:ok, Enum.map(rows, fn {type} -> type end)}
     end
   end
 
@@ -939,6 +971,8 @@ defmodule Coflux.Orchestration.Runs do
          retry_limit,
          retry_delay_min,
          retry_delay_max,
+         recurrent,
+         delay,
          requires_tag_set_id,
          now
        ) do
@@ -960,6 +994,8 @@ defmodule Coflux.Orchestration.Runs do
                retry_limit: retry_limit,
                retry_delay_min: retry_delay_min,
                retry_delay_max: retry_delay_max,
+               recurrent: if(recurrent, do: 1, else: 0),
+               delay: delay,
                requires_tag_set_id: requires_tag_set_id,
                created_at: now
              }) do

@@ -74,20 +74,24 @@ def _parse_cache(
 
 
 def _parse_retries(
-    retries: int | tuple[int, int] | tuple[int, int, int],
+    retries: int | bool | models.Retries,
 ) -> models.Retries | None:
-    # TODO: parse string (e.g., '1h')
     match retries:
-        case 0:
+        case False | 0:
             return None
+        case True:
+            # Unlimited with sensible defaults (1s-60s backoff)
+            return models.Retries(None, 1000, 60000)
         case int(limit):
             return models.Retries(limit, 0, 0)
-        case (limit, delay):
-            return models.Retries(limit, delay, delay)
-        case (limit, delay_min, delay_max):
-            return models.Retries(limit, delay_min, delay_max)
-        case other:
-            raise ValueError(other)
+        case models.Retries(limit, delay_min, delay_max):
+            if limit == 0:
+                return None
+            return models.Retries(
+                limit,
+                int(delay_min * 1000),
+                int(delay_max * 1000),
+            )
 
 
 def _parse_defer(
@@ -124,7 +128,8 @@ def _build_definition(
     cache_params: t.Iterable[str] | str | None,
     cache_namespace: str | None,
     cache_version: str | None,
-    retries: int | tuple[int, int] | tuple[int, int, int],
+    retries: int | bool | models.Retries,
+    recurrent: bool,
     defer: bool,
     defer_params: t.Iterable[str] | str | None,
     delay: float | dt.timedelta,
@@ -145,6 +150,7 @@ def _build_definition(
         _parse_defer(defer, defer_params, parameters_),
         _parse_delay(delay),
         _parse_retries(retries),
+        recurrent,
         _parse_memo(memo, parameters_),
         _parse_requires(requires),
         inspect.getdoc(fn),
@@ -180,7 +186,8 @@ class Target(t.Generic[P, T]):
         cache_params: t.Iterable[str] | str | None = None,
         cache_namespace: str | None = None,
         cache_version: str | None = None,
-        retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+        retries: int | bool | models.Retries = 0,
+        recurrent: bool = False,
         defer: bool = False,
         defer_params: t.Iterable[str] | str | None = None,
         delay: float | dt.timedelta = 0,
@@ -200,6 +207,7 @@ class Target(t.Generic[P, T]):
             cache_namespace,
             cache_version,
             retries,
+            recurrent,
             defer,
             defer_params,
             delay,
@@ -232,6 +240,7 @@ class Target(t.Generic[P, T]):
                 wait_for=self._definition.wait_for,
                 cache=self._definition.cache,
                 retries=self._definition.retries,
+                recurrent=self._definition.recurrent,
                 defer=self._definition.defer,
                 delay=self._definition.delay,
                 memo=self._definition.memo,
@@ -290,7 +299,8 @@ def task(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
+    recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,
     delay: float | dt.timedelta = 0,
@@ -308,6 +318,7 @@ def task(
             cache_namespace=cache_namespace,
             cache_version=cache_version,
             retries=retries,
+            recurrent=recurrent,
             defer=defer,
             defer_params=defer_params,
             delay=delay,
@@ -326,7 +337,8 @@ def workflow(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
+    recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,
     delay: float | dt.timedelta = 0,
@@ -343,6 +355,7 @@ def workflow(
             cache_namespace=cache_namespace,
             cache_version=cache_version,
             retries=retries,
+            recurrent=recurrent,
             defer=defer,
             defer_params=defer_params,
             delay=delay,
@@ -362,7 +375,8 @@ def stub(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
+    recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,
     delay: float | dt.timedelta = 0,
@@ -380,27 +394,12 @@ def stub(
             cache_namespace=cache_namespace,
             cache_version=cache_version,
             retries=retries,
+            recurrent=recurrent,
             defer=defer,
             defer_params=defer_params,
             delay=delay,
             memo=memo,
             is_stub=True,
-        )
-
-    return decorator
-
-
-def sensor(
-    *,
-    name=None,
-    requires: dict[str, str | bool | list[str]] | None = None,
-) -> t.Callable[[t.Callable[P, None]], Target[P, None]]:
-    def decorator(fn: t.Callable[P, None]) -> Target[P, None]:
-        return Target(
-            fn,
-            "sensor",
-            name=name,
-            requires=requires,
         )
 
     return decorator

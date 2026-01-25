@@ -3,75 +3,6 @@ defmodule Coflux.Orchestration.Results do
 
   alias Coflux.Orchestration.Values
 
-  def record_checkpoint(db, execution_id, arguments) do
-    with_transaction(db, fn ->
-      sequence =
-        case query_one(
-               db,
-               """
-               SELECT MAX(sequence)
-               FROM checkpoints
-               WHERE execution_id = ?1
-               """,
-               {execution_id}
-             ) do
-          {:ok, {nil}} -> 1
-          {:ok, {max_sequence}} -> max_sequence + 1
-        end
-
-      now = current_timestamp()
-
-      {:ok, checkpoint_id} = insert_checkpoint(db, execution_id, sequence, now)
-
-      arguments
-      |> Enum.with_index()
-      |> Enum.each(fn {value, position} ->
-        {:ok, value_id} = Values.get_or_create_value(db, value)
-        {:ok, _} = insert_checkpoint_argument(db, checkpoint_id, position, value_id)
-      end)
-
-      {:ok, checkpoint_id, sequence, now}
-    end)
-  end
-
-  def get_latest_checkpoint(db, step_id) do
-    query_one(
-      db,
-      """
-      SELECT c.id, c.execution_id, c.sequence, c.created_at
-      FROM checkpoints AS c
-      INNER JOIN executions AS e ON e.id = c.execution_id
-      WHERE e.step_id = ?1
-      ORDER BY e.attempt DESC, c.sequence DESC
-      LIMIT 1
-      """,
-      {step_id}
-    )
-  end
-
-  def get_checkpoint_arguments(db, checkpoint_id) do
-    case query(
-           db,
-           """
-           SELECT value_id
-           FROM checkpoint_arguments
-           WHERE checkpoint_id = ?1
-           ORDER BY position
-           """,
-           {checkpoint_id}
-         ) do
-      {:ok, rows} ->
-        values =
-          Enum.map(rows, fn {value_id} ->
-            case Values.get_value_by_id(db, value_id) do
-              {:ok, value} -> value
-            end
-          end)
-
-        {:ok, values}
-    end
-  end
-
   def record_result(db, execution_id, result) do
     with_transaction(db, fn ->
       now = current_timestamp()
@@ -273,22 +204,6 @@ defmodule Coflux.Orchestration.Results do
       value_id: value_id,
       successor_id: successor_id,
       created_at: created_at
-    })
-  end
-
-  defp insert_checkpoint(db, execution_id, sequence, created_at) do
-    insert_one(db, :checkpoints, %{
-      execution_id: execution_id,
-      sequence: sequence,
-      created_at: created_at
-    })
-  end
-
-  defp insert_checkpoint_argument(db, checkpoint_id, position, value_id) do
-    insert_one(db, :checkpoint_arguments, %{
-      checkpoint_id: checkpoint_id,
-      position: position,
-      value_id: value_id
     })
   end
 

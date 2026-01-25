@@ -33,7 +33,6 @@ defmodule Coflux.Orchestration.Utils do
     case type do
       :task -> 0
       :workflow -> 1
-      :sensor -> 2
     end
   end
 
@@ -41,7 +40,6 @@ defmodule Coflux.Orchestration.Utils do
     case value do
       0 -> :task
       1 -> :workflow
-      2 -> :sensor
     end
   end
 end

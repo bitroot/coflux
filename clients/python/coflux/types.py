@@ -1,6 +1,6 @@
 import typing as t
 
-TargetType = t.Literal["workflow", "task", "sensor"]
+TargetType = t.Literal["workflow", "task"]
 
 Requires = dict[str, list[str]]
 

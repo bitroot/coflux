@@ -58,18 +58,6 @@ CREATE TABLE workflows (
   FOREIGN KEY (requires_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE sensors (
-  id INTEGER PRIMARY KEY,
-  manifest_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  parameter_set_id INTEGER NOT NULL,
-  instruction_id INTEGER,
-  requires_tag_set_id INTEGER,
-  UNIQUE (manifest_id, name),
-  FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE,
-  FOREIGN KEY (parameter_set_id) REFERENCES parameter_sets ON DELETE RESTRICT
-) STRICT;
-
 CREATE TABLE spaces (id INTEGER PRIMARY KEY) STRICT;
 
 CREATE TABLE space_manifests (
@@ -335,24 +323,6 @@ CREATE TABLE asset_dependencies (
   PRIMARY KEY (execution_id, asset_id),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE checkpoints (
-  id INTEGER PRIMARY KEY,
-  execution_id INTEGER NOT NULL,
-  sequence INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  UNIQUE (execution_id, sequence),
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE checkpoint_arguments (
-  checkpoint_id INTEGER NOT NULL,
-  position INTEGER NOT NULL,
-  value_id INTEGER NOT NULL,
-  PRIMARY KEY (checkpoint_id, position),
-  FOREIGN KEY (checkpoint_id) REFERENCES checkpoints ON DELETE CASCADE,
-  FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE heartbeats (

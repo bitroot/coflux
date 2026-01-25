@@ -1,6 +1,6 @@
 # Examples → Slack bot
 
-This example implements a basic chat bot. Using a sensor, it listens for messages from the Slack API (using the [socket mode](https://api.slack.com/apis/connections/socket) client). Each message that is sent to the bot will cause a workflow run to be scheduled. The workflow adds a random Emoji reaction to the message.
+This example implements a basic chat bot. Using a long-running workflow, it listens for messages from the Slack API (using the [socket mode](https://api.slack.com/apis/connections/socket) client). Each message that is sent to the bot will cause a workflow run to be scheduled. The workflow adds a random Emoji reaction to the message.
 
 ## Slack bot setup
 

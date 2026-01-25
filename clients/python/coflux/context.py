@@ -15,7 +15,6 @@ def submit(
     cache: models.Cache | None = None,
     retries: models.Retries | None = None,
     defer: models.Defer | None = None,
-    execute_after: dt.datetime | None = None,
     delay: float | dt.timedelta = 0,
     memo: list[int] | bool = False,
     requires: types.Requires | None = None,
@@ -29,7 +28,6 @@ def submit(
         cache=cache,
         retries=retries,
         defer=defer,
-        execute_after=execute_after,
         delay=delay,
         memo=memo,
         requires=requires,
@@ -61,10 +59,6 @@ def asset(
     name: str | None = None,
 ) -> models.Asset:
     return execution.get_channel().create_asset(entries, at=at, match=match, name=name)
-
-
-def checkpoint(*arguments: t.Any) -> None:
-    return execution.get_channel().record_checkpoint(arguments)
 
 
 def log_debug(template: str | None = None, **kwargs) -> None:

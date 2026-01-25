@@ -91,8 +91,9 @@ class SubmitExecutionRequest(t.NamedTuple):
     cache: models.Cache | None
     defer: models.Defer | None
     memo: list[int] | bool
-    execute_after: dt.datetime | None
+    delay: int  # milliseconds
     retries: models.Retries | None
+    recurrent: bool
     requires: types.Requires | None
 
 
@@ -122,10 +123,6 @@ class RegisterGroupRequest(t.NamedTuple):
     execution_id: int
     group_id: int
     name: str | None
-
-
-class RecordCheckpointRequest(t.NamedTuple):
-    arguments: list[types.Value]
 
 
 class LogMessageRequest(t.NamedTuple):
@@ -329,19 +326,19 @@ class Channel:
         wait_for: set[int] | None = None,
         cache: models.Cache | None = None,
         retries: models.Retries | None = None,
+        recurrent: bool = False,
         defer: models.Defer | None = None,
-        execute_after: dt.datetime | None = None,
         delay: float | dt.timedelta = 0,
         memo: list[int] | bool = False,
         requires: types.Requires | None = None,
     ) -> models.Execution[t.Any]:
+        # Convert delay to milliseconds for the server
+        delay_ms = 0
         if delay:
-            delay = (
-                dt.timedelta(seconds=delay)
-                if isinstance(delay, (int, float))
-                else delay
-            )
-            execute_after = (execute_after or dt.datetime.now()) + delay
+            if isinstance(delay, dt.timedelta):
+                delay_ms = int(delay.total_seconds() * 1000)
+            else:
+                delay_ms = int(delay * 1000)
         # TODO: parallelise?
         serialised_arguments = [
             self._serialisation_manager.serialise(a) for a in arguments
@@ -357,8 +354,9 @@ class Channel:
                 cache,
                 defer,
                 memo,
-                execute_after,
+                delay_ms,
                 retries,
+                recurrent,
                 requires,
             )
         )
@@ -442,12 +440,6 @@ class Channel:
     def cancel_execution(self, execution_id: int) -> None:
         # TODO: wait for confirmation?
         self._notify(CancelExecutionRequest(execution_id))
-
-    def record_checkpoint(self, arguments):
-        serialised_arguments = [
-            self._serialisation_manager.serialise(a) for a in arguments
-        ]
-        self._notify(RecordCheckpointRequest(serialised_arguments))
 
     # TODO: don't support AssetEntry? or somehow consider entry's path? or somehow remove path from AssetEntry..?
     def create_asset(
@@ -797,11 +789,6 @@ class ExecutionState:
                 self._server_notify("cancel", (execution_id,))
             case RegisterGroupRequest(execution_id, group_id, name):
                 self._server_notify("register_group", (execution_id, group_id, name))
-            case RecordCheckpointRequest(arguments):
-                self._server_notify(
-                    "record_checkpoint",
-                    (self._id, _json_safe_arguments(arguments)),
-                )
             case LogMessageRequest(level, template, values, timestamp):
                 self._server_notify(
                     "log_messages", ([self._id, timestamp, level, template, values],)
@@ -821,13 +808,11 @@ class ExecutionState:
                 cache,
                 defer,
                 memo,
-                execute_after,
+                delay,
                 retries,
+                recurrent,
                 requires,
             ):
-                execute_after_ms = execute_after and int(
-                    execute_after.timestamp() * 1000
-                )
                 self._server_request(
                     "submit",
                     (
@@ -841,8 +826,9 @@ class ExecutionState:
                         cache and cache._asdict(),
                         defer and defer._asdict(),
                         memo,
-                        execute_after_ms,
+                        delay,
                         retries and retries._asdict(),
+                        recurrent,
                         requires,
                     ),
                     request_id,

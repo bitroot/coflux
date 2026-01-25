@@ -485,8 +485,9 @@ defmodule Coflux.Handlers.Api do
           wait_for: {"waitFor", &parse_indexes/1},
           cache: {"cache", &parse_cache/1},
           defer: {"defer", &parse_defer/1},
-          execute_after: {"executeAfter", &parse_integer(&1, optional: true)},
+          delay: {"delay", &parse_integer(&1, optional: true)},
           retries: {"retries", &parse_retries/1},
+          recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
           requires: {"requires", &parse_tag_set/1}
         }
       )
@@ -500,52 +501,12 @@ defmodule Coflux.Handlers.Api do
                :workflow,
                arguments.arguments,
                space: arguments.space_name,
-               execute_after: arguments[:execute_after],
                wait_for: arguments[:wait_for],
                cache: arguments[:cache],
                defer: arguments[:defer],
-               delay: arguments[:delay],
+               delay: arguments[:delay] || 0,
                retries: arguments[:retries],
-               requires: arguments[:requires]
-             ) do
-          {:ok, run_id, step_id, execution_id} ->
-            json_response(req, %{
-              "runId" => run_id,
-              "stepId" => step_id,
-              "executionId" => execution_id
-            })
-        end
-      end)
-    else
-      json_error_response(req, "bad_request", details: errors)
-    end
-  end
-
-  defp handle(req, "POST", ["start_sensor"], namespace) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          project_id: "projectId",
-          module: "module",
-          target: "target",
-          space_name: "spaceName",
-          arguments: {"arguments", &parse_arguments/1}
-        },
-        %{
-          requires: {"requires", &parse_tag_set/1}
-        }
-      )
-
-    if Enum.empty?(errors) do
-      with_project_access(req, arguments.project_id, namespace, fn ->
-        case Orchestration.start_run(
-               arguments.project_id,
-               arguments.module,
-               arguments.target,
-               :sensor,
-               arguments.arguments,
-               space: arguments.space_name,
+               recurrent: arguments[:recurrent] == true,
                requires: arguments[:requires]
              ) do
           {:ok, run_id, step_id, execution_id} ->
@@ -952,6 +913,14 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_boolean(value, opts \\ []) do
+    cond do
+      opts[:optional] && is_nil(value) -> {:ok, nil}
+      is_boolean(value) -> {:ok, value}
+      true -> {:error, :invalid}
+    end
+  end
+
   defp parse_string(value, opts) do
     cond do
       opts[:optional] && is_nil(value) -> {:ok, nil}
@@ -1009,7 +978,8 @@ defmodule Coflux.Handlers.Api do
         {:ok, nil}
 
       is_map(value) ->
-        with {:ok, limit} <- parse_integer(Map.get(value, "limit")),
+        # limit can be nil (unlimited) or an integer
+        with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
              {:ok, delay_min} <- parse_integer(Map.get(value, "delayMin"), optional: true),
              {:ok, delay_max} <- parse_integer(Map.get(value, "delayMax"), optional: true) do
           {:ok, %{limit: limit, delay_min: delay_min, delay_max: delay_max}}
@@ -1028,6 +998,7 @@ defmodule Coflux.Handlers.Api do
            {:ok, defer} <- parse_defer(Map.get(value, "defer")),
            {:ok, delay} <- parse_integer(Map.get(value, "delay")),
            {:ok, retries} <- parse_retries(Map.get(value, "retries")),
+           {:ok, recurrent} <- parse_boolean(Map.get(value, "recurrent"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, instruction} <-
              parse_string(
@@ -1043,34 +1014,13 @@ defmodule Coflux.Handlers.Api do
            defer: defer,
            delay: delay,
            retries: retries,
+           recurrent: recurrent == true,
            requires: requires,
            instruction: instruction
          }}
       else
         {:error, error} ->
           {:error, error}
-      end
-    else
-      {:error, :invalid}
-    end
-  end
-
-  defp parse_sensor(value) do
-    if is_map(value) do
-      with {:ok, parameters} <- parse_parameters(Map.get(value, "parameters")),
-           {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
-           {:ok, instruction} <-
-             parse_string(
-               Map.get(value, "instruction"),
-               optional: true,
-               max_length: 5000
-             ) do
-        {:ok,
-         %{
-           parameters: parameters,
-           requires: requires,
-           instruction: instruction
-         }}
       end
     else
       {:error, :invalid}
@@ -1093,38 +1043,11 @@ defmodule Coflux.Handlers.Api do
     end)
   end
 
-  defp parse_sensors(value) do
-    Enum.reduce_while(value, {:ok, %{}}, fn {sensor_name, sensor}, {:ok, result} ->
-      if is_valid_target_name?(sensor_name) do
-        case parse_sensor(sensor) do
-          {:ok, parsed} ->
-            {:cont, {:ok, Map.put(result, sensor_name, parsed)}}
-
-          {:error, error} ->
-            {:halt, {:error, error}}
-        end
-      else
-        {:halt, {:error, :invalid}}
-      end
-    end)
-  end
-
-  defp parse_manifest(value) do
-    if is_map(value) do
-      with {:ok, workflows} <- parse_workflows(Map.get(value, "workflows", %{})),
-           {:ok, sensors} <- parse_sensors(Map.get(value, "sensors", %{})) do
-        {:ok, %{workflows: workflows, sensors: sensors}}
-      end
-    else
-      {:error, :invalid}
-    end
-  end
-
   defp parse_manifests(value) do
     if is_map(value) do
-      Enum.reduce_while(value, {:ok, %{}}, fn {module, manifest}, {:ok, result} ->
+      Enum.reduce_while(value, {:ok, %{}}, fn {module, workflows}, {:ok, result} ->
         if is_valid_module_name?(module) do
-          case parse_manifest(manifest) do
+          case parse_workflows(workflows) do
             {:ok, parsed} ->
               {:cont, {:ok, Map.put(result, module, parsed)}}
 

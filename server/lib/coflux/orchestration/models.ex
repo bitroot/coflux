@@ -31,6 +31,8 @@ defmodule Coflux.Orchestration.Models do
       :retry_limit,
       :retry_delay_min,
       :retry_delay_max,
+      :recurrent,
+      :delay,
       :requires_tag_set_id,
       :created_at
     ]

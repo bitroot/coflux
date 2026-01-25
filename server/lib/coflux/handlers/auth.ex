@@ -16,8 +16,8 @@ defmodule Coflux.Handlers.Auth do
   - If namespaces omitted, defaults to [null]
 
   Auth mode is controlled by COFLUX_AUTH_MODE:
-  - "token" (default): Require valid token with namespace access
-  - "none": No authentication required
+  - "none" (default): No authentication required
+  - "token": Require valid token with namespace access
   """
 
   alias Coflux.Config
