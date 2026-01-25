@@ -137,7 +137,7 @@ defmodule Coflux.Orchestration.Runs do
     parent_id = Keyword.get(opts, :parent_id)
     now = current_timestamp()
 
-    # TODO: check that 'type' is :workflow or :sensor?
+    # TODO: check that 'type' is :workflow?
 
     with_transaction(db, fn ->
       {:ok, run_id, external_run_id} = insert_run(db, parent_id, idempotency_key, now)

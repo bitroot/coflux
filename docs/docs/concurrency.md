@@ -108,7 +108,7 @@ An example use case might be sending a notification to a user.
 
 ## Cancelling executions
 
-Once a task (or workflow/sensor) has been submitted, the returned `Execution` can be used to cancel the running execution:
+Once a task or workflow has been submitted, the returned `Execution` can be used to cancel the running execution:
 
 ```python
 @cf.workflow()

@@ -31,28 +31,20 @@ defmodule Coflux.Topics.Search do
 
   defp process_notification(topic, {:manifests, targets}) do
     update_in(topic.state.targets, fn existing ->
-      Enum.reduce(targets, existing, fn {module_name, module_targets}, existing ->
-        Enum.reduce(
-          %{workflows: :workflow, sensors: :sensor},
-          existing,
-          fn {key, target_type}, existing ->
-            module_targets
-            |> Map.fetch!(key)
-            |> Enum.reduce(existing, fn target_name, existing ->
-              existing_target = get_in(existing, [module_name, target_name])
+      Enum.reduce(targets, existing, fn {module_name, workflow_names}, existing ->
+        Enum.reduce(workflow_names, existing, fn target_name, existing ->
+          existing_target = get_in(existing, [module_name, target_name])
 
-              if !existing_target || elem(existing_target, 0) != target_type do
-                put_in(
-                  existing,
-                  [Access.key(module_name, %{}), target_name],
-                  {target_type, nil}
-                )
-              else
-                existing
-              end
-            end)
+          if !existing_target || elem(existing_target, 0) != :workflow do
+            put_in(
+              existing,
+              [Access.key(module_name, %{}), target_name],
+              {:workflow, nil}
+            )
+          else
+            existing
           end
-        )
+        end)
       end)
     end)
   end
@@ -139,7 +131,7 @@ defmodule Coflux.Topics.Search do
           name: module_name
         }
 
-      {type, module_name, target_name, latest_run} when type in [:workflow, :sensor, :task] ->
+      {type, module_name, target_name, latest_run} when type in [:workflow, :task] ->
         run =
           case latest_run do
             {run_id, step_id, attempt} -> %{runId: run_id, stepId: step_id, attempt: attempt}

@@ -1,6 +1,5 @@
 from .context import (
     asset,
-    checkpoint,
     group,
     log_debug,
     log_error,
@@ -9,7 +8,7 @@ from .context import (
     suspend,
     suspense,
 )
-from .decorators import sensor, stub, task, workflow
+from .decorators import stub, task, workflow
 from .models import Asset, Execution
 from .worker import Worker
 
@@ -17,9 +16,7 @@ __all__ = [
     "workflow",
     "task",
     "stub",
-    "sensor",
     "group",
-    "checkpoint",
     "suspense",
     "suspend",
     "log_debug",

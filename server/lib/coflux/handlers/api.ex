@@ -523,46 +523,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["start_sensor"], namespace) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          project_id: "projectId",
-          module: "module",
-          target: "target",
-          space_name: "spaceName",
-          arguments: {"arguments", &parse_arguments/1}
-        },
-        %{
-          requires: {"requires", &parse_tag_set/1}
-        }
-      )
-
-    if Enum.empty?(errors) do
-      with_project_access(req, arguments.project_id, namespace, fn ->
-        case Orchestration.start_run(
-               arguments.project_id,
-               arguments.module,
-               arguments.target,
-               :sensor,
-               arguments.arguments,
-               space: arguments.space_name,
-               requires: arguments[:requires]
-             ) do
-          {:ok, run_id, step_id, execution_id} ->
-            json_response(req, %{
-              "runId" => run_id,
-              "stepId" => step_id,
-              "executionId" => execution_id
-            })
-        end
-      end)
-    else
-      json_error_response(req, "bad_request", details: errors)
-    end
-  end
-
   defp handle(req, "POST", ["cancel_execution"], namespace) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
@@ -1067,28 +1027,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_sensor(value) do
-    if is_map(value) do
-      with {:ok, parameters} <- parse_parameters(Map.get(value, "parameters")),
-           {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
-           {:ok, instruction} <-
-             parse_string(
-               Map.get(value, "instruction"),
-               optional: true,
-               max_length: 5000
-             ) do
-        {:ok,
-         %{
-           parameters: parameters,
-           requires: requires,
-           instruction: instruction
-         }}
-      end
-    else
-      {:error, :invalid}
-    end
-  end
-
   defp parse_workflows(value) do
     Enum.reduce_while(value, {:ok, %{}}, fn {workflow_name, workflow}, {:ok, result} ->
       if is_valid_target_name?(workflow_name) do
@@ -1105,38 +1043,11 @@ defmodule Coflux.Handlers.Api do
     end)
   end
 
-  defp parse_sensors(value) do
-    Enum.reduce_while(value, {:ok, %{}}, fn {sensor_name, sensor}, {:ok, result} ->
-      if is_valid_target_name?(sensor_name) do
-        case parse_sensor(sensor) do
-          {:ok, parsed} ->
-            {:cont, {:ok, Map.put(result, sensor_name, parsed)}}
-
-          {:error, error} ->
-            {:halt, {:error, error}}
-        end
-      else
-        {:halt, {:error, :invalid}}
-      end
-    end)
-  end
-
-  defp parse_manifest(value) do
-    if is_map(value) do
-      with {:ok, workflows} <- parse_workflows(Map.get(value, "workflows", %{})),
-           {:ok, sensors} <- parse_sensors(Map.get(value, "sensors", %{})) do
-        {:ok, %{workflows: workflows, sensors: sensors}}
-      end
-    else
-      {:error, :invalid}
-    end
-  end
-
   defp parse_manifests(value) do
     if is_map(value) do
-      Enum.reduce_while(value, {:ok, %{}}, fn {module, manifest}, {:ok, result} ->
+      Enum.reduce_while(value, {:ok, %{}}, fn {module, workflows}, {:ok, result} ->
         if is_valid_module_name?(module) do
-          case parse_manifest(manifest) do
+          case parse_workflows(workflows) do
             {:ok, parsed} ->
               {:cont, {:ok, Map.put(result, module, parsed)}}
 

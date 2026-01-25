@@ -399,19 +399,3 @@ def stub(
         )
 
     return decorator
-
-
-def sensor(
-    *,
-    name=None,
-    requires: dict[str, str | bool | list[str]] | None = None,
-) -> t.Callable[[t.Callable[P, None]], Target[P, None]]:
-    def decorator(fn: t.Callable[P, None]) -> Target[P, None]:
-        return Target(
-            fn,
-            "sensor",
-            name=name,
-            requires=requires,
-        )
-
-    return decorator

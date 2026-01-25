@@ -106,64 +106,46 @@ def _register_manifests(
 ) -> None:
     manifests = {
         module: {
-            "workflows": {
-                workflow_name: {
-                    "parameters": [
-                        {
-                            "name": p.name,
-                            "annotation": p.annotation,
-                            "default": p.default,
-                        }
-                        for p in definition.parameters
-                    ],
-                    "waitFor": list(definition.wait_for),
-                    "cache": (
-                        definition.cache
-                        and {
-                            "params": definition.cache.params,
-                            "maxAge": definition.cache.max_age,
-                            "namespace": definition.cache.namespace,
-                            "version": definition.cache.version,
-                        }
-                    ),
-                    "defer": (
-                        definition.defer
-                        and {
-                            "params": definition.defer.params,
-                        }
-                    ),
-                    "delay": definition.delay,
-                    "retries": (
-                        definition.retries
-                        and {
-                            "limit": definition.retries.limit,
-                            "delayMin": definition.retries.delay_min,
-                            "delayMax": definition.retries.delay_max,
-                        }
-                    ),
-                    "recurrent": definition.recurrent,
-                    "requires": definition.requires,
-                    "instruction": definition.instruction,
-                }
-                for workflow_name, (definition, _) in target.items()
-                if definition.type == "workflow"
-            },
-            "sensors": {
-                sensor_name: {
-                    "parameters": [
-                        {
-                            "name": p.name,
-                            "annotation": p.annotation,
-                            "default": p.default,
-                        }
-                        for p in definition.parameters
-                    ],
-                    "requires": definition.requires,
-                    "instruction": definition.instruction,
-                }
-                for sensor_name, (definition, _) in target.items()
-                if definition.type == "sensor"
-            },
+            workflow_name: {
+                "parameters": [
+                    {
+                        "name": p.name,
+                        "annotation": p.annotation,
+                        "default": p.default,
+                    }
+                    for p in definition.parameters
+                ],
+                "waitFor": list(definition.wait_for),
+                "cache": (
+                    definition.cache
+                    and {
+                        "params": definition.cache.params,
+                        "maxAge": definition.cache.max_age,
+                        "namespace": definition.cache.namespace,
+                        "version": definition.cache.version,
+                    }
+                ),
+                "defer": (
+                    definition.defer
+                    and {
+                        "params": definition.defer.params,
+                    }
+                ),
+                "delay": definition.delay,
+                "retries": (
+                    definition.retries
+                    and {
+                        "limit": definition.retries.limit,
+                        "delayMin": definition.retries.delay_min,
+                        "delayMax": definition.retries.delay_max,
+                    }
+                ),
+                "recurrent": definition.recurrent,
+                "requires": definition.requires,
+                "instruction": definition.instruction,
+            }
+            for workflow_name, (definition, _) in target.items()
+            if definition.type == "workflow"
         }
         for module, target in targets.items()
     }

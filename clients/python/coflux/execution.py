@@ -125,10 +125,6 @@ class RegisterGroupRequest(t.NamedTuple):
     name: str | None
 
 
-class RecordCheckpointRequest(t.NamedTuple):
-    arguments: list[types.Value]
-
-
 class LogMessageRequest(t.NamedTuple):
     level: int
     template: str | None
@@ -445,12 +441,6 @@ class Channel:
     def cancel_execution(self, execution_id: int) -> None:
         # TODO: wait for confirmation?
         self._notify(CancelExecutionRequest(execution_id))
-
-    def record_checkpoint(self, arguments):
-        serialised_arguments = [
-            self._serialisation_manager.serialise(a) for a in arguments
-        ]
-        self._notify(RecordCheckpointRequest(serialised_arguments))
 
     # TODO: don't support AssetEntry? or somehow consider entry's path? or somehow remove path from AssetEntry..?
     def create_asset(
@@ -800,11 +790,6 @@ class ExecutionState:
                 self._server_notify("cancel", (execution_id,))
             case RegisterGroupRequest(execution_id, group_id, name):
                 self._server_notify("register_group", (execution_id, group_id, name))
-            case RecordCheckpointRequest(arguments):
-                self._server_notify(
-                    "record_checkpoint",
-                    (self._id, _json_safe_arguments(arguments)),
-                )
             case LogMessageRequest(level, template, values, timestamp):
                 self._server_notify(
                     "log_messages", ([self._id, timestamp, level, template, values],)

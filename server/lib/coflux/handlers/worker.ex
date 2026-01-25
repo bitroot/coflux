@@ -160,24 +160,6 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
-      "record_checkpoint" ->
-        [execution_id, arguments] = message["params"]
-
-        if is_recognised_execution?(execution_id, state) do
-          arguments = Enum.map(arguments, &parse_value/1)
-
-          :ok =
-            Orchestration.record_checkpoint(
-              state.project_id,
-              execution_id,
-              arguments
-            )
-
-          {[], state}
-        else
-          {[{:close, 4000, "execution_invalid"}], nil}
-        end
-
       "notify_terminated" ->
         [execution_ids] = message["params"]
 
@@ -405,7 +387,6 @@ defmodule Coflux.Handlers.Worker do
     case type do
       "workflow" -> :workflow
       "task" -> :task
-      "sensor" -> :sensor
     end
   end
 

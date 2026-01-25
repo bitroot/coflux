@@ -18,7 +18,6 @@ defmodule Coflux.Orchestration.Server do
   }
 
   @session_timeout_ms 5_000
-  @sensor_rate_limit_ms 5_000
   @connected_worker_poll_interval_ms 30_000
   @disconnected_worker_poll_interval_ms 5_000
   @worker_idle_timeout_ms 5_000
@@ -377,26 +376,14 @@ defmodule Coflux.Orchestration.Server do
           :ok ->
             state =
               manifests
-              |> Enum.reduce(state, fn {module, manifest}, state ->
-                state =
-                  Enum.reduce(manifest.workflows, state, fn {target_name, target}, state ->
+              |> Enum.reduce(state, fn {module, workflows}, state ->
+                Enum.reduce(workflows, state, fn {target_name, target}, state ->
                     notify_listeners(
                       state,
                       {:workflow, module, target_name, space_id},
                       {:target, target}
                     )
                   end)
-
-                state =
-                  Enum.reduce(manifest.sensors, state, fn {target_name, target}, state ->
-                    notify_listeners(
-                      state,
-                      {:sensor, module, target_name, space_id},
-                      {:target, target}
-                    )
-                  end)
-
-                state
               end)
               |> notify_listeners(
                 {:modules, space_id},
@@ -405,12 +392,8 @@ defmodule Coflux.Orchestration.Server do
               |> notify_listeners(
                 {:targets, space_id},
                 {:manifests,
-                 Map.new(manifests, fn {module_name, targets} ->
-                   {module_name,
-                    %{
-                      workflows: MapSet.new(Map.keys(targets.workflows)),
-                      sensors: MapSet.new(Map.keys(targets.sensors))
-                    }}
+                 Map.new(manifests, fn {module_name, workflows} ->
+                   {module_name, MapSet.new(Map.keys(workflows))}
                  end)}
               )
               |> flush_notifications()
@@ -962,13 +945,6 @@ defmodule Coflux.Orchestration.Server do
     {:reply, :ok, state}
   end
 
-  def handle_call({:record_checkpoint, execution_id, arguments}, _from, state) do
-    case Results.record_checkpoint(state.db, execution_id, arguments) do
-      {:ok, _checkpoint_id, _attempt, _created_at} ->
-        {:reply, :ok, state}
-    end
-  end
-
   def handle_call({:record_result, execution_id, result}, _from, state) do
     case process_result(state, execution_id, result) do
       {:ok, state} ->
@@ -1298,30 +1274,6 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:subscribe_sensor, module, target_name, space_id, pid},
-        _from,
-        state
-      ) do
-    with {:ok, _} <- lookup_space_by_id(state, space_id),
-         {:ok, sensor} <-
-           Manifests.get_latest_sensor(state.db, space_id, module, target_name),
-         {:ok, instruction} <-
-           if(sensor && sensor.instruction_id,
-             do: Manifests.get_instruction(state.db, sensor.instruction_id),
-             else: {:ok, nil}
-           ),
-         {:ok, runs} = Runs.get_target_runs(state.db, module, target_name, :sensor, space_id) do
-      {:ok, ref, state} =
-        add_listener(state, {:sensor, module, target_name, space_id}, pid)
-
-      {:reply, {:ok, sensor, instruction, runs, ref}, state}
-    else
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-    end
-  end
-
   def handle_call({:subscribe_run, external_run_id, pid}, _from, state) do
     case Runs.get_run_by_external_id(state.db, external_run_id) do
       {:ok, nil} ->
@@ -1467,27 +1419,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:subscribe_targets, space_id, pid}, _from, state) do
-    # TODO: indicate which are archived (only workflows/sensors)
-    {:ok, workflows, sensors} =
-      Manifests.get_all_targets_for_space(state.db, space_id)
+    # TODO: indicate which are archived
+    {:ok, workflows} = Manifests.get_all_workflows_for_space(state.db, space_id)
 
     {:ok, steps} = Runs.get_steps_for_space(state.db, space_id)
 
     result =
-      Enum.reduce(
-        %{workflow: workflows, sensor: sensors},
-        %{},
-        fn {target_type, targets}, result ->
-          Enum.reduce(targets, result, fn {module_name, target_names}, result ->
-            Enum.reduce(target_names, result, fn target_name, result ->
-              put_in(
-                result,
-                [Access.key(module_name, %{}), target_name],
-                {target_type, nil}
-              )
-            end)
-          end)
-        end
+      Enum.reduce(workflows, %{}, fn {module_name, target_names}, result ->
+        Enum.reduce(target_names, result, fn target_name, result ->
+          put_in(
+            result,
+            [Access.key(module_name, %{}), target_name],
+            {:workflow, nil}
+          )
+        end)
+      end
       )
 
     result =
@@ -1618,14 +1564,7 @@ defmodule Coflux.Orchestration.Server do
               {state, assigned, unassigned}
             else
               # TODO: choose session before resolving arguments?
-              {:ok, arguments} =
-                case Results.get_latest_checkpoint(state.db, execution.step_id) do
-                  {:ok, nil} ->
-                    Runs.get_step_arguments(state.db, execution.step_id)
-
-                  {:ok, {checkpoint_id, _, _, _}} ->
-                    Results.get_checkpoint_arguments(state.db, checkpoint_id)
-                end
+              {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
 
               if arguments_ready?(state.db, execution.wait_for, arguments) &&
                    dependencies_ready?(state.db, execution.execution_id) do
@@ -2325,10 +2264,7 @@ defmodule Coflux.Orchestration.Server do
         state =
           state
           |> notify_listeners(
-            case type do
-              :workflow -> {:workflow, module, target_name, space_id}
-              :sensor -> {:sensor, module, target_name, space_id}
-            end,
+            {:workflow, module, target_name, space_id},
             {:run, external_run_id, created_at}
           )
           |> notify_listeners(
@@ -2395,13 +2331,6 @@ defmodule Coflux.Orchestration.Server do
               notify_listeners(
                 state,
                 {:workflow, run_module, run_target, space_id},
-                {:run, run.external_id, run.created_at}
-              )
-
-            :sensor ->
-              notify_listeners(
-                state,
-                {:sensor, run_module, run_target, space_id},
                 {:run, run.external_id, run.created_at}
               )
 
@@ -2617,28 +2546,6 @@ defmodule Coflux.Orchestration.Server do
                   rerun_step(state, step, space_id, execute_after: execute_after)
 
                 {retry_id, state}
-              else
-                {nil, state}
-              end
-
-            step.type == :sensor ->
-              {:ok, assignments} = Runs.get_step_assignments(state.db, step.id)
-
-              if Enum.all?(Map.values(assignments)) do
-                now = System.os_time(:millisecond)
-
-                last_assigned_at =
-                  assignments |> Map.values() |> Enum.max(&>=/2, fn -> nil end)
-
-                execute_after =
-                  if last_assigned_at && now - last_assigned_at < @sensor_rate_limit_ms do
-                    last_assigned_at + @sensor_rate_limit_ms
-                  end
-
-                {:ok, _, _, state} =
-                  rerun_step(state, step, space_id, execute_after: execute_after)
-
-                {nil, state}
               else
                 {nil, state}
               end

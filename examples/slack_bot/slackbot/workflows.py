@@ -39,7 +39,7 @@ def _handle_request(client: SocketModeClient, req: SocketModeRequest):
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
 
-@cf.sensor()
+@cf.workflow()
 def slack_bot():
     client = _socket_client()
     client.socket_mode_request_listeners.append(_handle_request)

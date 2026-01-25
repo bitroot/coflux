@@ -29,7 +29,6 @@ const sidebars: SidebarsConfig = {
         "deferring",
         "memoising",
         "assets",
-        "sensors",
         "stubs",
         "blobs",
       ],

@@ -63,10 +63,6 @@ def asset(
     return execution.get_channel().create_asset(entries, at=at, match=match, name=name)
 
 
-def checkpoint(*arguments: t.Any) -> None:
-    return execution.get_channel().record_checkpoint(arguments)
-
-
 def log_debug(template: str | None = None, **kwargs) -> None:
     execution.get_channel().log_message(0, template, **kwargs)
 

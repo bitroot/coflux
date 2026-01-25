@@ -30,7 +30,7 @@ Workflows are defined in _modules_. Typically these are Python modules, but they
 Put the workflow above into `hello.py`.
 
 :::tip
-The docstring of a workflow (or sensor) will be available in the UI when running a workflow. This is a great place to explain what the workflow does.
+The docstring of a workflow will be available in the UI when running a workflow. This is a great place to explain what the workflow does.
 :::
 
 Before coming back to more advanced features, let's see how to get this workflow running...

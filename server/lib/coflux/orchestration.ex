@@ -99,10 +99,6 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:notify_terminated, execution_ids})
   end
 
-  def record_checkpoint(project_id, execution_id, arguments) do
-    call_server(project_id, {:record_checkpoint, execution_id, arguments})
-  end
-
   def record_result(project_id, execution_id, result) do
     call_server(project_id, {:record_result, execution_id, result})
   end
@@ -156,10 +152,6 @@ defmodule Coflux.Orchestration do
 
   def subscribe_workflow(project_id, module, target, space_id, pid) do
     call_server(project_id, {:subscribe_workflow, module, target, space_id, pid})
-  end
-
-  def subscribe_sensor(project_id, module, target, space_id, pid) do
-    call_server(project_id, {:subscribe_sensor, module, target, space_id, pid})
   end
 
   def subscribe_run(project_id, run_id, pid) do

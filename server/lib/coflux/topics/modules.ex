@@ -21,10 +21,9 @@ defmodule Coflux.Topics.Modules do
       Orchestration.subscribe_modules(project_id, space_id, self())
 
     value =
-      Map.new(manifests, fn {module, manifest} ->
+      Map.new(manifests, fn {module, workflows} ->
         result = %{
-          workflows: Map.keys(manifest.workflows),
-          sensors: Map.keys(manifest.sensors),
+          workflows: Map.keys(workflows),
           executing: 0,
           scheduled: 0,
           nextDueAt: nil
@@ -109,11 +108,9 @@ defmodule Coflux.Topics.Modules do
     |> Topic.set([module, :nextDueAt], next_due_at)
   end
 
-  defp update_manifest(topic, module, manifest) do
-    if manifest do
-      topic
-      |> Topic.set([module, :workflows], Map.keys(manifest.workflows))
-      |> Topic.set([module, :sensors], Map.keys(manifest.sensors))
+  defp update_manifest(topic, module, workflows) do
+    if workflows do
+      Topic.set(topic, [module, :workflows], Map.keys(workflows))
     else
       Topic.unset(topic, [], module)
     end

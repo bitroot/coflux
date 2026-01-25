@@ -6,10 +6,10 @@ defmodule Coflux.Orchestration.Manifests do
   def register_manifests(db, space_id, manifests) do
     with_transaction(db, fn ->
       manifest_ids =
-        Map.new(manifests, fn {module, manifest} ->
+        Map.new(manifests, fn {module, workflows} ->
           {:ok, manifest_id} =
-            if manifest do
-              hash = hash_manifest(manifest)
+            if workflows && map_size(workflows) > 0 do
+              hash = hash_manifest_workflows(workflows)
 
               case query_one(db, "SELECT id FROM manifests WHERE hash = ?1", {{:blob, hash}}) do
                 {:ok, nil} ->
@@ -22,7 +22,7 @@ defmodule Coflux.Orchestration.Manifests do
                       {:manifest_id, :name, :instruction_id, :parameter_set_id, :wait_for,
                        :cache_config_id, :defer_params, :delay, :retry_limit, :retry_delay_min,
                        :retry_delay_max, :recurrent, :requires_tag_set_id},
-                      Enum.map(manifest.workflows, fn {name, workflow} ->
+                      Enum.map(workflows, fn {name, workflow} ->
                         {:ok, instruction_id} =
                           if workflow.instruction do
                             get_or_create_instruction_id(db, workflow.instruction)
@@ -62,35 +62,6 @@ defmodule Coflux.Orchestration.Manifests do
                           if(workflow.recurrent, do: 1, else: 0),
                           requires_tag_set_id
                         }
-                      end)
-                    )
-
-                  {:ok, _} =
-                    insert_many(
-                      db,
-                      :sensors,
-                      {:manifest_id, :name, :instruction_id, :parameter_set_id,
-                       :requires_tag_set_id},
-                      Enum.map(manifest.sensors, fn {name, sensor} ->
-                        {:ok, instruction_id} =
-                          if sensor.instruction do
-                            get_or_create_instruction_id(db, sensor.instruction)
-                          else
-                            {:ok, nil}
-                          end
-
-                        {:ok, requires_tag_set_id} =
-                          if sensor.requires do
-                            TagSets.get_or_create_tag_set_id(db, sensor.requires)
-                          else
-                            {:ok, nil}
-                          end
-
-                        case get_or_create_parameter_set_id(db, sensor.parameters) do
-                          {:ok, parameter_set_id} ->
-                            {manifest_id, name, instruction_id, parameter_set_id,
-                             requires_tag_set_id}
-                        end
                       end)
                     )
 
@@ -173,8 +144,7 @@ defmodule Coflux.Orchestration.Manifests do
           Enum.reduce(manifest_ids, %{}, fn {module, manifest_id}, result ->
             if manifest_id do
               {:ok, workflows} = get_manifest_workflows(db, manifest_id)
-              {:ok, sensors} = get_manifest_sensors(db, manifest_id)
-              Map.put(result, module, %{workflows: workflows, sensors: sensors})
+              Map.put(result, module, workflows)
             else
               result
             end
@@ -220,27 +190,6 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  def get_latest_sensor(db, space_id, module, target_name) do
-    case query_one(
-           db,
-           """
-           SELECT s.parameter_set_id, s.instruction_id, s.requires_tag_set_id
-           FROM space_manifests AS wm
-           LEFT JOIN sensors AS s ON s.manifest_id = wm.manifest_id
-           WHERE wm.space_id = ?1 AND wm.module = ?2 AND s.name = ?3
-           ORDER BY wm.created_at DESC
-           LIMIT 1
-           """,
-           {space_id, module, target_name}
-         ) do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, {parameter_set_id, instruction_id, requires_tag_set_id}} ->
-        build_sensor(db, parameter_set_id, instruction_id, requires_tag_set_id)
-    end
-  end
-
   defp get_manifest_workflows(db, manifest_id) do
     case query(
            db,
@@ -279,30 +228,7 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  defp get_manifest_sensors(db, manifest_id) do
-    case query(
-           db,
-           """
-           SELECT name, parameter_set_id, instruction_id, requires_tag_set_id
-           FROM sensors
-           WHERE manifest_id = ?1
-           """,
-           {manifest_id}
-         ) do
-      {:ok, rows} ->
-        sensors =
-          Map.new(rows, fn {name, parameter_set_id, instruction_id, requires_tag_set_id} ->
-            {:ok, sensor} =
-              build_sensor(db, parameter_set_id, instruction_id, requires_tag_set_id)
-
-            {name, sensor}
-          end)
-
-        {:ok, sensors}
-    end
-  end
-
-  defp get_all_workflows_for_space(db, space_id) do
+  def get_all_workflows_for_space(db, space_id) do
     case query(
            db,
            """
@@ -324,41 +250,6 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  defp get_all_sensors_for_space(db, space_id) do
-    case query(
-           db,
-           """
-           SELECT DISTINCT wm.module, s.name
-           FROM space_manifests AS wm
-           INNER JOIN manifests AS m on m.id = wm.manifest_id
-           INNER JOIN sensors AS s ON s.manifest_id = m.id
-           WHERE wm.space_id = ?1
-           """,
-           {space_id}
-         ) do
-      {:ok, rows} ->
-        {:ok,
-         Enum.reduce(rows, %{}, fn {module, target_name}, result ->
-           result
-           |> Map.put_new(module, MapSet.new())
-           |> Map.update!(module, &MapSet.put(&1, target_name))
-         end)}
-    end
-  end
-
-  def get_all_targets_for_space(db, space_id) do
-    with {:ok, workflows} <- get_all_workflows_for_space(db, space_id),
-         {:ok, sensors} <- get_all_sensors_for_space(db, space_id) do
-      {:ok, workflows, sensors}
-    end
-  end
-
-  defp hash_manifest(manifest) do
-    workflows_hash = hash_manifest_workflows(manifest.workflows)
-    sensors_hash = hash_manifest_sensors(manifest.sensors)
-    :crypto.hash(:sha256, [workflows_hash, 0, sensors_hash])
-  end
-
   defp hash_manifest_workflows(workflows) do
     data =
       Enum.map(workflows, fn {name, workflow} ->
@@ -366,6 +257,7 @@ defmodule Coflux.Orchestration.Manifests do
           name,
           hash_parameter_set(workflow.parameters),
           Integer.to_string(Utils.encode_params_set(workflow.wait_for)),
+          # TODO: fix (workflow.cache.params being true gets encoded to "" as well as not set) - also below/elsewhere
           if(workflow.cache, do: Utils.encode_params_list(workflow.cache.params), else: ""),
           if(workflow.cache[:max_age], do: Integer.to_string(workflow.cache.max_age), else: ""),
           if(workflow.cache[:namespace], do: workflow.cache.namespace, else: ""),
@@ -378,20 +270,6 @@ defmodule Coflux.Orchestration.Manifests do
           if(workflow.recurrent, do: "1", else: "0"),
           hash_requires(workflow.requires),
           workflow.instruction || ""
-        ]
-      end)
-
-    :crypto.hash(:sha256, Enum.intersperse(data, 0))
-  end
-
-  defp hash_manifest_sensors(sensors) do
-    data =
-      Enum.map(sensors, fn {name, sensor} ->
-        [
-          name,
-          hash_parameter_set(sensor.parameters),
-          hash_requires(sensor.requires),
-          sensor.instruction || ""
         ]
       end)
 
@@ -454,24 +332,6 @@ defmodule Coflux.Orchestration.Manifests do
        delay: delay,
        retries: retries,
        recurrent: recurrent == 1,
-       requires: requires
-     }}
-  end
-
-  defp build_sensor(db, parameter_set_id, instruction_id, requires_tag_set_id) do
-    {:ok, parameters} = get_parameter_set(db, parameter_set_id)
-
-    {:ok, requires} =
-      if requires_tag_set_id do
-        TagSets.get_tag_set(db, requires_tag_set_id)
-      else
-        {:ok, nil}
-      end
-
-    {:ok,
-     %{
-       parameters: parameters,
-       instruction_id: instruction_id,
        requires: requires
      }}
   end
