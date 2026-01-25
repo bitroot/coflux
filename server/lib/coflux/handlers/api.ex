@@ -485,7 +485,7 @@ defmodule Coflux.Handlers.Api do
           wait_for: {"waitFor", &parse_indexes/1},
           cache: {"cache", &parse_cache/1},
           defer: {"defer", &parse_defer/1},
-          execute_after: {"executeAfter", &parse_integer(&1, optional: true)},
+          delay: {"delay", &parse_integer(&1, optional: true)},
           retries: {"retries", &parse_retries/1},
           recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
           requires: {"requires", &parse_tag_set/1}
@@ -501,11 +501,10 @@ defmodule Coflux.Handlers.Api do
                :workflow,
                arguments.arguments,
                space: arguments.space_name,
-               execute_after: arguments[:execute_after],
                wait_for: arguments[:wait_for],
                cache: arguments[:cache],
                defer: arguments[:defer],
-               delay: arguments[:delay],
+               delay: arguments[:delay] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
                requires: arguments[:requires]

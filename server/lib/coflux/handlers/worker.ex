@@ -109,7 +109,7 @@ defmodule Coflux.Handlers.Worker do
           cache,
           defer,
           memo,
-          execute_after,
+          delay,
           retries,
           recurrent,
           requires
@@ -124,11 +124,11 @@ defmodule Coflux.Handlers.Worker do
                  parse_type(type),
                  Enum.map(arguments, &parse_value/1),
                  group_id: group_id,
-                 execute_after: execute_after,
                  wait_for: wait_for,
                  cache: parse_cache(cache),
                  defer: parse_defer(defer),
                  memo: memo,
+                 delay: delay || 0,
                  retries: parse_retries(retries),
                  recurrent: recurrent == true,
                  requires: requires

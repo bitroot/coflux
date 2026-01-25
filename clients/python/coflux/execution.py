@@ -91,7 +91,7 @@ class SubmitExecutionRequest(t.NamedTuple):
     cache: models.Cache | None
     defer: models.Defer | None
     memo: list[int] | bool
-    execute_after: dt.datetime | None
+    delay: int  # milliseconds
     retries: models.Retries | None
     recurrent: bool
     requires: types.Requires | None
@@ -328,18 +328,17 @@ class Channel:
         retries: models.Retries | None = None,
         recurrent: bool = False,
         defer: models.Defer | None = None,
-        execute_after: dt.datetime | None = None,
         delay: float | dt.timedelta = 0,
         memo: list[int] | bool = False,
         requires: types.Requires | None = None,
     ) -> models.Execution[t.Any]:
+        # Convert delay to milliseconds for the server
+        delay_ms = 0
         if delay:
-            delay = (
-                dt.timedelta(seconds=delay)
-                if isinstance(delay, (int, float))
-                else delay
-            )
-            execute_after = (execute_after or dt.datetime.now()) + delay
+            if isinstance(delay, dt.timedelta):
+                delay_ms = int(delay.total_seconds() * 1000)
+            else:
+                delay_ms = int(delay * 1000)
         # TODO: parallelise?
         serialised_arguments = [
             self._serialisation_manager.serialise(a) for a in arguments
@@ -355,7 +354,7 @@ class Channel:
                 cache,
                 defer,
                 memo,
-                execute_after,
+                delay_ms,
                 retries,
                 recurrent,
                 requires,
@@ -809,14 +808,11 @@ class ExecutionState:
                 cache,
                 defer,
                 memo,
-                execute_after,
+                delay,
                 retries,
                 recurrent,
                 requires,
             ):
-                execute_after_ms = execute_after and int(
-                    execute_after.timestamp() * 1000
-                )
                 self._server_request(
                     "submit",
                     (
@@ -830,7 +826,7 @@ class ExecutionState:
                         cache and cache._asdict(),
                         defer and defer._asdict(),
                         memo,
-                        execute_after_ms,
+                        delay,
                         retries and retries._asdict(),
                         recurrent,
                         requires,

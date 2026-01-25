@@ -56,7 +56,7 @@ defmodule Coflux.Orchestration.Manifests do
                             do: Utils.encode_params_list(workflow.defer.params)
                           ),
                           workflow.delay,
-                          if(workflow.retries, do: workflow.retries.limit),
+                          if(workflow.retries, do: workflow.retries.limit || -1, else: 0),
                           if(workflow.retries, do: workflow.retries.delay_min, else: 0),
                           if(workflow.retries, do: workflow.retries.delay_max, else: 0),
                           if(workflow.recurrent, do: 1, else: 0),
@@ -318,17 +318,17 @@ defmodule Coflux.Orchestration.Manifests do
 
     retries =
       cond do
-        # nil = unlimited retries
-        is_nil(retry_limit) ->
+        # 0 = no retries
+        retry_limit == 0 ->
+          nil
+
+        # -1 = unlimited retries
+        retry_limit == -1 ->
           %{
             limit: nil,
             delay_min: retry_delay_min,
             delay_max: retry_delay_max
           }
-
-        # 0 = no retries
-        retry_limit == 0 ->
-          nil
 
         # positive = that many retries
         true ->

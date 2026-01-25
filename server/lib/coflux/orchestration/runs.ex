@@ -25,6 +25,7 @@ defmodule Coflux.Orchestration.Runs do
         retry_delay_min,
         retry_delay_max,
         recurrent,
+        delay,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -57,6 +58,7 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_delay_min,
         s.retry_delay_max,
         s.recurrent,
+        s.delay,
         s.requires_tag_set_id,
         s.created_at
       FROM steps AS s
@@ -263,10 +265,13 @@ defmodule Coflux.Orchestration.Runs do
     cache = Keyword.get(opts, :cache)
     defer = Keyword.get(opts, :defer)
     memo = Keyword.get(opts, :memo)
-    execute_after = Keyword.get(opts, :execute_after)
     retries = Keyword.get(opts, :retries)
     recurrent = Keyword.get(opts, :recurrent, false)
+    delay = Keyword.get(opts, :delay, 0)
     requires = Keyword.get(opts, :requires) || %{}
+
+    # Calculate execute_after from delay
+    execute_after = if delay > 0, do: now + delay
 
     memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
 
@@ -327,10 +332,11 @@ defmodule Coflux.Orchestration.Runs do
               cache_config_id,
               defer_key,
               memo_key,
-              if(retries, do: retries.limit, else: 0),
+              if(retries, do: retries.limit || -1, else: 0),
               if(retries, do: retries.delay_min, else: 0),
               if(retries, do: retries.delay_max, else: 0),
               recurrent,
+              delay,
               requires_tag_set_id,
               now
             )
@@ -966,6 +972,7 @@ defmodule Coflux.Orchestration.Runs do
          retry_delay_min,
          retry_delay_max,
          recurrent,
+         delay,
          requires_tag_set_id,
          now
        ) do
@@ -988,6 +995,7 @@ defmodule Coflux.Orchestration.Runs do
                retry_delay_min: retry_delay_min,
                retry_delay_max: retry_delay_max,
                recurrent: if(recurrent, do: 1, else: 0),
+               delay: delay,
                requires_tag_set_id: requires_tag_set_id,
                created_at: now
              }) do

@@ -661,7 +661,8 @@ defmodule Coflux.Orchestration.Server do
        }} ->
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
-        execute_after = Keyword.get(opts, :execute_after)
+        delay = Keyword.get(opts, :delay, 0)
+        execute_after = if delay > 0, do: created_at + delay
         requires = Keyword.get(opts, :requires) || %{}
 
         state =
@@ -1611,9 +1612,9 @@ defmodule Coflux.Orchestration.Server do
                                do: Map.fetch!(cache_configs, execution.cache_config_id)
                              ),
                            retries:
-                             if(is_nil(execution.retry_limit) || execution.retry_limit > 0,
+                             if(execution.retry_limit == -1 || execution.retry_limit > 0,
                                do: %{
-                                 limit: execution.retry_limit,
+                                 limit: if(execution.retry_limit == -1, do: nil, else: execution.retry_limit),
                                  delay_min: execution.retry_delay_min,
                                  delay_max: execution.retry_delay_max
                                }
@@ -2257,8 +2258,8 @@ defmodule Coflux.Orchestration.Server do
          attempt: attempt,
          created_at: created_at
        }} ->
-        # TODO: neater way to get execute_after?
-        execute_after = Keyword.get(opts, :execute_after)
+        delay = Keyword.get(opts, :delay, 0)
+        execute_after = if delay > 0, do: created_at + delay
         execute_at = execute_after || created_at
 
         state =
@@ -2523,7 +2524,7 @@ defmodule Coflux.Orchestration.Server do
 
               {retry_id, state}
 
-            result_retryable?(result) && is_nil(step.retry_limit) ->
+            result_retryable?(result) && step.retry_limit == -1 ->
               # Unlimited retries - random delay between min and max
               delay_s =
                 step.retry_delay_min +
@@ -2564,7 +2565,12 @@ defmodule Coflux.Orchestration.Server do
               end
 
             step.recurrent == 1 and match?({:value, _}, result) ->
-              {:ok, _, _, state} = rerun_step(state, step, space_id)
+              execute_after =
+                if step.delay > 0 do
+                  System.os_time(:millisecond) + step.delay
+                end
+
+              {:ok, _, _, state} = rerun_step(state, step, space_id, execute_after: execute_after)
               {nil, state}
 
             true ->
