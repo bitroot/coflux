@@ -461,7 +461,7 @@ defmodule Coflux.Handlers.Worker do
   def parse_retries(value) do
     if value do
       %{
-        limit: Map.fetch!(value, "limit"),
+        limit: Map.get(value, "limit"),
         delay_min: Map.fetch!(value, "delay_min"),
         delay_max: Map.fetch!(value, "delay_max")
       }

@@ -56,7 +56,7 @@ defmodule Coflux.Orchestration.Manifests do
                             do: Utils.encode_params_list(workflow.defer.params)
                           ),
                           workflow.delay,
-                          if(workflow.retries, do: workflow.retries.limit, else: 0),
+                          if(workflow.retries, do: workflow.retries.limit),
                           if(workflow.retries, do: workflow.retries.delay_min, else: 0),
                           if(workflow.retries, do: workflow.retries.delay_max, else: 0),
                           if(workflow.recurrent, do: 1, else: 0),
@@ -264,7 +264,10 @@ defmodule Coflux.Orchestration.Manifests do
           if(workflow.cache[:version], do: workflow.cache.version, else: ""),
           if(workflow.defer, do: Utils.encode_params_list(workflow.defer.params), else: ""),
           Integer.to_string(workflow.delay),
-          if(workflow.retries, do: Integer.to_string(workflow.retries.limit), else: ""),
+          if(workflow.retries,
+            do: if(workflow.retries.limit, do: Integer.to_string(workflow.retries.limit), else: "unlimited"),
+            else: ""
+          ),
           if(workflow.retries, do: Integer.to_string(workflow.retries.delay_min), else: ""),
           if(workflow.retries, do: Integer.to_string(workflow.retries.delay_max), else: ""),
           if(workflow.recurrent, do: "1", else: "0"),
@@ -314,12 +317,26 @@ defmodule Coflux.Orchestration.Manifests do
       end
 
     retries =
-      if retry_limit do
-        %{
-          limit: retry_limit,
-          delay_min: retry_delay_min,
-          delay_max: retry_delay_max
-        }
+      cond do
+        # nil = unlimited retries
+        is_nil(retry_limit) ->
+          %{
+            limit: nil,
+            delay_min: retry_delay_min,
+            delay_max: retry_delay_max
+          }
+
+        # 0 = no retries
+        retry_limit == 0 ->
+          nil
+
+        # positive = that many retries
+        true ->
+          %{
+            limit: retry_limit,
+            delay_min: retry_delay_min,
+            delay_max: retry_delay_max
+          }
       end
 
     {:ok,

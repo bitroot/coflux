@@ -1611,7 +1611,7 @@ defmodule Coflux.Orchestration.Server do
                                do: Map.fetch!(cache_configs, execution.cache_config_id)
                              ),
                            retries:
-                             if(execution.retry_limit > 0,
+                             if(is_nil(execution.retry_limit) || execution.retry_limit > 0,
                                do: %{
                                  limit: execution.retry_limit,
                                  delay_min: execution.retry_delay_min,
@@ -2523,11 +2523,24 @@ defmodule Coflux.Orchestration.Server do
 
               {retry_id, state}
 
+            result_retryable?(result) && is_nil(step.retry_limit) ->
+              # Unlimited retries - random delay between min and max
+              delay_s =
+                step.retry_delay_min +
+                  :rand.uniform() * (step.retry_delay_max - step.retry_delay_min)
+
+              execute_after = System.os_time(:millisecond) + delay_s * 1000
+
+              {:ok, retry_id, _, state} =
+                rerun_step(state, step, space_id, execute_after: execute_after)
+
+              {retry_id, state}
+
             result_retryable?(result) && step.retry_limit > 0 ->
+              # Limited retries - check consecutive failures
               {:ok, result_types} =
                 Runs.get_step_result_types(state.db, step.id, step.retry_limit + 1)
 
-              # Count consecutive failures (error=0, abandoned=2) from most recent
               consecutive_failures =
                 result_types
                 |> Enum.take_while(&(&1 in [0, 2]))

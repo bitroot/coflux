@@ -74,20 +74,24 @@ def _parse_cache(
 
 
 def _parse_retries(
-    retries: int | tuple[int, int] | tuple[int, int, int],
+    retries: int | bool | models.Retries,
 ) -> models.Retries | None:
-    # TODO: parse string (e.g., '1h')
     match retries:
-        case 0:
+        case False | 0:
             return None
+        case True:
+            # Unlimited with sensible defaults (1s-60s backoff)
+            return models.Retries(None, 1000, 60000)
         case int(limit):
             return models.Retries(limit, 0, 0)
-        case (limit, delay):
-            return models.Retries(limit, delay, delay)
-        case (limit, delay_min, delay_max):
-            return models.Retries(limit, delay_min, delay_max)
-        case other:
-            raise ValueError(other)
+        case models.Retries(limit, delay_min, delay_max):
+            if limit == 0:
+                return None
+            return models.Retries(
+                limit,
+                int(delay_min * 1000),
+                int(delay_max * 1000),
+            )
 
 
 def _parse_defer(
@@ -124,7 +128,7 @@ def _build_definition(
     cache_params: t.Iterable[str] | str | None,
     cache_namespace: str | None,
     cache_version: str | None,
-    retries: int | tuple[int, int] | tuple[int, int, int],
+    retries: int | bool | models.Retries,
     recurrent: bool,
     defer: bool,
     defer_params: t.Iterable[str] | str | None,
@@ -182,7 +186,7 @@ class Target(t.Generic[P, T]):
         cache_params: t.Iterable[str] | str | None = None,
         cache_namespace: str | None = None,
         cache_version: str | None = None,
-        retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+        retries: int | bool | models.Retries = 0,
         recurrent: bool = False,
         defer: bool = False,
         defer_params: t.Iterable[str] | str | None = None,
@@ -295,7 +299,7 @@ def task(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
     recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,
@@ -333,7 +337,7 @@ def workflow(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
     recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,
@@ -371,7 +375,7 @@ def stub(
     cache_params: t.Iterable[str] | str | None = None,
     cache_namespace: str | None = None,
     cache_version: str | None = None,
-    retries: int | tuple[int, int] | tuple[int, int, int] = 0,
+    retries: int | bool | models.Retries = 0,
     recurrent: bool = False,
     defer: bool = False,
     defer_params: t.Iterable[str] | str | None = None,

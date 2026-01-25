@@ -9,7 +9,7 @@ from .context import (
     suspense,
 )
 from .decorators import stub, task, workflow
-from .models import Asset, Execution
+from .models import Asset, Execution, Retries
 from .worker import Worker
 
 __all__ = [
@@ -26,5 +26,6 @@ __all__ = [
     "asset",
     "Execution",
     "Asset",
+    "Retries",
     "Worker",
 ]

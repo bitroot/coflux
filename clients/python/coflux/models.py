@@ -25,9 +25,9 @@ class Defer(t.NamedTuple):
 
 
 class Retries(t.NamedTuple):
-    limit: int
-    delay_min: int
-    delay_max: int
+    limit: int | None = None  # 0 = no retries, None = unlimited
+    delay_min: float = 1      # seconds
+    delay_max: float = 60     # seconds
 
 
 class Target(t.NamedTuple):

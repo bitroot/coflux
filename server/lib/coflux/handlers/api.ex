@@ -979,7 +979,8 @@ defmodule Coflux.Handlers.Api do
         {:ok, nil}
 
       is_map(value) ->
-        with {:ok, limit} <- parse_integer(Map.get(value, "limit")),
+        # limit can be nil (unlimited) or an integer
+        with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
              {:ok, delay_min} <- parse_integer(Map.get(value, "delayMin"), optional: true),
              {:ok, delay_max} <- parse_integer(Map.get(value, "delayMax"), optional: true) do
           {:ok, %{limit: limit, delay_min: delay_min, delay_max: delay_max}}
