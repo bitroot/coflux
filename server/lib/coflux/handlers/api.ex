@@ -1101,6 +1101,7 @@ defmodule Coflux.Handlers.Api do
       "defer" => compose_workflow_defer(workflow.defer),
       "delay" => workflow.delay,
       "retries" => compose_workflow_retries(workflow.retries),
+      "recurrent" => workflow.recurrent,
       "requires" => workflow.requires
     }
   end

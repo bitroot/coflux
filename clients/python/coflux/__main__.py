@@ -131,7 +131,7 @@ def _register_manifests(
                         "params": definition.defer.params,
                     }
                 ),
-                "delay": definition.delay,
+                "delay": int(definition.delay * 1000),
                 "retries": (
                     definition.retries
                     and {
