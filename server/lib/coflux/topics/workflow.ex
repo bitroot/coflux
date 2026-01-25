@@ -104,6 +104,7 @@ defmodule Coflux.Topics.Workflow do
         defer: build_defer_configuration(workflow.defer),
         delay: workflow.delay,
         retries: build_retries_configuration(workflow.retries),
+        recurrent: workflow.recurrent,
         requires: workflow.requires
       }
     end

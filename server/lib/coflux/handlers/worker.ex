@@ -111,6 +111,7 @@ defmodule Coflux.Handlers.Worker do
           memo,
           execute_after,
           retries,
+          recurrent,
           requires
         ] = message["params"]
 
@@ -129,6 +130,7 @@ defmodule Coflux.Handlers.Worker do
                  defer: parse_defer(defer),
                  memo: memo,
                  retries: parse_retries(retries),
+                 recurrent: recurrent == true,
                  requires: requires
                ) do
             {:ok, _run_id, _step_id, execution_id} ->

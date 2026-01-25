@@ -93,6 +93,7 @@ class SubmitExecutionRequest(t.NamedTuple):
     memo: list[int] | bool
     execute_after: dt.datetime | None
     retries: models.Retries | None
+    recurrent: bool
     requires: types.Requires | None
 
 
@@ -329,6 +330,7 @@ class Channel:
         wait_for: set[int] | None = None,
         cache: models.Cache | None = None,
         retries: models.Retries | None = None,
+        recurrent: bool = False,
         defer: models.Defer | None = None,
         execute_after: dt.datetime | None = None,
         delay: float | dt.timedelta = 0,
@@ -359,6 +361,7 @@ class Channel:
                 memo,
                 execute_after,
                 retries,
+                recurrent,
                 requires,
             )
         )
@@ -823,6 +826,7 @@ class ExecutionState:
                 memo,
                 execute_after,
                 retries,
+                recurrent,
                 requires,
             ):
                 execute_after_ms = execute_after and int(
@@ -843,6 +847,7 @@ class ExecutionState:
                         memo,
                         execute_after_ms,
                         retries and retries._asdict(),
+                        recurrent,
                         requires,
                     ),
                     request_id,

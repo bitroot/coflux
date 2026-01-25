@@ -141,6 +141,7 @@ def _register_manifests(
                             "delayMax": definition.retries.delay_max,
                         }
                     ),
+                    "recurrent": definition.recurrent,
                     "requires": definition.requires,
                     "instruction": definition.instruction,
                 }

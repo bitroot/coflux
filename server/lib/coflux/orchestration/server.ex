@@ -2595,14 +2595,20 @@ defmodule Coflux.Orchestration.Server do
               {retry_id, state}
 
             result_retryable?(result) && step.retry_limit > 0 ->
-              {:ok, assignments} = Runs.get_step_assignments(state.db, step.id)
-              attempts = Enum.count(assignments)
+              {:ok, result_types} =
+                Runs.get_step_result_types(state.db, step.id, step.retry_limit + 1)
 
-              if attempts <= step.retry_limit do
+              # Count consecutive failures (error=0, abandoned=2) from most recent
+              consecutive_failures =
+                result_types
+                |> Enum.take_while(&(&1 in [0, 2]))
+                |> Enum.count()
+
+              if consecutive_failures <= step.retry_limit do
                 # TODO: add jitter (within min/max delay)
                 delay_s =
                   step.retry_delay_min +
-                    (attempts - 1) / step.retry_limit *
+                    (consecutive_failures - 1) / step.retry_limit *
                       (step.retry_delay_max - step.retry_delay_min)
 
                 execute_after = System.os_time(:millisecond) + delay_s * 1000
@@ -2636,6 +2642,10 @@ defmodule Coflux.Orchestration.Server do
               else
                 {nil, state}
               end
+
+            step.recurrent == 1 and match?({:value, _}, result) ->
+              {:ok, _, _, state} = rerun_step(state, step, space_id)
+              {nil, state}
 
             true ->
               {nil, state}

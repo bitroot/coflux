@@ -487,6 +487,7 @@ defmodule Coflux.Handlers.Api do
           defer: {"defer", &parse_defer/1},
           execute_after: {"executeAfter", &parse_integer(&1, optional: true)},
           retries: {"retries", &parse_retries/1},
+          recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
           requires: {"requires", &parse_tag_set/1}
         }
       )
@@ -506,6 +507,7 @@ defmodule Coflux.Handlers.Api do
                defer: arguments[:defer],
                delay: arguments[:delay],
                retries: arguments[:retries],
+               recurrent: arguments[:recurrent] == true,
                requires: arguments[:requires]
              ) do
           {:ok, run_id, step_id, execution_id} ->
@@ -952,6 +954,14 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_boolean(value, opts \\ []) do
+    cond do
+      opts[:optional] && is_nil(value) -> {:ok, nil}
+      is_boolean(value) -> {:ok, value}
+      true -> {:error, :invalid}
+    end
+  end
+
   defp parse_string(value, opts) do
     cond do
       opts[:optional] && is_nil(value) -> {:ok, nil}
@@ -1028,6 +1038,7 @@ defmodule Coflux.Handlers.Api do
            {:ok, defer} <- parse_defer(Map.get(value, "defer")),
            {:ok, delay} <- parse_integer(Map.get(value, "delay")),
            {:ok, retries} <- parse_retries(Map.get(value, "retries")),
+           {:ok, recurrent} <- parse_boolean(Map.get(value, "recurrent"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, instruction} <-
              parse_string(
@@ -1043,6 +1054,7 @@ defmodule Coflux.Handlers.Api do
            defer: defer,
            delay: delay,
            retries: retries,
+           recurrent: recurrent == true,
            requires: requires,
            instruction: instruction
          }}

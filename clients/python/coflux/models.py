@@ -38,6 +38,7 @@ class Target(t.NamedTuple):
     defer: Defer | None
     delay: float
     retries: Retries | None
+    recurrent: bool
     memo: list[int] | bool
     requires: types.Requires | None
     instruction: str | None

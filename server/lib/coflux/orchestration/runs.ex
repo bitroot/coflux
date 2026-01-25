@@ -24,6 +24,7 @@ defmodule Coflux.Orchestration.Runs do
         retry_limit,
         retry_delay_min,
         retry_delay_max,
+        recurrent,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -55,6 +56,7 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_limit,
         s.retry_delay_min,
         s.retry_delay_max,
+        s.recurrent,
         s.requires_tag_set_id,
         s.created_at
       FROM steps AS s
@@ -263,6 +265,7 @@ defmodule Coflux.Orchestration.Runs do
     memo = Keyword.get(opts, :memo)
     execute_after = Keyword.get(opts, :execute_after)
     retries = Keyword.get(opts, :retries)
+    recurrent = Keyword.get(opts, :recurrent, false)
     requires = Keyword.get(opts, :requires) || %{}
 
     memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
@@ -327,6 +330,7 @@ defmodule Coflux.Orchestration.Runs do
               if(retries, do: retries.limit, else: 0),
               if(retries, do: retries.delay_min, else: 0),
               if(retries, do: retries.delay_max, else: 0),
+              recurrent,
               requires_tag_set_id,
               now
             )
@@ -681,6 +685,7 @@ defmodule Coflux.Orchestration.Runs do
         retry_limit,
         retry_delay_min,
         retry_delay_max,
+        recurrent,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -735,6 +740,27 @@ defmodule Coflux.Orchestration.Runs do
          ) do
       {:ok, rows} ->
         {:ok, Map.new(rows)}
+    end
+  end
+
+  @doc """
+  Gets result types for executions of a step, ordered most recent first.
+  """
+  def get_step_result_types(db, step_id, limit) do
+    case query(
+           db,
+           """
+           SELECT r.type
+           FROM executions AS e
+           INNER JOIN results AS r ON r.execution_id = e.id
+           WHERE e.step_id = ?1
+           ORDER BY e.created_at DESC
+           LIMIT ?2
+           """,
+           {step_id, limit}
+         ) do
+      {:ok, rows} ->
+        {:ok, Enum.map(rows, fn {type} -> type end)}
     end
   end
 
@@ -939,6 +965,7 @@ defmodule Coflux.Orchestration.Runs do
          retry_limit,
          retry_delay_min,
          retry_delay_max,
+         recurrent,
          requires_tag_set_id,
          now
        ) do
@@ -960,6 +987,7 @@ defmodule Coflux.Orchestration.Runs do
                retry_limit: retry_limit,
                retry_delay_min: retry_delay_min,
                retry_delay_max: retry_delay_max,
+               recurrent: if(recurrent, do: 1, else: 0),
                requires_tag_set_id: requires_tag_set_id,
                created_at: now
              }) do
