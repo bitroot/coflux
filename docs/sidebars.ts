@@ -18,6 +18,7 @@ const sidebars: SidebarsConfig = {
     "executions",
     "concurrency",
     "retries",
+    "recurring",
     "caching",
     "groups",
     "logging",
