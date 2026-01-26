@@ -611,6 +611,40 @@ defmodule Coflux.Handlers.Api do
     end)
   end
 
+  defp handle(req, "POST", ["create_session"], namespace) do
+    {:ok, arguments, errors, req} =
+      read_arguments(
+        req,
+        %{
+          project_id: "projectId",
+          space_name: "spaceName"
+        },
+        %{
+          provides: {"provides", &parse_tag_set/1},
+          concurrency: {"concurrency", &parse_integer(&1, optional: true)}
+        }
+      )
+
+    if Enum.empty?(errors) do
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        case Orchestration.create_session(
+               arguments.project_id,
+               arguments.space_name,
+               arguments[:provides] || %{},
+               arguments[:concurrency] || 0
+             ) do
+          {:ok, session_id} ->
+            json_response(req, %{"sessionId" => session_id})
+
+          {:error, :space_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
+    else
+      json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, _method, _path, _namespace) do
     json_error_response(req, "not_found", status: 404)
   end

@@ -64,6 +64,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:resume_session, session_id, pid})
   end
 
+  def create_session(project_id, space_name, provides, concurrency) do
+    call_server(project_id, {:create_session, space_name, provides, concurrency})
+  end
+
   def declare_targets(project_id, session_id, targets) do
     call_server(project_id, {:declare_targets, session_id, targets})
   end

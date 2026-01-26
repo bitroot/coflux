@@ -10,7 +10,7 @@ from .context import (
 )
 from .decorators import stub, task, workflow
 from .models import Asset, Execution, Retries
-from .worker import Worker
+from .worker import SessionExpiredError, Worker
 
 __all__ = [
     "workflow",
@@ -27,5 +27,6 @@ __all__ = [
     "Execution",
     "Asset",
     "Retries",
+    "SessionExpiredError",
     "Worker",
 ]

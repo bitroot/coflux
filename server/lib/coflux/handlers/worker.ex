@@ -12,13 +12,8 @@ defmodule Coflux.Handlers.Worker do
         # TODO: validate
         project_id = get_query_param(qs, "project")
         session_id = get_query_param(qs, "session")
-        space_name = get_query_param(qs, "space")
-        worker_id = get_query_param(qs, "launch", &String.to_integer/1)
-        provides = get_query_param(qs, "provides", &parse_provides/1)
-        concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
 
-        {:cowboy_websocket, req,
-         {project_id, session_id, space_name, worker_id, provides, concurrency}}
+        {:cowboy_websocket, req, {project_id, session_id}}
 
       {:error, server_version, expected_version} ->
         req =
@@ -34,12 +29,12 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, session_id, space_name, worker_id, provides, concurrency}) do
+  def websocket_init({project_id, session_id}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
         # TODO: authenticate
         # TODO: monitor server?
-        case connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
+        case connect(project_id, session_id) do
           {:ok, session_id, execution_ids} ->
             {[session_message(session_id)],
              %{
@@ -343,23 +338,14 @@ defmodule Coflux.Handlers.Worker do
     {[{:close, 4000, "space_not_found"}], state}
   end
 
-  defp connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
+  defp connect(project_id, session_id) do
     if session_id do
-      with {:ok, execution_ids} <- Orchestration.resume_session(project_id, session_id, self()) do
+      with {:ok, _external_session_id, execution_ids} <-
+             Orchestration.resume_session(project_id, session_id, self()) do
         {:ok, session_id, execution_ids}
       end
     else
-      with {:ok, session_id} <-
-             Orchestration.start_session(
-               project_id,
-               space_name,
-               worker_id,
-               provides,
-               concurrency,
-               self()
-             ) do
-        {:ok, session_id, MapSet.new()}
-      end
+      {:error, :no_session}
     end
   end
 
@@ -513,12 +499,4 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  defp parse_provides(value) do
-    value
-    |> String.split(";", trim: true)
-    |> Enum.reduce(%{}, fn part, result ->
-      [key, value] = String.split(part, ":", parts: 2)
-      Map.update(result, key, [value], &[value | &1])
-    end)
-  end
 end

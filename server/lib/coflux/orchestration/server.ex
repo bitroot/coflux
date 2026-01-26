@@ -435,6 +435,39 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:create_session, space_name, provides, concurrency}, _from, state) do
+    with {:ok, space_id, _} <- lookup_space_by_name(state, space_name) do
+      case Sessions.start_session(state.db, space_id, provides, nil) do
+        {:ok, session_id, external_session_id, now} ->
+          session = %{
+            external_id: external_session_id,
+            connection: nil,
+            targets: %{},
+            queue: [],
+            starting: MapSet.new(),
+            executing: MapSet.new(),
+            expire_timer: nil,
+            concurrency: concurrency,
+            space_id: space_id,
+            provides: provides,
+            worker_id: nil,
+            last_idle_at: now,
+            activated: false
+          }
+
+          state =
+            state
+            |> put_in([Access.key(:sessions), session_id], session)
+            |> put_in([Access.key(:session_ids), external_session_id], session_id)
+
+          {:reply, {:ok, external_session_id}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
   def handle_call(
         {:start_session, space_name, worker_id, provides, concurrency, pid},
         _from,
@@ -458,7 +491,8 @@ defmodule Coflux.Orchestration.Server do
             space_id: space_id,
             provides: provides,
             worker_id: worker_id,
-            last_idle_at: now
+            last_idle_at: now,
+            activated: true
           }
 
           state =
@@ -503,6 +537,7 @@ defmodule Coflux.Orchestration.Server do
     case Map.fetch(state.session_ids, external_session_id) do
       {:ok, session_id} ->
         session = Map.fetch!(state.sessions, session_id)
+        is_first_activation = not Map.get(session, :activated, true)
 
         if session.expire_timer do
           Process.cancel_timer(session.expire_timer)
@@ -529,20 +564,28 @@ defmodule Coflux.Orchestration.Server do
           |> put_in([Access.key(:connections), ref], {pid, session_id})
           |> update_in(
             [Access.key(:sessions), session_id],
-            &Map.merge(&1, %{connection: ref, queue: []})
+            &Map.merge(&1, %{connection: ref, queue: [], activated: true})
           )
-          |> notify_listeners(
-            {:sessions, session.space_id},
-            {:session, session_id,
-             %{
-               connected: true,
-               executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
-               pool_name:
-                 if(session.worker_id,
-                   do: state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
-                 )
-             }}
-          )
+
+        # Notify listeners on first activation or reconnection
+        state =
+          if is_first_activation or session.connection do
+            notify_listeners(
+              state,
+              {:sessions, session.space_id},
+              {:session, session_id,
+               %{
+                 connected: true,
+                 executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
+                 pool_name:
+                   if(session.worker_id,
+                     do: state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
+                   )
+               }}
+            )
+          else
+            state
+          end
 
         state =
           if session.worker_id do
@@ -1728,14 +1771,36 @@ defmodule Coflux.Orchestration.Server do
                     &(elem(&1, 1).id == pool_id)
                   )
 
+                # Create a session for the pool-launched worker
+                {:ok, session_id, external_session_id, session_now} =
+                  Sessions.start_session(state.db, space_id, pool.provides, worker_id)
+
+                session = %{
+                  external_id: external_session_id,
+                  connection: nil,
+                  targets: %{},
+                  queue: [],
+                  starting: MapSet.new(),
+                  executing: MapSet.new(),
+                  expire_timer: nil,
+                  concurrency: 0,
+                  space_id: space_id,
+                  provides: pool.provides,
+                  worker_id: worker_id,
+                  last_idle_at: session_now,
+                  activated: false
+                }
+
                 state
+                |> put_in([Access.key(:sessions), session_id], session)
+                |> put_in([Access.key(:session_ids), external_session_id], session_id)
                 |> call_launcher(
                   pool.launcher,
                   :launch,
                   [
                     state.project_id,
                     state.spaces[space_id].name,
-                    worker_id,
+                    external_session_id,
                     pool.modules,
                     pool.provides,
                     Map.delete(pool.launcher, :type)
@@ -1776,7 +1841,7 @@ defmodule Coflux.Orchestration.Server do
                   space_id: space_id,
                   state: :active,
                   data: nil,
-                  session_id: nil,
+                  session_id: session_id,
                   stop_id: nil,
                   last_poll_at: nil
                 })
