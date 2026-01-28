@@ -264,14 +264,10 @@ def _init(
             try:
                 with Worker(
                     project,
-                    space,
                     host,
-                    token,
-                    provides,
                     serialiser_configs,
                     blob_threshold,
                     blob_store_configs,
-                    concurrency,
                     session_id,
                     targets,
                 ) as worker:

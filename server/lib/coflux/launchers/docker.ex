@@ -1,5 +1,5 @@
 defmodule Coflux.DockerLauncher do
-  def launch(project_id, space_name, session_id, modules, provides, config \\ %{}) do
+  def launch(project_id, session_id, modules, config \\ %{}) do
     # TODO: option to configure docker host/socket?
     # TODO: option to configure coflux host?
     with {:ok, %{"Id" => container_id}} <-
@@ -9,10 +9,8 @@ defmodule Coflux.DockerLauncher do
              "Cmd" => modules,
              "Env" => [
                "COFLUX_HOST=localhost:7777",
-               "COFLUX_SPACE=#{space_name}",
                "COFLUX_PROJECT=#{project_id}",
-               "COFLUX_SESSION=#{session_id}",
-               "COFLUX_PROVIDES=#{encode_provides(provides)}"
+               "COFLUX_SESSION=#{session_id}"
              ]
            }),
          :ok <- start_container(container_id) do
@@ -120,13 +118,5 @@ defmodule Coflux.DockerLauncher do
       409 -> {:error, :conflict}
       500 -> {:error, :server_error}
     end
-  end
-
-  defp encode_provides(provides) do
-    provides
-    |> Enum.flat_map(fn {key, values} ->
-      Enum.map(values, &"#{key}:#{&1}")
-    end)
-    |> Enum.join(" ")
   end
 end

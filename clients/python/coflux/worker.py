@@ -36,38 +36,24 @@ def _parse_value(value: list) -> types.Value:
     raise Exception(f"unexpected value: {value}")
 
 
-def _encode_tags(provides: dict[str, list[str]]) -> str:
-    return ";".join(f"{k}:{v}" for k, vs in provides.items() for v in vs)
-
-
 class SessionExpiredError(Exception):
     """Raised when the worker's session has expired."""
-
-    pass
 
 
 class Worker:
     def __init__(
         self,
         project_id: str,
-        space_name: str,
         server_host: str,
-        token: str | None,
-        provides: dict[str, list[str]],
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
-        concurrency: int,
-        session_id: str | None,
+        session_id: str,
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
         self._project_id = project_id
-        self._space_name = space_name
-        self._session_id = session_id
         self._server_host = server_host
-        self._token = token
-        self._provides = provides
-        self._concurrency = concurrency
+        self._session_id = session_id
         self._targets = targets
         self._connection = server.Connection(
             {"execute": self._handle_execute, "abort": self._handle_abort}
@@ -106,27 +92,17 @@ class Worker:
     def _params(self):
         params = {
             "project": self._project_id,
-            "space": self._space_name,
+            "session": self._session_id,
         }
         if API_VERSION:
             params["version"] = API_VERSION
-        if self._session_id:
-            params["session"] = self._session_id
-        if self._token:
-            params["token"] = self._token
-        if self._provides:
-            params["provides"] = _encode_tags(self._provides)
-        if self._concurrency:
-            params["concurrency"] = str(self._concurrency)
         return params
 
     async def run(self) -> None:
         """Run the worker. Raises SessionExpiredError if session expires."""
         check_server(self._server_host)
         while True:
-            print(
-                f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})..."
-            )
+            print(f"Connecting ({self._server_host}, {self._project_id})...")
             url = self._url("ws", "worker", self._params())
             try:
                 async with websockets.connect(url) as websocket:
@@ -152,8 +128,6 @@ class Worker:
                 reason = e.rcvd.reason if e.rcvd else None
                 if reason == "project_not_found":
                     raise Exception("Project not found")
-                elif reason == "space_not_found":
-                    raise Exception("Space not found")
                 elif reason == "session_invalid":
                     raise SessionExpiredError("Session invalid")
                 else:
