@@ -95,12 +95,15 @@ defmodule Coflux.Topics.Pool do
   defp build_launcher(launcher) do
     case launcher.type do
       :docker ->
-        %{
-          type: "docker",
-          image: launcher.image
-        }
+        base = %{type: "docker", image: launcher.image}
+
+        base
+        |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
     end
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp build_pool(pool) do
     if pool do

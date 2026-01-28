@@ -793,6 +793,10 @@ def pools_list(project: str, space: str, host: str, token: str | None):
     "--docker-image",
     help="The Docker image.",
 )
+@click.option(
+    "--docker-host",
+    help="Docker daemon connection (e.g., 'unix:///var/run/docker.sock' or 'tcp://host:2375').",
+)
 @click.argument("name")
 def pools_update(
     project: str,
@@ -802,6 +806,7 @@ def pools_update(
     modules: tuple[str, ...] | None,
     provides: tuple[str, ...] | None,
     docker_image: str | None,
+    docker_host: str | None,
     name: str,
 ):
     """
@@ -815,11 +820,13 @@ def pools_update(
         pool["modules"] = list(modules)
     if provides is not None:
         pool["provides"] = _parse_provides(provides)
-    if docker_image:
-        if "launcher" not in pool or pool["launcher"]["type"] != "docker":
-            pool["launcher"] = {}
-        pool["launcher"]["type"] = "docker"
-        pool["launcher"]["image"] = docker_image
+    if docker_image or docker_host:
+        if "launcher" not in pool or pool.get("launcher", {}).get("type") != "docker":
+            pool["launcher"] = {"type": "docker"}
+        if docker_image:
+            pool["launcher"]["image"] = docker_image
+        if docker_host:
+            pool["launcher"]["dockerHost"] = docker_host
 
     _api_request(
         "POST",
