@@ -1,4 +1,6 @@
 ALTER TABLE sessions ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN activation_timeout INTEGER;
+ALTER TABLE sessions ADD COLUMN reconnection_timeout INTEGER;
 
 CREATE TABLE session_activations (
   session_id INTEGER PRIMARY KEY,

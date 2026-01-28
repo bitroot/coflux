@@ -34,8 +34,8 @@ defmodule Coflux.Handlers.Worker do
       {:ok, _} ->
         # TODO: authenticate
         # TODO: monitor server?
-        case connect(project_id, session_id) do
-          {:ok, session_id, execution_ids} ->
+        case Orchestration.resume_session(project_id, session_id, self()) do
+          {:ok, _external_session_id, execution_ids} ->
             {[session_message(session_id)],
              %{
                project_id: project_id,
@@ -43,13 +43,7 @@ defmodule Coflux.Handlers.Worker do
                execution_ids: execution_ids
              }}
 
-          {:error, :space_invalid} ->
-            {[{:close, 4000, "space_not_found"}], nil}
-
-          {:error, :no_worker} ->
-            {[{:close, 4000, "launch_invalid"}], nil}
-
-          {:error, :no_session} ->
+          {:error, :session_invalid} ->
             {[{:close, 4000, "session_invalid"}], nil}
         end
 
@@ -336,17 +330,6 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(:stop, state) do
     {[{:close, 4000, "space_not_found"}], state}
-  end
-
-  defp connect(project_id, session_id) do
-    if session_id do
-      with {:ok, _external_session_id, execution_ids} <-
-             Orchestration.resume_session(project_id, session_id, self()) do
-        {:ok, session_id, execution_ids}
-      end
-    else
-      {:error, :no_session}
-    end
   end
 
   defp is_recognised_execution?(execution_id, state) do

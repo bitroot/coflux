@@ -627,12 +627,14 @@ defmodule Coflux.Handlers.Api do
 
     if Enum.empty?(errors) do
       with_project_access(req, arguments.project_id, namespace, fn ->
-        case Orchestration.create_session(
-               arguments.project_id,
-               arguments.space_name,
-               arguments[:provides] || %{},
-               arguments[:concurrency] || 0
-             ) do
+        opts =
+          [
+            provides: arguments[:provides],
+            concurrency: arguments[:concurrency]
+          ]
+          |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+        case Orchestration.create_session(arguments.project_id, arguments.space_name, opts) do
           {:ok, session_id} ->
             json_response(req, %{"sessionId" => session_id})
 

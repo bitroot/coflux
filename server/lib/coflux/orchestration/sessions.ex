@@ -3,7 +3,12 @@ defmodule Coflux.Orchestration.Sessions do
 
   import Coflux.Store
 
-  def create_session(db, space_id, provides, worker_id, concurrency) do
+  def create_session(db, space_id, worker_id, opts \\ []) do
+    provides = Keyword.get(opts, :provides)
+    concurrency = Keyword.get(opts, :concurrency, 0)
+    activation_timeout = Keyword.get(opts, :activation_timeout)
+    reconnection_timeout = Keyword.get(opts, :reconnection_timeout)
+
     with_transaction(db, fn ->
       case generate_external_id(db, :sessions, 30) do
         {:ok, external_id} ->
@@ -22,7 +27,9 @@ defmodule Coflux.Orchestration.Sessions do
                  space_id: space_id,
                  worker_id: worker_id,
                  provides_tag_set_id: provides_tag_set_id,
-                 concurrency: concurrency || 0,
+                 concurrency: concurrency,
+                 activation_timeout: activation_timeout,
+                 reconnection_timeout: reconnection_timeout,
                  created_at: now
                }) do
             {:ok, session_id} ->
@@ -55,7 +62,7 @@ defmodule Coflux.Orchestration.Sessions do
   end
 
   def load_active_sessions(db) do
-    query_all(
+    query(
       db,
       """
       SELECT
@@ -65,6 +72,8 @@ defmodule Coflux.Orchestration.Sessions do
         s.worker_id,
         s.provides_tag_set_id,
         s.concurrency,
+        s.activation_timeout,
+        s.reconnection_timeout,
         s.created_at,
         sa.created_at AS activated_at
       FROM sessions s

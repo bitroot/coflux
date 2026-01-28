@@ -17,7 +17,8 @@ defmodule Coflux.Orchestration.Server do
     Observations
   }
 
-  @session_timeout_ms 5_000
+  @default_activation_timeout_ms 600_000
+  @default_reconnection_timeout_ms 30_000
   @connected_worker_poll_interval_ms 30_000
   @disconnected_worker_poll_interval_ms 5_000
   @worker_idle_timeout_ms 5_000
@@ -27,6 +28,7 @@ defmodule Coflux.Orchestration.Server do
               db: nil,
               tick_timer: nil,
               suspend_timer: nil,
+              expiry_timer: nil,
 
               # id -> %{name, base_id, state}
               spaces: %{},
@@ -43,11 +45,14 @@ defmodule Coflux.Orchestration.Server do
               # ref -> {pid, session_id}
               connections: %{},
 
-              # session_id -> %{external_id, connection, targets, queue, starting, executing, expire_timer, concurrency, space_id, provides, worker_id, last_idle_at, activated_at}
+              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, space_id, provides, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
               sessions: %{},
 
               # external_id -> session_id
               session_ids: %{},
+
+              # session_id -> expiry_timestamp_ms
+              session_expiries: %{},
 
               # {module, target} -> %{type, session_ids}
               targets: %{},
@@ -139,7 +144,7 @@ defmodule Coflux.Orchestration.Server do
         active_sessions,
         state,
         fn {session_id, external_id, space_id, worker_id, provides_tag_set_id, concurrency,
-            created_at, activated_at},
+            activation_timeout, reconnection_timeout, created_at, activated_at},
            state ->
           provides =
             if provides_tag_set_id do
@@ -150,6 +155,9 @@ defmodule Coflux.Orchestration.Server do
               %{}
             end
 
+          activation_timeout = activation_timeout || @default_activation_timeout_ms
+          reconnection_timeout = reconnection_timeout || @default_reconnection_timeout_ms
+
           session = %{
             external_id: external_id,
             connection: nil,
@@ -157,28 +165,28 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            expire_timer: nil,
             concurrency: concurrency,
             space_id: space_id,
             provides: provides,
             worker_id: worker_id,
             last_idle_at: activated_at || created_at,
-            activated_at: activated_at
+            activated_at: activated_at,
+            activation_timeout: activation_timeout,
+            reconnection_timeout: reconnection_timeout
           }
-
-          # For activated sessions, start expire timer since worker needs to reconnect
-          session =
-            if activated_at do
-              timer = Process.send_after(self(), {:expire_session, session_id}, @session_timeout_ms)
-              Map.put(session, :expire_timer, timer)
-            else
-              session
-            end
 
           state =
             state
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_id], session_id)
+
+          # Schedule expiry - either activation (if never connected) or reconnection (if was connected)
+          state =
+            if activated_at do
+              schedule_session_expiry(state, session_id, reconnection_timeout)
+            else
+              schedule_session_expiry(state, session_id, activation_timeout)
+            end
 
           # Link session to worker if applicable
           if worker_id && Map.has_key?(state.workers, worker_id) do
@@ -493,9 +501,21 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:create_session, space_name, provides, concurrency}, _from, state) do
+  def handle_call({:create_session, space_name, opts}, _from, state) do
+    provides = Keyword.get(opts, :provides, %{})
+    concurrency = Keyword.get(opts, :concurrency, 0)
+    activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
+    reconnection_timeout = Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
+
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name) do
-      case Sessions.create_session(state.db, space_id, provides, nil, concurrency) do
+      db_opts = [
+        provides: provides,
+        concurrency: concurrency,
+        activation_timeout: activation_timeout,
+        reconnection_timeout: reconnection_timeout
+      ]
+
+      case Sessions.create_session(state.db, space_id, nil, db_opts) do
         {:ok, session_id, external_session_id, now} ->
           session = %{
             external_id: external_session_id,
@@ -504,19 +524,21 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            expire_timer: nil,
             concurrency: concurrency,
             space_id: space_id,
             provides: provides,
             worker_id: nil,
             last_idle_at: now,
-            activated_at: nil
+            activated_at: nil,
+            activation_timeout: activation_timeout,
+            reconnection_timeout: reconnection_timeout
           }
 
           state =
             state
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
+            |> schedule_session_expiry(session_id, activation_timeout)
 
           {:reply, {:ok, external_session_id}, state}
       end
@@ -539,9 +561,8 @@ defmodule Coflux.Orchestration.Server do
             session.activated_at
           end
 
-        if session.expire_timer do
-          Process.cancel_timer(session.expire_timer)
-        end
+        # Cancel any pending expiry (activation or reconnection)
+        state = cancel_session_expiry(state, session_id)
 
         state =
           if session.connection do
@@ -1499,18 +1520,33 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
-  def handle_info({:expire_session, session_id}, state) do
-    if state.sessions[session_id].connection do
-      IO.puts("Ignoring session expire (#{inspect(session_id)})")
-      {:noreply, state}
-    else
-      state =
-        state
-        |> remove_session(session_id)
-        |> flush_notifications()
+  def handle_info(:expire_sessions, state) do
+    now = System.os_time(:millisecond)
 
-      {:noreply, state}
-    end
+    {expired, remaining} =
+      state.session_expiries
+      |> Enum.split_with(fn {_, expiry_at} -> expiry_at <= now end)
+
+    state = %{state | session_expiries: Map.new(remaining), expiry_timer: nil}
+
+    state =
+      Enum.reduce(expired, state, fn {session_id, _}, state ->
+        # Only remove if still disconnected (connected sessions shouldn't be in expiries)
+        case Map.fetch(state.sessions, session_id) do
+          {:ok, session} when is_nil(session.connection) ->
+            remove_session(state, session_id)
+
+          _ ->
+            state
+        end
+      end)
+
+    state =
+      state
+      |> reschedule_expiry_timer()
+      |> flush_notifications()
+
+    {:noreply, state}
   end
 
   def handle_info(:tick, state) do
@@ -1767,8 +1803,20 @@ defmodule Coflux.Orchestration.Server do
                   )
 
                 # Create a session for the pool-launched worker
+                activation_timeout =
+                  Map.get(pool, :activation_timeout, @default_activation_timeout_ms)
+
+                reconnection_timeout =
+                  Map.get(pool, :reconnection_timeout, @default_reconnection_timeout_ms)
+
+                session_opts = [
+                  provides: pool.provides,
+                  activation_timeout: activation_timeout,
+                  reconnection_timeout: reconnection_timeout
+                ]
+
                 {:ok, session_id, external_session_id, session_now} =
-                  Sessions.create_session(state.db, space_id, pool.provides, worker_id, 0)
+                  Sessions.create_session(state.db, space_id, worker_id, session_opts)
 
                 session = %{
                   external_id: external_session_id,
@@ -1777,18 +1825,20 @@ defmodule Coflux.Orchestration.Server do
                   queue: [],
                   starting: MapSet.new(),
                   executing: MapSet.new(),
-                  expire_timer: nil,
                   concurrency: 0,
                   space_id: space_id,
                   provides: pool.provides,
                   worker_id: worker_id,
                   last_idle_at: session_now,
-                  activated_at: nil
+                  activated_at: nil,
+                  activation_timeout: activation_timeout,
+                  reconnection_timeout: reconnection_timeout
                 }
 
                 state
                 |> put_in([Access.key(:sessions), session_id], session)
                 |> put_in([Access.key(:session_ids), external_session_id], session_id)
+                |> schedule_session_expiry(session_id, activation_timeout)
                 |> call_launcher(
                   pool.launcher,
                   :launch,
@@ -2055,15 +2105,13 @@ defmodule Coflux.Orchestration.Server do
           case Map.fetch(state.sessions, session_id) do
             {:ok, session} ->
               # TODO: (re-)schedule timer when receiving heartbeats?
-              expire_timer =
-                Process.send_after(self(), {:expire_session, session_id}, @session_timeout_ms)
-
               state =
                 state
                 |> update_in(
                   [Access.key(:sessions), session_id],
-                  &Map.merge(&1, %{connection: nil, expire_timer: expire_timer})
+                  &Map.put(&1, :connection, nil)
                 )
+                |> schedule_session_expiry(session_id, session.reconnection_timeout)
                 |> notify_listeners(
                   {:sessions, session.space_id},
                   {:connected, session_id, false}
@@ -2183,6 +2231,7 @@ defmodule Coflux.Orchestration.Server do
   defp remove_session(state, session_id) do
     {:ok, _} = Sessions.expire_session(state.db, session_id)
     {session, state} = pop_in(state.sessions[session_id])
+    state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
 
     state =
       session.executing
@@ -3022,5 +3071,32 @@ defmodule Coflux.Orchestration.Server do
       {:pool, worker.space_id, worker.pool_name},
       {:worker_deactivated, worker_id, deactivated_at}
     )
+  end
+
+  defp schedule_session_expiry(state, session_id, timeout_ms) do
+    expiry_at = System.os_time(:millisecond) + timeout_ms
+    state = put_in(state.session_expiries[session_id], expiry_at)
+    reschedule_expiry_timer(state)
+  end
+
+  defp cancel_session_expiry(state, session_id) do
+    state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
+    reschedule_expiry_timer(state)
+  end
+
+  defp reschedule_expiry_timer(state) do
+    if state.expiry_timer do
+      Process.cancel_timer(state.expiry_timer)
+    end
+
+    case state.session_expiries |> Map.values() |> Enum.min(fn -> nil end) do
+      nil ->
+        %{state | expiry_timer: nil}
+
+      next_expiry ->
+        delay = max(0, next_expiry - System.os_time(:millisecond))
+        timer = Process.send_after(self(), :expire_sessions, delay)
+        %{state | expiry_timer: timer}
+    end
   end
 end
