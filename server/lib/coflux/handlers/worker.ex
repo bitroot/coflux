@@ -11,9 +11,10 @@ defmodule Coflux.Handlers.Worker do
       :ok ->
         # TODO: validate
         project_id = get_query_param(qs, "project")
+        space_name = get_query_param(qs, "space")
         session_id = get_query_param(qs, "session")
 
-        {:cowboy_websocket, req, {project_id, session_id}}
+        {:cowboy_websocket, req, {project_id, space_name, session_id}}
 
       {:error, server_version, expected_version} ->
         req =
@@ -29,12 +30,12 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, session_id}) do
+  def websocket_init({project_id, space_name, session_id}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
         # TODO: authenticate
         # TODO: monitor server?
-        case Orchestration.resume_session(project_id, session_id, self()) do
+        case Orchestration.resume_session(project_id, session_id, space_name, self()) do
           {:ok, _external_session_id, execution_ids} ->
             {[session_message(session_id)],
              %{
@@ -45,6 +46,9 @@ defmodule Coflux.Handlers.Worker do
 
           {:error, :session_invalid} ->
             {[{:close, 4000, "session_invalid"}], nil}
+
+          {:error, :space_mismatch} ->
+            {[{:close, 4000, "space_mismatch"}], nil}
         end
 
       :error ->

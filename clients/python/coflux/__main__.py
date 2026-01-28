@@ -259,11 +259,12 @@ def _init(
                 session_id = _create_session(
                     host, project, space, provides, concurrency, token=token
                 )
-                print(f"Session created.")
+                print("Session created.")
 
             try:
                 with Worker(
                     project,
+                    space,
                     host,
                     serialiser_configs,
                     blob_threshold,

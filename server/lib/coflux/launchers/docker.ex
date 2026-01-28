@@ -1,5 +1,5 @@
 defmodule Coflux.DockerLauncher do
-  def launch(project_id, session_id, modules, config \\ %{}) do
+  def launch(project_id, space_name, session_id, modules, config \\ %{}) do
     # TODO: option to configure docker host/socket?
     # TODO: option to configure coflux host?
     with {:ok, %{"Id" => container_id}} <-
@@ -10,6 +10,7 @@ defmodule Coflux.DockerLauncher do
              "Env" => [
                "COFLUX_HOST=localhost:7777",
                "COFLUX_PROJECT=#{project_id}",
+               "COFLUX_SPACE=#{space_name}",
                "COFLUX_SESSION=#{session_id}"
              ]
            }),
@@ -35,7 +36,19 @@ defmodule Coflux.DockerLauncher do
   def poll(%{container: container_id}) do
     case inspect_container(container_id) do
       {:ok, result} ->
-        {:ok, result["State"]["Running"] == true}
+        running = result["State"]["Running"] == true
+
+        if !running do
+          case get_container_logs(container_id) do
+            {:ok, logs} when logs != "" ->
+              IO.puts("Container #{container_id} stopped. Logs:\n#{logs}")
+
+            _ ->
+              IO.puts("Container #{container_id} stopped (no logs)")
+          end
+        end
+
+        {:ok, running}
 
       {:error, :no_such_container} ->
         {:ok, false}
@@ -79,6 +92,21 @@ defmodule Coflux.DockerLauncher do
       Req.get!(
         "http:///v1.47/containers/#{container_id}/json",
         unix_socket: "/var/run/docker.sock"
+      )
+
+    case response.status do
+      200 -> {:ok, response.body}
+      404 -> {:error, :no_such_container}
+      500 -> {:error, :server_error}
+    end
+  end
+
+  defp get_container_logs(container_id) do
+    response =
+      Req.get!(
+        "http:///v1.47/containers/#{container_id}/logs",
+        unix_socket: "/var/run/docker.sock",
+        params: [stdout: true, stderr: true, tail: 100]
       )
 
     case response.status do

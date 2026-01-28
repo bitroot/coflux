@@ -44,6 +44,7 @@ class Worker:
     def __init__(
         self,
         project_id: str,
+        space_name: str,
         server_host: str,
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
@@ -52,6 +53,7 @@ class Worker:
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
         self._project_id = project_id
+        self._space_name = space_name
         self._server_host = server_host
         self._session_id = session_id
         self._targets = targets
@@ -92,6 +94,7 @@ class Worker:
     def _params(self):
         params = {
             "project": self._project_id,
+            "space": self._space_name,
             "session": self._session_id,
         }
         if API_VERSION:
@@ -102,7 +105,7 @@ class Worker:
         """Run the worker. Raises SessionExpiredError if session expires."""
         check_server(self._server_host)
         while True:
-            print(f"Connecting ({self._server_host}, {self._project_id})...")
+            print(f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})...")
             url = self._url("ws", "worker", self._params())
             try:
                 async with websockets.connect(url) as websocket:
@@ -130,6 +133,10 @@ class Worker:
                     raise Exception("Project not found")
                 elif reason == "session_invalid":
                     raise SessionExpiredError("Session invalid")
+                elif reason == "space_mismatch":
+                    raise Exception(
+                        f"Space mismatch: session does not belong to space '{self._space_name}'"
+                    )
                 else:
                     delay = 1 + 3 * random.random()  # TODO: exponential backoff
                     print(f"Disconnected (reconnecting in {delay:.1f} seconds).")

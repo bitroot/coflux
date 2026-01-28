@@ -444,12 +444,12 @@ defmodule Coflux.Orchestration.Server do
               manifests
               |> Enum.reduce(state, fn {module, workflows}, state ->
                 Enum.reduce(workflows, state, fn {target_name, target}, state ->
-                    notify_listeners(
-                      state,
-                      {:workflow, module, target_name, space_id},
-                      {:target, target}
-                    )
-                  end)
+                  notify_listeners(
+                    state,
+                    {:workflow, module, target_name, space_id},
+                    {:target, target}
+                  )
+                end)
               end)
               |> notify_listeners(
                 {:modules, space_id},
@@ -505,7 +505,9 @@ defmodule Coflux.Orchestration.Server do
     provides = Keyword.get(opts, :provides, %{})
     concurrency = Keyword.get(opts, :concurrency, 0)
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
-    reconnection_timeout = Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
+
+    reconnection_timeout =
+      Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
 
     with {:ok, space_id, _} <- lookup_space_by_name(state, space_name) do
       db_opts = [
@@ -548,12 +550,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:resume_session, external_session_id, pid}, _from, state) do
-    case Map.fetch(state.session_ids, external_session_id) do
-      {:ok, session_id} ->
-        session = Map.fetch!(state.sessions, session_id)
-
-        activated_at =
+  def handle_call({:resume_session, external_session_id, space_name, pid}, _from, state) do
+    with {:ok, session_id} <- Map.fetch(state.session_ids, external_session_id),
+         session = Map.fetch!(state.sessions, session_id),
+         {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
+         true <- session.space_id == space_id do
+      activated_at =
           if is_nil(session.activated_at) do
             {:ok, now} = Sessions.activate_session(state.db, session_id)
             now
@@ -596,29 +598,25 @@ defmodule Coflux.Orchestration.Server do
              %{
                connected: true,
                executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
-               pool_name:
-                 if(session.worker_id,
-                   do: state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
-                 )
+               pool_name: get_in(state.workers, [session.worker_id, :pool_name])
              }}
           )
 
         state =
-          if session.worker_id do
-            worker = Map.fetch!(state.workers, session.worker_id)
-            # TODO: check that worker space matches session space?
-            # TODO: check worker isn't assigned to a different session?
-            state
-            |> put_in(
-              [Access.key(:workers), session.worker_id, Access.key(:session_id)],
-              session_id
-            )
-            |> notify_listeners(
-              {:pool, worker.space_id, worker.pool_name},
-              {:worker_connected, session.worker_id, true}
-            )
-          else
-            state
+          case session.worker_id && Map.fetch(state.workers, session.worker_id) do
+            {:ok, worker} ->
+              state
+              |> put_in(
+                [Access.key(:workers), session.worker_id, Access.key(:session_id)],
+                session_id
+              )
+              |> notify_listeners(
+                {:pool, worker.space_id, worker.pool_name},
+                {:worker_connected, session.worker_id, true}
+              )
+
+            _ ->
+              state
           end
 
         executions = MapSet.union(session.executing, session.starting)
@@ -627,9 +625,15 @@ defmodule Coflux.Orchestration.Server do
 
         state = flush_notifications(state)
         {:reply, {:ok, external_session_id, executions}, state}
-
+    else
       :error ->
-        {:reply, {:error, :no_session}, state}
+        {:reply, {:error, :session_invalid}, state}
+
+      {:error, :space_invalid} ->
+        {:reply, {:error, :space_mismatch}, state}
+
+      false ->
+        {:reply, {:error, :space_mismatch}, state}
     end
   end
 
@@ -1291,10 +1295,7 @@ defmodule Coflux.Orchestration.Server do
               |> MapSet.union(session.executing)
               |> Enum.count()
 
-            pool_name =
-              if session.worker_id do
-                state.workers |> Map.fetch!(session.worker_id) |> Map.fetch!(:pool_name)
-              end
+            pool_name = get_in(state.workers, [session.worker_id, :pool_name])
 
             {session_id,
              %{
@@ -1493,8 +1494,7 @@ defmodule Coflux.Orchestration.Server do
             {:workflow, nil}
           )
         end)
-      end
-      )
+      end)
 
     result =
       Enum.reduce(
@@ -1688,7 +1688,11 @@ defmodule Coflux.Orchestration.Server do
                            retries:
                              if(execution.retry_limit == -1 || execution.retry_limit > 0,
                                do: %{
-                                 limit: if(execution.retry_limit == -1, do: nil, else: execution.retry_limit),
+                                 limit:
+                                   if(execution.retry_limit == -1,
+                                     do: nil,
+                                     else: execution.retry_limit
+                                   ),
                                  delay_min: execution.retry_delay_min,
                                  delay_max: execution.retry_delay_max
                                }
@@ -1844,6 +1848,7 @@ defmodule Coflux.Orchestration.Server do
                   :launch,
                   [
                     state.project_id,
+                    state.spaces[space_id].name,
                     external_session_id,
                     pool.modules,
                     Map.delete(pool.launcher, :type)
