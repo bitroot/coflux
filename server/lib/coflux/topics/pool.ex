@@ -76,8 +76,12 @@ defmodule Coflux.Topics.Pool do
     |> Topic.set([:workers, Integer.to_string(worker_id), :stopError], error)
   end
 
-  defp process_notification(topic, {:worker_deactivated, worker_id, deactivated_at}) do
-    Topic.set(topic, [:workers, Integer.to_string(worker_id), :deactivatedAt], deactivated_at)
+  defp process_notification(topic, {:worker_deactivated, worker_id, deactivated_at, exit_info}) do
+    worker_key = Integer.to_string(worker_id)
+
+    topic
+    |> Topic.set([:workers, worker_key, :deactivatedAt], deactivated_at)
+    |> Topic.set([:workers, worker_key, :exit], build_exit_info(exit_info))
   end
 
   defp process_notification(topic, {:worker_state, worker_id, state}) do
@@ -118,8 +122,21 @@ defmodule Coflux.Topics.Pool do
       stoppingAt: worker.stopping_at,
       stopError: worker.stop_error,
       deactivatedAt: worker.deactivated_at,
+      exit: build_exit_info(worker),
       state: worker.state,
       connected: worker.connected
     }
+  end
+
+  defp build_exit_info(nil), do: nil
+
+  defp build_exit_info(info) do
+    if info[:exit_code] do
+      %{
+        code: info[:exit_code],
+        oomKilled: info[:oom_killed],
+        error: info[:error]
+      }
+    end
   end
 end

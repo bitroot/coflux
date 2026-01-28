@@ -60,16 +60,29 @@ defmodule Coflux.Orchestration.Workers do
     end
   end
 
-  def create_worker_deactivation(db, worker_id) do
+  def create_worker_deactivation(db, worker_id, exit_info \\ nil) do
     now = current_timestamp()
 
-    case insert_one(db, :worker_deactivations, %{
-           worker_id: worker_id,
-           created_at: now
-         }) do
+    record =
+      %{
+        worker_id: worker_id,
+        created_at: now
+      }
+      |> maybe_add_exit_info(exit_info)
+
+    case insert_one(db, :worker_deactivations, record) do
       {:ok, _} ->
         {:ok, now}
     end
+  end
+
+  defp maybe_add_exit_info(record, nil), do: record
+
+  defp maybe_add_exit_info(record, exit_info) do
+    record
+    |> Map.put(:exit_code, exit_info[:exit_code])
+    |> Map.put(:oom_killed, if(exit_info[:oom_killed], do: 1, else: 0))
+    |> Map.put(:error, exit_info[:error])
   end
 
   def get_active_workers(db) do
@@ -121,7 +134,8 @@ defmodule Coflux.Orchestration.Workers do
     query(
       db,
       """
-      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error, d.created_at
+      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
+             d.created_at, d.exit_code, d.oom_killed, d.error
       FROM workers AS w
       INNER JOIN pools AS p ON p.id = w.pool_id
       LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id

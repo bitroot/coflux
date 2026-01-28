@@ -556,75 +556,75 @@ defmodule Coflux.Orchestration.Server do
          {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
          true <- session.space_id == space_id do
       activated_at =
-          if is_nil(session.activated_at) do
-            {:ok, now} = Sessions.activate_session(state.db, session_id)
-            now
-          else
-            session.activated_at
-          end
+        if is_nil(session.activated_at) do
+          {:ok, now} = Sessions.activate_session(state.db, session_id)
+          now
+        else
+          session.activated_at
+        end
 
-        # Cancel any pending expiry (activation or reconnection)
-        state = cancel_session_expiry(state, session_id)
+      # Cancel any pending expiry (activation or reconnection)
+      state = cancel_session_expiry(state, session_id)
 
-        state =
-          if session.connection do
-            {{pid, ^session_id}, state} = pop_in(state.connections[session.connection])
-            # TODO: better reason?
-            Process.exit(pid, :kill)
-            state
-          else
-            state
-          end
-
-        ref = Process.monitor(pid)
-
-        state.sessions[session_id].queue
-        |> Enum.reverse()
-        |> Enum.each(&send(pid, &1))
-
-        state =
+      state =
+        if session.connection do
+          {{pid, ^session_id}, state} = pop_in(state.connections[session.connection])
+          # TODO: better reason?
+          Process.exit(pid, :kill)
           state
-          |> put_in([Access.key(:connections), ref], {pid, session_id})
-          |> update_in(
-            [Access.key(:sessions), session_id],
-            &Map.merge(&1, %{connection: ref, queue: [], activated_at: activated_at})
-          )
+        else
+          state
+        end
 
-        state =
-          notify_listeners(
-            state,
-            {:sessions, session.space_id},
-            {:session, session_id,
-             %{
-               connected: true,
-               executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
-               pool_name: get_in(state.workers, [session.worker_id, :pool_name])
-             }}
-          )
+      ref = Process.monitor(pid)
 
-        state =
-          case session.worker_id && Map.fetch(state.workers, session.worker_id) do
-            {:ok, worker} ->
-              state
-              |> put_in(
-                [Access.key(:workers), session.worker_id, Access.key(:session_id)],
-                session_id
-              )
-              |> notify_listeners(
-                {:pool, worker.space_id, worker.pool_name},
-                {:worker_connected, session.worker_id, true}
-              )
+      state.sessions[session_id].queue
+      |> Enum.reverse()
+      |> Enum.each(&send(pid, &1))
 
-            _ ->
-              state
-          end
+      state =
+        state
+        |> put_in([Access.key(:connections), ref], {pid, session_id})
+        |> update_in(
+          [Access.key(:sessions), session_id],
+          &Map.merge(&1, %{connection: ref, queue: [], activated_at: activated_at})
+        )
 
-        executions = MapSet.union(session.executing, session.starting)
+      state =
+        notify_listeners(
+          state,
+          {:sessions, session.space_id},
+          {:session, session_id,
+           %{
+             connected: true,
+             executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
+             pool_name: get_in(state.workers, [session.worker_id, :pool_name])
+           }}
+        )
 
-        send(self(), :tick)
+      state =
+        case session.worker_id && Map.fetch(state.workers, session.worker_id) do
+          {:ok, worker} ->
+            state
+            |> put_in(
+              [Access.key(:workers), session.worker_id, Access.key(:session_id)],
+              session_id
+            )
+            |> notify_listeners(
+              {:pool, worker.space_id, worker.pool_name},
+              {:worker_connected, session.worker_id, true}
+            )
 
-        state = flush_notifications(state)
-        {:reply, {:ok, external_session_id, executions}, state}
+          _ ->
+            state
+        end
+
+      executions = MapSet.union(session.executing, session.starting)
+
+      send(self(), :tick)
+
+      state = flush_notifications(state)
+      {:reply, {:ok, external_session_id, executions}, state}
     else
       :error ->
         {:reply, {:error, :session_invalid}, state}
@@ -1239,7 +1239,7 @@ defmodule Coflux.Orchestration.Server do
           Map.new(
             pool_workers,
             fn {worker_id, starting_at, started_at, start_error, stopping_at, stopped_at,
-                stop_error, deactivated_at} ->
+                stop_error, deactivated_at, exit_code, oom_killed, exit_error} ->
               worker = Map.get(state.workers, worker_id)
 
               connected =
@@ -1264,6 +1264,9 @@ defmodule Coflux.Orchestration.Server do
                  stopped_at: stopped_at,
                  stop_error: stop_error,
                  deactivated_at: deactivated_at,
+                 exit_code: exit_code,
+                 oom_killed: oom_killed == 1,
+                 exit_error: exit_error,
                  state: if(worker, do: worker.state),
                  connected: connected
                }}
@@ -1941,8 +1944,8 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {:ok, true}} ->
               state
 
-            {:ok, {:ok, false}} ->
-              deactivate_worker(state, worker_id)
+            {:ok, {:ok, false, exit_info}} ->
+              deactivate_worker(state, worker_id, exit_info)
 
             :error ->
               # TODO: ?
@@ -3066,15 +3069,15 @@ defmodule Coflux.Orchestration.Server do
     )
   end
 
-  defp deactivate_worker(state, worker_id) do
-    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id)
+  defp deactivate_worker(state, worker_id, exit_info \\ nil) do
+    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, exit_info)
 
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
     notify_listeners(
       state,
       {:pool, worker.space_id, worker.pool_name},
-      {:worker_deactivated, worker_id, deactivated_at}
+      {:worker_deactivated, worker_id, deactivated_at, exit_info}
     )
   end
 

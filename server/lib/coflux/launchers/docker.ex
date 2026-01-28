@@ -36,24 +36,28 @@ defmodule Coflux.DockerLauncher do
   def poll(%{container: container_id}) do
     case inspect_container(container_id) do
       {:ok, result} ->
-        running = result["State"]["Running"] == true
+        state = result["State"]
 
-        if !running do
-          case get_container_logs(container_id) do
-            {:ok, logs} when logs != "" ->
-              IO.puts("Container #{container_id} stopped. Logs:\n#{logs}")
+        if state["Running"] do
+          {:ok, true}
+        else
+          exit_info = %{
+            exit_code: state["ExitCode"],
+            oom_killed: state["OOMKilled"] == true,
+            error: non_empty_string(state["Error"])
+          }
 
-            _ ->
-              IO.puts("Container #{container_id} stopped (no logs)")
-          end
+          {:ok, false, exit_info}
         end
 
-        {:ok, running}
-
       {:error, :no_such_container} ->
-        {:ok, false}
+        {:ok, false, nil}
     end
   end
+
+  defp non_empty_string(""), do: nil
+  defp non_empty_string(nil), do: nil
+  defp non_empty_string(s) when is_binary(s), do: s
 
   defp create_container(config) do
     response =
@@ -92,21 +96,6 @@ defmodule Coflux.DockerLauncher do
       Req.get!(
         "http:///v1.47/containers/#{container_id}/json",
         unix_socket: "/var/run/docker.sock"
-      )
-
-    case response.status do
-      200 -> {:ok, response.body}
-      404 -> {:error, :no_such_container}
-      500 -> {:error, :server_error}
-    end
-  end
-
-  defp get_container_logs(container_id) do
-    response =
-      Req.get!(
-        "http:///v1.47/containers/#{container_id}/logs",
-        unix_socket: "/var/run/docker.sock",
-        params: [stdout: true, stderr: true, tail: 100]
       )
 
     case response.status do
