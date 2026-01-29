@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import os
+import random
 import subprocess
 import sys
 import time
@@ -251,10 +252,15 @@ def _init(
 
         # Track whether we created the session (vs it being provided externally)
         session_provided = session_id is not None
+        session_backoff = 0
 
         while True:
             # Create a session if not provided
             if not session_id:
+                if session_backoff > 0:
+                    delay = min(session_backoff, 30) * (0.5 + random.random())
+                    print(f"Waiting {delay:.1f} seconds before creating session...")
+                    time.sleep(delay)
                 print("Creating session...")
                 session_id = _create_session(
                     host, project, space, provides, concurrency, token=token
@@ -273,12 +279,14 @@ def _init(
                     targets,
                 ) as worker:
                     asyncio.run(worker.run())
+                    session_backoff = 0  # Reset on clean exit
             except SessionExpiredError:
                 if session_provided:
                     print("Session expired. Exiting...")
                     raise
                 else:
                     print("Session expired. Recreating...")
+                    session_backoff = max(1, session_backoff * 2)
                     session_id = None
                     continue
             break
