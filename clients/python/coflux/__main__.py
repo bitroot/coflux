@@ -23,6 +23,38 @@ from .version import API_VERSION, VersionMismatchError
 T = t.TypeVar("T")
 
 
+def _is_localhost(host: str) -> bool:
+    """
+    Check if a host is localhost-like.
+
+    Handles localhost, *.localhost, 127.0.0.1, [::1], all with optional port.
+    """
+    # Handle IPv6 addresses in brackets (e.g., [::1]:7777)
+    if host.startswith("["):
+        bracket_end = host.find("]")
+        if bracket_end != -1:
+            return host[1:bracket_end] == "::1"
+        return False
+
+    # Remove port suffix for regular hosts
+    hostname = host.rsplit(":", 1)[0] if ":" in host else host
+
+    # Check for localhost, subdomains of localhost, or IPv4 loopback
+    return hostname == "localhost" or hostname.endswith(".localhost") or hostname == "127.0.0.1"
+
+
+def _should_use_secure(host: str, secure: bool | None) -> bool:
+    """
+    Determine whether to use secure connections (HTTPS/WSS).
+
+    If secure is explicitly set, use that value.
+    Otherwise, infer from hostname: insecure for localhost, secure otherwise.
+    """
+    if secure is not None:
+        return secure
+    return not _is_localhost(host)
+
+
 def _callback(_changes: set[tuple[watchfiles.Change, str]]) -> None:
     print("Change detected. Reloading...")
 
@@ -36,16 +68,17 @@ def _get_default_image() -> str:
 
 
 def _api_request(
-    method: str, host: str, action: str, token: str | None, **kwargs
+    method: str, host: str, action: str, token: str | None, *, secure: bool, **kwargs
 ) -> t.Any:
     headers = kwargs.pop("headers", {})
     if API_VERSION:
         headers["X-API-Version"] = API_VERSION
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    scheme = "https" if secure else "http"
     with httpx.Client() as client:
         response = client.request(
-            method, f"http://{host}/api/{action}", headers=headers, **kwargs
+            method, f"{scheme}://{host}/api/{action}", headers=headers, **kwargs
         )
         if response.status_code == 409:
             data = response.json()
@@ -65,13 +98,15 @@ def _create_session(
     provides: dict[str, list[str]] | None = None,
     concurrency: int | None = None,
     token: str | None = None,
+    *,
+    secure: bool,
 ) -> str:
     payload: dict[str, t.Any] = {"projectId": project_id, "spaceName": space_name}
     if provides:
         payload["provides"] = provides
     if concurrency:
         payload["concurrency"] = concurrency
-    result = _api_request("POST", host, "create_session", token, json=payload)
+    result = _api_request("POST", host, "create_session", token, secure=secure, json=payload)
     return result["sessionId"]
 
 
@@ -127,6 +162,8 @@ def _register_manifests(
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     token: str | None = None,
+    *,
+    secure: bool,
 ) -> None:
     manifests = {
         module: {
@@ -179,6 +216,7 @@ def _register_manifests(
         host,
         "register_manifests",
         token,
+        secure=secure,
         json={
             "projectId": project_id,
             "spaceName": space_name,
@@ -188,7 +226,7 @@ def _register_manifests(
 
 
 def _get_pool(
-    host: str, project_id: str, space_name: str, pool_name: str, token: str | None
+    host: str, project_id: str, space_name: str, pool_name: str, token: str | None, *, secure: bool
 ) -> dict | None:
     try:
         return _api_request(
@@ -196,6 +234,7 @@ def _get_pool(
             host,
             "get_pool",
             token,
+            secure=secure,
             params={
                 "project": project_id,
                 "space": space_name,
@@ -237,6 +276,7 @@ def _init(
     space: str,
     host: str,
     token: str | None,
+    secure: bool,
     provides: dict[str, list[str]],
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
@@ -248,7 +288,7 @@ def _init(
     try:
         targets = _load_modules(list(modules))
         if register:
-            _register_manifests(project, space, host, targets, token=token)
+            _register_manifests(project, space, host, targets, token=token, secure=secure)
 
         # Track whether we created the session (vs it being provided externally)
         session_provided = session_id is not None
@@ -263,7 +303,7 @@ def _init(
                     time.sleep(delay)
                 print("Creating session...")
                 session_id = _create_session(
-                    host, project, space, provides, concurrency, token=token
+                    host, project, space, provides, concurrency, token=token, secure=secure
                 )
                 print("Session created.")
 
@@ -272,6 +312,7 @@ def _init(
                     project,
                     space,
                     host,
+                    secure,
                     serialiser_configs,
                     blob_threshold,
                     blob_store_configs,
@@ -364,6 +405,35 @@ def _load_config() -> config.Config:
     return config.Config.model_validate(_read_config(path).unwrap())
 
 
+def _parse_bool_env(name: str) -> bool | None:
+    """
+    Parse a boolean environment variable.
+
+    Returns True for '1', 'true', 'yes', 'on' (case-insensitive).
+    Returns False for '0', 'false', 'no', 'off' (case-insensitive).
+    Returns None if not set or empty.
+    Raises click.BadParameter for invalid values.
+    """
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return None
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise click.BadParameter(
+        f"Invalid value for {name}: {value!r}. Use: 1/0, true/false, yes/no, on/off"
+    )
+
+
+def _get_default_secure() -> bool | None:
+    """Get the default secure value from env or config."""
+    env_value = _parse_bool_env("COFLUX_SECURE")
+    if env_value is not None:
+        return env_value
+    return _load_config().server.secure
+
+
 @cli.command("configure")
 @click.option(
     "-p",
@@ -446,15 +516,23 @@ def spaces():
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
 def spaces_list(
     project: str,
     host: str,
     token: str | None,
+    secure: bool | None,
 ):
     """
     Lists spaces.
     """
-    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
+    use_secure = _should_use_secure(host, secure)
+    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
     if spaces:
         # TODO: draw as tree
         _print_table(
@@ -495,6 +573,12 @@ def spaces_list(
     default=_load_config().server.token,
 )
 @click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+@click.option(
     "--base",
     help="The base space to inherit from",
 )
@@ -503,15 +587,17 @@ def spaces_create(
     project: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     base: str | None,
     name: str,
 ):
     """
     Creates a space within the project.
     """
+    use_secure = _should_use_secure(host, secure)
     base_id = None
     if base:
-        spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
+        spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
         space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
         base_id = space_ids_by_name.get(base)
         if not base_id:
@@ -523,6 +609,7 @@ def spaces_create(
         host,
         "create_space",
         token,
+        secure=use_secure,
         json={
             "projectId": project,
             "name": name,
@@ -567,6 +654,12 @@ def spaces_create(
     default=_load_config().server.token,
 )
 @click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+@click.option(
     "--name",
     help="The new name of the space",
 )
@@ -584,6 +677,7 @@ def spaces_update(
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     name: str | None,
     base: str | None,
     no_base: bool,
@@ -591,7 +685,8 @@ def spaces_update(
     """
     Updates a space within the project.
     """
-    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
+    use_secure = _should_use_secure(host, secure)
+    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
     space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
     space_id = space_ids_by_name.get(space)
     if not space_id:
@@ -616,7 +711,7 @@ def spaces_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_space", token, json=payload)
+    _api_request("POST", host, "update_space", token, secure=use_secure, json=payload)
 
     click.secho(f"Updated space '{name or space}'.", fg="green")
 
@@ -655,16 +750,24 @@ def spaces_update(
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
 def spaces_archive(
     project: str,
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
 ):
     """
     Archives a space.
     """
-    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
+    use_secure = _should_use_secure(host, secure)
+    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
     space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
     space_id = space_ids_by_name.get(space)
     if not space_id:
@@ -675,6 +778,7 @@ def spaces_archive(
         host,
         "archive_space",
         token,
+        secure=use_secure,
         json={
             "projectId": project,
             "spaceId": space_id,
@@ -725,15 +829,23 @@ def pools():
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
-def pools_list(project: str, space: str, host: str, token: str | None):
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+def pools_list(project: str, space: str, host: str, token: str | None, secure: bool | None):
     """
     Lists pools.
     """
+    use_secure = _should_use_secure(host, secure)
     pools = _api_request(
         "GET",
         host,
         "get_pools",
         token,
+        secure=use_secure,
         json={"projectId": project, "spaceName": space},
     )
     if pools:
@@ -786,6 +898,12 @@ def pools_list(project: str, space: str, host: str, token: str | None):
     default=_load_config().server.token,
 )
 @click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+@click.option(
     "modules",
     "-m",
     "--module",
@@ -811,6 +929,7 @@ def pools_update(
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     modules: tuple[str, ...] | None,
     provides: tuple[str, ...] | None,
     docker_image: str | None,
@@ -820,7 +939,8 @@ def pools_update(
     """
     Updates a pool.
     """
-    pool = _get_pool(host, project, space, name, token) or {}
+    use_secure = _should_use_secure(host, secure)
+    pool = _get_pool(host, project, space, name, token, secure=use_secure) or {}
 
     # TODO: support explicitly unsetting 'provides' (and modules, etc?)
 
@@ -841,6 +961,7 @@ def pools_update(
         host,
         "update_pool",
         token,
+        secure=use_secure,
         json={
             "projectId": project,
             "spaceName": space,
@@ -884,16 +1005,24 @@ def pools_update(
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
 @click.argument("name")
-def pools_delete(project: str, space: str, host: str, token: str | None, name: str):
+def pools_delete(project: str, space: str, host: str, token: str | None, secure: bool | None, name: str):
     """
     Deletes a pool.
     """
+    use_secure = _should_use_secure(host, secure)
     _api_request(
         "POST",
         host,
         "update_pool",
         token,
+        secure=use_secure,
         json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
     )
 
@@ -941,13 +1070,14 @@ def assets():
     pass
 
 
-def _get_asset(host: str, project_id: str, asset_id: str, token: str | None) -> dict | None:
+def _get_asset(host: str, project_id: str, asset_id: str, token: str | None, *, secure: bool) -> dict | None:
     try:
         return _api_request(
             "GET",
             host,
             "get_asset",
             token,
+            secure=secure,
             params={
                 "project": project_id,
                 "asset": asset_id,
@@ -997,16 +1127,22 @@ def _human_size(bytes: int) -> str:
     default=_load_config().server.token,
 )
 @click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+@click.option(
     "--match",
     help="Glob-style matcher to filter files",
 )
 @click.argument("id")
-def assets_inspect(project: str, host: str, token: str | None, match: str | None, id: str):
+def assets_inspect(project: str, host: str, token: str | None, secure: bool | None, match: str | None, id: str):
     """
     Inspect an asset.
     """
-
-    asset = _get_asset(host, project, id, token)
+    use_secure = _should_use_secure(host, secure)
+    asset = _get_asset(host, project, id, token, secure=use_secure)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found in project")
 
@@ -1059,6 +1195,12 @@ def assets_inspect(project: str, host: str, token: str | None, match: str | None
     default=_load_config().server.token,
 )
 @click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
+@click.option(
     "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
     default=".",
@@ -1078,6 +1220,7 @@ def assets_download(
     project: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     to: Path,
     force: bool,
     match: str | None,
@@ -1086,8 +1229,8 @@ def assets_download(
     """
     Downloads the contents of an asset.
     """
-
-    asset = _get_asset(host, project, id, token)
+    use_secure = _should_use_secure(host, secure)
+    asset = _get_asset(host, project, id, token, secure=use_secure)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found in project")
 
@@ -1159,12 +1302,19 @@ def assets_download(
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     module_name: tuple[str, ...],
 ) -> None:
     """
@@ -1176,8 +1326,9 @@ def register(
     """
     if not module_name:
         raise click.ClickException("No module(s) specified.")
+    use_secure = _should_use_secure(host, secure)
     targets = _load_modules(list(module_name))
-    _register_manifests(project, space, host, targets, token=token)
+    _register_manifests(project, space, host, targets, token=token, secure=use_secure)
     click.secho("Manifest(s) registered.", fg="green")
 
 
@@ -1214,6 +1365,12 @@ def register(
     help="Authentication token",
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
+)
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
 )
 @click.option(
     "--provides",
@@ -1259,6 +1416,7 @@ def worker(
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     provides: tuple[str, ...] | None,
     session: str | None,
     concurrency: int,
@@ -1278,12 +1436,14 @@ def worker(
         raise click.ClickException("No module(s) specified.")
     provides_ = _parse_provides(provides)
     config = _load_config()
+    use_secure = _should_use_secure(host, secure)
     args = (*module_name,)
     kwargs = {
         "project": project,
         "space": space,
         "host": host,
         "token": token,
+        "secure": use_secure,
         "provides": provides_,
         "serialiser_configs": config and config.serialisers,
         "blob_threshold": config and config.blobs and config.blobs.threshold,
@@ -1340,6 +1500,12 @@ def worker(
     envvar="COFLUX_TOKEN",
     default=_load_config().server.token,
 )
+@click.option(
+    "--secure/--no-secure",
+    "secure",
+    default=_get_default_secure(),
+    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+)
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
@@ -1348,6 +1514,7 @@ def submit(
     space: str,
     host: str,
     token: str | None,
+    secure: bool | None,
     module: str,
     target: str,
     argument: tuple[str, ...],
@@ -1355,12 +1522,14 @@ def submit(
     """
     Submit a workflow to be run.
     """
+    use_secure = _should_use_secure(host, secure)
     # TODO: support overriding options?
     workflow = _api_request(
         "GET",
         host,
         "get_workflow",
         token,
+        secure=use_secure,
         params={
             "project": project,
             "space": space,
@@ -1377,6 +1546,7 @@ def submit(
         host,
         "submit_workflow",
         token,
+        secure=use_secure,
         json={
             "projectId": project,
             "spaceName": space,
