@@ -868,12 +868,13 @@ def blobs_get(host: str, secure: bool | None, key: str):
     """
     Gets a blob by key and writes the content to stdout.
     """
+    use_secure = _should_use_secure(host, secure)
     config = _load_config()
     if not config.blobs.stores:
         raise click.ClickException("Blob store not configured")
 
     out = click.get_binary_stream("stdout")
-    with BlobManager(config.blobs.stores, host) as blob_manager:
+    with BlobManager(config.blobs.stores, host, secure=use_secure) as blob_manager:
         blob = blob_manager.get(key)
         for chunk in iter(lambda: blob.read(64 * 1024), b""):
             out.write(chunk)
@@ -1020,7 +1021,7 @@ def assets_download(
 
     total_size = sum(v["size"] for v in entries.values())
 
-    with BlobManager(config.blobs.stores, host) as blob_manager:
+    with BlobManager(config.blobs.stores, host, secure=use_secure) as blob_manager:
         click.echo(f"Downloading {len(entries)} files ({_human_size(total_size)})...")
         # TODO: parallelise downloads
         with click.progressbar(entries.items(), label="") as bar:
