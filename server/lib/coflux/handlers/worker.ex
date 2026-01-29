@@ -12,9 +12,9 @@ defmodule Coflux.Handlers.Worker do
         # TODO: validate
         project_id = get_query_param(qs, "project")
         space_name = get_query_param(qs, "space")
-        session_id = get_query_param(qs, "session")
+        session_token = get_query_param(qs, "session")
 
-        {:cowboy_websocket, req, {project_id, space_name, session_id}}
+        {:cowboy_websocket, req, {project_id, space_name, session_token}}
 
       {:error, server_version, expected_version} ->
         req =
@@ -30,17 +30,16 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, space_name, session_id}) do
+  def websocket_init({project_id, space_name, session_token}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
-        # TODO: authenticate
         # TODO: monitor server?
-        case Orchestration.resume_session(project_id, session_id, space_name, self()) do
-          {:ok, _external_session_id, execution_ids} ->
-            {[session_message(session_id)],
+        case Orchestration.resume_session(project_id, session_token, space_name, self()) do
+          {:ok, external_id, execution_ids} ->
+            {[session_message(external_id)],
              %{
                project_id: project_id,
-               session_id: session_id,
+               session_id: external_id,
                execution_ids: execution_ids
              }}
 

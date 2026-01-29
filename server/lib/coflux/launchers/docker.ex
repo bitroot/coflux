@@ -1,7 +1,7 @@
 defmodule Coflux.DockerLauncher do
   @docker_api_version "v1.47"
 
-  def launch(project_id, space_name, session_id, modules, config \\ %{}) do
+  def launch(project_id, space_name, session_token, modules, config \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
     coflux_host = get_coflux_host()
 
@@ -16,7 +16,7 @@ defmodule Coflux.DockerLauncher do
                  "COFLUX_HOST=#{coflux_host}",
                  "COFLUX_PROJECT=#{project_id}",
                  "COFLUX_SPACE=#{space_name}",
-                 "COFLUX_SESSION=#{session_id}"
+                 "COFLUX_SESSION=#{session_token}"
                ]
              }
            ),

@@ -10,8 +10,12 @@ defmodule Coflux.Orchestration.Sessions do
     reconnection_timeout = Keyword.get(opts, :reconnection_timeout)
 
     with_transaction(db, fn ->
-      case generate_external_id(db, :sessions, 30) do
+      case generate_external_id(db, :sessions, 12) do
         {:ok, external_id} ->
+          secret = generate_secret(24)
+          secret_hash = hash_secret(secret)
+          token = "#{external_id}.#{secret}"
+
           provides_tag_set_id =
             if provides && Enum.any?(provides) do
               case TagSets.get_or_create_tag_set_id(db, provides) do
@@ -30,13 +34,37 @@ defmodule Coflux.Orchestration.Sessions do
                  concurrency: concurrency,
                  activation_timeout: activation_timeout,
                  reconnection_timeout: reconnection_timeout,
+                 secret_hash: {:blob, secret_hash},
                  created_at: now
                }) do
             {:ok, session_id} ->
-              {:ok, session_id, external_id, now}
+              {:ok, session_id, external_id, token, secret_hash, now}
           end
       end
     end)
+  end
+
+  def parse_token(token) do
+    case String.split(token, ".", parts: 2) do
+      [external_id, secret] -> {:ok, external_id, secret}
+      _ -> :error
+    end
+  end
+
+  def verify_secret(_secret, nil), do: false
+
+  def verify_secret(secret, secret_hash) do
+    hash_secret(secret) == secret_hash
+  end
+
+  defp generate_secret(length) do
+    :crypto.strong_rand_bytes(length)
+    |> Base.url_encode64(padding: false)
+    |> binary_part(0, length)
+  end
+
+  defp hash_secret(secret) do
+    :crypto.hash(:sha256, secret)
   end
 
   def activate_session(db, session_id) do
@@ -74,6 +102,7 @@ defmodule Coflux.Orchestration.Sessions do
         s.concurrency,
         s.activation_timeout,
         s.reconnection_timeout,
+        s.secret_hash,
         s.created_at,
         sa.created_at AS activated_at
       FROM sessions s

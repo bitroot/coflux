@@ -144,7 +144,7 @@ defmodule Coflux.Orchestration.Server do
         active_sessions,
         state,
         fn {session_id, external_id, space_id, worker_id, provides_tag_set_id, concurrency,
-            activation_timeout, reconnection_timeout, created_at, activated_at},
+            activation_timeout, reconnection_timeout, secret_hash, created_at, activated_at},
            state ->
           provides =
             if provides_tag_set_id do
@@ -160,6 +160,7 @@ defmodule Coflux.Orchestration.Server do
 
           session = %{
             external_id: external_id,
+            secret_hash: secret_hash,
             connection: nil,
             targets: %{},
             queue: [],
@@ -518,9 +519,10 @@ defmodule Coflux.Orchestration.Server do
       ]
 
       case Sessions.create_session(state.db, space_id, nil, db_opts) do
-        {:ok, session_id, external_session_id, now} ->
+        {:ok, session_id, external_session_id, token, secret_hash, now} ->
           session = %{
             external_id: external_session_id,
+            secret_hash: secret_hash,
             connection: nil,
             targets: %{},
             queue: [],
@@ -542,7 +544,7 @@ defmodule Coflux.Orchestration.Server do
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
             |> schedule_session_expiry(session_id, activation_timeout)
 
-          {:reply, {:ok, external_session_id}, state}
+          {:reply, {:ok, token}, state}
       end
     else
       {:error, error} ->
@@ -550,9 +552,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:resume_session, external_session_id, space_name, pid}, _from, state) do
-    with {:ok, session_id} <- Map.fetch(state.session_ids, external_session_id),
+  def handle_call({:resume_session, token, space_name, pid}, _from, state) do
+    with {:ok, external_id, secret} <- Sessions.parse_token(token),
+         {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
          session = Map.fetch!(state.sessions, session_id),
+         true <- Sessions.verify_secret(secret, session.secret_hash),
          {:ok, space_id, _} <- lookup_space_by_name(state, space_name),
          true <- session.space_id == space_id do
       activated_at =
@@ -624,7 +628,7 @@ defmodule Coflux.Orchestration.Server do
       send(self(), :tick)
 
       state = flush_notifications(state)
-      {:reply, {:ok, external_session_id, executions}, state}
+      {:reply, {:ok, external_id, executions}, state}
     else
       :error ->
         {:reply, {:error, :session_invalid}, state}
@@ -632,13 +636,14 @@ defmodule Coflux.Orchestration.Server do
       {:error, :space_invalid} ->
         {:reply, {:error, :space_mismatch}, state}
 
+      # Token verification failed or space mismatch
       false ->
-        {:reply, {:error, :space_mismatch}, state}
+        {:reply, {:error, :session_invalid}, state}
     end
   end
 
-  def handle_call({:declare_targets, external_session_id, targets}, _from, state) do
-    session_id = Map.fetch!(state.session_ids, external_session_id)
+  def handle_call({:declare_targets, external_id, targets}, _from, state) do
+    session_id = Map.fetch!(state.session_ids, external_id)
 
     state =
       state
@@ -1820,11 +1825,12 @@ defmodule Coflux.Orchestration.Server do
                   reconnection_timeout: reconnection_timeout
                 ]
 
-                {:ok, session_id, external_session_id, session_now} =
+                {:ok, session_id, external_id, token, secret_hash, session_now} =
                   Sessions.create_session(state.db, space_id, worker_id, session_opts)
 
                 session = %{
-                  external_id: external_session_id,
+                  external_id: external_id,
+                  secret_hash: secret_hash,
                   connection: nil,
                   targets: %{},
                   queue: [],
@@ -1842,7 +1848,7 @@ defmodule Coflux.Orchestration.Server do
 
                 state
                 |> put_in([Access.key(:sessions), session_id], session)
-                |> put_in([Access.key(:session_ids), external_session_id], session_id)
+                |> put_in([Access.key(:session_ids), external_id], session_id)
                 |> schedule_session_expiry(session_id, activation_timeout)
                 |> call_launcher(
                   pool.launcher,
@@ -1850,7 +1856,7 @@ defmodule Coflux.Orchestration.Server do
                   [
                     state.project_id,
                     state.spaces[space_id].name,
-                    external_session_id,
+                    token,
                     pool.modules,
                     Map.delete(pool.launcher, :type)
                   ],
