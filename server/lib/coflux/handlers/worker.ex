@@ -1,19 +1,33 @@
 defmodule Coflux.Handlers.Worker do
+  @moduledoc """
+  WebSocket handler for worker connections.
+
+  Authentication is done via Sec-WebSocket-Protocol header using the format:
+  `session.<base64-encoded-token>` (similar to the topics handler pattern).
+
+  The client should request protocols like: ["session.dG9rZW4=", "v1"]
+  The server echoes back "v1" on successful auth.
+  """
+
   import Coflux.Handlers.Utils
 
   alias Coflux.{Orchestration, Projects, Version}
 
+  @protocol_version "v1"
+
   def init(req, opts) do
     qs = :cowboy_req.parse_qs(req)
     expected_version = get_query_param(qs, "version")
+    protocols = parse_websocket_protocols(req)
 
     case Version.check(expected_version) do
       :ok ->
         # TODO: validate
         project_id = get_query_param(qs, "project")
         space_name = get_query_param(qs, "space")
-        session_token = get_query_param(qs, "session")
+        session_token = extract_session_token(protocols)
 
+        req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
         {:cowboy_websocket, req, {project_id, space_name, session_token}}
 
       {:error, server_version, expected_version} ->
@@ -485,4 +499,23 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
+  defp parse_websocket_protocols(req) do
+    case :cowboy_req.parse_header("sec-websocket-protocol", req) do
+      :undefined -> []
+      protocols -> protocols
+    end
+  end
+
+  defp extract_session_token(protocols) do
+    Enum.find_value(protocols, nil, fn
+      "session." <> encoded ->
+        case Base.url_decode64(encoded, padding: false) do
+          {:ok, token} -> token
+          :error -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  end
 end

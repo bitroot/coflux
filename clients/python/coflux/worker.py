@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import random
 import traceback
 import typing as t
@@ -95,11 +96,15 @@ class Worker:
         params = {
             "project": self._project_id,
             "space": self._space_name,
-            "session": self._session_id,
         }
         if API_VERSION:
             params["version"] = API_VERSION
         return params
+
+    def _subprotocols(self) -> list[str]:
+        """Build WebSocket subprotocols for authentication."""
+        encoded_token = base64.urlsafe_b64encode(self._session_id.encode()).decode().rstrip("=")
+        return [f"session.{encoded_token}", "v1"]
 
     async def run(self) -> None:
         """Run the worker. Raises SessionExpiredError if session expires."""
@@ -108,7 +113,7 @@ class Worker:
             print(f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})...")
             url = self._url("ws", "worker", self._params())
             try:
-                async with websockets.connect(url) as websocket:
+                async with websockets.connect(url, subprotocols=self._subprotocols()) as websocket:
                     print("Connected.")
                     targets: dict[str, dict[types.TargetType, list[str]]] = {}
                     for module, module_targets in self._targets.items():
