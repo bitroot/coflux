@@ -94,14 +94,14 @@ def _api_request(
 def _create_session(
     host: str,
     project_id: str,
-    space_name: str,
+    workspace_name: str,
     provides: dict[str, list[str]] | None = None,
     concurrency: int | None = None,
     token: str | None = None,
     *,
     secure: bool,
 ) -> str:
-    payload: dict[str, t.Any] = {"projectId": project_id, "spaceName": space_name}
+    payload: dict[str, t.Any] = {"projectId": project_id, "workspaceName": workspace_name}
     if provides:
         payload["provides"] = provides
     if concurrency:
@@ -158,7 +158,7 @@ def _load_modules(
 
 def _register_manifests(
     project_id: str,
-    space_name: str,
+    workspace_name: str,
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     token: str | None = None,
@@ -219,14 +219,14 @@ def _register_manifests(
         secure=secure,
         json={
             "projectId": project_id,
-            "spaceName": space_name,
+            "workspaceName": workspace_name,
             "manifests": manifests,
         },
     )
 
 
 def _get_pool(
-    host: str, project_id: str, space_name: str, pool_name: str, token: str | None, *, secure: bool
+    host: str, project_id: str, workspace_name: str, pool_name: str, token: str | None, *, secure: bool
 ) -> dict | None:
     try:
         return _api_request(
@@ -237,7 +237,7 @@ def _get_pool(
             secure=secure,
             params={
                 "project": project_id,
-                "space": space_name,
+                "workspace": workspace_name,
                 "pool": pool_name,
             },
         )
@@ -273,7 +273,7 @@ def _print_table(
 def _init(
     *modules: types.ModuleType | str,
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool,
@@ -288,7 +288,7 @@ def _init(
     try:
         targets = _load_modules(list(modules))
         if register:
-            _register_manifests(project, space, host, targets, token=token, secure=secure)
+            _register_manifests(project, workspace, host, targets, token=token, secure=secure)
 
         # Track whether we created the session (vs it being provided externally)
         session_provided = session_id is not None
@@ -303,14 +303,14 @@ def _init(
                     time.sleep(delay)
                 print("Creating session...")
                 session_id = _create_session(
-                    host, project, space, provides, concurrency, token=token, secure=secure
+                    host, project, workspace, provides, concurrency, token=token, secure=secure
                 )
                 print("Session created.")
 
             try:
                 with Worker(
                     project,
-                    space,
+                    workspace,
                     host,
                     secure,
                     serialiser_configs,
@@ -469,8 +469,8 @@ def _server_options(token: bool = True):
     return decorator
 
 
-def _project_options(space: bool = False):
-    """Add project option, and optionally space."""
+def _project_options(workspace: bool = False):
+    """Add project option, and optionally workspace."""
     def decorator(f):
         decorators = [
             click.option(
@@ -483,14 +483,14 @@ def _project_options(space: bool = False):
                 required=True,
             ),
         ]
-        if space:
+        if workspace:
             decorators.append(
                 click.option(
-                    "-s",
-                    "--space",
-                    help="Space name",
-                    envvar="COFLUX_SPACE",
-                    default=_load_config().space,
+                    "-w",
+                    "--workspace",
+                    help="Workspace name",
+                    envvar="COFLUX_WORKSPACE",
+                    default=_load_config().workspace,
                     show_default=True,
                     required=True,
                 )
@@ -511,11 +511,11 @@ def _project_options(space: bool = False):
     prompt=True,
 )
 @click.option(
-    "space",
-    "-s",
-    "--space",
-    help="Space name",
-    default=_load_config().space,
+    "workspace",
+    "-w",
+    "--workspace",
+    help="Workspace name",
+    default=_load_config().workspace,
     show_default=True,
     prompt=True,
 )
@@ -530,7 +530,7 @@ def _project_options(space: bool = False):
 def configure(
     host: str | None,
     project: str | None,
-    space: str | None,
+    workspace: str | None,
 ):
     """
     Populate/update the configuration file.
@@ -541,7 +541,7 @@ def configure(
     path = _config_path()
     data = _read_config(path)
     data["project"] = project
-    data["space"] = space
+    data["workspace"] = workspace
     data.setdefault("server", {})["host"] = host
     _write_config(path, data)
 
@@ -551,50 +551,50 @@ def configure(
 
 
 @cli.group()
-def spaces():
+def workspaces():
     """
-    Manage spaces.
+    Manage workspaces.
     """
     pass
 
 
-@spaces.command("list")
+@workspaces.command("list")
 @_project_options()
 @_server_options()
-def spaces_list(
+def workspaces_list(
     project: str,
     host: str,
     token: str | None,
     secure: bool | None,
 ):
     """
-    Lists spaces.
+    Lists workspaces.
     """
     use_secure = _should_use_secure(host, secure)
-    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
-    if spaces:
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    if workspaces:
         # TODO: draw as tree
         _print_table(
             ("Name", "Base"),
             [
                 (
-                    space["name"],
-                    spaces[space["baseId"]]["name"] if space["baseId"] else "(None)",
+                    workspace["name"],
+                    workspaces[workspace["baseId"]]["name"] if workspace["baseId"] else "(None)",
                 )
-                for space in spaces.values()
+                for workspace in workspaces.values()
             ],
         )
 
 
-@spaces.command("create")
+@workspaces.command("create")
 @_project_options()
 @_server_options()
 @click.option(
     "--base",
-    help="The base space to inherit from",
+    help="The base workspace to inherit from",
 )
 @click.argument("name")
-def spaces_create(
+def workspaces_create(
     project: str,
     host: str,
     token: str | None,
@@ -603,14 +603,14 @@ def spaces_create(
     name: str,
 ):
     """
-    Creates a space within the project.
+    Creates a workspace within the project.
     """
     use_secure = _should_use_secure(host, secure)
     base_id = None
     if base:
-        spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
-        space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
-        base_id = space_ids_by_name.get(base)
+        workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+        workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+        base_id = workspace_ids_by_name.get(base)
         if not base_id:
             click.BadOptionUsage("base", "Not recognised")
 
@@ -618,7 +618,7 @@ def spaces_create(
     _api_request(
         "POST",
         host,
-        "create_space",
+        "create_workspace",
         token,
         secure=use_secure,
         json={
@@ -627,28 +627,28 @@ def spaces_create(
             "baseId": base_id,
         },
     )
-    click.secho(f"Created space '{name}'.", fg="green")
+    click.secho(f"Created workspace '{name}'.", fg="green")
 
 
-@spaces.command("update")
-@_project_options(space=True)
+@workspaces.command("update")
+@_project_options(workspace=True)
 @_server_options()
 @click.option(
     "--name",
-    help="The new name of the space",
+    help="The new name of the workspace",
 )
 @click.option(
     "--base",
-    help="The new base space to inherit from",
+    help="The new base workspace to inherit from",
 )
 @click.option(
     "--no-base",
     is_flag=True,
-    help="Unset the base space",
+    help="Unset the base workspace",
 )
-def spaces_update(
+def workspaces_update(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -657,24 +657,24 @@ def spaces_update(
     no_base: bool,
 ):
     """
-    Updates a space within the project.
+    Updates a workspace within the project.
     """
     use_secure = _should_use_secure(host, secure)
-    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
-    space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
-    space_id = space_ids_by_name.get(space)
-    if not space_id:
-        raise click.BadOptionUsage("space", "Not recognised")
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+    workspace_id = workspace_ids_by_name.get(workspace)
+    if not workspace_id:
+        raise click.BadOptionUsage("workspace", "Not recognised")
 
     base_id = None
     if base:
-        base_id = space_ids_by_name.get(base)
+        base_id = workspace_ids_by_name.get(base)
         if not base_id:
             raise click.BadOptionUsage("base", "Not recognised")
 
     payload = {
         "projectId": project,
-        "spaceId": space_id,
+        "workspaceId": workspace_id,
     }
     if name is not None:
         payload["name"] = name
@@ -685,43 +685,43 @@ def spaces_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_space", token, secure=use_secure, json=payload)
+    _api_request("POST", host, "update_workspace", token, secure=use_secure, json=payload)
 
-    click.secho(f"Updated space '{name or space}'.", fg="green")
+    click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
 
 
-@spaces.command("archive")
-@_project_options(space=True)
+@workspaces.command("archive")
+@_project_options(workspace=True)
 @_server_options()
-def spaces_archive(
+def workspaces_archive(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
 ):
     """
-    Archives a space.
+    Archives a workspace.
     """
     use_secure = _should_use_secure(host, secure)
-    spaces = _api_request("GET", host, "get_spaces", token, secure=use_secure, params={"project": project})
-    space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
-    space_id = space_ids_by_name.get(space)
-    if not space_id:
-        raise click.BadOptionUsage("space", "Not recognised")
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
+    workspace_id = workspace_ids_by_name.get(workspace)
+    if not workspace_id:
+        raise click.BadOptionUsage("workspace", "Not recognised")
 
     _api_request(
         "POST",
         host,
-        "archive_space",
+        "archive_workspace",
         token,
         secure=use_secure,
         json={
             "projectId": project,
-            "spaceId": space_id,
+            "workspaceId": workspace_id,
         },
     )
-    click.secho(f"Archived space '{space}'.", fg="green")
+    click.secho(f"Archived workspace '{workspace}'.", fg="green")
 
 
 @cli.group()
@@ -733,9 +733,9 @@ def pools():
 
 
 @pools.command("list")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
-def pools_list(project: str, space: str, host: str, token: str | None, secure: bool | None):
+def pools_list(project: str, workspace: str, host: str, token: str | None, secure: bool | None):
     """
     Lists pools.
     """
@@ -746,7 +746,7 @@ def pools_list(project: str, space: str, host: str, token: str | None, secure: b
         "get_pools",
         token,
         secure=use_secure,
-        json={"projectId": project, "spaceName": space},
+        json={"projectId": project, "workspaceName": workspace},
     )
     if pools:
         _print_table(
@@ -764,7 +764,7 @@ def pools_list(project: str, space: str, host: str, token: str | None, secure: b
 
 
 @pools.command("update")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
 @click.option(
     "modules",
@@ -789,7 +789,7 @@ def pools_list(project: str, space: str, host: str, token: str | None, secure: b
 @click.argument("name")
 def pools_update(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -803,7 +803,7 @@ def pools_update(
     Updates a pool.
     """
     use_secure = _should_use_secure(host, secure)
-    pool = _get_pool(host, project, space, name, token, secure=use_secure) or {}
+    pool = _get_pool(host, project, workspace, name, token, secure=use_secure) or {}
 
     # TODO: support explicitly unsetting 'provides' (and modules, etc?)
 
@@ -827,7 +827,7 @@ def pools_update(
         secure=use_secure,
         json={
             "projectId": project,
-            "spaceName": space,
+            "workspaceName": workspace,
             "poolName": name,
             "pool": pool,
         },
@@ -835,10 +835,10 @@ def pools_update(
 
 
 @pools.command("delete")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
 @click.argument("name")
-def pools_delete(project: str, space: str, host: str, token: str | None, secure: bool | None, name: str):
+def pools_delete(project: str, workspace: str, host: str, token: str | None, secure: bool | None, name: str):
     """
     Deletes a pool.
     """
@@ -849,7 +849,7 @@ def pools_delete(project: str, space: str, host: str, token: str | None, secure:
         "update_pool",
         token,
         secure=use_secure,
-        json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
+        json={"projectId": project, "workspaceName": workspace, "poolName": name, "pool": None},
     )
 
 
@@ -1032,12 +1032,12 @@ def assets_download(
 
 
 @cli.command("register")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -1054,12 +1054,12 @@ def register(
         raise click.ClickException("No module(s) specified.")
     use_secure = _should_use_secure(host, secure)
     targets = _load_modules(list(module_name))
-    _register_manifests(project, space, host, targets, token=token, secure=use_secure)
+    _register_manifests(project, workspace, host, targets, token=token, secure=use_secure)
     click.secho("Manifest(s) registered.", fg="green")
 
 
 @cli.command("worker")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
 @click.option(
     "--provides",
@@ -1102,7 +1102,7 @@ def register(
 @click.argument("module_name", nargs=-1)
 def worker(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -1129,7 +1129,7 @@ def worker(
     args = (*module_name,)
     kwargs = {
         "project": project,
-        "space": space,
+        "workspace": workspace,
         "host": host,
         "token": token,
         "secure": use_secure,
@@ -1156,14 +1156,14 @@ def worker(
 
 
 @cli.command("submit")
-@_project_options(space=True)
+@_project_options(workspace=True)
 @_server_options()
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
 def submit(
     project: str,
-    space: str,
+    workspace: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -1184,7 +1184,7 @@ def submit(
         secure=use_secure,
         params={
             "project": project,
-            "space": space,
+            "workspace": workspace,
             "module": module,
             "target": target,
         },
@@ -1201,7 +1201,7 @@ def submit(
         secure=use_secure,
         json={
             "projectId": project,
-            "spaceName": space,
+            "workspaceName": workspace,
             "module": module,
             "target": target,
             "arguments": [["json", a] for a in argument],

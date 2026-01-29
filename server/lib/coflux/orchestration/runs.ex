@@ -85,17 +85,17 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def get_space_id_for_execution(db, execution_id) do
+  def get_workspace_id_for_execution(db, execution_id) do
     case query_one!(
            db,
-           "SELECT space_id FROM executions WHERE id = ?1",
+           "SELECT workspace_id FROM executions WHERE id = ?1",
            {execution_id}
          ) do
-      {:ok, {space_id}} -> {:ok, space_id}
+      {:ok, {workspace_id}} -> {:ok, workspace_id}
     end
   end
 
-  def get_steps_for_space(db, space_id) do
+  def get_steps_for_workspace(db, workspace_id) do
     case query(
            db,
            """
@@ -103,7 +103,7 @@ defmodule Coflux.Orchestration.Runs do
              SELECT s.module, s.target, MAX(e.created_at) AS max_created_at
              FROM executions AS e
              INNER JOIN steps AS s ON s.id = e.step_id
-             WHERE e.space_id = ?1
+             WHERE e.workspace_id = ?1
              GROUP BY s.module, s.target
            )
            SELECT s.module, s.target, s.type, r.external_id, s.external_id, e.attempt
@@ -111,9 +111,9 @@ defmodule Coflux.Orchestration.Runs do
            INNER JOIN steps AS s ON s.id = e.step_id
            INNER JOIN latest_executions AS le ON s.module = le.module AND s.target = le.target AND e.created_at = le.max_created_at
            INNER JOIN runs AS r ON r.id = s.run_id
-           WHERE e.space_id = ?1
+           WHERE e.workspace_id = ?1
            """,
-           {space_id}
+           {workspace_id}
          ) do
       {:ok, rows} ->
         {:ok,
@@ -131,8 +131,8 @@ defmodule Coflux.Orchestration.Runs do
         target,
         type,
         arguments,
-        space_id,
-        cache_space_ids,
+        workspace_id,
+        cache_workspace_ids,
         opts \\ []
       ) do
     idempotency_key = Keyword.get(opts, :idempotency_key)
@@ -154,8 +154,8 @@ defmodule Coflux.Orchestration.Runs do
           type,
           arguments,
           true,
-          space_id,
-          cache_space_ids,
+          workspace_id,
+          cache_workspace_ids,
           now,
           opts
         )
@@ -172,8 +172,8 @@ defmodule Coflux.Orchestration.Runs do
         target,
         type,
         arguments,
-        space_id,
-        cache_space_ids,
+        workspace_id,
+        cache_workspace_ids,
         opts \\ []
       ) do
     now = current_timestamp()
@@ -188,8 +188,8 @@ defmodule Coflux.Orchestration.Runs do
         type,
         arguments,
         false,
-        space_id,
-        cache_space_ids,
+        workspace_id,
+        cache_workspace_ids,
         now,
         opts
       )
@@ -254,8 +254,8 @@ defmodule Coflux.Orchestration.Runs do
          type,
          arguments,
          is_initial,
-         space_id,
-         cache_space_ids,
+         workspace_id,
+         cache_workspace_ids,
          now,
          opts
        ) do
@@ -277,7 +277,7 @@ defmodule Coflux.Orchestration.Runs do
 
     memoised_execution =
       if memo_key do
-        case find_memoised_execution(db, run_id, cache_space_ids, memo_key) do
+        case find_memoised_execution(db, run_id, cache_workspace_ids, memo_key) do
           {:ok, memoised_execution} -> memoised_execution
         end
       end
@@ -357,7 +357,7 @@ defmodule Coflux.Orchestration.Runs do
           attempt = 1
 
           {:ok, execution_id} =
-            insert_execution(db, step_id, attempt, space_id, execute_after, now)
+            insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
           {external_step_id, execution_id, attempt, now, false, cache_key}
       end
@@ -393,14 +393,14 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def rerun_step(db, step_id, space_id, execute_after, dependency_ids) do
+  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ids) do
     with_transaction(db, fn ->
       now = current_timestamp()
       # TODO: cancel pending executions for step?
       {:ok, attempt} = get_next_execution_attempt(db, step_id)
 
       {:ok, execution_id} =
-        insert_execution(db, step_id, attempt, space_id, execute_after, now)
+        insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
       {:ok, _} =
         insert_many(
@@ -498,7 +498,7 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_limit,
         s.retry_delay_min,
         s.retry_delay_max,
-        e.space_id,
+        e.workspace_id,
         e.execute_after,
         e.attempt,
         e.created_at
@@ -539,7 +539,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_pending_executions_for_space(db, space_id) do
+  def get_pending_executions_for_workspace(db, workspace_id) do
     query(
       db,
       """
@@ -547,9 +547,9 @@ defmodule Coflux.Orchestration.Runs do
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
       LEFT JOIN results AS r ON r.execution_id = e.id
-      WHERE e.space_id = ?1 AND r.created_at IS NULL
+      WHERE e.workspace_id = ?1 AND r.created_at IS NULL
       """,
-      {space_id}
+      {workspace_id}
     )
   end
 
@@ -588,7 +588,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_target_runs(db, module, target, type, space_id, limit \\ 50) do
+  def get_target_runs(db, module, target, type, workspace_id, limit \\ 50) do
     query(
       db,
       """
@@ -596,11 +596,11 @@ defmodule Coflux.Orchestration.Runs do
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
-      WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.space_id = ?4
+      WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.workspace_id = ?4
       ORDER BY r.created_at DESC
       LIMIT ?5
       """,
-      {module, target, Utils.encode_step_type(type), space_id, limit}
+      {module, target, Utils.encode_step_type(type), workspace_id, limit}
     )
   end
 
@@ -706,7 +706,7 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT e.id, e.step_id, e.attempt, e.space_id, e.execute_after, e.created_at, a.created_at
+      SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at
       FROM steps AS s
       INNER JOIN executions AS e ON e.step_id = s.id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
@@ -868,7 +868,7 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   # TODO: consider changed 'requires'?
-  defp find_memoised_execution(db, run_id, space_ids, memo_key) do
+  defp find_memoised_execution(db, run_id, workspace_ids, memo_key) do
     case query(
            db,
            """
@@ -878,13 +878,13 @@ defmodule Coflux.Orchestration.Runs do
            LEFT JOIN results AS r ON r.execution_id = e.id
            WHERE
              s.run_id = ?1
-             AND e.space_id IN (#{build_placeholders(length(space_ids), 1)})
-             AND s.memo_key = ?#{length(space_ids) + 2}
+             AND e.workspace_id IN (#{build_placeholders(length(workspace_ids), 1)})
+             AND s.memo_key = ?#{length(workspace_ids) + 2}
              AND (r.type IS NULL OR r.type = 1)
            ORDER BY e.created_at DESC
            LIMIT 1
            """,
-           List.to_tuple([run_id] ++ space_ids ++ [{:blob, memo_key}])
+           List.to_tuple([run_id] ++ workspace_ids ++ [{:blob, memo_key}])
          ) do
       {:ok, [row]} ->
         {:ok, row}
@@ -894,7 +894,7 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def find_cached_execution(db, space_ids, step_id, cache_key, recorded_after) do
+  def find_cached_execution(db, workspace_ids, step_id, cache_key, recorded_after) do
     case query(
            db,
            """
@@ -903,14 +903,14 @@ defmodule Coflux.Orchestration.Runs do
            INNER JOIN executions AS e ON e.step_id = s.id
            LEFT JOIN results AS r ON r.execution_id = e.id
            WHERE
-             e.space_id IN (#{build_placeholders(length(space_ids))})
-             AND s.cache_key = ?#{length(space_ids) + 1}
-             AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?#{length(space_ids) + 2}))
-             AND s.id <> ?#{length(space_ids) + 3}
+             e.workspace_id IN (#{build_placeholders(length(workspace_ids))})
+             AND s.cache_key = ?#{length(workspace_ids) + 1}
+             AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?#{length(workspace_ids) + 2}))
+             AND s.id <> ?#{length(workspace_ids) + 3}
            ORDER BY e.created_at DESC
            LIMIT 1
            """,
-           List.to_tuple(space_ids ++ [{:blob, cache_key}, recorded_after, step_id])
+           List.to_tuple(workspace_ids ++ [{:blob, cache_key}, recorded_after, step_id])
          ) do
       {:ok, [{execution_id}]} ->
         {:ok, execution_id}
@@ -1023,11 +1023,11 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  defp insert_execution(db, step_id, attempt, space_id, execute_after, created_at) do
+  defp insert_execution(db, step_id, attempt, workspace_id, execute_after, created_at) do
     insert_one(db, :executions, %{
       step_id: step_id,
       attempt: attempt,
-      space_id: space_id,
+      workspace_id: workspace_id,
       execute_after: execute_after,
       created_at: created_at
     })

@@ -45,7 +45,7 @@ class Worker:
     def __init__(
         self,
         project_id: str,
-        space_name: str,
+        workspace_name: str,
         server_host: str,
         secure: bool,
         serialiser_configs: list[config.SerialiserConfig],
@@ -55,7 +55,7 @@ class Worker:
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
         self._project_id = project_id
-        self._space_name = space_name
+        self._workspace_name = workspace_name
         self._server_host = server_host
         self._secure = secure
         self._session_id = session_id
@@ -97,7 +97,7 @@ class Worker:
     def _params(self):
         params = {
             "project": self._project_id,
-            "space": self._space_name,
+            "workspace": self._workspace_name,
         }
         if API_VERSION:
             params["version"] = API_VERSION
@@ -112,7 +112,7 @@ class Worker:
         """Run the worker. Raises SessionExpiredError if session expires."""
         check_server(self._server_host, self._secure)
         while True:
-            print(f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})...")
+            print(f"Connecting ({self._server_host}, {self._project_id}, {self._workspace_name})...")
             scheme = "wss" if self._secure else "ws"
             url = self._url(scheme, "worker", self._params())
             try:
@@ -141,9 +141,9 @@ class Worker:
                     raise Exception("Project not found")
                 elif reason == "session_invalid":
                     raise SessionExpiredError("Session invalid")
-                elif reason == "space_mismatch":
+                elif reason == "workspace_mismatch":
                     raise Exception(
-                        f"Space mismatch: session does not belong to space '{self._space_name}'"
+                        f"Workspace mismatch: session does not belong to workspace '{self._workspace_name}'"
                     )
                 else:
                     delay = 1 + 3 * random.random()  # TODO: exponential backoff

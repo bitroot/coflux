@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Run do
-  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :space_id]
+  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -16,7 +16,7 @@ defmodule Coflux.Topics.Run do
   def init(params) do
     project_id = Map.fetch!(params, :project_id)
     external_run_id = Map.fetch!(params, :run_id)
-    space_id = String.to_integer(Map.fetch!(params, :space_id))
+    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
 
     case Orchestration.subscribe_run(
            project_id,
@@ -27,7 +27,7 @@ defmodule Coflux.Topics.Run do
         {:error, :not_found}
 
       {:ok, run, parent, steps, _ref} ->
-        run_space_id =
+        run_workspace_id =
           steps
           |> Map.values()
           |> Enum.reject(& &1.parent_id)
@@ -35,15 +35,15 @@ defmodule Coflux.Topics.Run do
           |> Map.fetch!(:executions)
           |> Map.values()
           |> Enum.min_by(& &1.created_at)
-          |> Map.fetch!(:space_id)
+          |> Map.fetch!(:workspace_id)
 
-        space_ids = Enum.uniq([run_space_id, space_id])
+        workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
 
         {:ok,
-         Topic.new(build_run(run, parent, steps, space_ids), %{
+         Topic.new(build_run(run, parent, steps, workspace_ids), %{
            project_id: project_id,
            external_run_id: external_run_id,
-           space_ids: space_ids
+           workspace_ids: workspace_ids
          })}
     end
   end
@@ -53,8 +53,8 @@ defmodule Coflux.Topics.Run do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:step, external_step_id, step, space_id}) do
-    if space_id in topic.state.space_ids do
+  defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
+    if workspace_id in topic.state.workspace_ids do
       Topic.set(topic, [:steps, external_step_id], %{
         module: step.module,
         target: step.target,
@@ -75,16 +75,16 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:execution, step_id, attempt, execution_id, space_id, created_at, execute_after,
+         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
           dependencies}
        ) do
-    if space_id in topic.state.space_ids do
+    if workspace_id in topic.state.workspace_ids do
       Topic.set(
         topic,
         [:steps, step_id, :executions, Integer.to_string(attempt)],
         %{
           executionId: Integer.to_string(execution_id),
-          spaceId: Integer.to_string(space_id),
+          workspaceId: Integer.to_string(workspace_id),
           createdAt: created_at,
           executeAfter: execute_after,
           assignedAt: nil,
@@ -185,7 +185,7 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp build_run(run, parent, steps, space_ids) do
+  defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
       parent: if(parent, do: build_execution(parent)),
@@ -194,7 +194,7 @@ defmodule Coflux.Topics.Run do
         |> Enum.filter(fn {_, step} ->
           step.executions
           |> Map.values()
-          |> Enum.any?(&(&1.space_id in space_ids))
+          |> Enum.any?(&(&1.workspace_id in workspace_ids))
         end)
         |> Map.new(fn {step_id, step} ->
           {step_id,
@@ -212,13 +212,13 @@ defmodule Coflux.Topics.Run do
              executions:
                step.executions
                |> Enum.filter(fn {_, execution} ->
-                 execution.space_id in space_ids
+                 execution.workspace_id in workspace_ids
                end)
                |> Map.new(fn {attempt, execution} ->
                  {Integer.to_string(attempt),
                   %{
                     executionId: Integer.to_string(execution.execution_id),
-                    spaceId: Integer.to_string(execution.space_id),
+                    workspaceId: Integer.to_string(execution.workspace_id),
                     createdAt: execution.created_at,
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,

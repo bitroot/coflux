@@ -82,7 +82,7 @@ defmodule Coflux.Orchestration.Workers do
              w.created_at,
              p.id,
              p.name,
-             p.space_id,
+             p.workspace_id,
              (SELECT ws.state
                FROM worker_states AS ws
                WHERE ws.worker_id = w.id
@@ -109,8 +109,8 @@ defmodule Coflux.Orchestration.Workers do
         {:ok,
          Enum.map(
            rows,
-           fn {worker_id, created_at, pool_id, pool_name, space_id, state, data} ->
-             {worker_id, created_at, pool_id, pool_name, space_id, decode_state(state),
+           fn {worker_id, created_at, pool_id, pool_name, workspace_id, state, data} ->
+             {worker_id, created_at, pool_id, pool_name, workspace_id, decode_state(state),
               if(data, do: :erlang.binary_to_term(data))}
            end
          )}
