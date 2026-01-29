@@ -6,6 +6,7 @@ import pydantic
 
 class ServerConfig(pydantic.BaseModel):
     host: str = "localhost:7777"
+    token: str | None = None
 
 
 class HTTPBlobStoreConfig(pydantic.BaseModel):

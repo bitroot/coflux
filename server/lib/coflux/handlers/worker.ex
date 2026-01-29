@@ -1,24 +1,34 @@
 defmodule Coflux.Handlers.Worker do
+  @moduledoc """
+  WebSocket handler for worker connections.
+
+  Authentication is done via Sec-WebSocket-Protocol header using the format:
+  `session.<base64-encoded-token>` (similar to the topics handler pattern).
+
+  The client should request protocols like: ["session.dG9rZW4=", "v1"]
+  The server echoes back "v1" on successful auth.
+  """
+
   import Coflux.Handlers.Utils
 
   alias Coflux.{Orchestration, Projects, Version}
 
+  @protocol_version "v1"
+
   def init(req, opts) do
     qs = :cowboy_req.parse_qs(req)
     expected_version = get_query_param(qs, "version")
+    protocols = parse_websocket_protocols(req)
 
     case Version.check(expected_version) do
       :ok ->
         # TODO: validate
         project_id = get_query_param(qs, "project")
-        session_id = get_query_param(qs, "session")
         space_name = get_query_param(qs, "space")
-        worker_id = get_query_param(qs, "launch", &String.to_integer/1)
-        provides = get_query_param(qs, "provides", &parse_provides/1)
-        concurrency = get_query_param(qs, "concurrency", &String.to_integer/1) || 0
+        session_token = extract_session_token(protocols)
 
-        {:cowboy_websocket, req,
-         {project_id, session_id, space_name, worker_id, provides, concurrency}}
+        req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
+        {:cowboy_websocket, req, {project_id, space_name, session_token}}
 
       {:error, server_version, expected_version} ->
         req =
@@ -34,28 +44,24 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, session_id, space_name, worker_id, provides, concurrency}) do
+  def websocket_init({project_id, space_name, session_token}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
-        # TODO: authenticate
         # TODO: monitor server?
-        case connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
-          {:ok, session_id, execution_ids} ->
-            {[session_message(session_id)],
+        case Orchestration.resume_session(project_id, session_token, space_name, self()) do
+          {:ok, external_id, execution_ids} ->
+            {[session_message(external_id)],
              %{
                project_id: project_id,
-               session_id: session_id,
+               session_id: external_id,
                execution_ids: execution_ids
              }}
 
-          {:error, :space_invalid} ->
-            {[{:close, 4000, "space_not_found"}], nil}
-
-          {:error, :no_worker} ->
-            {[{:close, 4000, "launch_invalid"}], nil}
-
-          {:error, :no_session} ->
+          {:error, :session_invalid} ->
             {[{:close, 4000, "session_invalid"}], nil}
+
+          {:error, :space_mismatch} ->
+            {[{:close, 4000, "space_mismatch"}], nil}
         end
 
       :error ->
@@ -343,26 +349,6 @@ defmodule Coflux.Handlers.Worker do
     {[{:close, 4000, "space_not_found"}], state}
   end
 
-  defp connect(project_id, session_id, space_name, worker_id, provides, concurrency) do
-    if session_id do
-      with {:ok, execution_ids} <- Orchestration.resume_session(project_id, session_id, self()) do
-        {:ok, session_id, execution_ids}
-      end
-    else
-      with {:ok, session_id} <-
-             Orchestration.start_session(
-               project_id,
-               space_name,
-               worker_id,
-               provides,
-               concurrency,
-               self()
-             ) do
-        {:ok, session_id, MapSet.new()}
-      end
-    end
-  end
-
   defp is_recognised_execution?(execution_id, state) do
     MapSet.member?(state.execution_ids, execution_id)
   end
@@ -513,12 +499,23 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  defp parse_provides(value) do
-    value
-    |> String.split(";", trim: true)
-    |> Enum.reduce(%{}, fn part, result ->
-      [key, value] = String.split(part, ":", parts: 2)
-      Map.update(result, key, [value], &[value | &1])
+  defp parse_websocket_protocols(req) do
+    case :cowboy_req.parse_header("sec-websocket-protocol", req) do
+      :undefined -> []
+      protocols -> protocols
+    end
+  end
+
+  defp extract_session_token(protocols) do
+    Enum.find_value(protocols, nil, fn
+      "session." <> encoded ->
+        case Base.url_decode64(encoded, padding: false) do
+          {:ok, token} -> token
+          :error -> nil
+        end
+
+      _ ->
+        nil
     end)
   end
 end

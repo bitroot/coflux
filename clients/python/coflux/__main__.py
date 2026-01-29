@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import os
+import random
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ import tomlkit
 import watchfiles
 
 from . import Worker, config, decorators, loader, models, utils
+from .worker import SessionExpiredError
 from .blobs import Manager as BlobManager
 from .version import API_VERSION, VersionMismatchError
 
@@ -33,10 +35,14 @@ def _get_default_image() -> str:
         return "ghcr.io/bitroot/coflux"
 
 
-def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
+def _api_request(
+    method: str, host: str, action: str, token: str | None, **kwargs
+) -> t.Any:
     headers = kwargs.pop("headers", {})
     if API_VERSION:
         headers["X-API-Version"] = API_VERSION
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     with httpx.Client() as client:
         response = client.request(
             method, f"http://{host}/api/{action}", headers=headers, **kwargs
@@ -50,6 +56,23 @@ def _api_request(method: str, host: str, action: str, **kwargs) -> t.Any:
         response.raise_for_status()
         is_json = response.headers.get("Content-Type") == "application/json"
         return response.json() if is_json else None
+
+
+def _create_session(
+    host: str,
+    project_id: str,
+    space_name: str,
+    provides: dict[str, list[str]] | None = None,
+    concurrency: int | None = None,
+    token: str | None = None,
+) -> str:
+    payload: dict[str, t.Any] = {"projectId": project_id, "spaceName": space_name}
+    if provides:
+        payload["provides"] = provides
+    if concurrency:
+        payload["concurrency"] = concurrency
+    result = _api_request("POST", host, "create_session", token, json=payload)
+    return result["sessionId"]
 
 
 def _encode_provides(
@@ -103,6 +126,7 @@ def _register_manifests(
     space_name: str,
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
+    token: str | None = None,
 ) -> None:
     manifests = {
         module: {
@@ -154,6 +178,7 @@ def _register_manifests(
         "POST",
         host,
         "register_manifests",
+        token,
         json={
             "projectId": project_id,
             "spaceName": space_name,
@@ -163,13 +188,14 @@ def _register_manifests(
 
 
 def _get_pool(
-    host: str, project_id: str, space_name: str, pool_name: str
+    host: str, project_id: str, space_name: str, pool_name: str, token: str | None
 ) -> dict | None:
     try:
         return _api_request(
             "GET",
             host,
             "get_pool",
+            token,
             params={
                 "project": project_id,
                 "space": space_name,
@@ -210,32 +236,60 @@ def _init(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     provides: dict[str, list[str]],
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
     blob_store_configs: list[config.BlobStoreConfig],
     concurrency: int,
-    launch_id: str | None,
+    session_id: str | None,
     register: bool,
 ) -> None:
     try:
         targets = _load_modules(list(modules))
         if register:
-            _register_manifests(project, space, host, targets)
+            _register_manifests(project, space, host, targets, token=token)
 
-        with Worker(
-            project,
-            space,
-            host,
-            provides,
-            serialiser_configs,
-            blob_threshold,
-            blob_store_configs,
-            concurrency,
-            launch_id,
-            targets,
-        ) as worker:
-            asyncio.run(worker.run())
+        # Track whether we created the session (vs it being provided externally)
+        session_provided = session_id is not None
+        session_backoff = 0
+
+        while True:
+            # Create a session if not provided
+            if not session_id:
+                if session_backoff > 0:
+                    delay = min(session_backoff, 30) * (0.5 + random.random())
+                    print(f"Waiting {delay:.1f} seconds before creating session...")
+                    time.sleep(delay)
+                print("Creating session...")
+                session_id = _create_session(
+                    host, project, space, provides, concurrency, token=token
+                )
+                print("Session created.")
+
+            try:
+                with Worker(
+                    project,
+                    space,
+                    host,
+                    serialiser_configs,
+                    blob_threshold,
+                    blob_store_configs,
+                    session_id,
+                    targets,
+                ) as worker:
+                    asyncio.run(worker.run())
+                    session_backoff = 0  # Reset on clean exit
+            except SessionExpiredError:
+                if session_provided:
+                    print("Session expired. Exiting...")
+                    raise
+                else:
+                    print("Session expired. Recreating...")
+                    session_backoff = max(1, session_backoff * 2)
+                    session_id = None
+                    continue
+            break
     except KeyboardInterrupt:
         pass
 
@@ -386,14 +440,21 @@ def spaces():
     show_default=True,
     required=True,
 )
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
 def spaces_list(
     project: str,
     host: str,
+    token: str | None,
 ):
     """
     Lists spaces.
     """
-    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
     if spaces:
         # TODO: draw as tree
         _print_table(
@@ -428,6 +489,12 @@ def spaces_list(
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "--base",
     help="The base space to inherit from",
 )
@@ -435,6 +502,7 @@ def spaces_list(
 def spaces_create(
     project: str,
     host: str,
+    token: str | None,
     base: str | None,
     name: str,
 ):
@@ -443,7 +511,7 @@ def spaces_create(
     """
     base_id = None
     if base:
-        spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+        spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
         space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
         base_id = space_ids_by_name.get(base)
         if not base_id:
@@ -454,6 +522,7 @@ def spaces_create(
         "POST",
         host,
         "create_space",
+        token,
         json={
             "projectId": project,
             "name": name,
@@ -492,6 +561,12 @@ def spaces_create(
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "--name",
     help="The new name of the space",
 )
@@ -508,6 +583,7 @@ def spaces_update(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     name: str | None,
     base: str | None,
     no_base: bool,
@@ -515,7 +591,7 @@ def spaces_update(
     """
     Updates a space within the project.
     """
-    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
     space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
     space_id = space_ids_by_name.get(space)
     if not space_id:
@@ -540,7 +616,7 @@ def spaces_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_space", json=payload)
+    _api_request("POST", host, "update_space", token, json=payload)
 
     click.secho(f"Updated space '{name or space}'.", fg="green")
 
@@ -573,15 +649,22 @@ def spaces_update(
     show_default=True,
     required=True,
 )
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
 def spaces_archive(
     project: str,
     space: str,
     host: str,
+    token: str | None,
 ):
     """
     Archives a space.
     """
-    spaces = _api_request("GET", host, "get_spaces", params={"project": project})
+    spaces = _api_request("GET", host, "get_spaces", token, params={"project": project})
     space_ids_by_name = {w["name"]: id for id, w in spaces.items()}
     space_id = space_ids_by_name.get(space)
     if not space_id:
@@ -591,6 +674,7 @@ def spaces_archive(
         "POST",
         host,
         "archive_space",
+        token,
         json={
             "projectId": project,
             "spaceId": space_id,
@@ -635,7 +719,13 @@ def pools():
     show_default=True,
     required=True,
 )
-def pools_list(project: str, space: str, host: str):
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+def pools_list(project: str, space: str, host: str, token: str | None):
     """
     Lists pools.
     """
@@ -643,6 +733,7 @@ def pools_list(project: str, space: str, host: str):
         "GET",
         host,
         "get_pools",
+        token,
         json={"projectId": project, "spaceName": space},
     )
     if pools:
@@ -689,6 +780,12 @@ def pools_list(project: str, space: str, host: str):
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "modules",
     "-m",
     "--module",
@@ -704,20 +801,26 @@ def pools_list(project: str, space: str, host: str):
     "--docker-image",
     help="The Docker image.",
 )
+@click.option(
+    "--docker-host",
+    help="Docker daemon connection (e.g., 'unix:///var/run/docker.sock' or 'tcp://host:2375').",
+)
 @click.argument("name")
 def pools_update(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     modules: tuple[str, ...] | None,
     provides: tuple[str, ...] | None,
     docker_image: str | None,
+    docker_host: str | None,
     name: str,
 ):
     """
     Updates a pool.
     """
-    pool = _get_pool(host, project, space, name) or {}
+    pool = _get_pool(host, project, space, name, token) or {}
 
     # TODO: support explicitly unsetting 'provides' (and modules, etc?)
 
@@ -725,16 +828,19 @@ def pools_update(
         pool["modules"] = list(modules)
     if provides is not None:
         pool["provides"] = _parse_provides(provides)
-    if docker_image:
-        if "launcher" not in pool or pool["launcher"]["type"] != "docker":
-            pool["launcher"] = {}
-        pool["launcher"]["type"] = "docker"
-        pool["launcher"]["image"] = docker_image
+    if docker_image or docker_host:
+        if "launcher" not in pool or pool.get("launcher", {}).get("type") != "docker":
+            pool["launcher"] = {"type": "docker"}
+        if docker_image:
+            pool["launcher"]["image"] = docker_image
+        if docker_host:
+            pool["launcher"]["dockerHost"] = docker_host
 
     _api_request(
         "POST",
         host,
         "update_pool",
+        token,
         json={
             "projectId": project,
             "spaceName": space,
@@ -772,8 +878,14 @@ def pools_update(
     show_default=True,
     required=True,
 )
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
 @click.argument("name")
-def pools_delete(project: str, space: str, host: str, name: str):
+def pools_delete(project: str, space: str, host: str, token: str | None, name: str):
     """
     Deletes a pool.
     """
@@ -781,6 +893,7 @@ def pools_delete(project: str, space: str, host: str, name: str):
         "POST",
         host,
         "update_pool",
+        token,
         json={"projectId": project, "spaceName": space, "poolName": name, "pool": None},
     )
 
@@ -828,12 +941,13 @@ def assets():
     pass
 
 
-def _get_asset(host: str, project_id: str, asset_id: str) -> dict | None:
+def _get_asset(host: str, project_id: str, asset_id: str, token: str | None) -> dict | None:
     try:
         return _api_request(
             "GET",
             host,
             "get_asset",
+            token,
             params={
                 "project": project_id,
                 "asset": asset_id,
@@ -877,16 +991,22 @@ def _human_size(bytes: int) -> str:
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "--match",
     help="Glob-style matcher to filter files",
 )
 @click.argument("id")
-def assets_inspect(project: str, host: str, match: str | None, id: str):
+def assets_inspect(project: str, host: str, token: str | None, match: str | None, id: str):
     """
     Inspect an asset.
     """
 
-    asset = _get_asset(host, project, id)
+    asset = _get_asset(host, project, id, token)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found in project")
 
@@ -933,6 +1053,12 @@ def assets_inspect(project: str, host: str, match: str | None, id: str):
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
     default=".",
@@ -951,6 +1077,7 @@ def assets_inspect(project: str, host: str, match: str | None, id: str):
 def assets_download(
     project: str,
     host: str,
+    token: str | None,
     to: Path,
     force: bool,
     match: str | None,
@@ -960,7 +1087,7 @@ def assets_download(
     Downloads the contents of an asset.
     """
 
-    asset = _get_asset(host, project, id)
+    asset = _get_asset(host, project, id, token)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found in project")
 
@@ -1026,11 +1153,18 @@ def assets_download(
     show_default=True,
     required=True,
 )
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     module_name: tuple[str, ...],
 ) -> None:
     """
@@ -1043,7 +1177,7 @@ def register(
     if not module_name:
         raise click.ClickException("No module(s) specified.")
     targets = _load_modules(list(module_name))
-    _register_manifests(project, space, host, targets)
+    _register_manifests(project, space, host, targets, token=token)
     click.secho("Manifest(s) registered.", fg="green")
 
 
@@ -1076,6 +1210,12 @@ def register(
     required=True,
 )
 @click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
+@click.option(
     "--provides",
     help="Features that this worker provides (to be matched with features that tasks require)",
     multiple=True,
@@ -1084,9 +1224,9 @@ def register(
     show_default=True,
 )
 @click.option(
-    "--launch",
-    help="The launch ID",
-    envvar="COFLUX_LAUNCH",
+    "--session",
+    help="Session ID (for pool-launched workers)",
+    envvar="COFLUX_SESSION",
 )
 @click.option(
     "--concurrency",
@@ -1118,8 +1258,9 @@ def worker(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     provides: tuple[str, ...] | None,
-    launch: str | None,
+    session: str | None,
     concurrency: int,
     watch: bool,
     register: bool,
@@ -1142,12 +1283,13 @@ def worker(
         "project": project,
         "space": space,
         "host": host,
+        "token": token,
         "provides": provides_,
         "serialiser_configs": config and config.serialisers,
         "blob_threshold": config and config.blobs and config.blobs.threshold,
         "blob_store_configs": config and config.blobs and config.blobs.stores,
         "concurrency": concurrency,
-        "launch_id": launch,
+        "session_id": session,
         "register": register or dev,
     }
     if watch or dev:
@@ -1192,6 +1334,12 @@ def worker(
     show_default=True,
     required=True,
 )
+@click.option(
+    "--token",
+    help="Authentication token",
+    envvar="COFLUX_TOKEN",
+    default=_load_config().server.token,
+)
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
@@ -1199,6 +1347,7 @@ def submit(
     project: str,
     space: str,
     host: str,
+    token: str | None,
     module: str,
     target: str,
     argument: tuple[str, ...],
@@ -1211,6 +1360,7 @@ def submit(
         "GET",
         host,
         "get_workflow",
+        token,
         params={
             "project": project,
             "space": space,
@@ -1226,6 +1376,7 @@ def submit(
         "POST",
         host,
         "submit_workflow",
+        token,
         json={
             "projectId": project,
             "spaceName": space,

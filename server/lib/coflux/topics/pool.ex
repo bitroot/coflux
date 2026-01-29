@@ -76,8 +76,12 @@ defmodule Coflux.Topics.Pool do
     |> Topic.set([:workers, Integer.to_string(worker_id), :stopError], error)
   end
 
-  defp process_notification(topic, {:worker_deactivated, worker_id, deactivated_at}) do
-    Topic.set(topic, [:workers, Integer.to_string(worker_id), :deactivatedAt], deactivated_at)
+  defp process_notification(topic, {:worker_deactivated, worker_id, deactivated_at, error}) do
+    worker_key = Integer.to_string(worker_id)
+
+    topic
+    |> Topic.set([:workers, worker_key, :deactivatedAt], deactivated_at)
+    |> Topic.set([:workers, worker_key, :error], error)
   end
 
   defp process_notification(topic, {:worker_state, worker_id, state}) do
@@ -91,12 +95,15 @@ defmodule Coflux.Topics.Pool do
   defp build_launcher(launcher) do
     case launcher.type do
       :docker ->
-        %{
-          type: "docker",
-          image: launcher.image
-        }
+        base = %{type: "docker", image: launcher.image}
+
+        base
+        |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
     end
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp build_pool(pool) do
     if pool do
@@ -118,6 +125,7 @@ defmodule Coflux.Topics.Pool do
       stoppingAt: worker.stopping_at,
       stopError: worker.stop_error,
       deactivatedAt: worker.deactivated_at,
+      error: worker.error,
       state: worker.state,
       connected: worker.connected
     }

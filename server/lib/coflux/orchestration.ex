@@ -53,15 +53,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:get_workflow, space_name, module, target_name})
   end
 
-  def start_session(project_id, space_name, worker_id, provides, concurrency, pid) do
-    call_server(
-      project_id,
-      {:start_session, space_name, worker_id, provides, concurrency, pid}
-    )
+  def resume_session(project_id, session_id, space_name, pid) do
+    call_server(project_id, {:resume_session, session_id, space_name, pid})
   end
 
-  def resume_session(project_id, session_id, pid) do
-    call_server(project_id, {:resume_session, session_id, pid})
+  def create_session(project_id, space_name, opts \\ []) do
+    call_server(project_id, {:create_session, space_name, opts})
   end
 
   def declare_targets(project_id, session_id, targets) do

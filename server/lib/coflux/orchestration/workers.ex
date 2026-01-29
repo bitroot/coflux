@@ -60,11 +60,12 @@ defmodule Coflux.Orchestration.Workers do
     end
   end
 
-  def create_worker_deactivation(db, worker_id) do
+  def create_worker_deactivation(db, worker_id, error) do
     now = current_timestamp()
 
     case insert_one(db, :worker_deactivations, %{
            worker_id: worker_id,
+           error: error,
            created_at: now
          }) do
       {:ok, _} ->
@@ -121,7 +122,8 @@ defmodule Coflux.Orchestration.Workers do
     query(
       db,
       """
-      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error, d.created_at
+      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
+             d.created_at, d.error
       FROM workers AS w
       INNER JOIN pools AS p ON p.id = w.pool_id
       LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id

@@ -310,7 +310,7 @@ defmodule Coflux.Handlers.Api do
                 %{
                   "provides" => pool.provides,
                   "modules" => pool.modules,
-                  "launcher" => pool.launcher
+                  "launcher" => format_launcher(pool.launcher)
                 }
               )
 
@@ -320,6 +320,18 @@ defmodule Coflux.Handlers.Api do
       end
     end)
   end
+
+  defp format_launcher(nil), do: nil
+
+  defp format_launcher(launcher) do
+    base = %{"type" => Atom.to_string(launcher.type), "image" => launcher.image}
+
+    base
+    |> maybe_put("dockerHost", Map.get(launcher, :docker_host))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp handle(req, "POST", ["update_pool"], namespace) do
     {:ok, arguments, errors, req} =
@@ -611,6 +623,42 @@ defmodule Coflux.Handlers.Api do
     end)
   end
 
+  defp handle(req, "POST", ["create_session"], namespace) do
+    {:ok, arguments, errors, req} =
+      read_arguments(
+        req,
+        %{
+          project_id: "projectId",
+          space_name: "spaceName"
+        },
+        %{
+          provides: {"provides", &parse_tag_set/1},
+          concurrency: {"concurrency", &parse_integer(&1, optional: true)}
+        }
+      )
+
+    if Enum.empty?(errors) do
+      with_project_access(req, arguments.project_id, namespace, fn ->
+        opts =
+          [
+            provides: arguments[:provides],
+            concurrency: arguments[:concurrency]
+          ]
+          |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+        case Orchestration.create_session(arguments.project_id, arguments.space_name, opts) do
+          {:ok, session_id} ->
+            json_response(req, %{"sessionId" => session_id})
+
+          {:error, :space_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+      end)
+    else
+      json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, _method, _path, _namespace) do
     json_error_response(req, "not_found", status: 404)
   end
@@ -732,11 +780,19 @@ defmodule Coflux.Handlers.Api do
 
   defp parse_docker_launcher(value) do
     image = Map.get(value, "image")
+    docker_host = Map.get(value, "dockerHost")
 
-    if is_binary(image) && String.length(image) <= 200 do
-      {:ok, %{type: :docker, image: image}}
-    else
-      {:error, :invalid}
+    cond do
+      not is_binary(image) or String.length(image) > 200 ->
+        {:error, :invalid}
+
+      not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
+        {:error, :invalid}
+
+      true ->
+        launcher = %{type: :docker, image: image}
+        launcher = if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+        {:ok, launcher}
     end
   end
 

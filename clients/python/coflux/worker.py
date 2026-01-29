@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import random
 import traceback
 import typing as t
@@ -36,8 +37,8 @@ def _parse_value(value: list) -> types.Value:
     raise Exception(f"unexpected value: {value}")
 
 
-def _encode_tags(provides: dict[str, list[str]]) -> str:
-    return ";".join(f"{k}:{v}" for k, vs in provides.items() for v in vs)
+class SessionExpiredError(Exception):
+    """Raised when the worker's session has expired."""
 
 
 class Worker:
@@ -46,20 +47,16 @@ class Worker:
         project_id: str,
         space_name: str,
         server_host: str,
-        provides: dict[str, list[str]],
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
-        concurrency: int,
-        launch_id: str | None,
+        session_id: str,
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
         self._project_id = project_id
         self._space_name = space_name
-        self._launch_id = launch_id
         self._server_host = server_host
-        self._provides = provides
-        self._concurrency = concurrency
+        self._session_id = session_id
         self._targets = targets
         self._connection = server.Connection(
             {"execute": self._handle_execute, "abort": self._handle_abort}
@@ -102,25 +99,21 @@ class Worker:
         }
         if API_VERSION:
             params["version"] = API_VERSION
-        if self._connection.session_id:
-            params["session"] = self._connection.session_id
-        elif self._launch_id:
-            params["launch"] = self._launch_id
-        if self._provides:
-            params["provides"] = _encode_tags(self._provides)
-        if self._concurrency:
-            params["concurrency"] = str(self._concurrency)
         return params
 
+    def _subprotocols(self) -> list[str]:
+        """Build WebSocket subprotocols for authentication."""
+        encoded_token = base64.urlsafe_b64encode(self._session_id.encode()).decode().rstrip("=")
+        return [f"session.{encoded_token}", "v1"]
+
     async def run(self) -> None:
+        """Run the worker. Raises SessionExpiredError if session expires."""
         check_server(self._server_host)
         while True:
-            print(
-                f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})..."
-            )
+            print(f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})...")
             url = self._url("ws", "worker", self._params())
             try:
-                async with websockets.connect(url) as websocket:
+                async with websockets.connect(url, subprotocols=self._subprotocols()) as websocket:
                     print("Connected.")
                     targets: dict[str, dict[types.TargetType, list[str]]] = {}
                     for module, module_targets in self._targets.items():
@@ -142,15 +135,13 @@ class Worker:
             except websockets.ConnectionClosedError as e:
                 reason = e.rcvd.reason if e.rcvd else None
                 if reason == "project_not_found":
-                    print("Project not found")
-                    return
-                elif reason == "space_not_found":
-                    print("Space not found")
-                    return
+                    raise Exception("Project not found")
                 elif reason == "session_invalid":
-                    print("Session expired. Resetting and reconnecting...")
-                    self._connection.reset()
-                    self._execution_manager.abort_all()
+                    raise SessionExpiredError("Session invalid")
+                elif reason == "space_mismatch":
+                    raise Exception(
+                        f"Space mismatch: session does not belong to space '{self._space_name}'"
+                    )
                 else:
                     delay = 1 + 3 * random.random()  # TODO: exponential backoff
                     print(f"Disconnected (reconnecting in {delay:.1f} seconds).")
