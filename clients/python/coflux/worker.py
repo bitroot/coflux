@@ -47,6 +47,7 @@ class Worker:
         project_id: str,
         space_name: str,
         server_host: str,
+        secure: bool,
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
@@ -56,6 +57,7 @@ class Worker:
         self._project_id = project_id
         self._space_name = space_name
         self._server_host = server_host
+        self._secure = secure
         self._session_id = session_id
         self._targets = targets
         self._connection = server.Connection(
@@ -108,10 +110,11 @@ class Worker:
 
     async def run(self) -> None:
         """Run the worker. Raises SessionExpiredError if session expires."""
-        check_server(self._server_host)
+        check_server(self._server_host, self._secure)
         while True:
             print(f"Connecting ({self._server_host}, {self._project_id}, {self._space_name})...")
-            url = self._url("ws", "worker", self._params())
+            scheme = "wss" if self._secure else "ws"
+            url = self._url(scheme, "worker", self._params())
             try:
                 async with websockets.connect(url, subprotocols=self._subprotocols()) as websocket:
                     print("Connected.")

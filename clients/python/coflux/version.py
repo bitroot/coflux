@@ -35,14 +35,15 @@ class ServerConnectionError(Exception):
         super().__init__(f"Cannot connect to server at {host}: {message}")
 
 
-def check_server(host: str) -> dict:
+def check_server(host: str, secure: bool) -> dict:
     """
     Check server connectivity and version compatibility.
     Returns the server metadata if successful.
     Raises ServerConnectionError if server is unreachable.
     Raises VersionMismatchError if versions are incompatible.
     """
-    url = f"http://{host}/.well-known/com.coflux"
+    scheme = "https" if secure else "http"
+    url = f"{scheme}://{host}/.well-known/com.coflux"
     try:
         with httpx.Client(timeout=10) as client:
             response = client.get(url)
