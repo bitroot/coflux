@@ -968,13 +968,22 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:notify_terminated, execution_ids}, _from, state) do
-    # TODO: record in database?
-
     now = System.os_time(:millisecond)
 
     state =
       execution_ids
       |> Enum.reduce(state, fn execution_id, state ->
+        # If execution has no result recorded, mark it as abandoned
+        state =
+          case Results.has_result?(state.db, execution_id) do
+            {:ok, false} ->
+              {:ok, state} = process_result(state, execution_id, :abandoned)
+              state
+
+            {:ok, true} ->
+              state
+          end
+
         case find_session_for_execution(state, execution_id) do
           {:ok, session_id} ->
             state =
@@ -2713,6 +2722,7 @@ defmodule Coflux.Orchestration.Server do
                  step.module
                ) do
             {:ok, state} -> state
+            {:error, :already_recorded} -> state
           end
 
         {:ok, state}

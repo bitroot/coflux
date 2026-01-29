@@ -287,6 +287,9 @@ defmodule Coflux.Handlers.Api do
                 }
               end)
             )
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "workspace_not_found", status: 404)
         end
       end)
     else
@@ -317,6 +320,9 @@ defmodule Coflux.Handlers.Api do
             :error ->
               json_error_response(req, "not_found", status: 404)
           end
+
+        {:error, :workspace_invalid} ->
+          json_error_response(req, "workspace_not_found", status: 404)
       end
     end)
   end
