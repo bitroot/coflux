@@ -80,7 +80,7 @@ class Worker:
         arguments = [_parse_value(a) for a in arguments]
         loop = asyncio.get_running_loop()
         self._execution_manager.execute(
-            execution_id, module_name, target, arguments, self._server_host, loop
+            execution_id, module_name, target, arguments, self._server_host, self._secure, loop
         )
 
     async def _handle_abort(self, *args) -> None:
