@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Pools do
-  use Topical.Topic, route: ["projects", :project_id, "pools", :space_id]
+  use Topical.Topic, route: ["projects", :project_id, "pools", :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -15,10 +15,10 @@ defmodule Coflux.Topics.Pools do
 
   def init(params) do
     project_id = Map.fetch!(params, :project_id)
-    space_id = String.to_integer(Map.fetch!(params, :space_id))
+    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
 
     {:ok, pools, ref} =
-      Orchestration.subscribe_pools(project_id, space_id, self())
+      Orchestration.subscribe_pools(project_id, workspace_id, self())
 
     value = build_value(pools)
 

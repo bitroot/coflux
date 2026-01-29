@@ -1,6 +1,6 @@
 defmodule Coflux.Topics.Module do
   use Topical.Topic,
-    route: ["projects", :project_id, "modules", :module, :space_id]
+    route: ["projects", :project_id, "modules", :module, :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -17,10 +17,10 @@ defmodule Coflux.Topics.Module do
   def init(params) do
     project_id = Map.fetch!(params, :project_id)
     module = Map.fetch!(params, :module)
-    space_id = String.to_integer(Map.fetch!(params, :space_id))
+    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
 
     {:ok, executions, ref} =
-      Orchestration.subscribe_module(project_id, module, space_id, self())
+      Orchestration.subscribe_module(project_id, module, workspace_id, self())
 
     value =
       Map.new(executions, fn {execution_id, target_name, external_run_id, external_step_id,

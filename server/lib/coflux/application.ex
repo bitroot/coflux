@@ -34,7 +34,7 @@ defmodule Coflux.Application do
     [
       Topics.Sessions,
       Topics.Projects,
-      Topics.Spaces,
+      Topics.Workspaces,
       Topics.Modules,
       Topics.Run,
       Topics.Workflow,

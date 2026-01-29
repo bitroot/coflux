@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Sessions do
 
   import Coflux.Store
 
-  def create_session(db, space_id, worker_id, opts \\ []) do
+  def create_session(db, workspace_id, worker_id, opts \\ []) do
     provides = Keyword.get(opts, :provides)
     concurrency = Keyword.get(opts, :concurrency, 0)
     activation_timeout = Keyword.get(opts, :activation_timeout)
@@ -28,7 +28,7 @@ defmodule Coflux.Orchestration.Sessions do
 
           case insert_one(db, :sessions, %{
                  external_id: external_id,
-                 space_id: space_id,
+                 workspace_id: workspace_id,
                  worker_id: worker_id,
                  provides_tag_set_id: provides_tag_set_id,
                  concurrency: concurrency,
@@ -96,7 +96,7 @@ defmodule Coflux.Orchestration.Sessions do
       SELECT
         s.id,
         s.external_id,
-        s.space_id,
+        s.workspace_id,
         s.worker_id,
         s.provides_tag_set_id,
         s.concurrency,

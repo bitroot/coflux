@@ -62,7 +62,7 @@ defmodule Coflux.Orchestration.Models do
       :retry_limit,
       :retry_delay_min,
       :retry_delay_max,
-      :space_id,
+      :workspace_id,
       :execute_after,
       :attempt,
       :created_at

@@ -23,7 +23,7 @@ uv sync
 Configure Coflux:
 
 ```bash
-uv run configure --project=... --space=...
+uv run configure --project=... --workspace=...
 ```
 
 Run worker in development mode:

@@ -24,11 +24,11 @@ defmodule Coflux.Handlers.Worker do
       :ok ->
         # TODO: validate
         project_id = get_query_param(qs, "project")
-        space_name = get_query_param(qs, "space")
+        workspace_name = get_query_param(qs, "workspace")
         session_token = extract_session_token(protocols)
 
         req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
-        {:cowboy_websocket, req, {project_id, space_name, session_token}}
+        {:cowboy_websocket, req, {project_id, workspace_name, session_token}}
 
       {:error, server_version, expected_version} ->
         req =
@@ -44,11 +44,11 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, space_name, session_token}) do
+  def websocket_init({project_id, workspace_name, session_token}) do
     case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
       {:ok, _} ->
         # TODO: monitor server?
-        case Orchestration.resume_session(project_id, session_token, space_name, self()) do
+        case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
           {:ok, external_id, execution_ids} ->
             {[session_message(external_id)],
              %{
@@ -60,8 +60,8 @@ defmodule Coflux.Handlers.Worker do
           {:error, :session_invalid} ->
             {[{:close, 4000, "session_invalid"}], nil}
 
-          {:error, :space_mismatch} ->
-            {[{:close, 4000, "space_mismatch"}], nil}
+          {:error, :workspace_mismatch} ->
+            {[{:close, 4000, "workspace_mismatch"}], nil}
         end
 
       :error ->
@@ -346,7 +346,7 @@ defmodule Coflux.Handlers.Worker do
   end
 
   def websocket_info(:stop, state) do
-    {[{:close, 4000, "space_not_found"}], state}
+    {[{:close, 4000, "workspace_not_found"}], state}
   end
 
   defp is_recognised_execution?(execution_id, state) do

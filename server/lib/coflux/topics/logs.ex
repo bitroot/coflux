@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Logs do
-  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, "logs", :space_id]
+  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, "logs", :workspace_id]
 
   alias Coflux.Orchestration
 
@@ -16,13 +16,13 @@ defmodule Coflux.Topics.Logs do
   def init(params) do
     project_id = Map.fetch!(params, :project_id)
     run_id = Map.fetch!(params, :run_id)
-    space_id = String.to_integer(Map.fetch!(params, :space_id))
+    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
 
     case Orchestration.subscribe_run(project_id, run_id, self()) do
       {:ok, _run, _parent, steps, _ref} ->
         case Orchestration.subscribe_logs(project_id, run_id, self()) do
           {:ok, _ref, messages} ->
-            run_space_id =
+            run_workspace_id =
               steps
               |> Map.values()
               |> Enum.reject(& &1.parent_id)
@@ -30,9 +30,9 @@ defmodule Coflux.Topics.Logs do
               |> Map.fetch!(:executions)
               |> Map.values()
               |> Enum.min_by(& &1.created_at)
-              |> Map.fetch!(:space_id)
+              |> Map.fetch!(:workspace_id)
 
-            space_ids = Enum.uniq([run_space_id, space_id])
+            workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
 
             execution_ids =
               steps
@@ -40,7 +40,7 @@ defmodule Coflux.Topics.Logs do
               |> Enum.flat_map(fn step ->
                 step.executions
                 |> Map.values()
-                |> Enum.filter(&(&1.space_id in space_ids))
+                |> Enum.filter(&(&1.workspace_id in workspace_ids))
                 |> Enum.map(& &1.execution_id)
               end)
               |> MapSet.new()
@@ -50,7 +50,7 @@ defmodule Coflux.Topics.Logs do
               |> Enum.filter(&(elem(&1, 0) in execution_ids))
               |> Enum.map(&build_message/1)
               |> Topic.new(%{
-                space_ids: space_ids,
+                workspace_ids: workspace_ids,
                 execution_ids: execution_ids
               })
 
@@ -64,8 +64,8 @@ defmodule Coflux.Topics.Logs do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:execution, _, _, execution_id, space_id, _, _, _}) do
-    if space_id in topic.state.space_ids do
+  defp process_notification(topic, {:execution, _, _, execution_id, workspace_id, _, _, _}) do
+    if workspace_id in topic.state.workspace_ids do
       update_in(topic.state.execution_ids, &MapSet.put(&1, execution_id))
     else
       topic

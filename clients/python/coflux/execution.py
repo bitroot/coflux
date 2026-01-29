@@ -258,6 +258,7 @@ class Channel:
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
         server_host: str,
+        secure: bool,
         connection,
     ):
         self._execution_id = execution_id
@@ -267,7 +268,7 @@ class Channel:
         self._groups: list[str | None] = []
         self._running = True
         self._exit_stack = contextlib.ExitStack()
-        self._blob_manager = blobs.Manager(blob_store_configs, server_host)
+        self._blob_manager = blobs.Manager(blob_store_configs, server_host, secure=secure)
         self._serialisation_manager = serialisation.Manager(
             serialiser_configs, blob_threshold, self._blob_manager
         )
@@ -566,6 +567,7 @@ def _execute(
     blob_threshold: int,
     blob_store_configs: list[config.BlobStoreConfig],
     server_host: str,
+    secure: bool,
     conn,
 ):
     global _channel_context
@@ -576,6 +578,7 @@ def _execute(
         blob_threshold,
         blob_store_configs,
         server_host,
+        secure,
         conn,
     ) as channel:
         threading.Thread(target=channel.run).start()
@@ -670,6 +673,7 @@ class ExecutionState:
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
         server_host: str,
+        secure: bool,
         server_connection: server.Connection,
         loop: asyncio.AbstractEventLoop,
     ):
@@ -692,6 +696,7 @@ class ExecutionState:
                 blob_threshold,
                 blob_store_configs,
                 server_host,
+                secure,
                 child_conn,
             ),
             name=f"Execution-{execution_id}",
@@ -931,6 +936,7 @@ class Manager:
         target: str,
         arguments: list[types.Value],
         server_host: str,
+        secure: bool,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         if execution_id in self._executions:
@@ -944,6 +950,7 @@ class Manager:
             self._blob_threshold,
             self._blob_store_configs,
             server_host,
+            secure,
             self._connection,
             loop,
         )
