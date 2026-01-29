@@ -168,7 +168,6 @@ CREATE TABLE worker_stop_results (
 CREATE TABLE worker_deactivations (
   worker_id INTEGER PRIMARY KEY,
   created_at INTEGER NOT NULL,
-  -- TODO: reason?
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 

@@ -22,6 +22,8 @@ defmodule Coflux.DockerLauncher do
            ),
          :ok <- start_container(docker_conn, container_id) do
       {:ok, %{container: container_id, docker_conn: docker_conn}}
+    else
+      {:error, reason} -> {:error, Atom.to_string(reason)}
     end
   end
 
@@ -45,17 +47,21 @@ defmodule Coflux.DockerLauncher do
         if state["Running"] do
           {:ok, true}
         else
-          exit_info = %{
-            exit_code: state["ExitCode"],
-            oom_killed: state["OOMKilled"] == true,
-            error: non_empty_string(state["Error"])
-          }
-
-          {:ok, false, exit_info}
+          error = build_error(state)
+          {:ok, false, error}
         end
 
       {:error, :no_such_container} ->
         {:ok, false, nil}
+    end
+  end
+
+  # Returns nil for successful exit, or error code string for failures
+  defp build_error(state) do
+    cond do
+      state["OOMKilled"] == true -> "oom_killed"
+      state["ExitCode"] != 0 -> "exit_code:#{state["ExitCode"]}"
+      true -> nil
     end
   end
 
@@ -84,10 +90,6 @@ defmodule Coflux.DockerLauncher do
     System.get_env("COFLUX_PUBLIC_HOST") ||
       "localhost:#{System.get_env("PORT", "7777")}"
   end
-
-  defp non_empty_string(""), do: nil
-  defp non_empty_string(nil), do: nil
-  defp non_empty_string(s) when is_binary(s), do: s
 
   defp docker_request(docker_conn, method, path, opts \\ []) do
     {url, conn_opts} =

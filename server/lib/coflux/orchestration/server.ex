@@ -1239,7 +1239,7 @@ defmodule Coflux.Orchestration.Server do
           Map.new(
             pool_workers,
             fn {worker_id, starting_at, started_at, start_error, stopping_at, stopped_at,
-                stop_error, deactivated_at, exit_code, oom_killed, exit_error} ->
+                stop_error, deactivated_at, error} ->
               worker = Map.get(state.workers, worker_id)
 
               connected =
@@ -1264,9 +1264,7 @@ defmodule Coflux.Orchestration.Server do
                  stopped_at: stopped_at,
                  stop_error: stop_error,
                  deactivated_at: deactivated_at,
-                 exit_code: exit_code,
-                 oom_killed: oom_killed == 1,
-                 exit_error: exit_error,
+                 error: error,
                  state: if(worker, do: worker.state),
                  connected: connected
                }}
@@ -1861,7 +1859,7 @@ defmodule Coflux.Orchestration.Server do
                       case result do
                         {:ok, {:ok, data}} -> {data, nil}
                         {:ok, {:error, error}} -> {nil, error}
-                        :error -> {nil, nil}
+                        :error -> {nil, "launcher_crashed"}
                       end
 
                     {:ok, started_at} =
@@ -1877,7 +1875,7 @@ defmodule Coflux.Orchestration.Server do
 
                     state =
                       if error do
-                        deactivate_worker(state, worker_id)
+                        deactivate_worker(state, worker_id, error)
                       else
                         state
                       end
@@ -1944,8 +1942,8 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {:ok, true}} ->
               state
 
-            {:ok, {:ok, false, exit_info}} ->
-              deactivate_worker(state, worker_id, exit_info)
+            {:ok, {:ok, false, error}} ->
+              deactivate_worker(state, worker_id, error)
 
             :error ->
               # TODO: ?
@@ -3069,15 +3067,15 @@ defmodule Coflux.Orchestration.Server do
     )
   end
 
-  defp deactivate_worker(state, worker_id, exit_info \\ nil) do
-    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, exit_info)
+  defp deactivate_worker(state, worker_id, error) do
+    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, error)
 
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
     notify_listeners(
       state,
       {:pool, worker.space_id, worker.pool_name},
-      {:worker_deactivated, worker_id, deactivated_at, exit_info}
+      {:worker_deactivated, worker_id, deactivated_at, error}
     )
   end
 
