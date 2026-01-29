@@ -434,6 +434,73 @@ def _get_default_secure() -> bool | None:
     return _load_config().server.secure
 
 
+def _server_options(token: bool = True):
+    """Add server options: host, secure, and optionally token."""
+    def decorator(f):
+        decorators = [
+            click.option(
+                "-h",
+                "--host",
+                help="Host to connect to",
+                envvar="COFLUX_HOST",
+                default=_load_config().server.host,
+                show_default=True,
+                required=True,
+            ),
+            click.option(
+                "--secure/--no-secure",
+                "secure",
+                default=_get_default_secure(),
+                help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
+            ),
+        ]
+        if token:
+            decorators.append(
+                click.option(
+                    "--token",
+                    help="Authentication token",
+                    envvar="COFLUX_TOKEN",
+                    default=_load_config().server.token,
+                )
+            )
+        for d in reversed(decorators):
+            f = d(f)
+        return f
+    return decorator
+
+
+def _project_options(space: bool = False):
+    """Add project option, and optionally space."""
+    def decorator(f):
+        decorators = [
+            click.option(
+                "-p",
+                "--project",
+                help="Project ID",
+                envvar="COFLUX_PROJECT",
+                default=_load_config().project,
+                show_default=True,
+                required=True,
+            ),
+        ]
+        if space:
+            decorators.append(
+                click.option(
+                    "-s",
+                    "--space",
+                    help="Space name",
+                    envvar="COFLUX_SPACE",
+                    default=_load_config().space,
+                    show_default=True,
+                    required=True,
+                )
+            )
+        for d in reversed(decorators):
+            f = d(f)
+        return f
+    return decorator
+
+
 @cli.command("configure")
 @click.option(
     "-p",
@@ -492,36 +559,8 @@ def spaces():
 
 
 @spaces.command("list")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options()
+@_server_options()
 def spaces_list(
     project: str,
     host: str,
@@ -548,36 +587,8 @@ def spaces_list(
 
 
 @spaces.command("create")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options()
+@_server_options()
 @click.option(
     "--base",
     help="The base space to inherit from",
@@ -620,45 +631,8 @@ def spaces_create(
 
 
 @spaces.command("update")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="The (current) name of the space",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.option(
     "--name",
     help="The new name of the space",
@@ -717,45 +691,8 @@ def spaces_update(
 
 
 @spaces.command("archive")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 def spaces_archive(
     project: str,
     space: str,
@@ -796,45 +733,8 @@ def pools():
 
 
 @pools.command("list")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 def pools_list(project: str, space: str, host: str, token: str | None, secure: bool | None):
     """
     Lists pools.
@@ -864,45 +764,8 @@ def pools_list(project: str, space: str, host: str, token: str | None, secure: b
 
 
 @pools.command("update")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.option(
     "modules",
     "-m",
@@ -972,45 +835,8 @@ def pools_update(
 
 
 @pools.command("delete")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.argument("name")
 def pools_delete(project: str, space: str, host: str, token: str | None, secure: bool | None, name: str):
     """
@@ -1036,17 +862,9 @@ def blobs():
 
 
 @blobs.command("get")
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
+@_server_options(token=False)
 @click.argument("key")
-def blobs_get(host: str, key: str):
+def blobs_get(host: str, secure: bool | None, key: str):
     """
     Gets a blob by key and writes the content to stdout.
     """
@@ -1102,36 +920,8 @@ def _human_size(bytes: int) -> str:
 
 
 @assets.command("inspect")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options()
+@_server_options()
 @click.option(
     "--match",
     help="Glob-style matcher to filter files",
@@ -1170,36 +960,8 @@ def assets_inspect(project: str, host: str, token: str | None, secure: bool | No
 
 
 @assets.command("download")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options()
+@_server_options()
 @click.option(
     "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
@@ -1269,45 +1031,8 @@ def assets_download(
 
 
 @cli.command("register")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-w",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.argument("module_name", nargs=-1)
 def register(
     project: str,
@@ -1333,45 +1058,8 @@ def register(
 
 
 @cli.command("worker")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.option(
     "--provides",
     help="Features that this worker provides (to be matched with features that tasks require)",
@@ -1467,45 +1155,8 @@ def worker(
 
 
 @cli.command("submit")
-@click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    envvar="COFLUX_PROJECT",
-    default=_load_config().project,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-s",
-    "--space",
-    help="Space name",
-    envvar="COFLUX_SPACE",
-    default=_load_config().space,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    help="Host to connect to",
-    envvar="COFLUX_HOST",
-    default=_load_config().server.host,
-    show_default=True,
-    required=True,
-)
-@click.option(
-    "--token",
-    help="Authentication token",
-    envvar="COFLUX_TOKEN",
-    default=_load_config().server.token,
-)
-@click.option(
-    "--secure/--no-secure",
-    "secure",
-    default=_get_default_secure(),
-    help="Use secure connections (HTTPS/WSS). Inferred from host if not specified.",
-)
+@_project_options(space=True)
+@_server_options()
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
