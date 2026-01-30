@@ -2,55 +2,59 @@ defmodule Coflux.Auth do
   @moduledoc """
   Handles token authentication.
 
-  Tokens are stored in $COFLUX_DATA_DIR/tokens.json with format:
+  Token access is configured per-project in $COFLUX_DATA_DIR/projects.json:
   ```json
   {
-    "<sha256-hash>": {
-      "projects": ["acme", "demo"]
-    }
+    "acme": {
+      "tokens": ["<sha256-hash-1>", "<sha256-hash-2>"]
+    },
+    "demo": {}
   }
   ```
 
-  - Key: SHA-256 hash of token (hex, lowercase)
-  - projects: array of allowed project names (empty array = all projects)
-
-  Auth mode is controlled by COFLUX_AUTH_MODE:
-  - "none" (default): No authentication required
-  - "token": Require valid token with project access
+  The `tokens` field controls access:
+  - missing/null: open access (no token required)
+  - [] (empty array): locked (no valid tokens, access denied)
+  - ["hash1", ...]: restricted to listed token hashes
   """
 
-  alias Coflux.Config
-  alias Coflux.Auth.TokenStore
+  alias Coflux.ProjectStore
 
   @doc """
   Checks if the given token is authorized for the project.
 
-  Returns `:ok` when auth is disabled or token is valid.
+  Returns `:ok` when access is allowed.
   Returns `{:error, :unauthorized}` otherwise.
   """
   def check(token, project_id) do
-    case Config.auth_mode() do
-      :none -> :ok
-      :token -> validate_token(token, project_id)
+    case ProjectStore.get_tokens(project_id) do
+      {:ok, nil} ->
+        # No token auth configured - open access
+        :ok
+
+      {:ok, []} ->
+        # Empty tokens list - locked, no valid tokens
+        {:error, :unauthorized}
+
+      {:ok, tokens} ->
+        # Token list configured - must provide valid token
+        validate_token(token, tokens)
+
+      :error ->
+        # Project not found (shouldn't happen if validate_project passed)
+        {:error, :unauthorized}
     end
   end
 
-  defp validate_token(nil, _project_id), do: {:error, :unauthorized}
+  defp validate_token(nil, _tokens), do: {:error, :unauthorized}
 
-  defp validate_token(token, project_id) do
+  defp validate_token(token, tokens) do
     token_hash = hash_token(token)
 
-    case TokenStore.lookup(token_hash) do
-      {:ok, token_config} ->
-        # Empty projects list means access to all projects
-        if token_config.projects == [] or project_id in token_config.projects do
-          :ok
-        else
-          {:error, :unauthorized}
-        end
-
-      :error ->
-        {:error, :unauthorized}
+    if token_hash in tokens do
+      :ok
+    else
+      {:error, :unauthorized}
     end
   end
 

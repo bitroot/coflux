@@ -24,7 +24,6 @@ defmodule Coflux.Config do
   """
   def init do
     :persistent_term.put(:coflux_data_dir, parse_data_dir())
-    :persistent_term.put(:coflux_auth_mode, parse_auth_mode())
     :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
@@ -36,13 +35,6 @@ defmodule Coflux.Config do
   """
   def data_dir do
     :persistent_term.get(:coflux_data_dir)
-  end
-
-  @doc """
-  Returns the auth mode: `:none` (default) or `:token`.
-  """
-  def auth_mode do
-    :persistent_term.get(:coflux_auth_mode)
   end
 
   @doc """
@@ -72,14 +64,6 @@ defmodule Coflux.Config do
 
   defp parse_data_dir do
     System.get_env("COFLUX_DATA_DIR", Path.join(File.cwd!(), "data"))
-  end
-
-  defp parse_auth_mode do
-    case System.get_env("COFLUX_AUTH_MODE", "none") do
-      "none" -> :none
-      "token" -> :token
-      other -> raise "Invalid COFLUX_AUTH_MODE: #{inspect(other)}. Must be \"none\" or \"token\"."
-    end
   end
 
   @default_allowed_origins ["https://studio.coflux.com"]
