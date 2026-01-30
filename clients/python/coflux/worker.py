@@ -44,7 +44,6 @@ class SessionExpiredError(Exception):
 class Worker:
     def __init__(
         self,
-        project_id: str,
         workspace_name: str,
         server_host: str,
         secure: bool,
@@ -54,7 +53,6 @@ class Worker:
         session_id: str,
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
-        self._project_id = project_id
         self._workspace_name = workspace_name
         self._server_host = server_host
         self._secure = secure
@@ -96,7 +94,6 @@ class Worker:
 
     def _params(self):
         params = {
-            "project": self._project_id,
             "workspace": self._workspace_name,
         }
         if API_VERSION:
@@ -112,7 +109,7 @@ class Worker:
         """Run the worker. Raises SessionExpiredError if session expires."""
         check_server(self._server_host, self._secure)
         while True:
-            print(f"Connecting ({self._server_host}, {self._project_id}, {self._workspace_name})...")
+            print(f"Connecting ({self._server_host}, {self._workspace_name})...")
             scheme = "wss" if self._secure else "ws"
             url = self._url(scheme, "worker", self._params())
             try:

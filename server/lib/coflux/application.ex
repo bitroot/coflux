@@ -1,8 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, Projects, Orchestration, Topics}
-  alias Coflux.Auth.TokenStore
+  alias Coflux.{Config, ProjectStore, Orchestration, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -12,15 +11,13 @@ defmodule Coflux.Application do
 
     children =
       [
-        TokenStore,
-        {Projects, name: Coflux.ProjectsServer},
+        ProjectStore,
         # TODO: separate launch supervisor per project? (and specify max_children?)
         {Task.Supervisor, name: Coflux.LauncherSupervisor},
         Orchestration.Supervisor,
         {Topical, name: Coflux.TopicalRegistry, topics: topics()},
         {Coflux.Web, port: port}
       ]
-      |> Enum.filter(& &1)
 
     opts = [strategy: :one_for_one, name: Coflux.Supervisor]
 
@@ -33,7 +30,6 @@ defmodule Coflux.Application do
   defp topics() do
     [
       Topics.Sessions,
-      Topics.Projects,
       Topics.Workspaces,
       Topics.Modules,
       Topics.Run,

@@ -1,20 +1,16 @@
 defmodule Coflux.Topics.Logs do
-  use Topical.Topic, route: ["projects", :project_id, "runs", :run_id, "logs", :workspace_id]
+  use Topical.Topic, route: ["runs", :run_id, "logs", :workspace_id]
 
   alias Coflux.Orchestration
 
   import Coflux.TopicUtils
 
   def connect(params, context) do
-    namespace = Map.get(context, :namespace)
-
-    with :ok <- validate_project_access(params.project_id, namespace) do
-      {:ok, params}
-    end
+    {:ok, Map.put(params, :project, context.project)}
   end
 
   def init(params) do
-    project_id = Map.fetch!(params, :project_id)
+    project_id = Map.fetch!(params, :project)
     run_id = Map.fetch!(params, :run_id)
     workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
 

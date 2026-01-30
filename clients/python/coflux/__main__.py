@@ -93,7 +93,6 @@ def _api_request(
 
 def _create_session(
     host: str,
-    project_id: str,
     workspace_name: str,
     provides: dict[str, list[str]] | None = None,
     concurrency: int | None = None,
@@ -101,7 +100,7 @@ def _create_session(
     *,
     secure: bool,
 ) -> str:
-    payload: dict[str, t.Any] = {"projectId": project_id, "workspaceName": workspace_name}
+    payload: dict[str, t.Any] = {"workspaceName": workspace_name}
     if provides:
         payload["provides"] = provides
     if concurrency:
@@ -157,7 +156,6 @@ def _load_modules(
 
 
 def _register_manifests(
-    project_id: str,
     workspace_name: str,
     host: str,
     targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
@@ -218,7 +216,6 @@ def _register_manifests(
         token,
         secure=secure,
         json={
-            "projectId": project_id,
             "workspaceName": workspace_name,
             "manifests": manifests,
         },
@@ -226,7 +223,7 @@ def _register_manifests(
 
 
 def _get_pool(
-    host: str, project_id: str, workspace_name: str, pool_name: str, token: str | None, *, secure: bool
+    host: str, workspace_name: str, pool_name: str, token: str | None, *, secure: bool
 ) -> dict | None:
     try:
         return _api_request(
@@ -236,7 +233,6 @@ def _get_pool(
             token,
             secure=secure,
             params={
-                "project": project_id,
                 "workspace": workspace_name,
                 "pool": pool_name,
             },
@@ -272,7 +268,6 @@ def _print_table(
 
 def _init(
     *modules: types.ModuleType | str,
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -288,7 +283,7 @@ def _init(
     try:
         targets = _load_modules(list(modules))
         if register:
-            _register_manifests(project, workspace, host, targets, token=token, secure=secure)
+            _register_manifests(workspace, host, targets, token=token, secure=secure)
 
         # Track whether we created the session (vs it being provided externally)
         session_provided = session_id is not None
@@ -303,13 +298,12 @@ def _init(
                     time.sleep(delay)
                 print("Creating session...")
                 session_id = _create_session(
-                    host, project, workspace, provides, concurrency, token=token, secure=secure
+                    host, workspace, provides, concurrency, token=token, secure=secure
                 )
                 print("Session created.")
 
             try:
                 with Worker(
-                    project,
                     workspace,
                     host,
                     secure,
@@ -434,8 +428,8 @@ def _get_default_secure() -> bool | None:
     return _load_config().server.secure
 
 
-def _server_options(token: bool = True):
-    """Add server options: host, secure, and optionally token."""
+def _project_options(token: bool = True, workspace: bool = False):
+    """Add project options: host, secure, and optionally token and workspace."""
     def decorator(f):
         decorators = [
             click.option(
@@ -463,26 +457,6 @@ def _server_options(token: bool = True):
                     default=_load_config().server.token,
                 )
             )
-        for d in reversed(decorators):
-            f = d(f)
-        return f
-    return decorator
-
-
-def _project_options(workspace: bool = False):
-    """Add project option, and optionally workspace."""
-    def decorator(f):
-        decorators = [
-            click.option(
-                "-p",
-                "--project",
-                help="Project ID",
-                envvar="COFLUX_PROJECT",
-                default=_load_config().project,
-                show_default=True,
-                required=True,
-            ),
-        ]
         if workspace:
             decorators.append(
                 click.option(
@@ -503,14 +477,6 @@ def _project_options(workspace: bool = False):
 
 @cli.command("configure")
 @click.option(
-    "-p",
-    "--project",
-    help="Project ID",
-    default=_load_config().project,
-    show_default=True,
-    prompt=True,
-)
-@click.option(
     "workspace",
     "-w",
     "--workspace",
@@ -529,7 +495,6 @@ def _project_options(workspace: bool = False):
 )
 def configure(
     host: str | None,
-    project: str | None,
     workspace: str | None,
 ):
     """
@@ -540,7 +505,6 @@ def configure(
 
     path = _config_path()
     data = _read_config(path)
-    data["project"] = project
     data["workspace"] = workspace
     data.setdefault("server", {})["host"] = host
     _write_config(path, data)
@@ -560,9 +524,7 @@ def workspaces():
 
 @workspaces.command("list")
 @_project_options()
-@_server_options()
 def workspaces_list(
-    project: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -571,7 +533,7 @@ def workspaces_list(
     Lists workspaces.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
     if workspaces:
         # TODO: draw as tree
         _print_table(
@@ -588,14 +550,12 @@ def workspaces_list(
 
 @workspaces.command("create")
 @_project_options()
-@_server_options()
 @click.option(
     "--base",
     help="The base workspace to inherit from",
 )
 @click.argument("name")
 def workspaces_create(
-    project: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -608,7 +568,7 @@ def workspaces_create(
     use_secure = _should_use_secure(host, secure)
     base_id = None
     if base:
-        workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+        workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
         workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
         base_id = workspace_ids_by_name.get(base)
         if not base_id:
@@ -622,7 +582,6 @@ def workspaces_create(
         token,
         secure=use_secure,
         json={
-            "projectId": project,
             "name": name,
             "baseId": base_id,
         },
@@ -632,7 +591,6 @@ def workspaces_create(
 
 @workspaces.command("update")
 @_project_options(workspace=True)
-@_server_options()
 @click.option(
     "--name",
     help="The new name of the workspace",
@@ -647,7 +605,6 @@ def workspaces_create(
     help="Unset the base workspace",
 )
 def workspaces_update(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -660,7 +617,7 @@ def workspaces_update(
     Updates a workspace within the project.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
     workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
     workspace_id = workspace_ids_by_name.get(workspace)
     if not workspace_id:
@@ -672,8 +629,7 @@ def workspaces_update(
         if not base_id:
             raise click.BadOptionUsage("base", "Not recognised")
 
-    payload = {
-        "projectId": project,
+    payload: dict[str, t.Any] = {
         "workspaceId": workspace_id,
     }
     if name is not None:
@@ -692,9 +648,7 @@ def workspaces_update(
 
 @workspaces.command("archive")
 @_project_options(workspace=True)
-@_server_options()
 def workspaces_archive(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -704,7 +658,7 @@ def workspaces_archive(
     Archives a workspace.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure, params={"project": project})
+    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
     workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
     workspace_id = workspace_ids_by_name.get(workspace)
     if not workspace_id:
@@ -717,7 +671,6 @@ def workspaces_archive(
         token,
         secure=use_secure,
         json={
-            "projectId": project,
             "workspaceId": workspace_id,
         },
     )
@@ -734,8 +687,7 @@ def pools():
 
 @pools.command("list")
 @_project_options(workspace=True)
-@_server_options()
-def pools_list(project: str, workspace: str, host: str, token: str | None, secure: bool | None):
+def pools_list(workspace: str, host: str, token: str | None, secure: bool | None):
     """
     Lists pools.
     """
@@ -746,7 +698,7 @@ def pools_list(project: str, workspace: str, host: str, token: str | None, secur
         "get_pools",
         token,
         secure=use_secure,
-        json={"projectId": project, "workspaceName": workspace},
+        params={"workspace": workspace},
     )
     if pools:
         _print_table(
@@ -765,7 +717,6 @@ def pools_list(project: str, workspace: str, host: str, token: str | None, secur
 
 @pools.command("update")
 @_project_options(workspace=True)
-@_server_options()
 @click.option(
     "modules",
     "-m",
@@ -788,7 +739,6 @@ def pools_list(project: str, workspace: str, host: str, token: str | None, secur
 )
 @click.argument("name")
 def pools_update(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -803,7 +753,7 @@ def pools_update(
     Updates a pool.
     """
     use_secure = _should_use_secure(host, secure)
-    pool = _get_pool(host, project, workspace, name, token, secure=use_secure) or {}
+    pool = _get_pool(host, workspace, name, token, secure=use_secure) or {}
 
     # TODO: support explicitly unsetting 'provides' (and modules, etc?)
 
@@ -826,7 +776,6 @@ def pools_update(
         token,
         secure=use_secure,
         json={
-            "projectId": project,
             "workspaceName": workspace,
             "poolName": name,
             "pool": pool,
@@ -836,9 +785,8 @@ def pools_update(
 
 @pools.command("delete")
 @_project_options(workspace=True)
-@_server_options()
 @click.argument("name")
-def pools_delete(project: str, workspace: str, host: str, token: str | None, secure: bool | None, name: str):
+def pools_delete(workspace: str, host: str, token: str | None, secure: bool | None, name: str):
     """
     Deletes a pool.
     """
@@ -849,7 +797,7 @@ def pools_delete(project: str, workspace: str, host: str, token: str | None, sec
         "update_pool",
         token,
         secure=use_secure,
-        json={"projectId": project, "workspaceName": workspace, "poolName": name, "pool": None},
+        json={"workspaceName": workspace, "poolName": name, "pool": None},
     )
 
 
@@ -862,7 +810,7 @@ def blobs():
 
 
 @blobs.command("get")
-@_server_options(token=False)
+@_project_options(token=False)
 @click.argument("key")
 def blobs_get(host: str, secure: bool | None, key: str):
     """
@@ -889,7 +837,7 @@ def assets():
     pass
 
 
-def _get_asset(host: str, project_id: str, asset_id: str, token: str | None, *, secure: bool) -> dict | None:
+def _get_asset(host: str, asset_id: str, token: str | None, *, secure: bool) -> dict | None:
     try:
         return _api_request(
             "GET",
@@ -898,7 +846,6 @@ def _get_asset(host: str, project_id: str, asset_id: str, token: str | None, *, 
             token,
             secure=secure,
             params={
-                "project": project_id,
                 "asset": asset_id,
             },
         )
@@ -922,20 +869,19 @@ def _human_size(bytes: int) -> str:
 
 @assets.command("inspect")
 @_project_options()
-@_server_options()
 @click.option(
     "--match",
     help="Glob-style matcher to filter files",
 )
 @click.argument("id")
-def assets_inspect(project: str, host: str, token: str | None, secure: bool | None, match: str | None, id: str):
+def assets_inspect(host: str, token: str | None, secure: bool | None, match: str | None, id: str):
     """
     Inspect an asset.
     """
     use_secure = _should_use_secure(host, secure)
-    asset = _get_asset(host, project, id, token, secure=use_secure)
+    asset = _get_asset(host, id, token, secure=use_secure)
     if not asset:
-        raise click.ClickException(f"Asset '{id}' not found in project")
+        raise click.ClickException(f"Asset '{id}' not found")
 
     click.echo(f"Name: {asset['name'] or '(untitled)'}")
 
@@ -962,7 +908,6 @@ def assets_inspect(project: str, host: str, token: str | None, secure: bool | No
 
 @assets.command("download")
 @_project_options()
-@_server_options()
 @click.option(
     "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
@@ -980,7 +925,6 @@ def assets_inspect(project: str, host: str, token: str | None, secure: bool | No
 )
 @click.argument("id")
 def assets_download(
-    project: str,
     host: str,
     token: str | None,
     secure: bool | None,
@@ -993,9 +937,9 @@ def assets_download(
     Downloads the contents of an asset.
     """
     use_secure = _should_use_secure(host, secure)
-    asset = _get_asset(host, project, id, token, secure=use_secure)
+    asset = _get_asset(host, id, token, secure=use_secure)
     if not asset:
-        raise click.ClickException(f"Asset '{id}' not found in project")
+        raise click.ClickException(f"Asset '{id}' not found")
 
     entries = asset["entries"]
     if match:
@@ -1033,10 +977,8 @@ def assets_download(
 
 @cli.command("register")
 @_project_options(workspace=True)
-@_server_options()
 @click.argument("module_name", nargs=-1)
 def register(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -1054,13 +996,12 @@ def register(
         raise click.ClickException("No module(s) specified.")
     use_secure = _should_use_secure(host, secure)
     targets = _load_modules(list(module_name))
-    _register_manifests(project, workspace, host, targets, token=token, secure=use_secure)
+    _register_manifests(workspace, host, targets, token=token, secure=use_secure)
     click.secho("Manifest(s) registered.", fg="green")
 
 
 @cli.command("worker")
 @_project_options(workspace=True)
-@_server_options()
 @click.option(
     "--provides",
     help="Features that this worker provides (to be matched with features that tasks require)",
@@ -1101,7 +1042,6 @@ def register(
 )
 @click.argument("module_name", nargs=-1)
 def worker(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -1128,7 +1068,6 @@ def worker(
     use_secure = _should_use_secure(host, secure)
     args = (*module_name,)
     kwargs = {
-        "project": project,
         "workspace": workspace,
         "host": host,
         "token": token,
@@ -1157,12 +1096,10 @@ def worker(
 
 @cli.command("submit")
 @_project_options(workspace=True)
-@_server_options()
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
 def submit(
-    project: str,
     workspace: str,
     host: str,
     token: str | None,
@@ -1183,7 +1120,6 @@ def submit(
         token,
         secure=use_secure,
         params={
-            "project": project,
             "workspace": workspace,
             "module": module,
             "target": target,
@@ -1200,7 +1136,6 @@ def submit(
         token,
         secure=use_secure,
         json={
-            "projectId": project,
             "workspaceName": workspace,
             "module": module,
             "target": target,

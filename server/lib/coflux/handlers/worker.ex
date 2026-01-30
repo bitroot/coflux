@@ -7,11 +7,14 @@ defmodule Coflux.Handlers.Worker do
 
   The client should request protocols like: ["session.dG9rZW4=", "v1"]
   The server echoes back "v1" on successful auth.
+
+  The project is determined by COFLUX_PROJECT (if set) or extracted from the
+  subdomain (if COFLUX_BASE_DOMAIN is set).
   """
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Projects, Version}
+  alias Coflux.{Orchestration, Config, ProjectStore, Version}
 
   @protocol_version "v1"
 
@@ -22,13 +25,26 @@ defmodule Coflux.Handlers.Worker do
 
     case Version.check(expected_version) do
       :ok ->
-        # TODO: validate
-        project_id = get_query_param(qs, "project")
-        workspace_name = get_query_param(qs, "workspace")
-        session_token = extract_session_token(protocols)
+        case resolve_project(req) do
+          {:ok, project_id} ->
+            workspace_name = get_query_param(qs, "workspace")
+            session_token = extract_session_token(protocols)
 
-        req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
-        {:cowboy_websocket, req, {project_id, workspace_name, session_token}}
+            req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
+            {:cowboy_websocket, req, {project_id, workspace_name, session_token}}
+
+          {:error, :not_configured} ->
+            req = json_error_response(req, "not_configured", status: 500)
+            {:ok, req, opts}
+
+          {:error, :project_required} ->
+            req = json_error_response(req, "project_required", status: 400)
+            {:ok, req, opts}
+
+          {:error, :invalid_host} ->
+            req = json_error_response(req, "invalid_host", status: 400)
+            {:ok, req, opts}
+        end
 
       {:error, server_version, expected_version} ->
         req =
@@ -45,27 +61,33 @@ defmodule Coflux.Handlers.Worker do
   end
 
   def websocket_init({project_id, workspace_name, session_token}) do
-    case Projects.get_project_by_id(Coflux.ProjectsServer, project_id) do
-      {:ok, _} ->
-        # TODO: monitor server?
-        case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
-          {:ok, external_id, execution_ids} ->
-            {[session_message(external_id)],
-             %{
-               project_id: project_id,
-               session_id: external_id,
-               execution_ids: execution_ids
-             }}
+    # Validate project against whitelist when using subdomain routing
+    project_valid =
+      if Config.base_domain() do
+        ProjectStore.exists?(project_id)
+      else
+        true
+      end
 
-          {:error, :session_invalid} ->
-            {[{:close, 4000, "session_invalid"}], nil}
+    if project_valid do
+      # TODO: monitor server?
+      case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
+        {:ok, external_id, execution_ids} ->
+          {[session_message(external_id)],
+           %{
+             project_id: project_id,
+             session_id: external_id,
+             execution_ids: execution_ids
+           }}
 
-          {:error, :workspace_mismatch} ->
-            {[{:close, 4000, "workspace_mismatch"}], nil}
-        end
+        {:error, :session_invalid} ->
+          {[{:close, 4000, "session_invalid"}], nil}
 
-      :error ->
-        {[{:close, 4000, "project_not_found"}], nil}
+        {:error, :workspace_mismatch} ->
+          {[{:close, 4000, "workspace_mismatch"}], nil}
+      end
+    else
+      {[{:close, 4000, "project_not_found"}], nil}
     end
   end
 

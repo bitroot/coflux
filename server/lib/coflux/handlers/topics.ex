@@ -7,13 +7,15 @@ defmodule Coflux.Handlers.Topics do
 
   The client should request protocols like: ["bearer.dG9rZW4=", "v1"]
   The server echoes back "v1" on successful auth.
+
+  The project is determined by COFLUX_PROJECT (if set) or extracted from the
+  subdomain (if COFLUX_BASE_DOMAIN is set).
   """
 
   import Coflux.Handlers.Utils
 
   alias Topical.Adapters.Cowboy.WebsocketHandler, as: TopicalHandler
-  alias Coflux.Handlers.Auth
-  alias Coflux.Version
+  alias Coflux.{Auth, Version}
 
   @protocol_version "v1"
 
@@ -22,9 +24,9 @@ defmodule Coflux.Handlers.Topics do
     expected_version = get_query_param(qs, "version")
     protocols = parse_websocket_protocols(req)
 
-    with {:ok, namespace} <- resolve_namespace(req),
-         {:ok, req} <- authenticate(req, protocols, namespace) do
-      opts = Keyword.put(opts, :init, fn _req -> {:ok, %{namespace: namespace}} end)
+    with {:ok, project_id} <- resolve_project(req),
+         {:ok, req} <- authenticate(req, protocols, project_id) do
+      opts = Keyword.put(opts, :init, fn _req -> {:ok, %{project: project_id}} end)
 
       case Version.check(expected_version) do
         :ok ->
@@ -43,8 +45,16 @@ defmodule Coflux.Handlers.Topics do
           {:ok, req, opts}
       end
     else
+      {:error, :not_configured} ->
+        req = json_error_response(req, "not_configured", status: 500)
+        {:ok, req, opts}
+
       {:error, :invalid_host} ->
         req = json_error_response(req, "invalid_host", status: 400)
+        {:ok, req, opts}
+
+      {:error, :project_required} ->
+        req = json_error_response(req, "project_required", status: 400)
         {:ok, req, opts}
 
       {:error, :unauthorized} ->
@@ -53,24 +63,26 @@ defmodule Coflux.Handlers.Topics do
     end
   end
 
-  defp authenticate(req, protocols, namespace) do
-    case extract_bearer_token(protocols) do
-      {:ok, token} ->
-        case Auth.check_token(token, namespace) do
-          :ok ->
-            req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
-            {:ok, req}
+  defp authenticate(req, protocols, project_id) do
+    token =
+      case extract_bearer_token(protocols) do
+        {:ok, token} -> token
+        :none -> nil
+      end
 
-          error ->
-            error
-        end
+    case Auth.check(token, project_id) do
+      :ok ->
+        req =
+          if token do
+            :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
+          else
+            req
+          end
 
-      :none ->
-        # No bearer token provided - check if auth is required
-        case Auth.check_token(nil, namespace) do
-          :ok -> {:ok, req}
-          error -> error
-        end
+        {:ok, req}
+
+      error ->
+        error
     end
   end
 

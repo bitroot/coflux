@@ -1,20 +1,14 @@
 defmodule Coflux.Topics.Search do
   alias Coflux.Orchestration
 
-  use Topical.Topic, route: ["projects", :project_id, "search", :workspace_id]
-
-  import Coflux.TopicUtils, only: [validate_project_access: 2]
+  use Topical.Topic, route: ["search", :workspace_id]
 
   def connect(params, context) do
-    namespace = Map.get(context, :namespace)
-
-    with :ok <- validate_project_access(params.project_id, namespace) do
-      {:ok, params}
-    end
+    {:ok, Map.put(params, :project, context.project)}
   end
 
   def init(params) do
-    project_id = Map.fetch!(params, :project_id)
+    project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
     case Orchestration.subscribe_targets(project_id, workspace_id, self()) do

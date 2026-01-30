@@ -1,21 +1,15 @@
 defmodule Coflux.Topics.Workflow do
   use Topical.Topic,
-    route: ["projects", :project_id, "workflows", :module, :target, :workspace_id]
+    route: ["workflows", :module, :target, :workspace_id]
 
   alias Coflux.Orchestration
 
-  import Coflux.TopicUtils, only: [validate_project_access: 2]
-
   def connect(params, context) do
-    namespace = Map.get(context, :namespace)
-
-    with :ok <- validate_project_access(params.project_id, namespace) do
-      {:ok, params}
-    end
+    {:ok, Map.put(params, :project, context.project)}
   end
 
   def init(params) do
-    project_id = Map.fetch!(params, :project_id)
+    project_id = Map.fetch!(params, :project)
     module = Map.fetch!(params, :module)
     target_name = Map.fetch!(params, :target)
     workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
