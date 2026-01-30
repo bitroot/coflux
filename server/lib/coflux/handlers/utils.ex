@@ -2,29 +2,63 @@ defmodule Coflux.Handlers.Utils do
   alias Coflux.Config
 
   @doc """
-  Resolves the namespace from the request hostname.
+  Resolves the project from the request.
 
-  Returns `{:ok, namespace}` where namespace is a string or nil,
-  or `{:error, :invalid_host}` if hostname doesn't match base domain.
+  Behavior depends on configuration:
+
+  - Neither set: Returns `{:error, :not_configured}`
+  - COFLUX_PROJECT only: Returns the configured project (any access method works)
+  - COFLUX_BASE_DOMAIN only: Extracts project from subdomain (subdomain required)
+  - Both set: Extracts from subdomain, but must match COFLUX_PROJECT
   """
-  def resolve_namespace(req) do
-    hostname = :cowboy_req.host(req)
+  def resolve_project(req) do
+    configured_project = Config.project()
+    base_domain = Config.base_domain()
 
-    case Config.base_domain() do
-      nil ->
-        {:ok, nil}
+    case {configured_project, base_domain} do
+      {nil, nil} ->
+        {:error, :not_configured}
 
-      base_domain ->
+      {project_id, nil} ->
+        {:ok, project_id}
+
+      {_, base_domain} ->
+        # Subdomain routing
+        hostname = :cowboy_req.host(req)
+
         cond do
           hostname == base_domain ->
-            {:ok, nil}
+            {:error, :project_required}
 
           String.ends_with?(hostname, "." <> base_domain) ->
-            namespace = String.replace_suffix(hostname, "." <> base_domain, "")
-            {:ok, namespace}
+            project_id = String.replace_suffix(hostname, "." <> base_domain, "")
+
+            if configured_project && project_id != configured_project do
+              {:error, :project_mismatch}
+            else
+              {:ok, project_id}
+            end
 
           true ->
             {:error, :invalid_host}
+        end
+    end
+  end
+
+  @doc """
+  Extracts a bearer token from the Authorization header.
+
+  Returns the token string or nil if not found.
+  """
+  def get_token(req) do
+    case :cowboy_req.header("authorization", req) do
+      :undefined ->
+        nil
+
+      header ->
+        case String.split(header, " ", parts: 2) do
+          ["Bearer", token] -> String.trim(token)
+          _ -> nil
         end
     end
   end

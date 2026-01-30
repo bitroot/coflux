@@ -4,12 +4,24 @@ defmodule Coflux.Auth.TokenStore do
 
   Tokens are loaded from $COFLUX_DATA_DIR/tokens.json at startup.
   Reads go directly to ETS for performance.
+
+  Token file format:
+  ```json
+  {
+    "<sha256-hash>": {
+      "projects": ["acme", "demo"]
+    }
+  }
+  ```
+
+  - Key: SHA-256 hash of token (hex, lowercase)
+  - projects: array of allowed project names (empty array = all projects)
   """
 
   use GenServer
 
   defmodule TokenConfig do
-    defstruct namespaces: [nil]
+    defstruct projects: []
   end
 
   @table :coflux_auth_tokens
@@ -61,7 +73,7 @@ defmodule Coflux.Auth.TokenStore do
   end
 
   defp parse_config(config) do
-    namespaces = Map.get(config, "namespaces", [nil])
-    %TokenConfig{namespaces: namespaces}
+    projects = Map.get(config, "projects", [])
+    %TokenConfig{projects: projects}
   end
 end

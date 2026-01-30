@@ -3,6 +3,20 @@ defmodule Coflux.Config do
   Caches configuration values read from environment variables at startup.
 
   Uses persistent_term for fast reads without copying.
+
+  ## Project Configuration
+
+  At least one of the following must be configured:
+
+  - **COFLUX_PROJECT**: Restricts the server to a single project. All requests
+    are routed to this project. Supports any access method including IP addresses.
+
+  - **COFLUX_BASE_DOMAIN**: Enables subdomain-based project routing. The project
+    is extracted from the subdomain (e.g., `acme.example.com` → project "acme").
+    Requires subdomain access - direct IP or base domain access is not allowed.
+
+  When both are set, subdomain routing is used but only the configured project
+  is allowed.
   """
 
   @doc """
@@ -11,6 +25,7 @@ defmodule Coflux.Config do
   def init do
     :persistent_term.put(:coflux_data_dir, parse_data_dir())
     :persistent_term.put(:coflux_auth_mode, parse_auth_mode())
+    :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
     :ok
@@ -31,7 +46,18 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the base domain for namespace resolution, or nil if not set.
+  Returns the configured project name, or nil if not set.
+
+  When set, restricts the server to only serve this project.
+  """
+  def project do
+    :persistent_term.get(:coflux_project)
+  end
+
+  @doc """
+  Returns the base domain for subdomain-based routing, or nil if not set.
+
+  When set, the project is extracted from the request's subdomain.
   """
   def base_domain do
     :persistent_term.get(:coflux_base_domain)

@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, Projects, Orchestration, Topics}
+  alias Coflux.{Config, ProjectStore, Orchestration, Topics}
   alias Coflux.Auth.TokenStore
 
   @impl true
@@ -13,7 +13,8 @@ defmodule Coflux.Application do
     children =
       [
         TokenStore,
-        {Projects, name: Coflux.ProjectsServer},
+        # ProjectStore only needed for subdomain routing (COFLUX_BASE_DOMAIN set)
+        if(Config.base_domain(), do: ProjectStore),
         # TODO: separate launch supervisor per project? (and specify max_children?)
         {Task.Supervisor, name: Coflux.LauncherSupervisor},
         Orchestration.Supervisor,
@@ -33,7 +34,6 @@ defmodule Coflux.Application do
   defp topics() do
     [
       Topics.Sessions,
-      Topics.Projects,
       Topics.Workspaces,
       Topics.Modules,
       Topics.Run,
