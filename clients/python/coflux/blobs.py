@@ -50,8 +50,8 @@ class Store(abc.ABC):
 
 
 class HttpStore(Store):
-    def __init__(self, protocol: t.Literal["http", "https"], host: str):
-        self._protocol = protocol
+    def __init__(self, host: str, *, secure: bool = False):
+        self._protocol = "https" if secure else "http"
         self._host = host
 
     def __enter__(self):
@@ -161,11 +161,11 @@ class S3Store(Store):
             return self.put(file)
 
 
-def _create(config_: config.BlobStoreConfig, server_host: str, secure: bool):
+def _create(config_: config.BlobStoreConfig, server_host: str, server_secure: bool):
     if config_.type == "http":
-        # Use secure setting if config uses default host, otherwise respect config's protocol
-        protocol = ("https" if secure else "http") if config_.host is None else config_.protocol
-        return HttpStore(protocol, config_.host or server_host)
+        host = config_.host if config_.host is not None else server_host
+        secure = config_.secure if config_.secure is not None else server_secure
+        return HttpStore(host, secure=secure)
     elif config_.type == "s3":
         return S3Store(config_.bucket, config_.prefix, config_.region)
     else:
@@ -173,8 +173,8 @@ def _create(config_: config.BlobStoreConfig, server_host: str, secure: bool):
 
 
 class Manager:
-    def __init__(self, store_configs: list[config.BlobStoreConfig], server_host: str, *, secure: bool):
-        self._stores = [_create(c, server_host, secure) for c in store_configs]
+    def __init__(self, store_configs: list[config.BlobStoreConfig], *, server_host: str, server_secure: bool):
+        self._stores = [_create(c, server_host, server_secure) for c in store_configs]
 
     def __enter__(self):
         # TODO: ?

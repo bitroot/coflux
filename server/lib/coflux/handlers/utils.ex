@@ -228,4 +228,13 @@ defmodule Coflux.Handlers.Utils do
         nil
     end
   end
+
+  @doc """
+  Get all values for a query parameter (for repeated params like ?workspace=a&workspace=b).
+  """
+  def get_query_params(qs, key) do
+    qs
+    |> Enum.filter(fn {k, _v} -> k == key end)
+    |> Enum.map(fn {_k, v} -> v end)
+  end
 end

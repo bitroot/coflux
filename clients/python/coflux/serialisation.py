@@ -158,10 +158,12 @@ class Manager:
             elif isinstance(value, models.Execution):
                 # TODO: better handle id being none
                 assert value.id is not None
-                references.append(("execution", value.id))
+                # Include metadata in reference for log storage
+                references.append(("execution", value.id, value.metadata))
                 return {"type": "ref", "index": len(references) - 1}
             elif isinstance(value, models.Asset):
-                references.append(("asset", value.id))
+                # Include metadata in reference for log storage
+                references.append(("asset", value.id, value.metadata))
                 return {"type": "ref", "index": len(references) - 1}
             elif isinstance(value, tuple):
                 # TODO: include name
@@ -219,10 +221,10 @@ class Manager:
                     case "ref":
                         reference = references[data["index"]]
                         match reference:
-                            case ("execution", execution_id):
-                                return models.Execution(execution_id)
-                            case ("asset", asset_id):
-                                return models.Asset(asset_id)
+                            case ("execution", execution_id, exec_metadata):
+                                return models.Execution(execution_id, exec_metadata)
+                            case ("asset", asset_id, asset_metadata):
+                                return models.Asset(asset_id, asset_metadata)
                             case ("fragment", format, blob_key, _size, metadata):
                                 data = self._blob_manager.get(blob_key)
                                 for serialiser in self._serialisers:
@@ -234,6 +236,8 @@ class Manager:
                                 raise Exception(
                                     f"Couldn't deserialise fragment ({format})"
                                 )
+                            case other:
+                                raise ValueError(f"Unknown reference type: {other}")
                     case other:
                         raise Exception(f"unhandled data type ({other})")
             else:

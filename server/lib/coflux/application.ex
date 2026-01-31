@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, ProjectStore, Orchestration, Topics}
+  alias Coflux.{Config, ProjectStore, Orchestration, Logs, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -15,6 +15,8 @@ defmodule Coflux.Application do
         # TODO: separate launch supervisor per project? (and specify max_children?)
         {Task.Supervisor, name: Coflux.LauncherSupervisor},
         Orchestration.Supervisor,
+        {Registry, keys: :unique, name: Coflux.Logs.Registry},
+        Logs.Supervisor,
         {Topical, name: Coflux.TopicalRegistry, topics: topics()},
         {Coflux.Web, port: port}
       ]
@@ -34,7 +36,6 @@ defmodule Coflux.Application do
       Topics.Modules,
       Topics.Run,
       Topics.Workflow,
-      Topics.Logs,
       Topics.Module,
       Topics.Pools,
       Topics.Pool,

@@ -276,6 +276,7 @@ def _init(
     serialiser_configs: list[config.SerialiserConfig],
     blob_threshold: int,
     blob_store_configs: list[config.BlobStoreConfig],
+    log_store_config: config.LogStoreConfig,
     concurrency: int,
     session_id: str | None,
     register: bool,
@@ -310,6 +311,7 @@ def _init(
                     serialiser_configs,
                     blob_threshold,
                     blob_store_configs,
+                    log_store_config,
                     session_id,
                     targets,
                 ) as worker:
@@ -822,7 +824,7 @@ def blobs_get(host: str, secure: bool | None, key: str):
         raise click.ClickException("Blob store not configured")
 
     out = click.get_binary_stream("stdout")
-    with BlobManager(config.blobs.stores, host, secure=use_secure) as blob_manager:
+    with BlobManager(config.blobs.stores, server_host=host, server_secure=use_secure) as blob_manager:
         blob = blob_manager.get(key)
         for chunk in iter(lambda: blob.read(64 * 1024), b""):
             out.write(chunk)
@@ -965,7 +967,7 @@ def assets_download(
 
     total_size = sum(v["size"] for v in entries.values())
 
-    with BlobManager(config.blobs.stores, host, secure=use_secure) as blob_manager:
+    with BlobManager(config.blobs.stores, server_host=host, server_secure=use_secure) as blob_manager:
         click.echo(f"Downloading {len(entries)} files ({_human_size(total_size)})...")
         # TODO: parallelise downloads
         with click.progressbar(entries.items(), label="") as bar:
@@ -1076,6 +1078,7 @@ def worker(
         "serialiser_configs": config and config.serialisers,
         "blob_threshold": config and config.blobs and config.blobs.threshold,
         "blob_store_configs": config and config.blobs and config.blobs.stores,
+        "log_store_config": config and config.logs and config.logs.store,
         "concurrency": concurrency,
         "session_id": session,
         "register": register or dev,

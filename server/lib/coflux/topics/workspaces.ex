@@ -35,7 +35,7 @@ defmodule Coflux.Topics.Workspaces do
   defp build_workspace(workspace) do
     %{
       name: workspace.name,
-      baseId: workspace.base_id,
+      baseId: if(workspace.base_id, do: Integer.to_string(workspace.base_id)),
       state: build_state(workspace.state)
     }
   end
