@@ -92,8 +92,7 @@ defmodule Coflux.Topics.Run do
               {Integer.to_string(dependency_id), build_dependency(dependency)}
             end),
           children: [],
-          result: nil,
-          logCount: 0
+          result: nil
         }
       )
     else
@@ -173,14 +172,6 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:log_counts, execution_id, delta}) do
-    update_execution(topic, execution_id, fn topic, base_path ->
-      path = base_path ++ [:logCount]
-      count = get_in(topic.value, path) + delta
-      Topic.set(topic, base_path ++ [:logCount], count)
-    end)
-  end
-
   defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
@@ -226,8 +217,7 @@ defmodule Coflux.Topics.Run do
                       end),
                     dependencies: build_dependencies(execution.dependencies),
                     children: Enum.map(execution.children, &build_child/1),
-                    result: build_result(execution.result),
-                    logCount: execution.log_count
+                    result: build_result(execution.result)
                   }}
                end)
            }}

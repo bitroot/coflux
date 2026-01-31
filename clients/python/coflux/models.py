@@ -52,15 +52,48 @@ def _get_channel():
     return execution.get_channel()
 
 
-# TODO: make non-tuple?
-class Execution[T](t.NamedTuple):
-    id: int
+class ExecutionMetadata(t.NamedTuple):
+    """Metadata for an execution reference, used in log serialization."""
+
+    run_id: str | None = None
+    step_id: str | None = None
+    attempt: int | None = None
+    module: str | None = None
+    target: str | None = None
+
+
+class Execution[T]:
+    """Reference to a step execution."""
+
+    def __init__(
+        self,
+        id: str,
+        metadata: ExecutionMetadata | None = None,
+    ):
+        self._id = id
+        self._metadata = metadata or ExecutionMetadata()
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def metadata(self) -> ExecutionMetadata:
+        return self._metadata
 
     def result(self) -> T:
-        return _get_channel().resolve_reference(self.id)
+        return _get_channel().resolve_reference(self._id)
 
     def cancel(self) -> None:
-        _get_channel().cancel_execution(self.id)
+        _get_channel().cancel_execution(self._id)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Execution):
+            return self._id == other._id
+        return False
+
+    def __hash__(self) -> int:
+        return hash(self._id)
 
 
 # TODO: (make non-tuple?)
@@ -78,13 +111,31 @@ class AssetEntry(t.NamedTuple):
         return target
 
 
+class AssetMetadata(t.NamedTuple):
+    """Metadata for an asset reference, used in log serialization."""
+
+    external_id: str | None = None
+    name: str | None = None
+    total_count: int | None = None
+    total_size: int | None = None
+
+
 class Asset:
-    def __init__(self, id: int):
+    def __init__(
+        self,
+        id: str,
+        metadata: AssetMetadata | None = None,
+    ):
         self._id = id
+        self._metadata = metadata or AssetMetadata()
 
     @property
-    def id(self):
+    def id(self) -> str:
         return self._id
+
+    @property
+    def metadata(self) -> AssetMetadata:
+        return self._metadata
 
     @functools.cached_property
     def entries(self) -> list[AssetEntry]:

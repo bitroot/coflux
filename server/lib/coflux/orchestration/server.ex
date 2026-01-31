@@ -13,8 +13,7 @@ defmodule Coflux.Orchestration.Server do
     CacheConfigs,
     TagSets,
     Workers,
-    Manifests,
-    Observations
+    Manifests
   }
 
   @default_activation_timeout_ms 600_000
@@ -805,7 +804,16 @@ defmodule Coflux.Orchestration.Server do
           )
           |> flush_notifications()
 
-        {:reply, {:ok, run.external_id, external_step_id, execution_id}, state}
+        # Return extended metadata for log references
+        execution_metadata = %{
+          run_id: run.external_id,
+          step_id: external_step_id,
+          attempt: attempt,
+          module: module,
+          target: target_name
+        }
+
+        {:reply, {:ok, run.external_id, external_step_id, execution_id, execution_metadata}, state}
     end
   end
 
@@ -1091,6 +1099,13 @@ defmodule Coflux.Orchestration.Server do
           {:wait, state}
 
         {:ok, result} ->
+          # Only enrich value results with resolved references (asset metadata, execution metadata)
+          # Other result types (error, abandoned, etc.) don't need enrichment for the client
+          result =
+            case result do
+              {:value, value} -> {:value, build_value(value, state.db)}
+              other -> other
+            end
           {{:ok, result}, state}
       end
 
@@ -1104,17 +1119,25 @@ defmodule Coflux.Orchestration.Server do
     {:ok, asset_id} = Assets.get_or_create_asset(state.db, name, entries)
     :ok = Results.put_execution_asset(state.db, execution_id, asset_id)
 
-    {external_id, name, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
+    {external_id, asset_name, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
 
     state =
       state
       |> notify_listeners(
         {:run, run_id},
-        {:asset, execution_id, external_id, {name, total_count, total_size, entry}}
+        {:asset, execution_id, external_id, {asset_name, total_count, total_size, entry}}
       )
       |> flush_notifications()
 
-    {:reply, {:ok, asset_id}, state}
+    # Return extended metadata for log references
+    asset_metadata = %{
+      external_id: external_id,
+      name: asset_name,
+      total_count: total_count,
+      total_size: total_size
+    }
+
+    {:reply, {:ok, asset_id, asset_metadata}, state}
   end
 
   def handle_call({:get_asset_entries, asset_id, from_execution_id}, _from, state) do
@@ -1138,27 +1161,6 @@ defmodule Coflux.Orchestration.Server do
 
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  def handle_call({:record_logs, execution_id, messages}, _from, state) do
-    {:ok, run_id} = Runs.get_execution_run_id(state.db, execution_id)
-
-    case Observations.record_logs(state.db, execution_id, messages) do
-      :ok ->
-        messages =
-          Enum.map(messages, fn {timestamp, level, template, values} ->
-            {execution_id, timestamp, level, template,
-             Map.new(values, fn {k, v} -> {k, build_value(v, state.db)} end)}
-          end)
-
-        state =
-          state
-          |> notify_listeners({:logs, run_id}, {:messages, messages})
-          |> notify_listeners({:run, run_id}, {:log_counts, execution_id, length(messages)})
-          |> flush_notifications()
-
-        {:reply, :ok, state}
     end
   end
 
@@ -1365,7 +1367,6 @@ defmodule Coflux.Orchestration.Server do
         {:ok, run_executions} = Runs.get_run_executions(state.db, run.id)
         {:ok, run_dependencies} = Runs.get_run_dependencies(state.db, run.id)
         {:ok, run_children} = Runs.get_run_children(state.db, run.id)
-        {:ok, log_counts} = Observations.get_counts_for_run(state.db, run.id)
         {:ok, groups} = Runs.get_groups_for_run(state.db, run.id)
 
         cache_configs =
@@ -1465,8 +1466,7 @@ defmodule Coflux.Orchestration.Server do
                       assets: assets,
                       dependencies: dependencies,
                       result: result,
-                      children: Map.get(run_children, execution_id, []),
-                      log_count: Map.get(log_counts, execution_id, 0)
+                      children: Map.get(run_children, execution_id, [])
                     }}
                  end)
              }}
@@ -1474,23 +1474,6 @@ defmodule Coflux.Orchestration.Server do
 
         {:ok, ref, state} = add_listener(state, {:run, run.id}, pid)
         {:reply, {:ok, run, parent, steps, ref}, state}
-    end
-  end
-
-  def handle_call({:subscribe_logs, external_run_id, pid}, _from, state) do
-    case Runs.get_run_by_external_id(state.db, external_run_id) do
-      {:ok, run} ->
-        case Observations.get_messages_for_run(state.db, run.id) do
-          {:ok, messages} ->
-            messages =
-              Enum.map(messages, fn {execution_id, timestamp, level, template, values} ->
-                {execution_id, timestamp, level, template,
-                 Map.new(values, fn {k, v} -> {k, build_value(v, state.db)} end)}
-              end)
-
-            {:ok, ref, state} = add_listener(state, {:logs, run.id}, pid)
-            {:reply, {:ok, ref, messages}, state}
-        end
     end
   end
 
@@ -1672,6 +1655,9 @@ defmodule Coflux.Orchestration.Server do
                       {:ok, assigned_at} =
                         Runs.assign_execution(state.db, execution.execution_id, session_id)
 
+                      # Enrich arguments with resolved references (asset/execution metadata)
+                      enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
+
                       state =
                         state
                         |> update_in(
@@ -1681,7 +1667,7 @@ defmodule Coflux.Orchestration.Server do
                         |> send_session(
                           session_id,
                           {:execute, execution.execution_id, execution.module, execution.target,
-                           arguments}
+                           enriched_arguments, execution.run_external_id, execution.workspace_id}
                         )
 
                       {state, [{execution, assigned_at} | assigned], unassigned}
@@ -2982,6 +2968,13 @@ defmodule Coflux.Orchestration.Server do
 
           {:ok, result} ->
             state = Map.put(state, :waiting, waiting)
+
+            # Enrich value results with resolved references (asset metadata, execution metadata)
+            result =
+              case result do
+                {:value, value} -> {:value, build_value(value, state.db)}
+                other -> other
+              end
 
             Enum.reduce(
               execution_waiting,

@@ -14,6 +14,7 @@ defmodule Coflux.Web do
        [
          {"/.well-known/com.coflux", Handlers.WellKnown, []},
          {"/blobs/:key", Handlers.Blobs, []},
+         {"/logs", Handlers.Logs, []},
          {"/worker", Handlers.Worker, []},
          {"/topics", Handlers.Topics, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},

@@ -1,5 +1,8 @@
 import typing as t
 
+if t.TYPE_CHECKING:
+    from . import models
+
 TargetType = t.Literal["workflow", "task"]
 
 Requires = dict[str, list[str]]
@@ -7,8 +10,8 @@ Requires = dict[str, list[str]]
 Metadata = dict[str, t.Any]
 
 Reference = (
-    tuple[t.Literal["execution"], int]
-    | tuple[t.Literal["asset"], int]
+    tuple[t.Literal["execution"], str, "models.ExecutionMetadata"]
+    | tuple[t.Literal["asset"], str, "models.AssetMetadata"]
     | tuple[t.Literal["fragment"], str, str, int, dict[str, t.Any]]
 )
 

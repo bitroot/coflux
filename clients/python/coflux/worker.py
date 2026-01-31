@@ -13,14 +13,27 @@ from .version import API_VERSION, check_server
 
 def _parse_reference(reference: t.Any) -> types.Reference:
     match reference:
-        case ["execution", execution_id]:
-            return ("execution", execution_id)
-        case ["asset", asset_id]:
-            return ("asset", asset_id)
+        case ["execution", execution_id, run_id, step_id, attempt, module, target]:
+            metadata = models.ExecutionMetadata(
+                run_id=run_id,
+                step_id=step_id,
+                attempt=attempt,
+                module=module,
+                target=target,
+            )
+            return ("execution", execution_id, metadata)
+        case ["asset", external_id, name, total_count, total_size]:
+            metadata = models.AssetMetadata(
+                external_id=external_id,
+                name=name,
+                total_count=total_count,
+                total_size=total_size,
+            )
+            return ("asset", external_id, metadata)
         case ["fragment", serialiser, blob_key, size, metadata]:
             return ("fragment", serialiser, blob_key, size, metadata)
         case other:
-            raise Exception(f"unexpected reference: {other}")
+            raise ValueError(f"Unknown reference format: {other}")
 
 
 def _parse_references(references: list[t.Any]) -> list[types.Reference]:
@@ -50,6 +63,7 @@ class Worker:
         serialiser_configs: list[config.SerialiserConfig],
         blob_threshold: int,
         blob_store_configs: list[config.BlobStoreConfig],
+        log_store_config: config.LogStoreConfig,
         session_id: str,
         targets: dict[str, dict[str, tuple[models.Target, t.Callable]]],
     ):
@@ -62,7 +76,7 @@ class Worker:
             {"execute": self._handle_execute, "abort": self._handle_abort}
         )
         self._execution_manager = execution.Manager(
-            self._connection, serialiser_configs, blob_threshold, blob_store_configs
+            self._connection, serialiser_configs, blob_threshold, blob_store_configs, log_store_config
         )
 
     def __enter__(self):
@@ -72,13 +86,14 @@ class Worker:
         self._execution_manager.abort_all()
 
     async def _handle_execute(self, *args) -> None:
-        (execution_id, module_name, target_name, arguments) = args
+        (execution_id, module_name, target_name, arguments, run_id, workspace_id) = args
         print(f"Handling execute '{target_name}' ({execution_id})...")
         target = self._targets[module_name][target_name][1].__name__
         arguments = [_parse_value(a) for a in arguments]
         loop = asyncio.get_running_loop()
         self._execution_manager.execute(
-            execution_id, module_name, target, arguments, self._server_host, self._secure, loop
+            execution_id, module_name, target, arguments, self._server_host, self._secure, loop,
+            run_id, workspace_id
         )
 
     async def _handle_abort(self, *args) -> None:
