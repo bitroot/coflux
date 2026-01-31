@@ -1,18 +1,30 @@
 defmodule Coflux.Topics.Run do
   use Topical.Topic, route: ["runs", :run_id, :workspace_id]
 
-  alias Coflux.Orchestration
+  alias Coflux.{Auth, Orchestration}
 
   import Coflux.TopicUtils
 
   def connect(params, context) do
-    {:ok, Map.put(params, :project, context.project)}
+    workspace_id = String.to_integer(params.workspace_id)
+
+    if Auth.workspace_allowed?(workspace_id, context.allowed_workspace_ids) do
+      params =
+        params
+        |> Map.put(:project, context.project)
+        |> Map.put(:allowed_workspace_ids, context.allowed_workspace_ids)
+
+      {:ok, params}
+    else
+      {:error, :unauthorized}
+    end
   end
 
   def init(params) do
     project_id = Map.fetch!(params, :project)
     external_run_id = Map.fetch!(params, :run_id)
     workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
+    allowed_workspace_ids = Map.fetch!(params, :allowed_workspace_ids)
 
     case Orchestration.subscribe_run(
            project_id,
@@ -33,14 +45,24 @@ defmodule Coflux.Topics.Run do
           |> Enum.min_by(& &1.created_at)
           |> Map.fetch!(:workspace_id)
 
-        workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
+        # Intersect requested workspaces with allowed workspaces
+        requested_workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
 
-        {:ok,
-         Topic.new(build_run(run, parent, steps, workspace_ids), %{
-           project: project_id,
-           external_run_id: external_run_id,
-           workspace_ids: workspace_ids
-         })}
+        workspace_ids =
+          Enum.filter(requested_workspace_ids, fn ws_id ->
+            Auth.workspace_allowed?(ws_id, allowed_workspace_ids)
+          end)
+
+        if Enum.empty?(workspace_ids) do
+          {:error, :unauthorized}
+        else
+          {:ok,
+           Topic.new(build_run(run, parent, steps, workspace_ids), %{
+             project: project_id,
+             external_run_id: external_run_id,
+             workspace_ids: workspace_ids
+           })}
+        end
     end
   end
 

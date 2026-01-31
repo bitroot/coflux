@@ -5,6 +5,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, :get_workspaces)
   end
 
+  def get_workspace_name(project_id, workspace_id) do
+    call_server(project_id, {:get_workspace_name, workspace_id})
+  end
+
   def create_workspace(project_id, name, base_id) do
     call_server(project_id, {:create_workspace, name, base_id})
   end

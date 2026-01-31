@@ -1,10 +1,16 @@
 defmodule Coflux.Topics.Search do
-  alias Coflux.Orchestration
+  alias Coflux.{Auth, Orchestration}
 
   use Topical.Topic, route: ["search", :workspace_id]
 
   def connect(params, context) do
-    {:ok, Map.put(params, :project, context.project)}
+    workspace_id = String.to_integer(params.workspace_id)
+
+    if Auth.workspace_allowed?(workspace_id, context.allowed_workspace_ids) do
+      {:ok, Map.put(params, :project, context.project)}
+    else
+      {:error, :unauthorized}
+    end
   end
 
   def init(params) do

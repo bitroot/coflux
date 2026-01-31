@@ -219,6 +219,13 @@ defmodule Coflux.Orchestration.Server do
     {:reply, {:ok, workspaces}, state}
   end
 
+  def handle_call({:get_workspace_name, workspace_id}, _from, state) do
+    case Map.fetch(state.workspaces, workspace_id) do
+      {:ok, workspace} -> {:reply, {:ok, workspace.name}, state}
+      :error -> {:reply, {:error, :not_found}, state}
+    end
+  end
+
   def handle_call({:create_workspace, name, base_id}, _from, state) do
     case Workspaces.create_workspace(state.db, name, base_id) do
       {:ok, workspace_id, workspace} ->

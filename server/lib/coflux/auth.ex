@@ -39,6 +39,50 @@ defmodule Coflux.Auth do
     end
   end
 
+  @doc """
+  Resolves the allowed workspace IDs for a token.
+
+  Takes the token, project_id, and a map of workspaces `%{workspace_id => %{name: name, ...}}`.
+
+  Returns:
+  - `{:ok, :all}` if auth is disabled
+  - `{:ok, MapSet.t()}` with allowed workspace IDs
+  - `{:error, :unauthorized}` if token is invalid or project not allowed
+  """
+  def resolve_allowed_workspaces(token, project_id, workspaces) do
+    case Config.auth_mode() do
+      :none ->
+        {:ok, :all}
+
+      :token ->
+        resolve_token_workspaces(token, project_id, workspaces)
+    end
+  end
+
+  @doc """
+  Checks if a workspace ID is in the allowed set.
+
+  Returns `true` if allowed, `false` otherwise.
+  """
+  def workspace_allowed?(_workspace_id, :all), do: true
+
+  def workspace_allowed?(workspace_id, allowed_ids) when is_struct(allowed_ids, MapSet) do
+    MapSet.member?(allowed_ids, workspace_id)
+  end
+
+  @doc """
+  Checks if a workspace name matches the allowed patterns.
+
+  Returns `true` if the name matches any pattern.
+  """
+  def name_matches_patterns?(workspace_name, patterns) do
+    Enum.any?(patterns, fn pattern ->
+      match_workspace_pattern?(workspace_name, pattern)
+    end)
+  end
+
+  # Private functions
+
   defp check_token(nil, _project_id, _workspace_name), do: {:error, :unauthorized}
 
   defp check_token(token, project_id, workspace_name) do
@@ -49,6 +93,34 @@ defmodule Coflux.Auth do
         with :ok <- check_project(project_id, config.projects),
              :ok <- check_workspace(workspace_name, config.workspaces) do
           :ok
+        end
+
+      :error ->
+        {:error, :unauthorized}
+    end
+  end
+
+  defp resolve_token_workspaces(nil, _project_id, _workspaces), do: {:error, :unauthorized}
+
+  defp resolve_token_workspaces(token, project_id, workspaces) do
+    token_hash = hash_token(token)
+
+    case TokensStore.get_token_config(token_hash) do
+      {:ok, config} ->
+        case check_project(project_id, config.projects) do
+          :ok ->
+            allowed_ids =
+              workspaces
+              |> Enum.filter(fn {_id, ws} ->
+                name_matches_patterns?(ws.name, config.workspaces)
+              end)
+              |> Enum.map(fn {id, _ws} -> id end)
+              |> MapSet.new()
+
+            {:ok, allowed_ids}
+
+          error ->
+            error
         end
 
       :error ->
@@ -67,17 +139,11 @@ defmodule Coflux.Auth do
   defp check_workspace(nil, _allowed_workspaces), do: :ok
 
   defp check_workspace(workspace_name, allowed_workspaces) do
-    if workspace_matches?(workspace_name, allowed_workspaces) do
+    if name_matches_patterns?(workspace_name, allowed_workspaces) do
       :ok
     else
       {:error, :unauthorized}
     end
-  end
-
-  defp workspace_matches?(workspace_name, patterns) do
-    Enum.any?(patterns, fn pattern ->
-      match_workspace_pattern?(workspace_name, pattern)
-    end)
   end
 
   defp match_workspace_pattern?(workspace_name, pattern) do

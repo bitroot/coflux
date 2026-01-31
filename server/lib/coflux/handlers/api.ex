@@ -22,10 +22,12 @@ defmodule Coflux.Handlers.Api do
             {:ok, req, opts}
 
           method ->
+            token = get_token(req)
+
             with {:ok, project_id} <- resolve_project(req),
                  :ok <- validate_project(project_id),
-                 :ok <- Auth.check(get_token(req), project_id) do
-              req = handle(req, method, :cowboy_req.path_info(req), project_id)
+                 :ok <- Auth.check(token, project_id) do
+              req = handle(req, method, :cowboy_req.path_info(req), project_id, token)
               {:ok, req, opts}
             else
               {:error, :not_configured} ->
@@ -82,27 +84,70 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_workspaces"], project_id) do
-    case Orchestration.get_workspaces(project_id) do
-      {:ok, workspaces} ->
-        json_response(
-          req,
-          Map.new(workspaces, fn {workspace_id, workspace} ->
-            base_id =
-              if workspace.base_id,
-                do: Integer.to_string(workspace.base_id)
+  # Check workspace auth by name
+  defp check_workspace_auth(token, project_id, workspace_name) do
+    Auth.check(token, project_id, workspace_name)
+  end
 
-            {workspace_id,
-             %{
-               "name" => workspace.name,
-               "baseId" => base_id
-             }}
-          end)
-        )
+  # Check workspace auth by ID (looks up name first)
+  defp check_workspace_auth_by_id(token, project_id, workspace_id) do
+    case Orchestration.get_workspace_name(project_id, workspace_id) do
+      {:ok, workspace_name} ->
+        Auth.check(token, project_id, workspace_name)
+
+      {:error, :not_found} ->
+        {:error, :not_found}
     end
   end
 
-  defp handle(req, "POST", ["create_workspace"], project_id) do
+  # Check auth for new workspace name (used for renames)
+  # If name is nil (not being changed), skip the check
+  defp check_new_name_auth(_token, _project_id, nil), do: :ok
+
+  defp check_new_name_auth(token, project_id, new_name) do
+    Auth.check(token, project_id, new_name)
+  end
+
+  defp handle(req, "GET", ["get_workspaces"], project_id, token) do
+    case Orchestration.get_workspaces(project_id) do
+      {:ok, workspaces} ->
+        # Resolve allowed workspaces and filter
+        case Auth.resolve_allowed_workspaces(token, project_id, workspaces) do
+          {:ok, allowed_workspace_ids} ->
+            # Filter workspaces based on allowed IDs
+            filtered_workspaces =
+              case allowed_workspace_ids do
+                :all ->
+                  workspaces
+
+                ids when is_struct(ids, MapSet) ->
+                  Map.filter(workspaces, fn {workspace_id, _} ->
+                    MapSet.member?(ids, workspace_id)
+                  end)
+              end
+
+            json_response(
+              req,
+              Map.new(filtered_workspaces, fn {workspace_id, workspace} ->
+                base_id =
+                  if workspace.base_id,
+                    do: Integer.to_string(workspace.base_id)
+
+                {workspace_id,
+                 %{
+                   "name" => workspace.name,
+                   "baseId" => base_id
+                 }}
+              end)
+            )
+
+          {:error, :unauthorized} ->
+            json_error_response(req, "unauthorized", status: 401)
+        end
+    end
+  end
+
+  defp handle(req, "POST", ["create_workspace"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -115,29 +160,36 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.create_workspace(
-             project_id,
-             arguments.name,
-             arguments[:base_id]
-           ) do
-        {:ok, workspace_id} ->
-          json_response(req, %{id: workspace_id})
+      # Check if the new workspace name matches allowed patterns
+      case check_workspace_auth(token, project_id, arguments.name) do
+        :ok ->
+          case Orchestration.create_workspace(
+                 project_id,
+                 arguments.name,
+                 arguments[:base_id]
+               ) do
+            {:ok, workspace_id} ->
+              json_response(req, %{id: workspace_id})
 
-        {:error, errors} ->
-          errors =
-            MapUtils.translate_keys(errors, %{
-              name: "name",
-              base_id: "baseId"
-            })
+            {:error, errors} ->
+              errors =
+                MapUtils.translate_keys(errors, %{
+                  name: "name",
+                  base_id: "baseId"
+                })
 
-          json_error_response(req, "bad_request", details: errors)
+              json_error_response(req, "bad_request", details: errors)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["update_workspace"], project_id) do
+  defp handle(req, "POST", ["update_workspace"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -151,149 +203,199 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.update_workspace(
-             project_id,
-             arguments.workspace_id,
-             Map.take(arguments, [:name, :base_id])
-           ) do
-        :ok ->
-          :cowboy_req.reply(204, req)
+      # Check auth for current workspace
+      with :ok <- check_workspace_auth_by_id(token, project_id, arguments.workspace_id),
+           # If renaming, also check auth for new name
+           :ok <- check_new_name_auth(token, project_id, arguments[:name]) do
+        case Orchestration.update_workspace(
+               project_id,
+               arguments.workspace_id,
+               Map.take(arguments, [:name, :base_id])
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
 
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+
+          {:error, errors} ->
+            errors =
+              MapUtils.translate_keys(errors, %{
+                name: "name",
+                base_id: "baseId"
+              })
+
+            json_error_response(req, "bad_request", details: errors)
+        end
+      else
         {:error, :not_found} ->
           json_error_response(req, "not_found", status: 404)
 
-        {:error, errors} ->
-          errors =
-            MapUtils.translate_keys(errors, %{
-              name: "name",
-              base_id: "baseId"
-            })
-
-          json_error_response(req, "bad_request", details: errors)
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["pause_workspace"], project_id) do
+  defp handle(req, "POST", ["pause_workspace"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.pause_workspace(
-             project_id,
-             arguments.workspace_id
-           ) do
+      case check_workspace_auth_by_id(token, project_id, arguments.workspace_id) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.pause_workspace(
+                 project_id,
+                 arguments.workspace_id
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
+
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
 
         {:error, :not_found} ->
           json_error_response(req, "not_found", status: 404)
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["resume_workspace"], project_id) do
+  defp handle(req, "POST", ["resume_workspace"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_workspace(
-             project_id,
-             arguments.workspace_id
-           ) do
+      case check_workspace_auth_by_id(token, project_id, arguments.workspace_id) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.resume_workspace(
+                 project_id,
+                 arguments.workspace_id
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
+
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
 
         {:error, :not_found} ->
           json_error_response(req, "not_found", status: 404)
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["archive_workspace"], project_id) do
+  defp handle(req, "POST", ["archive_workspace"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_id: {"workspaceId", &parse_numeric_id/1}
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_workspace(
-             project_id,
-             arguments.workspace_id
-           ) do
+      case check_workspace_auth_by_id(token, project_id, arguments.workspace_id) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.archive_workspace(
+                 project_id,
+                 arguments.workspace_id
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
 
-        {:error, :descendants} ->
-          json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
+            {:error, :descendants} ->
+              json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
+
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
 
         {:error, :not_found} ->
           json_error_response(req, "not_found", status: 404)
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["get_pools"], project_id) do
+  defp handle(req, "GET", ["get_pools"], project_id, token) do
     qs = :cowboy_req.parse_qs(req)
     workspace_name = get_query_param(qs, "workspace")
 
-    case Orchestration.get_pools(project_id, workspace_name) do
-      {:ok, pools} ->
-        json_response(
-          req,
-          Map.new(pools, fn {pool_name, pool} ->
-            {
-              pool_name,
-              %{
-                "provides" => pool.provides,
-                "modules" => pool.modules,
-                "launcherType" => if(pool.launcher, do: pool.launcher.type)
-              }
-            }
-          end)
-        )
+    case check_workspace_auth(token, project_id, workspace_name) do
+      :ok ->
+        case Orchestration.get_pools(project_id, workspace_name) do
+          {:ok, pools} ->
+            json_response(
+              req,
+              Map.new(pools, fn {pool_name, pool} ->
+                {
+                  pool_name,
+                  %{
+                    "provides" => pool.provides,
+                    "modules" => pool.modules,
+                    "launcherType" => if(pool.launcher, do: pool.launcher.type)
+                  }
+                }
+              end)
+            )
 
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "workspace_not_found", status: 404)
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "workspace_not_found", status: 404)
+        end
+
+      {:error, :unauthorized} ->
+        json_error_response(req, "unauthorized", status: 401)
     end
   end
 
-  defp handle(req, "GET", ["get_pool"], project_id) do
+  defp handle(req, "GET", ["get_pool"], project_id, token) do
     qs = :cowboy_req.parse_qs(req)
     workspace_name = get_query_param(qs, "workspace")
     pool_name = get_query_param(qs, "pool")
 
-    case Orchestration.get_pools(project_id, workspace_name) do
-      {:ok, pools} ->
-        case Map.fetch(pools, pool_name) do
-          {:ok, pool} ->
-            json_response(
-              req,
-              %{
-                "provides" => pool.provides,
-                "modules" => pool.modules,
-                "launcher" => format_launcher(pool.launcher)
-              }
-            )
+    case check_workspace_auth(token, project_id, workspace_name) do
+      :ok ->
+        case Orchestration.get_pools(project_id, workspace_name) do
+          {:ok, pools} ->
+            case Map.fetch(pools, pool_name) do
+              {:ok, pool} ->
+                json_response(
+                  req,
+                  %{
+                    "provides" => pool.provides,
+                    "modules" => pool.modules,
+                    "launcher" => format_launcher(pool.launcher)
+                  }
+                )
 
-          :error ->
-            json_error_response(req, "not_found", status: 404)
+              :error ->
+                json_error_response(req, "not_found", status: 404)
+            end
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "workspace_not_found", status: 404)
         end
 
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "workspace_not_found", status: 404)
+      {:error, :unauthorized} ->
+        json_error_response(req, "unauthorized", status: 401)
     end
   end
 
@@ -309,7 +411,7 @@ defmodule Coflux.Handlers.Api do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp handle(req, "POST", ["update_pool"], project_id) do
+  defp handle(req, "POST", ["update_pool"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -318,24 +420,30 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.update_pool(
-             project_id,
-             arguments.workspace_name,
-             arguments.pool_name,
-             arguments.pool
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.update_pool(
+                 project_id,
+                 arguments.workspace_name,
+                 arguments.pool_name,
+                 arguments.pool
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["stop_worker"], project_id) do
+  defp handle(req, "POST", ["stop_worker"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -343,23 +451,29 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.stop_worker(
-             project_id,
-             arguments.workspace_name,
-             arguments.worker_id
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.stop_worker(
+                 project_id,
+                 arguments.workspace_name,
+                 arguments.worker_id
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["resume_worker"], project_id) do
+  defp handle(req, "POST", ["resume_worker"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -367,23 +481,29 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.resume_worker(
-             project_id,
-             arguments.workspace_name,
-             arguments.worker_id
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.resume_worker(
+                 project_id,
+                 arguments.workspace_name,
+                 arguments.worker_id
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
+            {:error, :not_found} ->
+              json_error_response(req, "not_found", status: 404)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["register_manifests"], project_id) do
+  defp handle(req, "POST", ["register_manifests"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -391,20 +511,26 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.register_manifests(
-             project_id,
-             arguments.workspace_name,
-             arguments.manifests
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.register_manifests(
+                 project_id,
+                 arguments.workspace_name,
+                 arguments.manifests
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["archive_module"], project_id) do
+  defp handle(req, "POST", ["archive_module"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -412,35 +538,47 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.archive_module(
-             project_id,
-             arguments.workspace_name,
-             arguments.module_name
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          :cowboy_req.reply(204, req)
+          case Orchestration.archive_module(
+                 project_id,
+                 arguments.workspace_name,
+                 arguments.module_name
+               ) do
+            :ok ->
+              :cowboy_req.reply(204, req)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["get_workflow"], project_id) do
+  defp handle(req, "GET", ["get_workflow"], project_id, token) do
     qs = :cowboy_req.parse_qs(req)
     workspace_name = get_query_param(qs, "workspace")
     module = get_query_param(qs, "module")
     target_name = get_query_param(qs, "target")
 
-    case Orchestration.get_workflow(project_id, workspace_name, module, target_name) do
-      {:ok, nil} ->
-        json_error_response(req, "not_found", status: 404)
+    case check_workspace_auth(token, project_id, workspace_name) do
+      :ok ->
+        case Orchestration.get_workflow(project_id, workspace_name, module, target_name) do
+          {:ok, nil} ->
+            json_error_response(req, "not_found", status: 404)
 
-      {:ok, workflow} ->
-        json_response(req, compose_workflow(workflow))
+          {:ok, workflow} ->
+            json_response(req, compose_workflow(workflow))
+        end
+
+      {:error, :unauthorized} ->
+        json_error_response(req, "unauthorized", status: 401)
     end
   end
 
-  defp handle(req, "POST", ["submit_workflow"], project_id) do
+  defp handle(req, "POST", ["submit_workflow"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -462,56 +600,69 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      case Orchestration.start_run(
-             project_id,
-             arguments.module,
-             arguments.target,
-             :workflow,
-             arguments.arguments,
-             workspace: arguments.workspace_name,
-             wait_for: arguments[:wait_for],
-             cache: arguments[:cache],
-             defer: arguments[:defer],
-             delay: arguments[:delay] || 0,
-             retries: arguments[:retries],
-             recurrent: arguments[:recurrent] == true,
-             requires: arguments[:requires]
-           ) do
-        {:ok, run_id, step_id, execution_id} ->
-          json_response(req, %{
-            "runId" => run_id,
-            "stepId" => step_id,
-            "executionId" => execution_id
-          })
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
+        :ok ->
+          case Orchestration.start_run(
+                 project_id,
+                 arguments.module,
+                 arguments.target,
+                 :workflow,
+                 arguments.arguments,
+                 workspace: arguments.workspace_name,
+                 wait_for: arguments[:wait_for],
+                 cache: arguments[:cache],
+                 defer: arguments[:defer],
+                 delay: arguments[:delay] || 0,
+                 retries: arguments[:retries],
+                 recurrent: arguments[:recurrent] == true,
+                 requires: arguments[:requires]
+               ) do
+            {:ok, run_id, step_id, execution_id} ->
+              json_response(req, %{
+                "runId" => run_id,
+                "stepId" => step_id,
+                "executionId" => execution_id
+              })
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["cancel_execution"], project_id) do
+  defp handle(req, "POST", ["cancel_execution"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
-        execution_id: "executionId"
+        execution_id: "executionId",
+        workspace_name: "workspaceName"
       })
 
-    # TODO: handle error? (or don't parse here?)
-    execution_id = String.to_integer(arguments.execution_id)
-
     if Enum.empty?(errors) do
-      case Orchestration.cancel_execution(
-             project_id,
-             execution_id
-           ) do
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
         :ok ->
-          json_response(req, %{})
+          # TODO: handle error? (or don't parse here?)
+          execution_id = String.to_integer(arguments.execution_id)
+
+          case Orchestration.cancel_execution(
+                 project_id,
+                 execution_id
+               ) do
+            :ok ->
+              json_response(req, %{})
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "POST", ["rerun_step"], project_id) do
+  defp handle(req, "POST", ["rerun_step"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(req, %{
         workspace_name: "workspaceName",
@@ -519,54 +670,76 @@ defmodule Coflux.Handlers.Api do
       })
 
     if Enum.empty?(errors) do
-      case Orchestration.rerun_step(
-             project_id,
-             arguments.step_id,
-             arguments.workspace_name
-           ) do
-        {:ok, execution_id, attempt} ->
-          json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
+        :ok ->
+          case Orchestration.rerun_step(
+                 project_id,
+                 arguments.step_id,
+                 arguments.workspace_name
+               ) do
+            {:ok, execution_id, attempt} ->
+              json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
 
-        {:error, :workspace_invalid} ->
-          json_error_response(req, "bad_request", details: %{"workspace" => "invalid"})
+            {:error, :workspace_invalid} ->
+              json_error_response(req, "bad_request", details: %{"workspace" => "invalid"})
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, "GET", ["search"], project_id) do
+  defp handle(req, "GET", ["search"], project_id, token) do
     qs = :cowboy_req.parse_qs(req)
     # TODO: handle parse error
     {:ok, workspace_id} = parse_numeric_id(get_query_param(qs, "workspaceId"))
     query = get_query_param(qs, "query")
 
-    case Topical.execute(
-           Coflux.TopicalRegistry,
-           ["search", workspace_id],
-           "query",
-           {query},
-           %{project: project_id}
-         ) do
-      {:ok, matches} ->
-        json_response(req, %{"matches" => matches})
-    end
-  end
+    case check_workspace_auth_by_id(token, project_id, workspace_id) do
+      :ok ->
+        case Topical.execute(
+               Coflux.TopicalRegistry,
+               ["search", workspace_id],
+               "query",
+               {query},
+               %{project: project_id}
+             ) do
+          {:ok, matches} ->
+            json_response(req, %{"matches" => matches})
+        end
 
-  defp handle(req, "GET", ["get_asset"], project_id) do
-    qs = :cowboy_req.parse_qs(req)
-    asset_id = get_query_param(qs, "asset")
-
-    case Orchestration.get_asset_by_external_id(project_id, asset_id) do
       {:error, :not_found} ->
         json_error_response(req, "not_found", status: 404)
 
-      {:ok, name, entries} ->
-        json_response(req, compose_asset(name, entries))
+      {:error, :unauthorized} ->
+        json_error_response(req, "unauthorized", status: 401)
     end
   end
 
-  defp handle(req, "POST", ["create_session"], project_id) do
+  defp handle(req, "GET", ["get_asset"], project_id, token) do
+    qs = :cowboy_req.parse_qs(req)
+    asset_id = get_query_param(qs, "asset")
+    workspace_name = get_query_param(qs, "workspace")
+
+    case check_workspace_auth(token, project_id, workspace_name) do
+      :ok ->
+        case Orchestration.get_asset_by_external_id(project_id, asset_id) do
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+
+          {:ok, name, entries} ->
+            json_response(req, compose_asset(name, entries))
+        end
+
+      {:error, :unauthorized} ->
+        json_error_response(req, "unauthorized", status: 401)
+    end
+  end
+
+  defp handle(req, "POST", ["create_session"], project_id, token) do
     {:ok, arguments, errors, req} =
       read_arguments(
         req,
@@ -580,26 +753,32 @@ defmodule Coflux.Handlers.Api do
       )
 
     if Enum.empty?(errors) do
-      opts =
-        [
-          provides: arguments[:provides],
-          concurrency: arguments[:concurrency]
-        ]
-        |> Enum.reject(fn {_, v} -> is_nil(v) end)
+      case check_workspace_auth(token, project_id, arguments.workspace_name) do
+        :ok ->
+          opts =
+            [
+              provides: arguments[:provides],
+              concurrency: arguments[:concurrency]
+            ]
+            |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-      case Orchestration.create_session(project_id, arguments.workspace_name, opts) do
-        {:ok, session_id} ->
-          json_response(req, %{"sessionId" => session_id})
+          case Orchestration.create_session(project_id, arguments.workspace_name, opts) do
+            {:ok, session_id} ->
+              json_response(req, %{"sessionId" => session_id})
 
-        {:error, :workspace_invalid} ->
-          json_error_response(req, "not_found", status: 404)
+            {:error, :workspace_invalid} ->
+              json_error_response(req, "not_found", status: 404)
+          end
+
+        {:error, :unauthorized} ->
+          json_error_response(req, "unauthorized", status: 401)
       end
     else
       json_error_response(req, "bad_request", details: errors)
     end
   end
 
-  defp handle(req, _method, _path, _project) do
+  defp handle(req, _method, _path, _project, _token) do
     json_error_response(req, "not_found", status: 404)
   end
 
