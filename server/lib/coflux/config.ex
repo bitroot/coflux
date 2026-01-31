@@ -27,6 +27,7 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
+    :persistent_term.put(:coflux_auth_mode, parse_auth_mode())
     :ok
   end
 
@@ -62,6 +63,16 @@ defmodule Coflux.Config do
     :persistent_term.get(:coflux_allowed_origins)
   end
 
+  @doc """
+  Returns the authentication mode (:token or :none).
+
+  - :token (default) - All requests require valid token
+  - :none - No authentication required
+  """
+  def auth_mode do
+    :persistent_term.get(:coflux_auth_mode)
+  end
+
   defp parse_data_dir do
     System.get_env("COFLUX_DATA_DIR", Path.join(File.cwd!(), "data"))
   end
@@ -78,6 +89,13 @@ defmodule Coflux.Config do
         |> String.split(",")
         |> Enum.map(&String.trim/1)
         |> Enum.reject(&(&1 == ""))
+    end
+  end
+
+  defp parse_auth_mode do
+    case System.get_env("COFLUX_AUTH_MODE") do
+      "none" -> :none
+      _ -> :token
     end
   end
 end

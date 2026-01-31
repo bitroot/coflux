@@ -14,7 +14,7 @@ defmodule Coflux.Handlers.Worker do
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Config, ProjectStore, Version}
+  alias Coflux.{Orchestration, Config, ProjectsStore, Version}
 
   @protocol_version "v1"
 
@@ -64,7 +64,7 @@ defmodule Coflux.Handlers.Worker do
     # Validate project against whitelist when using subdomain routing
     project_valid =
       if Config.base_domain() do
-        ProjectStore.exists?(project_id)
+        ProjectsStore.exists?(project_id)
       else
         true
       end

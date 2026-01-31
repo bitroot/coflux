@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Auth, Orchestration, Config, ProjectStore, MapUtils, Version}
+  alias Coflux.{Auth, Orchestration, Config, ProjectsStore, MapUtils, Version}
 
   @max_parameters 20
 
@@ -72,7 +72,7 @@ defmodule Coflux.Handlers.Api do
 
   defp validate_project(project_id) do
     if Config.base_domain() do
-      if ProjectStore.exists?(project_id) do
+      if ProjectsStore.exists?(project_id) do
         :ok
       else
         {:error, :project_not_found}

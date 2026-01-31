@@ -1,4 +1,4 @@
-defmodule Coflux.ProjectStore do
+defmodule Coflux.ProjectsStore do
   @moduledoc """
   GenServer that owns the project configuration ETS table.
 
@@ -9,18 +9,12 @@ defmodule Coflux.ProjectStore do
   Project file format:
   ```json
   {
-    "acme": {
-      "tokens": ["<sha256-hash-1>", "<sha256-hash-2>"]
-    },
-    "demo": {}
+    "test1": {},
+    "test2": {}
   }
   ```
 
   - Key: project name (string)
-  - tokens: controls access to the project:
-    - missing/null: open access (no token auth)
-    - [] (empty array): locked (no valid tokens)
-    - ["hash1", ...]: restricted to listed token hashes (SHA-256, hex, lowercase)
   """
 
   use GenServer
@@ -47,18 +41,6 @@ defmodule Coflux.ProjectStore do
     end
   end
 
-  @doc """
-  Gets the list of valid token hashes for a project. Reads directly from ETS.
-
-  Returns `{:ok, [hash1, hash2, ...]}` if project exists, `:error` otherwise.
-  """
-  def get_tokens(project) do
-    case :ets.lookup(@table, project) do
-      [{^project, config}] -> {:ok, config.tokens}
-      [] -> :error
-    end
-  end
-
   # Server callbacks
 
   @impl true
@@ -67,11 +49,11 @@ defmodule Coflux.ProjectStore do
 
     projects = load_projects()
 
-    # Add COFLUX_PROJECT if set and not already in file (with open access)
+    # Add COFLUX_PROJECT if set and not already in file
     projects =
       case Config.project() do
         nil -> projects
-        project_id -> Map.put_new(projects, project_id, %{tokens: nil})
+        project_id -> Map.put_new(projects, project_id, %{})
       end
 
     for {project, config} <- projects do
@@ -96,17 +78,6 @@ defmodule Coflux.ProjectStore do
     end
   end
 
-  defp parse_config(config) when is_map(config) do
-    # nil/missing = open access, [] = locked, [...] = restricted
-    tokens =
-      case Map.get(config, "tokens") do
-        nil -> nil
-        list when is_list(list) -> list
-        _ -> nil
-      end
-
-    %{tokens: tokens}
-  end
-
-  defp parse_config(_), do: %{tokens: nil}
+  defp parse_config(config) when is_map(config), do: %{}
+  defp parse_config(_), do: %{}
 end
