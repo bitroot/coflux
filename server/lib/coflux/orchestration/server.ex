@@ -562,9 +562,9 @@ defmodule Coflux.Orchestration.Server do
     with {:ok, external_id, secret} <- Sessions.parse_token(token),
          {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
          session = Map.fetch!(state.sessions, session_id),
-         true <- Sessions.verify_secret(secret, session.secret_hash),
+         :ok <- verify_session_secret(secret, session.secret_hash),
          {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
-         true <- session.workspace_id == workspace_id do
+         :ok <- require_workspace_match(session.workspace_id, workspace_id) do
       activated_at =
         if is_nil(session.activated_at) do
           {:ok, now} = Sessions.activate_session(state.db, session_id)
@@ -639,12 +639,14 @@ defmodule Coflux.Orchestration.Server do
       :error ->
         {:reply, {:error, :session_invalid}, state}
 
+      {:error, :session_invalid} ->
+        {:reply, {:error, :session_invalid}, state}
+
       {:error, :workspace_invalid} ->
         {:reply, {:error, :workspace_mismatch}, state}
 
-      # Token verification failed or workspace mismatch
-      false ->
-        {:reply, {:error, :session_invalid}, state}
+      {:error, :workspace_mismatch} ->
+        {:reply, {:error, :workspace_mismatch}, state}
     end
   end
 
@@ -876,14 +878,14 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:cancel_execution, workspace_name, execution_id}, _from, state) do
     with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
          {:ok, exec_workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id),
-         true <- exec_workspace_id == workspace_id do
+         :ok <- require_workspace_match(exec_workspace_id, workspace_id) do
       do_cancel_execution(state, execution_id)
     else
-      false ->
-        {:reply, {:error, :workspace_mismatch}, state}
-
       {:error, :workspace_invalid} ->
         {:reply, {:error, :not_found}, state}
+
+      {:error, :workspace_mismatch} ->
+        {:reply, {:error, :workspace_mismatch}, state}
 
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
@@ -2213,6 +2215,14 @@ defmodule Coflux.Orchestration.Server do
       :error ->
         {:error, :workspace_invalid}
     end
+  end
+
+  defp verify_session_secret(secret, secret_hash) do
+    if Sessions.verify_secret(secret, secret_hash), do: :ok, else: {:error, :session_invalid}
+  end
+
+  defp require_workspace_match(workspace_id, expected_workspace_id) do
+    if workspace_id == expected_workspace_id, do: :ok, else: {:error, :workspace_mismatch}
   end
 
   defp is_workspace_ancestor?(state, maybe_ancestor_id, workspace_id) do

@@ -2,7 +2,7 @@ defmodule Coflux.Auth do
   @moduledoc """
   Handles token authentication.
 
-  Token access is configured in $COFLUX_DATA_DIR/tokens.json:
+  Token access is configured in $COFLUX_DATA_DIR/config/tokens.json:
   ```json
   {
     "e3044207e9a26a59388c7224fc3f3c01...": {
@@ -67,8 +67,6 @@ defmodule Coflux.Auth do
   end
 
   defp hash_token(token) do
-    :sha256
-    |> :crypto.hash(token)
-    |> Base.encode16(case: :lower)
+    :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
   end
 end

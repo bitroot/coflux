@@ -195,7 +195,11 @@ defmodule Coflux.Handlers.Utils do
         end
       )
 
-    {:ok, values, errors, req}
+    if Enum.empty?(errors) do
+      {:ok, values, req}
+    else
+      {:error, errors, req}
+    end
   end
 
   defp merge_error(errors, key, error) do

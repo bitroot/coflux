@@ -84,35 +84,27 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # Check if access allows writing to the given workspace
-  defp can_write_workspace?(%{workspaces: :all}, _workspace_name), do: true
+  # Check if access grants operator permissions for the given workspace
+  defp is_operator?(%{workspaces: :all}, _workspace), do: true
 
-  defp can_write_workspace?(%{workspaces: patterns}, workspace_name) do
-    Enum.any?(patterns, fn pattern ->
-      cond do
-        pattern == "*" -> true
-        pattern == workspace_name -> true
-        String.ends_with?(pattern, "/*") ->
-          prefix = String.slice(pattern, 0..-3//1)
-          workspace_name == prefix or String.starts_with?(workspace_name, prefix <> "/")
-        true -> false
-      end
-    end)
+  defp is_operator?(%{workspaces: patterns}, workspace) do
+    Enum.any?(patterns, &workspace_matches?(workspace, &1))
   end
 
-  # Check workspace auth by ID (looks up name first)
-  defp check_workspace_auth_by_id(access, project_id, workspace_id) do
-    case Orchestration.get_workspace_name(project_id, workspace_id) do
-      {:ok, workspace_name} ->
-        if can_write_workspace?(access, workspace_name) do
-          :ok
-        else
-          {:error, :forbidden}
-        end
+  defp workspace_matches?(_workspace, "*"), do: true
+  defp workspace_matches?(workspace, workspace), do: true
 
-      {:error, :not_found} ->
-        {:error, :not_found}
+  defp workspace_matches?(workspace, pattern) do
+    if String.ends_with?(pattern, "/*") do
+      # Slice off the "*" to keep "prefix/", then check starts_with?
+      String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
+    else
+      false
     end
+  end
+
+  defp require_operator(access, workspace) do
+    if is_operator?(access, workspace), do: :ok, else: {:error, :forbidden}
   end
 
   defp handle(req, "GET", ["get_access"], _project_id, %{workspaces: workspaces}) do
@@ -141,194 +133,121 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["create_workspace"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          name: "name"
-        },
-        %{
-          base_id: {"baseId", &parse_numeric_id(&1, false)}
-        }
-      )
+    case read_arguments(req, %{name: "name"}, %{base_id: {"baseId", &parse_numeric_id(&1, false)}}) do
+      {:ok, arguments, req} ->
+        # Check if the new workspace name matches allowed patterns
+        if is_operator?(access, arguments.name) do
+          case Orchestration.create_workspace(project_id, arguments.name, arguments[:base_id]) do
+            {:ok, workspace_id} ->
+              json_response(req, %{id: workspace_id})
 
-    if Enum.empty?(errors) do
-      # Check if the new workspace name matches allowed patterns
-      if can_write_workspace?(access, arguments.name) do
-        case Orchestration.create_workspace(
-               project_id,
-               arguments.name,
-               arguments[:base_id]
-             ) do
-          {:ok, workspace_id} ->
-            json_response(req, %{id: workspace_id})
+            {:error, field_errors} ->
+              field_errors =
+                MapUtils.translate_keys(field_errors, %{name: "name", base_id: "baseId"})
 
-          {:error, errors} ->
-            errors =
-              MapUtils.translate_keys(errors, %{
-                name: "name",
-                base_id: "baseId"
-              })
-
-            json_error_response(req, "bad_request", details: errors)
+              json_error_response(req, "bad_request", details: field_errors)
+          end
+        else
+          json_error_response(req, "bad_request", details: %{"name" => "restricted"})
         end
-      else
-        json_error_response(req, "bad_request", details: %{"name" => "restricted"})
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["update_workspace"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          workspace_id: {"workspaceId", &parse_numeric_id/1}
-        },
-        %{
-          name: "name",
-          base_id: {"baseId", &parse_numeric_id(&1, false)}
-        }
-      )
+    case read_arguments(
+           req,
+           %{workspace_id: {"workspaceId", &parse_numeric_id/1}},
+           %{name: "name", base_id: {"baseId", &parse_numeric_id(&1, false)}}
+         ) do
+      {:ok, arguments, req} ->
+        with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
+             :ok <- require_operator(access, workspace),
+             :ok <- check_rename_allowed(access, arguments[:name]),
+             :ok <- Orchestration.update_workspace(project_id, arguments.workspace_id, Map.take(arguments, [:name, :base_id])) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
 
-    if Enum.empty?(errors) do
-      # Check auth for current workspace
-      case check_workspace_auth_by_id(access, project_id, arguments.workspace_id) do
-        :ok ->
-          # If renaming, check auth for new name - return validation error if restricted
-          new_name = arguments[:name]
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
 
-          if is_nil(new_name) or can_write_workspace?(access, new_name) do
-            case Orchestration.update_workspace(
-                   project_id,
-                   arguments.workspace_id,
-                   Map.take(arguments, [:name, :base_id])
-                 ) do
-              :ok ->
-                :cowboy_req.reply(204, req)
-
-              {:error, :not_found} ->
-                json_error_response(req, "not_found", status: 404)
-
-              {:error, errors} ->
-                errors =
-                  MapUtils.translate_keys(errors, %{
-                    name: "name",
-                    base_id: "baseId"
-                  })
-
-                json_error_response(req, "bad_request", details: errors)
-            end
-          else
+          {:error, :name_restricted} ->
             json_error_response(req, "bad_request", details: %{"name" => "restricted"})
-          end
 
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
+          {:error, field_errors} when is_map(field_errors) ->
+            field_errors = MapUtils.translate_keys(field_errors, %{name: "name", base_id: "baseId"})
+            json_error_response(req, "bad_request", details: field_errors)
+        end
 
-        {:error, :forbidden} ->
-          json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
+  defp check_rename_allowed(_access, nil), do: :ok
+
+  defp check_rename_allowed(access, new_name) do
+    if is_operator?(access, new_name), do: :ok, else: {:error, :name_restricted}
+  end
+
   defp handle(req, "POST", ["pause_workspace"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
-      })
+    case read_arguments(req, %{workspace_id: {"workspaceId", &parse_numeric_id/1}}) do
+      {:ok, arguments, req} ->
+        with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
+             :ok <- require_operator(access, workspace),
+             :ok <- Orchestration.pause_workspace(project_id, arguments.workspace_id) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
 
-    if Enum.empty?(errors) do
-      case check_workspace_auth_by_id(access, project_id, arguments.workspace_id) do
-        :ok ->
-          case Orchestration.pause_workspace(
-                 project_id,
-                 arguments.workspace_id
-               ) do
-            :ok ->
-              :cowboy_req.reply(204, req)
-
-            {:error, :not_found} ->
-              json_error_response(req, "not_found", status: 404)
-          end
-
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-
-        {:error, :forbidden} ->
-          json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["resume_workspace"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
-      })
+    case read_arguments(req, %{workspace_id: {"workspaceId", &parse_numeric_id/1}}) do
+      {:ok, arguments, req} ->
+        with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
+             :ok <- require_operator(access, workspace),
+             :ok <- Orchestration.resume_workspace(project_id, arguments.workspace_id) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
 
-    if Enum.empty?(errors) do
-      case check_workspace_auth_by_id(access, project_id, arguments.workspace_id) do
-        :ok ->
-          case Orchestration.resume_workspace(
-                 project_id,
-                 arguments.workspace_id
-               ) do
-            :ok ->
-              :cowboy_req.reply(204, req)
-
-            {:error, :not_found} ->
-              json_error_response(req, "not_found", status: 404)
-          end
-
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-
-        {:error, :forbidden} ->
-          json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["archive_workspace"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_id: {"workspaceId", &parse_numeric_id/1}
-      })
+    case read_arguments(req, %{workspace_id: {"workspaceId", &parse_numeric_id/1}}) do
+      {:ok, arguments, req} ->
+        with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
+             :ok <- require_operator(access, workspace),
+             :ok <- Orchestration.archive_workspace(project_id, arguments.workspace_id) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :descendants} ->
+            json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
 
-    if Enum.empty?(errors) do
-      case check_workspace_auth_by_id(access, project_id, arguments.workspace_id) do
-        :ok ->
-          case Orchestration.archive_workspace(
-                 project_id,
-                 arguments.workspace_id
-               ) do
-            :ok ->
-              :cowboy_req.reply(204, req)
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
 
-            {:error, :descendants} ->
-              json_error_response(req, "bad_request", details: %{"workspaceId" => "has_dependencies"})
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+        end
 
-            {:error, :not_found} ->
-              json_error_response(req, "not_found", status: 404)
-          end
-
-        {:error, :not_found} ->
-          json_error_response(req, "not_found", status: 404)
-
-        {:error, :forbidden} ->
-          json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
@@ -397,138 +316,96 @@ defmodule Coflux.Handlers.Api do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp handle(req, "POST", ["update_pool"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        pool_name: {"poolName", &parse_pool_name/1},
-        pool: {"pool", &parse_pool/1}
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.update_pool(
-               project_id,
-               arguments.workspace_name,
-               arguments.pool_name,
-               arguments.pool
-             ) do
-          :ok ->
-            :cowboy_req.reply(204, req)
-
-          {:error, :not_found} ->
-            json_error_response(req, "not_found", status: 404)
+    case read_arguments(req, %{
+           workspace_name: "workspaceName",
+           pool_name: {"poolName", &parse_pool_name/1},
+           pool: {"pool", &parse_pool/1}
+         }) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.update_pool(project_id, arguments.workspace_name, arguments.pool_name, arguments.pool) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["stop_worker"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        worker_id: {"workerId", &parse_numeric_id/1}
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.stop_worker(
-               project_id,
-               arguments.workspace_name,
-               arguments.worker_id
-             ) do
-          :ok ->
-            :cowboy_req.reply(204, req)
-
-          {:error, :not_found} ->
-            json_error_response(req, "not_found", status: 404)
+    case read_arguments(req, %{
+           workspace_name: "workspaceName",
+           worker_id: {"workerId", &parse_numeric_id/1}
+         }) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.stop_worker(project_id, arguments.workspace_name, arguments.worker_id) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["resume_worker"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        worker_id: {"workerId", &parse_numeric_id/1}
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.resume_worker(
-               project_id,
-               arguments.workspace_name,
-               arguments.worker_id
-             ) do
-          :ok ->
-            :cowboy_req.reply(204, req)
-
-          {:error, :not_found} ->
-            json_error_response(req, "not_found", status: 404)
+    case read_arguments(req, %{
+           workspace_name: "workspaceName",
+           worker_id: {"workerId", &parse_numeric_id/1}
+         }) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.resume_worker(project_id, arguments.workspace_name, arguments.worker_id) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["register_manifests"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        manifests: {"manifests", &parse_manifests/1}
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.register_manifests(
-               project_id,
-               arguments.workspace_name,
-               arguments.manifests
-             ) do
-          :ok ->
-            :cowboy_req.reply(204, req)
+    case read_arguments(req, %{
+           workspace_name: "workspaceName",
+           manifests: {"manifests", &parse_manifests/1}
+         }) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.register_manifests(project_id, arguments.workspace_name, arguments.manifests) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["archive_module"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        module_name: "moduleName"
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.archive_module(
-               project_id,
-               arguments.workspace_name,
-               arguments.module_name
-             ) do
-          :ok ->
-            :cowboy_req.reply(204, req)
+    case read_arguments(req, %{
+           workspace_name: "workspaceName",
+           module_name: "moduleName"
+         }) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.archive_module(project_id, arguments.workspace_name, arguments.module_name) do
+          :cowboy_req.reply(204, req)
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
@@ -548,77 +425,68 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["submit_workflow"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          module: "module",
-          target: "target",
-          workspace_name: "workspaceName",
-          arguments: {"arguments", &parse_arguments/1}
-        },
-        %{
-          wait_for: {"waitFor", &parse_indexes/1},
-          cache: {"cache", &parse_cache/1},
-          defer: {"defer", &parse_defer/1},
-          delay: {"delay", &parse_integer(&1, optional: true)},
-          retries: {"retries", &parse_retries/1},
-          recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
-          requires: {"requires", &parse_tag_set/1}
-        }
-      )
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.start_run(
-               project_id,
-               arguments.module,
-               arguments.target,
-               :workflow,
-               arguments.arguments,
-               workspace: arguments.workspace_name,
-               wait_for: arguments[:wait_for],
-               cache: arguments[:cache],
-               defer: arguments[:defer],
-               delay: arguments[:delay] || 0,
-               retries: arguments[:retries],
-               recurrent: arguments[:recurrent] == true,
-               requires: arguments[:requires]
-             ) do
-          {:ok, run_id, step_id, execution_id} ->
-            json_response(req, %{
-              "runId" => run_id,
-              "stepId" => step_id,
-              "executionId" => execution_id
-            })
+    case read_arguments(
+           req,
+           %{
+             module: "module",
+             target: "target",
+             workspace_name: "workspaceName",
+             arguments: {"arguments", &parse_arguments/1}
+           },
+           %{
+             wait_for: {"waitFor", &parse_indexes/1},
+             cache: {"cache", &parse_cache/1},
+             defer: {"defer", &parse_defer/1},
+             delay: {"delay", &parse_integer(&1, optional: true)},
+             retries: {"retries", &parse_retries/1},
+             recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
+             requires: {"requires", &parse_tag_set/1}
+           }
+         ) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             {:ok, run_id, step_id, execution_id} <-
+               Orchestration.start_run(
+                 project_id,
+                 arguments.module,
+                 arguments.target,
+                 :workflow,
+                 arguments.arguments,
+                 workspace: arguments.workspace_name,
+                 wait_for: arguments[:wait_for],
+                 cache: arguments[:cache],
+                 defer: arguments[:defer],
+                 delay: arguments[:delay] || 0,
+                 retries: arguments[:retries],
+                 recurrent: arguments[:recurrent] == true,
+                 requires: arguments[:requires]
+               ) do
+          json_response(req, %{
+            "runId" => run_id,
+            "stepId" => step_id,
+            "executionId" => execution_id
+          })
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["cancel_execution"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        execution_id: "executionId",
-        workspace_name: "workspaceName"
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
+    case read_arguments(req, %{execution_id: "executionId", workspace_name: "workspaceName"}) do
+      {:ok, arguments, req} ->
         # TODO: handle error? (or don't parse here?)
         execution_id = String.to_integer(arguments.execution_id)
 
-        case Orchestration.cancel_execution(
-               project_id,
-               arguments.workspace_name,
-               execution_id
-             ) do
-          :ok ->
-            json_response(req, %{})
+        with :ok <- require_operator(access, arguments.workspace_name),
+             :ok <- Orchestration.cancel_execution(project_id, arguments.workspace_name, execution_id) do
+          json_response(req, %{})
+        else
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
 
           {:error, :not_found} ->
             json_error_response(req, "not_found", status: 404)
@@ -626,39 +494,29 @@ defmodule Coflux.Handlers.Api do
           {:error, :workspace_mismatch} ->
             json_error_response(req, "bad_request", details: %{"workspaceName" => "mismatch"})
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
   defp handle(req, "POST", ["rerun_step"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(req, %{
-        workspace_name: "workspaceName",
-        step_id: "stepId"
-      })
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
-        case Orchestration.rerun_step(
-               project_id,
-               arguments.step_id,
-               arguments.workspace_name
-             ) do
-          {:ok, execution_id, attempt} ->
-            json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
+    case read_arguments(req, %{workspace_name: "workspaceName", step_id: "stepId"}) do
+      {:ok, arguments, req} ->
+        with :ok <- require_operator(access, arguments.workspace_name),
+             {:ok, execution_id, attempt} <-
+               Orchestration.rerun_step(project_id, arguments.step_id, arguments.workspace_name) do
+          json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
+        else
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
 
           {:error, :workspace_invalid} ->
             json_error_response(req, "bad_request", details: %{"workspace" => "invalid"})
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
@@ -694,39 +552,29 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["create_session"], project_id, access) do
-    {:ok, arguments, errors, req} =
-      read_arguments(
-        req,
-        %{
-          workspace_name: "workspaceName"
-        },
-        %{
-          provides: {"provides", &parse_tag_set/1},
-          concurrency: {"concurrency", &parse_integer(&1, optional: true)}
-        }
-      )
-
-    if Enum.empty?(errors) do
-      if can_write_workspace?(access, arguments.workspace_name) do
+    case read_arguments(
+           req,
+           %{workspace_name: "workspaceName"},
+           %{
+             provides: {"provides", &parse_tag_set/1},
+             concurrency: {"concurrency", &parse_integer(&1, optional: true)}
+           }
+         ) do
+      {:ok, arguments, req} ->
         opts =
-          [
-            provides: arguments[:provides],
-            concurrency: arguments[:concurrency]
-          ]
+          [provides: arguments[:provides], concurrency: arguments[:concurrency]]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-        case Orchestration.create_session(project_id, arguments.workspace_name, opts) do
-          {:ok, session_id} ->
-            json_response(req, %{"sessionId" => session_id})
-
-          {:error, :workspace_invalid} ->
-            json_error_response(req, "not_found", status: 404)
+        with :ok <- require_operator(access, arguments.workspace_name),
+             {:ok, session_id} <- Orchestration.create_session(project_id, arguments.workspace_name, opts) do
+          json_response(req, %{"sessionId" => session_id})
+        else
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
-      else
-        json_error_response(req, "forbidden", status: 403)
-      end
-    else
-      json_error_response(req, "bad_request", details: errors)
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
