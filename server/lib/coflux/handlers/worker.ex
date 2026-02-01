@@ -338,6 +338,7 @@ defmodule Coflux.Handlers.Worker do
 
       "get_asset" ->
         [asset_id, from_execution_id] = message["params"]
+        asset_id = String.to_integer(asset_id)
         from_execution_id = String.to_integer(from_execution_id)
 
         if is_recognised_execution?(from_execution_id, state) do
@@ -432,10 +433,10 @@ defmodule Coflux.Handlers.Worker do
         {:fragment, format, blob_key, size, metadata}
 
       ["execution", execution_id] ->
-        {:execution, execution_id}
+        {:execution, String.to_integer(execution_id)}
 
       ["asset", asset_id] ->
-        {:asset, asset_id}
+        {:asset, String.to_integer(asset_id)}
     end)
   end
 
