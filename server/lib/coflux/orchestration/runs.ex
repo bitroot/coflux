@@ -86,12 +86,13 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_workspace_id_for_execution(db, execution_id) do
-    case query_one!(
+    case query_one(
            db,
            "SELECT workspace_id FROM executions WHERE id = ?1",
            {execution_id}
          ) do
       {:ok, {workspace_id}} -> {:ok, workspace_id}
+      {:ok, nil} -> {:error, :not_found}
     end
   end
 

@@ -85,9 +85,9 @@ defmodule Coflux.Handlers.Api do
   end
 
   # Check if access grants operator permissions for the given workspace
-  defp is_operator?(%{workspaces: :all}, _workspace), do: true
+  defp operator?(%{workspaces: :all}, _workspace), do: true
 
-  defp is_operator?(%{workspaces: patterns}, workspace) do
+  defp operator?(%{workspaces: patterns}, workspace) do
     Enum.any?(patterns, &workspace_matches?(workspace, &1))
   end
 
@@ -96,7 +96,7 @@ defmodule Coflux.Handlers.Api do
 
   defp workspace_matches?(workspace, pattern) do
     if String.ends_with?(pattern, "/*") do
-      # Slice off the "*" to keep "prefix/", then check starts_with?
+      # "staging/*" matches "staging/foo", "staging/foo/bar", etc. (not "staging" itself)
       String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
     else
       false
@@ -104,7 +104,7 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp require_operator(access, workspace) do
-    if is_operator?(access, workspace), do: :ok, else: {:error, :forbidden}
+    if operator?(access, workspace), do: :ok, else: {:error, :forbidden}
   end
 
   defp handle(req, "GET", ["get_access"], _project_id, %{workspaces: workspaces}) do
@@ -136,7 +136,7 @@ defmodule Coflux.Handlers.Api do
     case read_arguments(req, %{name: "name"}, %{base_id: {"baseId", &parse_numeric_id(&1, false)}}) do
       {:ok, arguments, req} ->
         # Check if the new workspace name matches allowed patterns
-        if is_operator?(access, arguments.name) do
+        if operator?(access, arguments.name) do
           case Orchestration.create_workspace(project_id, arguments.name, arguments[:base_id]) do
             {:ok, workspace_id} ->
               json_response(req, %{id: workspace_id})
@@ -191,7 +191,7 @@ defmodule Coflux.Handlers.Api do
   defp check_rename_allowed(_access, nil), do: :ok
 
   defp check_rename_allowed(access, new_name) do
-    if is_operator?(access, new_name), do: :ok, else: {:error, :name_restricted}
+    if operator?(access, new_name), do: :ok, else: {:error, :name_restricted}
   end
 
   defp handle(req, "POST", ["pause_workspace"], project_id, access) do
