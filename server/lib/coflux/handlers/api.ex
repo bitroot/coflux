@@ -542,7 +542,7 @@ defmodule Coflux.Handlers.Api do
     qs = :cowboy_req.parse_qs(req)
     asset_id = get_query_param(qs, "asset")
 
-    case Orchestration.get_asset_by_external_id(project_id, asset_id) do
+    case Orchestration.get_asset(project_id, asset_id) do
       {:error, :not_found} ->
         json_error_response(req, "not_found", status: 404)
 

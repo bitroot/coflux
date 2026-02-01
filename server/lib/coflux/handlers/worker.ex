@@ -323,13 +323,11 @@ defmodule Coflux.Handlers.Worker do
               {path, blob_key, size, metadata}
             end)
 
-          {:ok, asset_id, metadata} =
+          {:ok, external_id, metadata} =
             Orchestration.put_asset(state.project_id, execution_id, name, entries)
 
-          # Return asset_id with metadata for log references
           result = [
-            Integer.to_string(asset_id),
-            metadata.external_id,
+            external_id,
             metadata.name,
             metadata.total_count,
             metadata.total_size
@@ -341,13 +339,16 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "get_asset" ->
-        [asset_id, from_execution_id] = message["params"]
-        asset_id = String.to_integer(asset_id)
+        [asset_external_id, from_execution_id] = message["params"]
         from_execution_id = String.to_integer(from_execution_id)
 
         if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.get_asset_entries(state.project_id, asset_id, from_execution_id) do
-            {:ok, entries} ->
+          case Orchestration.get_asset(
+                 state.project_id,
+                 asset_external_id,
+                 from_execution_id
+               ) do
+            {:ok, _name, entries} ->
               entries =
                 Map.new(entries, fn {path, blob_key, size, metadata} ->
                   {path, [blob_key, size, metadata]}
@@ -450,8 +451,8 @@ defmodule Coflux.Handlers.Worker do
       ["execution", execution_id] ->
         {:execution, String.to_integer(execution_id)}
 
-      ["asset", asset_id] ->
-        {:asset, String.to_integer(asset_id)}
+      ["asset", asset_external_id] ->
+        {:asset, asset_external_id}
     end)
   end
 

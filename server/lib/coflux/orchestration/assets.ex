@@ -25,40 +25,54 @@ defmodule Coflux.Orchestration.Assets do
     with_transaction(db, fn ->
       hash = hash_asset(name, entries)
 
-      case query_one(db, "SELECT id FROM assets WHERE hash = ?1", {{:blob, hash}}) do
-        {:ok, {asset_id}} ->
-          {:ok, asset_id}
+      {asset_id, external_id} =
+        case query_one(db, "SELECT id, external_id FROM assets WHERE hash = ?1", {{:blob, hash}}) do
+          {:ok, {asset_id, external_id}} ->
+            {asset_id, external_id}
 
-        {:ok, nil} ->
-          {:ok, external_id} = generate_external_id(db, :assets, 2, "A")
+          {:ok, nil} ->
+            {:ok, external_id} = generate_external_id(db, :assets, 2, "A")
 
-          {:ok, asset_id} =
-            insert_one(db, :assets, %{external_id: external_id, name: name, hash: {:blob, hash}})
+            {:ok, asset_id} =
+              insert_one(db, :assets, %{external_id: external_id, name: name, hash: {:blob, hash}})
 
-          Enum.each(entries, fn {path, blob_key, size, metadata} ->
-            {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
+            Enum.each(entries, fn {path, blob_key, size, metadata} ->
+              {:ok, blob_id} = Values.get_or_create_blob(db, blob_key, size)
 
-            {:ok, asset_entry_id} =
-              insert_one(db, :asset_entries, %{
-                asset_id: asset_id,
-                path: path,
-                blob_id: blob_id
-              })
+              {:ok, asset_entry_id} =
+                insert_one(db, :asset_entries, %{
+                  asset_id: asset_id,
+                  path: path,
+                  blob_id: blob_id
+                })
 
-            {:ok, _} =
-              insert_many(
-                db,
-                :asset_entry_metadata,
-                {:asset_entry_id, :key, :value},
-                Enum.map(metadata, fn {key, value} ->
-                  {asset_entry_id, key, Jason.encode!(value)}
-                end)
-              )
-          end)
+              {:ok, _} =
+                insert_many(
+                  db,
+                  :asset_entry_metadata,
+                  {:asset_entry_id, :key, :value},
+                  Enum.map(metadata, fn {key, value} ->
+                    {asset_entry_id, key, Jason.encode!(value)}
+                  end)
+                )
+            end)
 
-          {:ok, asset_id}
-      end
+            {asset_id, external_id}
+        end
+
+      {total_count, total_size, entry} = summarise_entries(entries)
+      {:ok, asset_id, external_id, name, total_count, total_size, entry}
     end)
+  end
+
+  defp summarise_entries(entries) do
+    {total_count, total_size} =
+      Enum.reduce(entries, {0, 0}, fn {_path, _blob_key, size, _metadata}, {count, total} ->
+        {count + 1, total + size}
+      end)
+
+    entry = if total_count == 1, do: hd(entries)
+    {total_count, total_size, entry}
   end
 
   defp get_asset_entries(db, asset_id) do
@@ -122,22 +136,21 @@ defmodule Coflux.Orchestration.Assets do
     end
   end
 
-  def get_asset_by_id(db, asset_id) do
-    case query_one(db, "SELECT external_id, name FROM assets WHERE id = ?1", {asset_id}) do
-      {:ok, {external_id, name}} ->
+  def get_asset_by_external_id(db, external_id) do
+    case query_one(db, "SELECT id, name FROM assets WHERE external_id = ?1", {external_id}) do
+      {:ok, {asset_id, name}} ->
         {:ok, entries} = get_asset_entries(db, asset_id)
-        {:ok, external_id, name, entries}
+        {:ok, asset_id, name, entries}
 
       {:ok, nil} ->
         {:error, :not_found}
     end
   end
 
-  def get_asset_by_external_id(db, external_id) do
-    case query_one(db, "SELECT id, name FROM assets WHERE external_id = ?1", {external_id}) do
-      {:ok, {asset_id, name}} ->
-        {:ok, entries} = get_asset_entries(db, asset_id)
-        {:ok, name, entries}
+  def get_asset_id(db, external_id) do
+    case query_one(db, "SELECT id FROM assets WHERE external_id = ?1", {external_id}) do
+      {:ok, {asset_id}} ->
+        {:ok, asset_id}
 
       {:ok, nil} ->
         {:error, :not_found}

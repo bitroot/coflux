@@ -115,12 +115,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:put_asset, execution_id, name, entries})
   end
 
-  def get_asset_entries(project_id, asset_id, opts \\ []) do
-    call_server(project_id, {:get_asset_entries, asset_id, opts})
-  end
-
-  def get_asset_by_external_id(project_id, asset_external_id) do
-    call_server(project_id, {:get_asset_by_external_id, asset_external_id})
+  def get_asset(project_id, asset_id, from_execution_id \\ nil) do
+    call_server(project_id, {:get_asset, asset_id, from_execution_id})
   end
 
   def subscribe_workspaces(project_id, pid) do

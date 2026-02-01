@@ -112,9 +112,8 @@ class AssetEntry(t.NamedTuple):
 
 
 class AssetMetadata(t.NamedTuple):
-    """Metadata for an asset reference, used in log serialization."""
+    """Metadata for an asset reference."""
 
-    external_id: str | None = None
     name: str | None = None
     total_count: int | None = None
     total_size: int | None = None

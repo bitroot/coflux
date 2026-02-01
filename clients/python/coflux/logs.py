@@ -72,7 +72,6 @@ def _format_reference(ref: t.Any) -> dict[str, t.Any]:
             return {
                 "type": "asset",
                 "assetId": asset_id,
-                "externalId": metadata.external_id,
                 "name": metadata.name,
                 "totalCount": metadata.total_count,
                 "totalSize": metadata.total_size,
