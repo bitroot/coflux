@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, ProjectsStore, TokensStore, Orchestration, Logs, Topics}
+  alias Coflux.{Config, JwksStore, ProjectsStore, TokensStore, Orchestration, Logs, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -20,13 +20,21 @@ defmodule Coflux.Application do
         Logs.Supervisor,
         {Topical, name: Coflux.TopicalRegistry, topics: topics()},
         {Coflux.Web, port: port}
-      ]
+      ] ++ auth_children()
 
     opts = [strategy: :one_for_one, name: Coflux.Supervisor]
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
       IO.puts("Server started. Running on port #{port}.")
       {:ok, pid}
+    end
+  end
+
+  # Start JWKS store only when using studio auth mode
+  defp auth_children do
+    case Config.auth_mode() do
+      :studio -> [JwksStore]
+      _ -> []
     end
   end
 

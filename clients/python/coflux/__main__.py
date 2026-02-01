@@ -15,7 +15,7 @@ import httpx
 import tomlkit
 import watchfiles
 
-from . import Worker, config, decorators, loader, models, utils
+from . import Worker, auth, config, decorators, loader, models, utils
 from .worker import SessionExpiredError
 from .blobs import Manager as BlobManager
 from .version import API_VERSION, VersionMismatchError
@@ -336,6 +336,77 @@ def cli():
     pass
 
 
+@cli.command("login")
+@click.option(
+    "--studio-url",
+    default="https://studio.coflux.com",
+    show_default=True,
+    help="Studio URL",
+    envvar="COFLUX_STUDIO_URL",
+)
+def login(studio_url: str):
+    """
+    Log in to Coflux Studio.
+
+    Opens a browser-based authentication flow. After logging in, your session
+    will be saved locally for use with team-based authentication.
+    """
+    try:
+        # Start device flow
+        flow = auth.start_device_flow(studio_url)
+
+        # Show user instructions
+        click.echo()
+        click.echo("To authenticate, open this URL in your browser:")
+        click.echo()
+        click.secho(f"  {flow['verification_uri']}", fg="cyan")
+        click.echo()
+        click.echo("Waiting for authorization...")
+
+        # Poll for token
+        result = auth.poll_for_token(
+            flow["device_code"],
+            studio_url,
+            interval=flow.get("interval", 5),
+            timeout=flow.get("expires_in", 900),
+        )
+
+        # Save credentials
+        auth.save_credentials(
+            {
+                "studio_token": result.access_token,
+                "user_email": result.user_email,
+                "user_id": result.user_id,
+            }
+        )
+
+        click.echo()
+        if result.user_email:
+            click.secho(f"Logged in as {result.user_email}", fg="green")
+        else:
+            click.secho("Logged in successfully", fg="green")
+    except auth.DeviceFlowExpired:
+        click.secho("Login expired. Please try again.", fg="red")
+        sys.exit(1)
+    except auth.DeviceFlowError as e:
+        click.secho(f"Login failed: {e}", fg="red")
+        sys.exit(1)
+    except httpx.HTTPStatusError as e:
+        click.secho(f"Login failed: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command("logout")
+def logout():
+    """
+    Log out from Coflux Studio.
+
+    Removes locally stored credentials.
+    """
+    auth.clear_credentials()
+    click.secho("Logged out successfully", fg="green")
+
+
 @cli.command("server")
 @click.option(
     "-p",
@@ -430,8 +501,8 @@ def _get_default_secure() -> bool | None:
     return _load_config().server.secure
 
 
-def _project_options(token: bool = True, workspace: bool = False):
-    """Add project options: host, secure, and optionally token and workspace."""
+def _project_options(token: bool = True, workspace: bool = False, team: bool = False):
+    """Add project options: host, secure, and optionally token, workspace, and team."""
     def decorator(f):
         decorators = [
             click.option(
@@ -454,9 +525,19 @@ def _project_options(token: bool = True, workspace: bool = False):
             decorators.append(
                 click.option(
                     "--token",
-                    help="Authentication token",
+                    help="Authentication token (for token auth mode)",
                     envvar="COFLUX_TOKEN",
                     default=_load_config().server.token,
+                )
+            )
+        if team:
+            decorators.append(
+                click.option(
+                    "-t",
+                    "--team",
+                    help="Team ID for Studio authentication",
+                    envvar="COFLUX_TEAM",
+                    default=_load_config().team,
                 )
             )
         if workspace:
@@ -475,6 +556,50 @@ def _project_options(token: bool = True, workspace: bool = False):
             f = d(f)
         return f
     return decorator
+
+
+def _get_studio_url() -> str:
+    """Get Studio URL from environment variable or default."""
+    return os.environ.get("COFLUX_STUDIO_URL") or "https://studio.coflux.com"
+
+
+def _resolve_token(
+    token: str | None,
+    team: str | None,
+    host: str,
+) -> str | None:
+    """
+    Resolve the authentication token to use.
+
+    If a token is provided directly, use it.
+    If a team is specified, exchange the Studio session token for a server token.
+    Otherwise, return None.
+    """
+    if token:
+        return token
+
+    if team:
+        # Use Studio authentication
+        studio_url = _get_studio_url()
+        try:
+            result = auth.exchange_for_server_token(team, host, studio_url)
+            return result["token"]
+        except ValueError as e:
+            raise click.ClickException(str(e))
+        except httpx.HTTPStatusError as e:
+            # Try to extract error message from JSON response
+            error_desc = None
+            try:
+                data = e.response.json()
+                error_desc = data.get("error_description")
+            except Exception:
+                pass
+
+            if error_desc:
+                raise click.ClickException(f"Authentication failed: {error_desc}")
+            raise click.ClickException(f"Authentication failed: HTTP {e.response.status_code}")
+
+    return None
 
 
 @cli.command("configure")
@@ -525,17 +650,19 @@ def workspaces():
 
 
 @workspaces.command("list")
-@_project_options()
+@_project_options(team=True)
 def workspaces_list(
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
 ):
     """
     Lists workspaces.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
+    resolved_token = _resolve_token(token, team, host)
+    workspaces = _api_request("GET", host, "get_workspaces", resolved_token, secure=use_secure)
     if workspaces:
         # TODO: draw as tree
         _print_table(
@@ -551,7 +678,7 @@ def workspaces_list(
 
 
 @workspaces.command("create")
-@_project_options()
+@_project_options(team=True)
 @click.option(
     "--base",
     help="The base workspace to inherit from",
@@ -560,6 +687,7 @@ def workspaces_list(
 def workspaces_create(
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     base: str | None,
     name: str,
@@ -568,9 +696,10 @@ def workspaces_create(
     Creates a workspace within the project.
     """
     use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
     base_id = None
     if base:
-        workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
+        workspaces = _api_request("GET", host, "get_workspaces", resolved_token, secure=use_secure)
         workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
         base_id = workspace_ids_by_name.get(base)
         if not base_id:
@@ -581,7 +710,7 @@ def workspaces_create(
         "POST",
         host,
         "create_workspace",
-        token,
+        resolved_token,
         secure=use_secure,
         json={
             "name": name,
@@ -592,7 +721,7 @@ def workspaces_create(
 
 
 @workspaces.command("update")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.option(
     "--name",
     help="The new name of the workspace",
@@ -610,6 +739,7 @@ def workspaces_update(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     name: str | None,
     base: str | None,
@@ -619,7 +749,8 @@ def workspaces_update(
     Updates a workspace within the project.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
+    resolved_token = _resolve_token(token, team, host)
+    workspaces = _api_request("GET", host, "get_workspaces", resolved_token, secure=use_secure)
     workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
     workspace_id = workspace_ids_by_name.get(workspace)
     if not workspace_id:
@@ -643,24 +774,26 @@ def workspaces_update(
         payload["baseId"] = None
 
     # TODO: handle response
-    _api_request("POST", host, "update_workspace", token, secure=use_secure, json=payload)
+    _api_request("POST", host, "update_workspace", resolved_token, secure=use_secure, json=payload)
 
     click.secho(f"Updated workspace '{name or workspace}'.", fg="green")
 
 
 @workspaces.command("archive")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 def workspaces_archive(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
 ):
     """
     Archives a workspace.
     """
     use_secure = _should_use_secure(host, secure)
-    workspaces = _api_request("GET", host, "get_workspaces", token, secure=use_secure)
+    resolved_token = _resolve_token(token, team, host)
+    workspaces = _api_request("GET", host, "get_workspaces", resolved_token, secure=use_secure)
     workspace_ids_by_name = {w["name"]: id for id, w in workspaces.items()}
     workspace_id = workspace_ids_by_name.get(workspace)
     if not workspace_id:
@@ -670,7 +803,7 @@ def workspaces_archive(
         "POST",
         host,
         "archive_workspace",
-        token,
+        resolved_token,
         secure=use_secure,
         json={
             "workspaceId": workspace_id,
@@ -688,17 +821,24 @@ def pools():
 
 
 @pools.command("list")
-@_project_options(workspace=True)
-def pools_list(workspace: str, host: str, token: str | None, secure: bool | None):
+@_project_options(workspace=True, team=True)
+def pools_list(
+    workspace: str,
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+):
     """
     Lists pools.
     """
     use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
     pools = _api_request(
         "GET",
         host,
         "get_pools",
-        token,
+        resolved_token,
         secure=use_secure,
         params={"workspace": workspace},
     )
@@ -718,7 +858,7 @@ def pools_list(workspace: str, host: str, token: str | None, secure: bool | None
 
 
 @pools.command("update")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.option(
     "modules",
     "-m",
@@ -744,6 +884,7 @@ def pools_update(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     modules: tuple[str, ...] | None,
     provides: tuple[str, ...] | None,
@@ -755,7 +896,8 @@ def pools_update(
     Updates a pool.
     """
     use_secure = _should_use_secure(host, secure)
-    pool = _get_pool(host, workspace, name, token, secure=use_secure) or {}
+    resolved_token = _resolve_token(token, team, host)
+    pool = _get_pool(host, workspace, name, resolved_token, secure=use_secure) or {}
 
     # TODO: support explicitly unsetting 'provides' (and modules, etc?)
 
@@ -775,7 +917,7 @@ def pools_update(
         "POST",
         host,
         "update_pool",
-        token,
+        resolved_token,
         secure=use_secure,
         json={
             "workspaceName": workspace,
@@ -786,18 +928,26 @@ def pools_update(
 
 
 @pools.command("delete")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.argument("name")
-def pools_delete(workspace: str, host: str, token: str | None, secure: bool | None, name: str):
+def pools_delete(
+    workspace: str,
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+    name: str,
+):
     """
     Deletes a pool.
     """
     use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
     _api_request(
         "POST",
         host,
         "update_pool",
-        token,
+        resolved_token,
         secure=use_secure,
         json={"workspaceName": workspace, "poolName": name, "pool": None},
     )
@@ -870,18 +1020,26 @@ def _human_size(bytes: int) -> str:
 
 
 @assets.command("inspect")
-@_project_options()
+@_project_options(team=True)
 @click.option(
     "--match",
     help="Glob-style matcher to filter files",
 )
 @click.argument("id")
-def assets_inspect(host: str, token: str | None, secure: bool | None, match: str | None, id: str):
+def assets_inspect(
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+    match: str | None,
+    id: str,
+):
     """
     Inspect an asset.
     """
     use_secure = _should_use_secure(host, secure)
-    asset = _get_asset(host, id, token, secure=use_secure)
+    resolved_token = _resolve_token(token, team, host)
+    asset = _get_asset(host, id, resolved_token, secure=use_secure)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found")
 
@@ -909,7 +1067,7 @@ def assets_inspect(host: str, token: str | None, secure: bool | None, match: str
 
 
 @assets.command("download")
-@_project_options()
+@_project_options(team=True)
 @click.option(
     "--to",
     type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
@@ -929,6 +1087,7 @@ def assets_inspect(host: str, token: str | None, secure: bool | None, match: str
 def assets_download(
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     to: Path,
     force: bool,
@@ -939,7 +1098,8 @@ def assets_download(
     Downloads the contents of an asset.
     """
     use_secure = _should_use_secure(host, secure)
-    asset = _get_asset(host, id, token, secure=use_secure)
+    resolved_token = _resolve_token(token, team, host)
+    asset = _get_asset(host, id, resolved_token, secure=use_secure)
     if not asset:
         raise click.ClickException(f"Asset '{id}' not found")
 
@@ -978,12 +1138,13 @@ def assets_download(
 
 
 @cli.command("register")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.argument("module_name", nargs=-1)
 def register(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     module_name: tuple[str, ...],
 ) -> None:
@@ -997,13 +1158,14 @@ def register(
     if not module_name:
         raise click.ClickException("No module(s) specified.")
     use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
     targets = _load_modules(list(module_name))
-    _register_manifests(workspace, host, targets, token=token, secure=use_secure)
+    _register_manifests(workspace, host, targets, token=resolved_token, secure=use_secure)
     click.secho("Manifest(s) registered.", fg="green")
 
 
 @cli.command("worker")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.option(
     "--provides",
     help="Features that this worker provides (to be matched with features that tasks require)",
@@ -1047,6 +1209,7 @@ def worker(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     provides: tuple[str, ...] | None,
     session: str | None,
@@ -1062,17 +1225,24 @@ def worker(
     Hosts the specified modules. Paths to scripts can be passed instead of module names.
 
     Options will be loaded from the configuration file, unless overridden as arguments (or environment variables).
+
+    For Studio authentication, use --team to specify the team ID. This requires
+    running 'coflux login' first.
     """
     if not module_name:
         raise click.ClickException("No module(s) specified.")
     provides_ = _parse_provides(provides)
     config = _load_config()
     use_secure = _should_use_secure(host, secure)
+
+    # Resolve token (either direct token or via Studio team auth)
+    resolved_token = _resolve_token(token, team, host)
+
     args = (*module_name,)
     kwargs = {
         "workspace": workspace,
         "host": host,
-        "token": token,
+        "token": resolved_token,
         "secure": use_secure,
         "provides": provides_,
         "serialiser_configs": config and config.serialisers,
@@ -1098,7 +1268,7 @@ def worker(
 
 
 @cli.command("submit")
-@_project_options(workspace=True)
+@_project_options(workspace=True, team=True)
 @click.argument("module")
 @click.argument("target")
 @click.argument("argument", nargs=-1)
@@ -1106,6 +1276,7 @@ def submit(
     workspace: str,
     host: str,
     token: str | None,
+    team: str | None,
     secure: bool | None,
     module: str,
     target: str,
@@ -1115,12 +1286,13 @@ def submit(
     Submit a workflow to be run.
     """
     use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
     # TODO: support overriding options?
     workflow = _api_request(
         "GET",
         host,
         "get_workflow",
-        token,
+        resolved_token,
         secure=use_secure,
         params={
             "workspace": workspace,
@@ -1136,7 +1308,7 @@ def submit(
         "POST",
         host,
         "submit_workflow",
-        token,
+        resolved_token,
         secure=use_secure,
         json={
             "workspaceName": workspace,

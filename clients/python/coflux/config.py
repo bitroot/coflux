@@ -97,6 +97,7 @@ def _default_serialisers():
 class Config(pydantic.BaseModel):
     project: str | None = None
     workspace: str | None = None
+    team: str | None = None
     concurrency: int = pydantic.Field(default_factory=_default_concurrency)
     server: ServerConfig = pydantic.Field(default_factory=ServerConfig)
     provides: dict[str, list[str] | str | bool] | None = None

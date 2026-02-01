@@ -23,10 +23,11 @@ defmodule Coflux.Handlers.Api do
 
           method ->
             token = get_token(req)
+            host = get_host(req)
 
-            with {:ok, project_id} <- resolve_project(req),
+            with {:ok, project_id} <- resolve_project(host),
                  :ok <- validate_project(project_id),
-                 {:ok, access} <- Auth.check(token, project_id) do
+                 {:ok, access} <- Auth.check(token, project_id, host) do
               req = handle(req, method, :cowboy_req.path_info(req), project_id, access)
               {:ok, req, opts}
             else

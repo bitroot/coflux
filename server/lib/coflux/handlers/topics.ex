@@ -24,8 +24,10 @@ defmodule Coflux.Handlers.Topics do
     expected_version = get_query_param(qs, "version")
     protocols = parse_websocket_protocols(req)
 
-    with {:ok, project_id} <- resolve_project(req),
-         {:ok, req} <- authenticate(req, protocols, project_id) do
+    host = get_host(req)
+
+    with {:ok, project_id} <- resolve_project(host),
+         {:ok, req} <- authenticate(req, protocols, project_id, host) do
       context = %{project: project_id}
       opts = Keyword.put(opts, :init, fn _req -> {:ok, context} end)
 
@@ -64,14 +66,14 @@ defmodule Coflux.Handlers.Topics do
     end
   end
 
-  defp authenticate(req, protocols, project_id) do
+  defp authenticate(req, protocols, project_id, host) do
     token =
       case extract_bearer_token(protocols) do
         {:ok, token} -> token
         :none -> nil
       end
 
-    case Auth.check(token, project_id) do
+    case Auth.check(token, project_id, host) do
       {:ok, _access} ->
         req =
           if token do
