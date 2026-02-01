@@ -873,7 +873,24 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:cancel_execution, execution_id}, _from, state) do
+  def handle_call({:cancel_execution, workspace_name, execution_id}, _from, state) do
+    with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
+         {:ok, exec_workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id),
+         true <- exec_workspace_id == workspace_id do
+      do_cancel_execution(state, execution_id)
+    else
+      false ->
+        {:reply, {:error, :workspace_mismatch}, state}
+
+      {:error, :workspace_invalid} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  defp do_cancel_execution(state, execution_id) do
     execution_id =
       case Results.get_result(state.db, execution_id) do
         {:ok, {{:spawned, spawned_execution_id}, _created_at}} -> spawned_execution_id

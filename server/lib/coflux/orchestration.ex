@@ -84,8 +84,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:register_group, parent_id, group_id, name})
   end
 
-  def cancel_execution(project_id, execution_id) do
-    call_server(project_id, {:cancel_execution, execution_id})
+  def cancel_execution(project_id, workspace_name, execution_id) do
+    call_server(project_id, {:cancel_execution, workspace_name, execution_id})
   end
 
   def rerun_step(project_id, step_id, workspace_name) do

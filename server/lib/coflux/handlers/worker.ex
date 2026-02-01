@@ -76,6 +76,7 @@ defmodule Coflux.Handlers.Worker do
           {[session_message(external_id)],
            %{
              project_id: project_id,
+             workspace_name: workspace_name,
              session_id: external_id,
              execution_ids: execution_ids
            }}
@@ -257,8 +258,12 @@ defmodule Coflux.Handlers.Worker do
         [execution_id] = message["params"]
         execution_id = String.to_integer(execution_id)
 
-        # TODO: restrict which executions can be cancelled?
-        :ok = Orchestration.cancel_execution(state.project_id, execution_id)
+        case Orchestration.cancel_execution(state.project_id, state.workspace_name, execution_id) do
+          :ok -> :ok
+          {:error, :workspace_mismatch} -> :ok
+          {:error, :not_found} -> :ok
+        end
+
         {[], state}
 
       "suspend" ->

@@ -1,30 +1,17 @@
 defmodule Coflux.Topics.Run do
   use Topical.Topic, route: ["runs", :run_id, :workspace_id]
 
-  alias Coflux.{Auth, Orchestration}
+  alias Coflux.Orchestration
 
   import Coflux.TopicUtils
 
   def connect(params, context) do
-    workspace_id = String.to_integer(params.workspace_id)
-
-    if Auth.workspace_allowed?(workspace_id, context.allowed_workspace_ids) do
-      params =
-        params
-        |> Map.put(:project, context.project)
-        |> Map.put(:allowed_workspace_ids, context.allowed_workspace_ids)
-
-      {:ok, params}
-    else
-      {:error, :unauthorized}
-    end
+    {:ok, Map.put(params, :project, context.project)}
   end
 
   def init(params) do
     project_id = Map.fetch!(params, :project)
     external_run_id = Map.fetch!(params, :run_id)
-    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
-    allowed_workspace_ids = Map.fetch!(params, :allowed_workspace_ids)
 
     case Orchestration.subscribe_run(
            project_id,
@@ -35,34 +22,11 @@ defmodule Coflux.Topics.Run do
         {:error, :not_found}
 
       {:ok, run, parent, steps, _ref} ->
-        run_workspace_id =
-          steps
-          |> Map.values()
-          |> Enum.reject(& &1.parent_id)
-          |> Enum.min_by(& &1.created_at)
-          |> Map.fetch!(:executions)
-          |> Map.values()
-          |> Enum.min_by(& &1.created_at)
-          |> Map.fetch!(:workspace_id)
-
-        # Intersect requested workspaces with allowed workspaces
-        requested_workspace_ids = Enum.uniq([run_workspace_id, workspace_id])
-
-        workspace_ids =
-          Enum.filter(requested_workspace_ids, fn ws_id ->
-            Auth.workspace_allowed?(ws_id, allowed_workspace_ids)
-          end)
-
-        if Enum.empty?(workspace_ids) do
-          {:error, :unauthorized}
-        else
-          {:ok,
-           Topic.new(build_run(run, parent, steps, workspace_ids), %{
-             project: project_id,
-             external_run_id: external_run_id,
-             workspace_ids: workspace_ids
-           })}
-        end
+        {:ok,
+         Topic.new(build_run(run, parent, steps), %{
+           project: project_id,
+           external_run_id: external_run_id
+         })}
     end
   end
 
@@ -71,24 +35,20 @@ defmodule Coflux.Topics.Run do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
-    if workspace_id in topic.state.workspace_ids do
-      Topic.set(topic, [:steps, external_step_id], %{
-        module: step.module,
-        target: step.target,
-        type: step.type,
-        parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
-        cacheConfig: build_cache_config(step.cache_config),
-        cacheKey: build_key(step.cache_key),
-        memoKey: build_key(step.memo_key),
-        createdAt: step.created_at,
-        arguments: Enum.map(step.arguments, &build_value/1),
-        requires: step.requires,
-        executions: %{}
-      })
-    else
-      topic
-    end
+  defp process_notification(topic, {:step, external_step_id, step, _workspace_id}) do
+    Topic.set(topic, [:steps, external_step_id], %{
+      module: step.module,
+      target: step.target,
+      type: step.type,
+      parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
+      cacheConfig: build_cache_config(step.cache_config),
+      cacheKey: build_key(step.cache_key),
+      memoKey: build_key(step.memo_key),
+      createdAt: step.created_at,
+      arguments: Enum.map(step.arguments, &build_value/1),
+      requires: step.requires,
+      executions: %{}
+    })
   end
 
   defp process_notification(
@@ -96,30 +56,26 @@ defmodule Coflux.Topics.Run do
          {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
           dependencies}
        ) do
-    if workspace_id in topic.state.workspace_ids do
-      Topic.set(
-        topic,
-        [:steps, step_id, :executions, Integer.to_string(attempt)],
-        %{
-          executionId: Integer.to_string(execution_id),
-          workspaceId: Integer.to_string(workspace_id),
-          createdAt: created_at,
-          executeAfter: execute_after,
-          assignedAt: nil,
-          completedAt: nil,
-          groups: %{},
-          assets: %{},
-          dependencies:
-            Map.new(dependencies, fn {dependency_id, dependency} ->
-              {Integer.to_string(dependency_id), build_dependency(dependency)}
-            end),
-          children: [],
-          result: nil
-        }
-      )
-    else
-      topic
-    end
+    Topic.set(
+      topic,
+      [:steps, step_id, :executions, Integer.to_string(attempt)],
+      %{
+        executionId: Integer.to_string(execution_id),
+        workspaceId: Integer.to_string(workspace_id),
+        createdAt: created_at,
+        executeAfter: execute_after,
+        assignedAt: nil,
+        completedAt: nil,
+        groups: %{},
+        assets: %{},
+        dependencies:
+          Map.new(dependencies, fn {dependency_id, dependency} ->
+            {Integer.to_string(dependency_id), build_dependency(dependency)}
+          end),
+        children: [],
+        result: nil
+      }
+    )
   end
 
   defp process_notification(topic, {:group, execution_id, group_id, name}) do
@@ -194,18 +150,12 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp build_run(run, parent, steps, workspace_ids) do
+  defp build_run(run, parent, steps) do
     %{
       createdAt: run.created_at,
       parent: if(parent, do: build_execution(parent)),
       steps:
-        steps
-        |> Enum.filter(fn {_, step} ->
-          step.executions
-          |> Map.values()
-          |> Enum.any?(&(&1.workspace_id in workspace_ids))
-        end)
-        |> Map.new(fn {step_id, step} ->
+        Map.new(steps, fn {step_id, step} ->
           {step_id,
            %{
              module: step.module,
@@ -219,11 +169,7 @@ defmodule Coflux.Topics.Run do
              arguments: Enum.map(step.arguments, &build_value/1),
              requires: step.requires,
              executions:
-               step.executions
-               |> Enum.filter(fn {_, execution} ->
-                 execution.workspace_id in workspace_ids
-               end)
-               |> Map.new(fn {attempt, execution} ->
+               Map.new(step.executions, fn {attempt, execution} ->
                  {Integer.to_string(attempt),
                   %{
                     executionId: Integer.to_string(execution.execution_id),

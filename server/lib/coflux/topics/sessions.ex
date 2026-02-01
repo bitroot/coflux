@@ -1,16 +1,10 @@
 defmodule Coflux.Topics.Sessions do
   use Topical.Topic, route: ["sessions", :workspace_id]
 
-  alias Coflux.{Auth, Orchestration}
+  alias Coflux.Orchestration
 
   def connect(params, context) do
-    workspace_id = String.to_integer(params.workspace_id)
-
-    if Auth.workspace_allowed?(workspace_id, context.allowed_workspace_ids) do
-      {:ok, Map.put(params, :project, context.project)}
-    else
-      {:error, :unauthorized}
-    end
+    {:ok, Map.put(params, :project, context.project)}
   end
 
   def init(params) do

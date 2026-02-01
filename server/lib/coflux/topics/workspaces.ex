@@ -9,6 +9,7 @@ defmodule Coflux.Topics.Workspaces do
 
   def init(params) do
     project_id = Map.fetch!(params, :project)
+
     {:ok, workspaces, ref} = Orchestration.subscribe_workspaces(project_id, self())
 
     workspaces =

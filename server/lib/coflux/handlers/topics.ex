@@ -10,16 +10,12 @@ defmodule Coflux.Handlers.Topics do
 
   The project is determined by COFLUX_PROJECT (if set) or extracted from the
   subdomain (if COFLUX_BASE_DOMAIN is set).
-
-  At connection time, the token's workspace patterns are resolved against current
-  workspaces to create a snapshot of allowed workspace IDs. This snapshot is used
-  for the duration of the connection.
   """
 
   import Coflux.Handlers.Utils
 
   alias Topical.Adapters.Cowboy.WebsocketHandler, as: TopicalHandler
-  alias Coflux.{Auth, Orchestration, Version}
+  alias Coflux.{Auth, Version}
 
   @protocol_version "v1"
 
@@ -29,8 +25,8 @@ defmodule Coflux.Handlers.Topics do
     protocols = parse_websocket_protocols(req)
 
     with {:ok, project_id} <- resolve_project(req),
-         {:ok, req, allowed_workspace_ids} <- authenticate(req, protocols, project_id) do
-      context = %{project: project_id, allowed_workspace_ids: allowed_workspace_ids}
+         {:ok, req} <- authenticate(req, protocols, project_id) do
+      context = %{project: project_id}
       opts = Keyword.put(opts, :init, fn _req -> {:ok, context} end)
 
       case Version.check(expected_version) do
@@ -75,11 +71,8 @@ defmodule Coflux.Handlers.Topics do
         :none -> nil
       end
 
-    # Get current workspaces to resolve patterns
-    {:ok, workspaces} = Orchestration.get_workspaces(project_id)
-
-    case Auth.resolve_allowed_workspaces(token, project_id, workspaces) do
-      {:ok, allowed_workspace_ids} ->
+    case Auth.check(token, project_id) do
+      {:ok, _access} ->
         req =
           if token do
             :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
@@ -87,7 +80,7 @@ defmodule Coflux.Handlers.Topics do
             req
           end
 
-        {:ok, req, allowed_workspace_ids}
+        {:ok, req}
 
       error ->
         error
