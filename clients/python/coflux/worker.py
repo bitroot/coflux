@@ -24,7 +24,6 @@ def _parse_reference(reference: t.Any) -> types.Reference:
             return ("execution", execution_id, metadata)
         case ["asset", external_id, name, total_count, total_size]:
             metadata = models.AssetMetadata(
-                external_id=external_id,
                 name=name,
                 total_count=total_count,
                 total_size=total_size,

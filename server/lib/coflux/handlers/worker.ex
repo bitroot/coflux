@@ -14,7 +14,7 @@ defmodule Coflux.Handlers.Worker do
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Config, ProjectStore, Version}
+  alias Coflux.{Orchestration, Config, ProjectsStore, Version}
 
   @protocol_version "v1"
 
@@ -64,7 +64,7 @@ defmodule Coflux.Handlers.Worker do
     # Validate project against whitelist when using subdomain routing
     project_valid =
       if Config.base_domain() do
-        ProjectStore.exists?(project_id)
+        ProjectsStore.exists?(project_id)
       else
         true
       end
@@ -76,6 +76,7 @@ defmodule Coflux.Handlers.Worker do
           {[session_message(external_id)],
            %{
              project_id: project_id,
+             workspace_name: workspace_name,
              session_id: external_id,
              execution_ids: execution_ids
            }}
@@ -143,6 +144,7 @@ defmodule Coflux.Handlers.Worker do
           recurrent,
           requires
         ] = message["params"]
+
         parent_id = String.to_integer(parent_id)
 
         if is_recognised_execution?(parent_id, state) do
@@ -257,9 +259,16 @@ defmodule Coflux.Handlers.Worker do
         [execution_id] = message["params"]
         execution_id = String.to_integer(execution_id)
 
-        # TODO: restrict which executions can be cancelled?
-        :ok = Orchestration.cancel_execution(state.project_id, execution_id)
-        {[], state}
+        case Orchestration.cancel_execution(state.project_id, state.workspace_name, execution_id) do
+          :ok ->
+            {[], state}
+
+          {:error, :workspace_mismatch} ->
+            {[{:close, 4000, "workspace_mismatch"}], nil}
+
+          {:error, :not_found} ->
+            {[], state}
+        end
 
       "suspend" ->
         [execution_id, execute_after] = message["params"]
@@ -314,13 +323,11 @@ defmodule Coflux.Handlers.Worker do
               {path, blob_key, size, metadata}
             end)
 
-          {:ok, asset_id, metadata} =
+          {:ok, external_id, metadata} =
             Orchestration.put_asset(state.project_id, execution_id, name, entries)
 
-          # Return asset_id with metadata for log references
           result = [
-            Integer.to_string(asset_id),
-            metadata.external_id,
+            external_id,
             metadata.name,
             metadata.total_count,
             metadata.total_size
@@ -332,12 +339,16 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "get_asset" ->
-        [asset_id, from_execution_id] = message["params"]
+        [asset_external_id, from_execution_id] = message["params"]
         from_execution_id = String.to_integer(from_execution_id)
 
         if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.get_asset_entries(state.project_id, asset_id, from_execution_id) do
-            {:ok, entries} ->
+          case Orchestration.get_asset(
+                 state.project_id,
+                 asset_external_id,
+                 from_execution_id
+               ) do
+            {:ok, _name, entries} ->
               entries =
                 Map.new(entries, fn {path, blob_key, size, metadata} ->
                   {path, [blob_key, size, metadata]}
@@ -351,7 +362,6 @@ defmodule Coflux.Handlers.Worker do
         else
           {[{:close, 4000, "execution_invalid"}], nil}
         end
-
     end
   end
 
@@ -359,10 +369,23 @@ defmodule Coflux.Handlers.Worker do
     {[], state}
   end
 
-  def websocket_info({:execute, execution_id, module, target, arguments, run_id, workspace_id}, state) do
+  def websocket_info(
+        {:execute, execution_id, module, target, arguments, run_id, workspace_id},
+        state
+      ) do
     arguments = Enum.map(arguments, &compose_value/1)
     state = Map.update!(state, :execution_ids, &MapSet.put(&1, execution_id))
-    {[command_message("execute", [Integer.to_string(execution_id), module, target, arguments, run_id, Integer.to_string(workspace_id)])], state}
+
+    {[
+       command_message("execute", [
+         Integer.to_string(execution_id),
+         module,
+         target,
+         arguments,
+         run_id,
+         Integer.to_string(workspace_id)
+       ])
+     ], state}
   end
 
   def websocket_info({:result, request_id, result}, state) do
@@ -380,7 +403,6 @@ defmodule Coflux.Handlers.Worker do
   defp is_recognised_execution?(execution_id, state) do
     MapSet.member?(state.execution_ids, execution_id)
   end
-
 
   defp session_message(session_id) do
     {:text, Jason.encode!([0, session_id])}
@@ -427,10 +449,10 @@ defmodule Coflux.Handlers.Worker do
         {:fragment, format, blob_key, size, metadata}
 
       ["execution", execution_id] ->
-        {:execution, execution_id}
+        {:execution, String.to_integer(execution_id)}
 
-      ["asset", asset_id] ->
-        {:asset, asset_id}
+      ["asset", asset_external_id] ->
+        {:asset, asset_external_id}
     end)
   end
 
@@ -489,8 +511,15 @@ defmodule Coflux.Handlers.Worker do
         ["fragment", format, blob_key, size, metadata]
 
       {:execution, execution_id, metadata} ->
-        ["execution", Integer.to_string(execution_id), metadata.run_id, metadata.step_id, metadata.attempt,
-         metadata.module, metadata.target]
+        [
+          "execution",
+          Integer.to_string(execution_id),
+          metadata.run_id,
+          metadata.step_id,
+          metadata.attempt,
+          metadata.module,
+          metadata.target
+        ]
 
       {:asset, external_id, {name, total_count, total_size, _entry}} ->
         ["asset", external_id, name, total_count, total_size]

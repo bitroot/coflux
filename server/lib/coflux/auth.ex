@@ -2,64 +2,71 @@ defmodule Coflux.Auth do
   @moduledoc """
   Handles token authentication.
 
-  Token access is configured per-project in $COFLUX_DATA_DIR/projects.json:
+  Token access is configured in $COFLUX_DATA_DIR/config/tokens.json:
   ```json
   {
-    "acme": {
-      "tokens": ["<sha256-hash-1>", "<sha256-hash-2>"]
+    "e3044207e9a26a59388c7224fc3f3c01...": {
+      "projects": ["test1", "test2"],
+      "workspaces": ["production"]
     },
-    "demo": {}
+    "479ccb088f9a5dce29dbff65996beac6...": {
+      "projects": ["test1"],
+      "workspaces": ["staging", "development/*"]
+    }
   }
   ```
 
-  The `tokens` field controls access:
-  - missing/null: open access (no token required)
-  - [] (empty array): locked (no valid tokens, access denied)
-  - ["hash1", ...]: restricted to listed token hashes
+  Authentication mode is controlled by COFLUX_AUTH_MODE:
+  - "token" (default): All requests require valid token
+  - "none": No authentication required
+
+  Workspace patterns control write access:
+  - "*" matches all workspaces
+  - "staging" matches exactly "staging"
+  - "staging/*" matches "staging", "staging/feature1", etc.
   """
 
-  alias Coflux.ProjectStore
+  alias Coflux.{Config, TokensStore}
+
+  @type access :: %{workspaces: :all | [String.t()]}
 
   @doc """
   Checks if the given token is authorized for the project.
 
-  Returns `:ok` when access is allowed.
+  Returns `{:ok, access}` with access details when allowed.
   Returns `{:error, :unauthorized}` otherwise.
   """
   def check(token, project_id) do
-    case ProjectStore.get_tokens(project_id) do
-      {:ok, nil} ->
-        # No token auth configured - open access
-        :ok
+    case Config.auth_mode() do
+      :none ->
+        {:ok, %{workspaces: :all}}
 
-      {:ok, []} ->
-        # Empty tokens list - locked, no valid tokens
-        {:error, :unauthorized}
-
-      {:ok, tokens} ->
-        # Token list configured - must provide valid token
-        validate_token(token, tokens)
-
-      :error ->
-        # Project not found (shouldn't happen if validate_project passed)
-        {:error, :unauthorized}
+      :token ->
+        check_token(token, project_id)
     end
   end
 
-  defp validate_token(nil, _tokens), do: {:error, :unauthorized}
+  # Private functions
 
-  defp validate_token(token, tokens) do
+  defp check_token(nil, _project_id), do: {:error, :unauthorized}
+
+  defp check_token(token, project_id) do
     token_hash = hash_token(token)
 
-    if token_hash in tokens do
-      :ok
-    else
-      {:error, :unauthorized}
+    case TokensStore.get_token_config(token_hash) do
+      {:ok, config} ->
+        if project_id in config.projects do
+          {:ok, %{workspaces: config.workspaces}}
+        else
+          {:error, :unauthorized}
+        end
+
+      :error ->
+        {:error, :unauthorized}
     end
   end
 
   defp hash_token(token) do
-    :crypto.hash(:sha256, token)
-    |> Base.encode16(case: :lower)
+    :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
   end
 end

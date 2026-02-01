@@ -26,7 +26,8 @@ defmodule Coflux.Handlers.Topics do
 
     with {:ok, project_id} <- resolve_project(req),
          {:ok, req} <- authenticate(req, protocols, project_id) do
-      opts = Keyword.put(opts, :init, fn _req -> {:ok, %{project: project_id}} end)
+      context = %{project: project_id}
+      opts = Keyword.put(opts, :init, fn _req -> {:ok, context} end)
 
       case Version.check(expected_version) do
         :ok ->
@@ -71,7 +72,7 @@ defmodule Coflux.Handlers.Topics do
       end
 
     case Auth.check(token, project_id) do
-      :ok ->
+      {:ok, _access} ->
         req =
           if token do
             :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)

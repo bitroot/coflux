@@ -219,6 +219,13 @@ defmodule Coflux.Orchestration.Server do
     {:reply, {:ok, workspaces}, state}
   end
 
+  def handle_call({:get_workspace_name, workspace_id}, _from, state) do
+    case Map.fetch(state.workspaces, workspace_id) do
+      {:ok, workspace} -> {:reply, {:ok, workspace.name}, state}
+      :error -> {:reply, {:error, :not_found}, state}
+    end
+  end
+
   def handle_call({:create_workspace, name, base_id}, _from, state) do
     case Workspaces.create_workspace(state.db, name, base_id) do
       {:ok, workspace_id, workspace} ->
@@ -555,9 +562,9 @@ defmodule Coflux.Orchestration.Server do
     with {:ok, external_id, secret} <- Sessions.parse_token(token),
          {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
          session = Map.fetch!(state.sessions, session_id),
-         true <- Sessions.verify_secret(secret, session.secret_hash),
+         :ok <- verify_session_secret(secret, session.secret_hash),
          {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
-         true <- session.workspace_id == workspace_id do
+         :ok <- require_workspace_match(session.workspace_id, workspace_id) do
       activated_at =
         if is_nil(session.activated_at) do
           {:ok, now} = Sessions.activate_session(state.db, session_id)
@@ -632,12 +639,14 @@ defmodule Coflux.Orchestration.Server do
       :error ->
         {:reply, {:error, :session_invalid}, state}
 
+      {:error, :session_invalid} ->
+        {:reply, {:error, :session_invalid}, state}
+
       {:error, :workspace_invalid} ->
         {:reply, {:error, :workspace_mismatch}, state}
 
-      # Token verification failed or workspace mismatch
-      false ->
-        {:reply, {:error, :session_invalid}, state}
+      {:error, :workspace_mismatch} ->
+        {:reply, {:error, :workspace_mismatch}, state}
     end
   end
 
@@ -702,6 +711,7 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run} = Runs.get_run_by_id(state.db, parent_run_id)
 
     cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
+    arguments = Enum.map(arguments, &convert_value_asset_ids(state.db, &1))
 
     case Runs.schedule_step(
            state.db,
@@ -866,7 +876,24 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:cancel_execution, execution_id}, _from, state) do
+  def handle_call({:cancel_execution, workspace_name, execution_id}, _from, state) do
+    with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
+         {:ok, exec_workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id),
+         :ok <- require_workspace_match(exec_workspace_id, workspace_id) do
+      do_cancel_execution(state, execution_id)
+    else
+      {:error, :workspace_invalid} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:error, :workspace_mismatch} ->
+        {:reply, {:error, :workspace_mismatch}, state}
+
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  defp do_cancel_execution(state, execution_id) do
     execution_id =
       case Results.get_result(state.db, execution_id) do
         {:ok, {{:spawned, spawned_execution_id}, _created_at}} -> spawned_execution_id
@@ -1116,10 +1143,11 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:put_asset, execution_id, name, entries}, _from, state) do
     {:ok, run_id} = Runs.get_execution_run_id(state.db, execution_id)
-    {:ok, asset_id} = Assets.get_or_create_asset(state.db, name, entries)
-    :ok = Results.put_execution_asset(state.db, execution_id, asset_id)
 
-    {external_id, asset_name, total_count, total_size, entry} = resolve_asset(state.db, asset_id)
+    {:ok, asset_id, external_id, asset_name, total_count, total_size, entry} =
+      Assets.get_or_create_asset(state.db, name, entries)
+
+    :ok = Results.put_execution_asset(state.db, execution_id, asset_id)
 
     state =
       state
@@ -1129,34 +1157,22 @@ defmodule Coflux.Orchestration.Server do
       )
       |> flush_notifications()
 
-    # Return extended metadata for log references
     asset_metadata = %{
-      external_id: external_id,
       name: asset_name,
       total_count: total_count,
       total_size: total_size
     }
 
-    {:reply, {:ok, asset_id, asset_metadata}, state}
+    {:reply, {:ok, external_id, asset_metadata}, state}
   end
 
-  def handle_call({:get_asset_entries, asset_id, from_execution_id}, _from, state) do
-    case Assets.get_asset_by_id(state.db, asset_id) do
-      {:ok, _external_id, _name, entries} ->
+  def handle_call({:get_asset, asset_external_id, from_execution_id}, _from, state) do
+    case Assets.get_asset_by_external_id(state.db, asset_external_id) do
+      {:ok, asset_id, name, entries} ->
         if from_execution_id do
           {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
         end
 
-        {:reply, {:ok, entries}, state}
-
-      {:error, :not_found} ->
-        {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  def handle_call({:get_asset_by_external_id, asset_external_id}, _from, state) do
-    case Assets.get_asset_by_external_id(state.db, asset_external_id) do
-      {:ok, name, entries} ->
         {:reply, {:ok, name, entries}, state}
 
       {:error, :not_found} ->
@@ -2191,6 +2207,14 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp verify_session_secret(secret, secret_hash) do
+    if Sessions.verify_secret(secret, secret_hash), do: :ok, else: {:error, :session_invalid}
+  end
+
+  defp require_workspace_match(workspace_id, expected_workspace_id) do
+    if workspace_id == expected_workspace_id, do: :ok, else: {:error, :workspace_mismatch}
+  end
+
   defp is_workspace_ancestor?(state, maybe_ancestor_id, workspace_id) do
     # TODO: avoid cycle?
     workspace = Map.fetch!(state.workspaces, workspace_id)
@@ -2502,6 +2526,23 @@ defmodule Coflux.Orchestration.Server do
     end)
   end
 
+  defp with_internal_asset_ids(db, references) do
+    Enum.map(references, fn
+      {:asset, external_id} ->
+        {:ok, id} = Assets.get_asset_id(db, external_id)
+        {:asset, id}
+
+      ref ->
+        ref
+    end)
+  end
+
+  defp convert_value_asset_ids(db, {:raw, data, refs}),
+    do: {:raw, data, with_internal_asset_ids(db, refs)}
+
+  defp convert_value_asset_ids(db, {:blob, key, size, refs}),
+    do: {:blob, key, size, with_internal_asset_ids(db, refs)}
+
   defp build_value(value, db) do
     case value do
       {:raw, data, references} ->
@@ -2563,6 +2604,12 @@ defmodule Coflux.Orchestration.Server do
   defp record_and_notify_result(state, execution_id, result, module) do
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
     {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
+
+    result =
+      case result do
+        {:value, value} -> {:value, convert_value_asset_ids(state.db, value)}
+        other -> other
+      end
 
     case Results.record_result(state.db, execution_id, result) do
       {:ok, created_at} ->

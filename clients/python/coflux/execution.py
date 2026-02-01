@@ -646,7 +646,6 @@ def _parse_reference(reference) -> types.Reference:
             return ("execution", execution_id, metadata)
         case ["asset", external_id, name, total_count, total_size]:
             metadata = models.AssetMetadata(
-                external_id=external_id,
                 name=name,
                 total_count=total_count,
                 total_size=total_size,
@@ -705,14 +704,13 @@ def _parse_submit_result(result: t.Any) -> tuple[str, models.ExecutionMetadata]:
 def _parse_asset_result(result: t.Any) -> tuple[str, models.AssetMetadata]:
     """Parse the put_asset response to extract asset ID and metadata."""
     match result:
-        case [asset_id, external_id, name, total_count, total_size]:
+        case [external_id, name, total_count, total_size]:
             metadata = models.AssetMetadata(
-                external_id=external_id,
                 name=name,
                 total_count=total_count,
                 total_size=total_size,
             )
-            return (asset_id, metadata)
+            return (external_id, metadata)
         case other:
             raise Exception(f"unrecognised asset result: {other}")
 
