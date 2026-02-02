@@ -568,18 +568,17 @@ def _resolve_token(
     Resolve the authentication token to use.
 
     If a token is provided directly, use it.
-    If a team is specified, exchange the Studio session token for a server token.
+    If a team is specified, get a project token (cached or exchanged).
     Otherwise, return None.
     """
     if token:
         return token
 
     if team:
-        # Use Studio authentication
+        # Use Studio authentication (with caching)
         studio_url = _get_studio_url()
         try:
-            result = auth.exchange_for_server_token(team, host, studio_url)
-            return result["token"]
+            return auth.get_project_token(team, host, studio_url)
         except ValueError as e:
             raise click.ClickException(str(e))
         except httpx.HTTPStatusError as e:

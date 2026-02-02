@@ -51,8 +51,6 @@ defmodule Coflux.Auth do
 
   @type access :: %{workspaces: :all | [String.t()]}
 
-  @expected_issuer "https://studio.coflux.com"
-
   @doc """
   Checks if the given token is authorized for the project.
 
@@ -190,7 +188,7 @@ defmodule Coflux.Auth do
     now = DateTime.utc_now() |> DateTime.to_unix()
 
     cond do
-      claims["iss"] != @expected_issuer ->
+      claims["iss"] != Config.studio_url() ->
         {:error, :invalid_issuer}
 
       claims["exp"] && claims["exp"] < now ->

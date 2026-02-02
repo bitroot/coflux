@@ -41,8 +41,16 @@ def save_credentials(credentials: dict[str, t.Any]) -> None:
 
 
 def clear_credentials() -> None:
-    """Remove the credentials file."""
+    """Remove the credentials file and token cache."""
     path = get_credentials_path()
+    if path.exists():
+        path.unlink()
+    clear_token_cache()
+
+
+def clear_token_cache() -> None:
+    """Remove the token cache file."""
+    path = Path.home() / ".config" / "coflux" / "token_cache.json"
     if path.exists():
         path.unlink()
 
@@ -85,7 +93,7 @@ def start_device_flow(studio_url: str) -> dict[str, t.Any]:
     - expires_in: Seconds until expiration
     - interval: Seconds to wait between polls
     """
-    url = f"{studio_url}/api/cli/device"
+    url = f"{studio_url}/api/auth/device"
 
     with httpx.Client() as client:
         response = client.post(url)
@@ -115,7 +123,7 @@ def poll_for_token(
         DeviceFlowExpired: If the device code expires
         DeviceFlowError: For other errors
     """
-    url = f"{studio_url}/api/cli/device/token"
+    url = f"{studio_url}/api/auth/device/token"
     start_time = time.time()
 
     with httpx.Client() as client:
@@ -150,27 +158,27 @@ def poll_for_token(
     raise DeviceFlowExpired("Timeout waiting for user approval")
 
 
-def exchange_for_server_token(
+def exchange_for_project_token(
     team: str,
     host: str,
     studio_url: str,
     studio_token: str | None = None,
 ) -> dict[str, t.Any]:
     """
-    Exchange a CLI session token for a server access JWT.
+    Exchange a device session token for a project access JWT.
 
     Args:
         team: Team external ID
         host: Server host
         studio_url: Studio URL
-        studio_token: CLI session token (uses stored token if not provided)
+        studio_token: Device session token (uses stored token if not provided)
 
     Returns:
         Dict with:
-        - token: Server access JWT
-        - expires_in: Seconds until expiration
-        - project_name: Project name (if available)
-        - team_name: Team name (if available)
+        - token: Project access JWT
+        - expiresIn: Seconds until expiration
+        - projectName: Project name (if available)
+        - teamName: Team name (if available)
 
     Raises:
         ValueError: If no studio token is available
@@ -182,7 +190,7 @@ def exchange_for_server_token(
             "No Studio session token available. Run 'coflux login' first."
         )
 
-    url = f"{studio_url}/api/cli/token"
+    url = f"{studio_url}/api/auth/project-token"
 
     with httpx.Client() as client:
         response = client.post(
@@ -198,5 +206,77 @@ def exchange_for_server_token(
 
         response.raise_for_status()
         return response.json()
+
+
+def _get_token_cache_path() -> Path:
+    """Get the path to the token cache file."""
+    config_dir = Path.home() / ".config" / "coflux"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir / "token_cache.json"
+
+
+def _load_token_cache() -> dict[str, t.Any]:
+    """Load the token cache from disk."""
+    path = _get_token_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_token_cache(cache: dict[str, t.Any]) -> None:
+    """Save the token cache to disk."""
+    path = _get_token_cache_path()
+    with path.open("w") as f:
+        json.dump(cache, f)
+    path.chmod(0o600)
+
+
+def get_project_token(
+    team: str,
+    host: str,
+    studio_url: str,
+    refresh_buffer: int = 60,
+) -> str:
+    """
+    Get a project access token, using cache if available.
+
+    Args:
+        team: Team external ID
+        host: Server host
+        studio_url: Studio URL
+        refresh_buffer: Seconds before expiry to consider token stale
+
+    Returns:
+        Project access JWT
+
+    Raises:
+        ValueError: If no studio token is available
+        httpx.HTTPStatusError: On API errors
+    """
+    cache = _load_token_cache()
+    key = f"{team}:{host}"
+
+    # Check cache for valid token
+    if key in cache:
+        entry = cache[key]
+        expires_at = entry.get("expires_at", 0)
+        if time.time() < expires_at - refresh_buffer:
+            return entry["token"]
+
+    # Exchange for new token
+    result = exchange_for_project_token(team, host, studio_url)
+
+    # Cache the result
+    cache[key] = {
+        "token": result["token"],
+        "expires_at": time.time() + result["expiresIn"],
+    }
+    _save_token_cache(cache)
+
+    return result["token"]
 
 
