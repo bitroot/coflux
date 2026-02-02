@@ -46,6 +46,14 @@ defmodule Coflux.TokensStore do
   """
   def get_token_config(token_hash), do: get(token_hash)
 
+  @doc """
+  Returns true if any tokens are configured.
+  """
+  def has_tokens? do
+    table = :persistent_term.get(@table_key)
+    :ets.info(table, :size) > 0
+  end
+
   defp parse_config(config) when is_map(config) do
     projects =
       case Map.get(config, "projects") do

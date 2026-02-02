@@ -29,11 +29,12 @@ defmodule Coflux.Application do
     end
   end
 
-  # Start JWKS store only when using studio auth mode
+  # Start JWKS store when Studio auth is enabled (namespaces configured)
   defp auth_children do
-    case Config.auth_mode() do
-      :studio -> [JwksStore]
-      _ -> []
+    if Config.namespaces() do
+      [JwksStore]
+    else
+      []
     end
   end
 

@@ -20,8 +20,17 @@ defmodule Coflux.Config do
 
   ## Authentication Configuration
 
-  - **COFLUX_AUTH_MODE**: Authentication mode - "token" (default), "studio", or "none"
-  - **COFLUX_NAMESPACES**: Comma-separated list of team IDs allowed (for studio mode)
+  Authentication methods are enabled based on configuration:
+
+  - **Token auth**: Enabled if `$COFLUX_DATA_DIR/config/tokens.json` exists with entries
+  - **Studio auth (JWT)**: Enabled if `COFLUX_NAMESPACES` is set
+
+  Both can be enabled simultaneously. The auth method is determined by token format:
+  JWTs (containing dots) use Studio auth, other tokens use token auth.
+
+  - **COFLUX_REQUIRE_AUTH**: Whether authentication is required (default: "true").
+    Set to "false" (case insensitive) to allow anonymous requests.
+  - **COFLUX_NAMESPACES**: Comma-separated list of team IDs allowed for Studio auth
   - **COFLUX_STUDIO_URL**: Studio URL for JWKS (default: https://studio.coflux.com)
   """
 
@@ -33,7 +42,7 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
-    :persistent_term.put(:coflux_auth_mode, parse_auth_mode())
+    :persistent_term.put(:coflux_require_auth, parse_require_auth())
     :persistent_term.put(:coflux_namespaces, parse_namespaces())
     :persistent_term.put(:coflux_studio_url, parse_studio_url())
     :ok
@@ -72,14 +81,13 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the authentication mode (:token, :studio, or :none).
+  Returns whether authentication is required.
 
-  - :token (default) - All requests require valid token from tokens.json
-  - :studio - Validates JWTs issued by Studio
-  - :none - No authentication required
+  When true (default), requests must provide valid credentials.
+  When false, anonymous requests are allowed (but auth still works if provided).
   """
-  def auth_mode do
-    :persistent_term.get(:coflux_auth_mode)
+  def require_auth? do
+    :persistent_term.get(:coflux_require_auth)
   end
 
   @doc """
@@ -117,11 +125,10 @@ defmodule Coflux.Config do
     end
   end
 
-  defp parse_auth_mode do
-    case System.get_env("COFLUX_AUTH_MODE") do
-      "none" -> :none
-      "studio" -> :studio
-      _ -> :token
+  defp parse_require_auth do
+    case System.get_env("COFLUX_REQUIRE_AUTH") do
+      nil -> true
+      value -> String.downcase(value) != "false"
     end
   end
 

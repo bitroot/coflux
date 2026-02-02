@@ -1,8 +1,8 @@
 defmodule Coflux.Auth do
   @moduledoc """
-  Handles token authentication.
+  Handles authentication for API requests.
 
-  ## Token Mode (default)
+  ## Token Authentication
 
   Token access is configured in $COFLUX_DATA_DIR/config/tokens.json:
   ```json
@@ -18,20 +18,28 @@ defmodule Coflux.Auth do
   }
   ```
 
-  ## Studio Mode
+  Token auth is enabled when the tokens.json file contains entries.
+
+  ## Studio Authentication (JWT)
 
   Validates JWTs issued by Coflux Studio. The JWT audience claim contains
-  "{namespace}:{project}" where namespace is the team's external ID.
+  "{namespace}:{host}" where namespace is the team's external ID.
 
-  Configure with:
-  - COFLUX_AUTH_MODE=studio
-  - COFLUX_NAMESPACES=team_id1,team_id2 (optional, restricts allowed namespaces)
-  - COFLUX_STUDIO_URL=https://studio.coflux.com (default)
+  Studio auth is enabled when COFLUX_NAMESPACES is set:
+  - COFLUX_NAMESPACES=team_id1,team_id2 (comma-separated list of allowed namespaces)
+  - COFLUX_STUDIO_URL=https://studio.coflux.com (default, for JWKS)
 
-  ## Authentication modes (COFLUX_AUTH_MODE):
-  - "token" (default): All requests require valid token from tokens.json
-  - "studio": Validates JWTs issued by Studio
-  - "none": No authentication required
+  ## Authentication Flow
+
+  Both token and Studio auth can be enabled simultaneously. The auth method
+  is determined by token format:
+  - JWTs (containing dots) → Studio auth
+  - Other tokens → Token auth
+
+  Set COFLUX_REQUIRE_AUTH=false to allow anonymous requests (auth still works
+  if credentials are provided).
+
+  ## Workspace Patterns
 
   Workspace patterns control write access:
   - "*" matches all workspaces
@@ -49,9 +57,9 @@ defmodule Coflux.Auth do
   Checks if the given token is authorized for the project.
 
   Args:
-    - token: The authorization token (API token or JWT)
-    - project_id: The project identifier (used for token auth mode)
-    - host: The request host (used for studio/JWT auth mode)
+    - token: The authorization token (API token or JWT), or nil
+    - project_id: The project identifier (used for token auth)
+    - host: The request host (used for Studio/JWT auth)
 
   Returns `{:ok, access}` with access details when allowed.
   The access map contains:
@@ -59,17 +67,43 @@ defmodule Coflux.Auth do
     - user_id: String.t() | nil - the external user ID (from JWT sub claim or nil)
 
   Returns `{:error, :unauthorized}` otherwise.
+
+  Authentication flow:
+  1. No token → allow if COFLUX_REQUIRE_AUTH=false, else reject
+  2. JWT format (has dots) → try Studio auth (if COFLUX_NAMESPACES configured)
+  3. Other format → try token auth (if tokens.json has entries)
   """
+  def check(nil, _project_id, _host) do
+    if Config.require_auth?() do
+      {:error, :unauthorized}
+    else
+      {:ok, %{workspaces: :all, user_id: nil}}
+    end
+  end
+
   def check(token, project_id, host) do
-    case Config.auth_mode() do
-      :none ->
-        {:ok, %{workspaces: :all, user_id: nil}}
-
-      :token ->
-        check_token(token, project_id)
-
-      :studio ->
+    if is_jwt?(token) do
+      # JWT format - try Studio auth
+      if Config.namespaces() do
         check_jwt(token, host)
+      else
+        {:error, :unauthorized}
+      end
+    else
+      # Non-JWT format - try token auth
+      if TokensStore.has_tokens?() do
+        check_token(token, project_id)
+      else
+        {:error, :unauthorized}
+      end
+    end
+  end
+
+  # Check if token looks like a JWT (has two dots separating three parts)
+  defp is_jwt?(token) do
+    case String.split(token, ".") do
+      [_, _, _] -> true
+      _ -> false
     end
   end
 
@@ -92,8 +126,6 @@ defmodule Coflux.Auth do
 
   # Private functions
 
-  defp check_token(nil, _project_id), do: {:error, :unauthorized}
-
   defp check_token(token, project_id) do
     token_hash = hash_token(token)
 
@@ -109,8 +141,6 @@ defmodule Coflux.Auth do
         {:error, :unauthorized}
     end
   end
-
-  defp check_jwt(nil, _host), do: {:error, :unauthorized}
 
   defp check_jwt(token, host) do
     with {:ok, {_header, claims}} <- decode_and_verify_jwt(token),
