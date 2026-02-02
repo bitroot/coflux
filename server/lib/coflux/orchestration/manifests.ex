@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Manifests do
 
   alias Coflux.Orchestration.{TagSets, CacheConfigs, Utils}
 
-  def register_manifests(db, workspace_id, manifests) do
+  def register_manifests(db, workspace_id, manifests, created_by \\ nil) do
     with_transaction(db, fn ->
       manifest_ids =
         Map.new(manifests, fn {module, workflows} ->
@@ -85,10 +85,10 @@ defmodule Coflux.Orchestration.Manifests do
         insert_many(
           db,
           :workspace_manifests,
-          {:workspace_id, :module, :manifest_id, :created_at},
+          {:workspace_id, :module, :manifest_id, :created_at, :created_by},
           Enum.reduce(manifest_ids, [], fn {module, manifest_id}, result ->
             if manifest_id != Map.get(current_manifest_ids, module) do
-              [{workspace_id, module, manifest_id, now} | result]
+              [{workspace_id, module, manifest_id, now, created_by} | result]
             else
               result
             end
@@ -99,7 +99,7 @@ defmodule Coflux.Orchestration.Manifests do
     end)
   end
 
-  def archive_module(db, workspace_id, module_name) do
+  def archive_module(db, workspace_id, module_name, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
@@ -108,7 +108,8 @@ defmodule Coflux.Orchestration.Manifests do
           workspace_id: workspace_id,
           module: module_name,
           manifest_id: nil,
-          created_at: now
+          created_at: now,
+          created_by: created_by
         })
 
       :ok

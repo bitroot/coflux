@@ -50,10 +50,19 @@ defmodule Coflux.Topics.Workflow do
   end
 
   defp process_notification({:run, external_run_id, created_at}, topic) do
+    # Legacy notification without created_by
     Topic.set(
       topic,
       [:runs, external_run_id],
-      %{id: external_run_id, createdAt: created_at}
+      %{id: external_run_id, createdAt: created_at, createdBy: nil}
+    )
+  end
+
+  defp process_notification({:run, external_run_id, created_at, created_by}, topic) do
+    Topic.set(
+      topic,
+      [:runs, external_run_id],
+      %{id: external_run_id, createdAt: created_at, createdBy: created_by}
     )
   end
 
@@ -105,8 +114,13 @@ defmodule Coflux.Topics.Workflow do
   end
 
   defp build_runs(runs) do
-    Map.new(runs, fn {external_run_id, created_at} ->
-      {external_run_id, %{id: external_run_id, createdAt: created_at}}
+    Map.new(runs, fn
+      {external_run_id, created_at, created_by} ->
+        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: created_by}}
+
+      {external_run_id, created_at} ->
+        # Legacy format without created_by
+        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: nil}}
     end)
   end
 end

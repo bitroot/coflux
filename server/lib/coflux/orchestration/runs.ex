@@ -138,12 +138,13 @@ defmodule Coflux.Orchestration.Runs do
       ) do
     idempotency_key = Keyword.get(opts, :idempotency_key)
     parent_id = Keyword.get(opts, :parent_id)
+    created_by = Keyword.get(opts, :created_by)
     now = current_timestamp()
 
     # TODO: check that 'type' is :workflow?
 
     with_transaction(db, fn ->
-      {:ok, run_id, external_run_id} = insert_run(db, parent_id, idempotency_key, now)
+      {:ok, run_id, external_run_id} = insert_run(db, parent_id, idempotency_key, now, created_by)
 
       {:ok, schedule} =
         do_schedule_step(
@@ -394,14 +395,14 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ids) do
+  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ids, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
       # TODO: cancel pending executions for step?
       {:ok, attempt} = get_next_execution_attempt(db, step_id)
 
       {:ok, execution_id} =
-        insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
+        insert_execution(db, step_id, attempt, workspace_id, execute_after, now, created_by)
 
       {:ok, _} =
         insert_many(
@@ -593,10 +594,11 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT DISTINCT r.external_id, r.created_at
+      SELECT DISTINCT r.external_id, r.created_at, u.external_id AS created_by
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
+      LEFT JOIN users AS u ON r.created_by = u.id
       WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.workspace_id = ?4
       ORDER BY r.created_at DESC
       LIMIT ?5
@@ -609,9 +611,10 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT id, external_id, parent_id, idempotency_key, created_at
-      FROM runs
-      WHERE id = ?1
+      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at, u.external_id AS created_by
+      FROM runs AS r
+      LEFT JOIN users AS u ON r.created_by = u.id
+      WHERE r.id = ?1
       """,
       {id},
       Models.Run
@@ -622,9 +625,10 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT id, external_id, parent_id, idempotency_key, created_at
-      FROM runs
-      WHERE external_id = ?1
+      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at, u.external_id AS created_by
+      FROM runs AS r
+      LEFT JOIN users AS u ON r.created_by = u.id
+      WHERE r.external_id = ?1
       """,
       {external_id},
       Models.Run
@@ -707,10 +711,11 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at
+      SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at, u.external_id
       FROM steps AS s
       INNER JOIN executions AS e ON e.step_id = s.id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
+      LEFT JOIN users AS u ON e.created_by = u.id
       WHERE s.run_id = ?1
       """,
       {run_id}
@@ -941,14 +946,15 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  defp insert_run(db, parent_id, idempotency_key, created_at) do
+  defp insert_run(db, parent_id, idempotency_key, created_at, created_by \\ nil) do
     case generate_external_id(db, :runs, 2, "R") do
       {:ok, external_id} ->
         case insert_one(db, :runs, %{
                external_id: external_id,
                parent_id: parent_id,
                idempotency_key: idempotency_key,
-               created_at: created_at
+               created_at: created_at,
+               created_by: created_by
              }) do
           {:ok, run_id} ->
             {:ok, run_id, external_id}
@@ -1024,13 +1030,14 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  defp insert_execution(db, step_id, attempt, workspace_id, execute_after, created_at) do
+  defp insert_execution(db, step_id, attempt, workspace_id, execute_after, created_at, created_by \\ nil) do
     insert_one(db, :executions, %{
       step_id: step_id,
       attempt: attempt,
       workspace_id: workspace_id,
       execute_after: execute_after,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 

@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Results do
 
   alias Coflux.Orchestration.Values
 
-  def record_result(db, execution_id, result) do
+  def record_result(db, execution_id, result, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
@@ -36,7 +36,7 @@ defmodule Coflux.Orchestration.Results do
             {7, nil, nil, execution_id}
         end
 
-      case insert_result(db, execution_id, type, error_id, value_id, successor_id, now) do
+      case insert_result(db, execution_id, type, error_id, value_id, successor_id, now, created_by) do
         {:ok, _} ->
           {:ok, now}
 
@@ -57,13 +57,14 @@ defmodule Coflux.Orchestration.Results do
     case query_one(
            db,
            """
-           SELECT type, error_id, value_id, successor_id, created_at
-           FROM results
-           WHERE execution_id = ?1
+           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.created_at, u.external_id
+           FROM results AS r
+           LEFT JOIN users AS u ON r.created_by = u.id
+           WHERE r.execution_id = ?1
            """,
            {execution_id}
          ) do
-      {:ok, {type, error_id, value_id, successor_id, created_at}} ->
+      {:ok, {type, error_id, value_id, successor_id, created_at, created_by}} ->
         result =
           case {type, error_id, value_id, successor_id} do
             {0, error_id, nil, retry_id} ->
@@ -96,7 +97,7 @@ defmodule Coflux.Orchestration.Results do
               {:spawned, execution_id}
           end
 
-        {:ok, {result, created_at}}
+        {:ok, {result, created_at, created_by}}
 
       {:ok, nil} ->
         {:ok, nil}
@@ -195,7 +196,8 @@ defmodule Coflux.Orchestration.Results do
          error_id,
          value_id,
          successor_id,
-         created_at
+         created_at,
+         created_by \\ nil
        ) do
     insert_one(db, :results, %{
       execution_id: execution_id,
@@ -203,7 +205,8 @@ defmodule Coflux.Orchestration.Results do
       error_id: error_id,
       value_id: value_id,
       successor_id: successor_id,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 

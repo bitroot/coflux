@@ -72,7 +72,7 @@ defmodule Coflux.Topics.Run do
   defp process_notification(
          topic,
          {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
-          dependencies}
+          dependencies, created_by}
        ) do
     if workspace_id in topic.state.workspace_ids do
       Topic.set(
@@ -82,6 +82,7 @@ defmodule Coflux.Topics.Run do
           executionId: Integer.to_string(execution_id),
           workspaceId: Integer.to_string(workspace_id),
           createdAt: created_at,
+          createdBy: created_by,
           executeAfter: execute_after,
           assignedAt: nil,
           completedAt: nil,
@@ -154,8 +155,8 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:result, execution_id, result, created_at}) do
-    result = build_result(result)
+  defp process_notification(topic, {:result, execution_id, result, created_at, created_by}) do
+    result = build_result(result, created_by)
 
     update_execution(topic, execution_id, fn topic, base_path ->
       topic
@@ -164,8 +165,8 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:result_result, execution_id, result, _created_at}) do
-    result = build_result(result)
+  defp process_notification(topic, {:result_result, execution_id, result, _created_at, created_by}) do
+    result = build_result(result, created_by)
 
     update_execution(topic, execution_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:result, :result], result)
@@ -175,6 +176,7 @@ defmodule Coflux.Topics.Run do
   defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
+      createdBy: run.created_by,
       parent: if(parent, do: build_execution(parent)),
       steps:
         steps
@@ -207,6 +209,7 @@ defmodule Coflux.Topics.Run do
                     executionId: Integer.to_string(execution.execution_id),
                     workspaceId: Integer.to_string(execution.workspace_id),
                     createdAt: execution.created_at,
+                    createdBy: execution.created_by,
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
                     completedAt: execution.completed_at,
@@ -217,7 +220,7 @@ defmodule Coflux.Topics.Run do
                       end),
                     dependencies: build_dependencies(execution.dependencies),
                     children: Enum.map(execution.children, &build_child/1),
-                    result: build_result(execution.result)
+                    result: build_result(execution.result, execution.result_created_by)
                   }}
                end)
            }}
@@ -248,11 +251,12 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp build_result(result) do
+  defp build_result(result, created_by \\ nil) do
     case result do
       {:error, type, message, frames, retry} ->
         %{
           type: "error",
+          createdBy: created_by,
           error: %{
             type: type,
             message: message,
@@ -262,25 +266,25 @@ defmodule Coflux.Topics.Run do
         }
 
       {:value, value} ->
-        %{type: "value", value: build_value(value)}
+        %{type: "value", createdBy: created_by, value: build_value(value)}
 
       {:abandoned, retry} ->
-        %{type: "abandoned", retry: if(retry, do: retry.attempt)}
+        %{type: "abandoned", createdBy: created_by, retry: if(retry, do: retry.attempt)}
 
       :cancelled ->
-        %{type: "cancelled"}
+        %{type: "cancelled", createdBy: created_by}
 
       {:suspended, successor} ->
-        %{type: "suspended", successor: if(successor, do: successor.attempt)}
+        %{type: "suspended", createdBy: created_by, successor: if(successor, do: successor.attempt)}
 
       {:deferred, execution, result} ->
-        %{type: "deferred", execution: build_execution(execution), result: build_result(result)}
+        %{type: "deferred", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
 
       {:cached, execution, result} ->
-        %{type: "cached", execution: build_execution(execution), result: build_result(result)}
+        %{type: "cached", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
 
       {:spawned, execution, result} ->
-        %{type: "spawned", execution: build_execution(execution), result: build_result(result)}
+        %{type: "spawned", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
 
       nil ->
         nil

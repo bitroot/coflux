@@ -7,7 +7,8 @@ defmodule Coflux.Orchestration.Models do
       :external_id,
       :parent_id,
       :idempotency_key,
-      :created_at
+      :created_at,
+      :created_by
     ]
   end
 

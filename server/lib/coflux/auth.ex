@@ -54,12 +54,16 @@ defmodule Coflux.Auth do
     - host: The request host (used for studio/JWT auth mode)
 
   Returns `{:ok, access}` with access details when allowed.
+  The access map contains:
+    - workspaces: :all | [String.t()] - workspace patterns the token has access to
+    - user_id: String.t() | nil - the external user ID (from JWT sub claim or nil)
+
   Returns `{:error, :unauthorized}` otherwise.
   """
   def check(token, project_id, host) do
     case Config.auth_mode() do
       :none ->
-        {:ok, %{workspaces: :all}}
+        {:ok, %{workspaces: :all, user_id: nil}}
 
       :token ->
         check_token(token, project_id)
@@ -96,7 +100,7 @@ defmodule Coflux.Auth do
     case TokensStore.get_token_config(token_hash) do
       {:ok, config} ->
         if project_id in config.projects do
-          {:ok, %{workspaces: config.workspaces}}
+          {:ok, %{workspaces: config.workspaces, user_id: nil}}
         else
           {:error, :unauthorized}
         end
@@ -114,7 +118,8 @@ defmodule Coflux.Auth do
          :ok <- validate_namespace(namespace),
          :ok <- validate_host(jwt_host, host) do
       workspaces = claims["workspaces"] || ["*"]
-      {:ok, %{workspaces: normalize_workspaces(workspaces)}}
+      user_id = claims["sub"]
+      {:ok, %{workspaces: normalize_workspaces(workspaces), user_id: user_id}}
     else
       {:error, _reason} ->
         {:error, :unauthorized}

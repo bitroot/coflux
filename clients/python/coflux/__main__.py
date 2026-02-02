@@ -337,20 +337,16 @@ def cli():
 
 
 @cli.command("login")
-@click.option(
-    "--studio-url",
-    default="https://studio.coflux.com",
-    show_default=True,
-    help="Studio URL",
-    envvar="COFLUX_STUDIO_URL",
-)
-def login(studio_url: str):
+def login():
     """
     Log in to Coflux Studio.
 
     Opens a browser-based authentication flow. After logging in, your session
     will be saved locally for use with team-based authentication.
+
+    Set the COFLUX_STUDIO_URL environment variable to use a custom Studio URL.
     """
+    studio_url = _get_studio_url()
     try:
         # Start device flow
         flow = auth.start_device_flow(studio_url)

@@ -27,11 +27,12 @@ defmodule Coflux.Orchestration.Workers do
     end
   end
 
-  def create_worker_state(db, worker_id, state) do
+  def create_worker_state(db, worker_id, state, created_by \\ nil) do
     case insert_one(db, :worker_states, %{
            worker_id: worker_id,
            state: encode_state(state),
-           created_at: current_timestamp()
+           created_at: current_timestamp(),
+           created_by: created_by
          }) do
       {:ok, _} -> :ok
     end
