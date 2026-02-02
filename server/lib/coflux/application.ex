@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, JwksStore, ProjectsStore, TokensStore, Orchestration, Logs, Topics}
+  alias Coflux.{Config, JwksStore, TokensStore, Orchestration, Logs, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -11,7 +11,6 @@ defmodule Coflux.Application do
 
     children =
       [
-        ProjectsStore,
         TokensStore,
         # TODO: separate launch supervisor per project? (and specify max_children?)
         {Task.Supervisor, name: Coflux.LauncherSupervisor},

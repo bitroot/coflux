@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Auth, Orchestration, Config, ProjectsStore, MapUtils, Version}
+  alias Coflux.{Auth, Orchestration, MapUtils, Version}
 
   @max_parameters 20
 
@@ -26,7 +26,6 @@ defmodule Coflux.Handlers.Api do
             host = get_host(req)
 
             with {:ok, project_id} <- resolve_project(host),
-                 :ok <- validate_project(project_id),
                  {:ok, access} <- Auth.check(token, project_id, host) do
               req = handle(req, method, :cowboy_req.path_info(req), project_id, access)
               {:ok, req, opts}
@@ -47,10 +46,6 @@ defmodule Coflux.Handlers.Api do
                 req = json_error_response(req, "project_mismatch", status: 403)
                 {:ok, req, opts}
 
-              {:error, :project_not_found} ->
-                req = json_error_response(req, "project_not_found", status: 404)
-                {:ok, req, opts}
-
               {:error, :unauthorized} ->
                 req = json_error_response(req, "unauthorized", status: 401)
                 {:ok, req, opts}
@@ -65,23 +60,6 @@ defmodule Coflux.Handlers.Api do
             "expected" => expected_version
           }
         )
-    end
-  end
-
-  # Validate that the resolved project is allowed
-  # When using subdomain routing (COFLUX_BASE_DOMAIN set), check the whitelist
-  # Otherwise, all projects are allowed
-  defp validate_project(nil), do: :ok
-
-  defp validate_project(project_id) do
-    if Config.base_domain() do
-      if ProjectsStore.exists?(project_id) do
-        :ok
-      else
-        {:error, :project_not_found}
-      end
-    else
-      :ok
     end
   end
 

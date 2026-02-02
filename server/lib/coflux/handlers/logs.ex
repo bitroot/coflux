@@ -36,7 +36,9 @@ defmodule Coflux.Handlers.Logs do
   ## POST /logs - Write log entries
 
   defp handle_post(req, opts) do
-    case resolve_project(req) do
+    host = get_host(req)
+
+    case resolve_project(host) do
       {:ok, project_id} ->
         handle_post_with_project(req, opts, project_id)
 
@@ -78,7 +80,9 @@ defmodule Coflux.Handlers.Logs do
   ## GET /logs - Query or subscribe to logs
 
   defp handle_get(req, opts) do
-    case resolve_project(req) do
+    host = get_host(req)
+
+    case resolve_project(host) do
       {:ok, project_id} ->
         handle_get_with_project(req, opts, project_id)
 
