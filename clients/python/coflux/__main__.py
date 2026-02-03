@@ -1314,7 +1314,7 @@ def tokens_list(
         result = _api_request("GET", host, "list_tokens", resolved_token, secure=use_secure)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
-            raise click.ClickException("Access denied. Full access required to list tokens.")
+            raise click.ClickException("Access denied.")
         raise
 
     tokens_list = result.get("tokens", [])
@@ -1384,7 +1384,9 @@ def tokens_create(
         )
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
-            raise click.ClickException("Access denied. Full access required to create tokens.")
+            raise click.ClickException(
+                "Access denied. Cannot create a token with broader workspace access than your own."
+            )
         raise
 
     click.secho("Token created successfully.", fg="green")
@@ -1421,7 +1423,7 @@ def tokens_revoke(
         result = _api_request("GET", host, "list_tokens", resolved_token, secure=use_secure)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
-            raise click.ClickException("Access denied. Full access required to revoke tokens.")
+            raise click.ClickException("Access denied.")
         raise
 
     tokens_list = result.get("tokens", [])
@@ -1448,7 +1450,9 @@ def tokens_revoke(
         if e.response.status_code == 404:
             raise click.ClickException(f"Token '{token_id}' not found.")
         if e.response.status_code == 403:
-            raise click.ClickException("Access denied. Full access required to revoke tokens.")
+            raise click.ClickException(
+                "Access denied. You can only revoke tokens you created."
+            )
         raise
 
     click.secho(f"Token '{token_id}' has been revoked.", fg="green")

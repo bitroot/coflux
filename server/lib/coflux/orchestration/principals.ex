@@ -131,7 +131,7 @@ defmodule Coflux.Orchestration.Principals do
   def list_tokens(db) do
     query = """
       SELECT t.id, t.external_id, t.name, t.workspaces, t.created_at, t.expires_at, t.revoked_at,
-             p_creator.user_external_id, t_creator.external_id
+             t.created_by, p_creator.user_external_id, t_creator.external_id
       FROM tokens t
       LEFT JOIN principals p_creator ON t.created_by = p_creator.id
       LEFT JOIN tokens t_creator ON p_creator.token_id = t_creator.id
@@ -140,7 +140,7 @@ defmodule Coflux.Orchestration.Principals do
 
     {:ok, rows} = Store.query(db, query, {})
 
-    tokens = Enum.map(rows, fn {id, external_id, name, workspaces_json, created_at, expires_at, revoked_at, creator_user_ext_id, creator_token_ext_id} ->
+    tokens = Enum.map(rows, fn {id, external_id, name, workspaces_json, created_at, expires_at, revoked_at, created_by_principal_id, creator_user_ext_id, creator_token_ext_id} ->
       created_by =
         case {creator_user_ext_id, creator_token_ext_id} do
           {nil, nil} -> nil
@@ -156,7 +156,8 @@ defmodule Coflux.Orchestration.Principals do
         created_at: created_at,
         expires_at: expires_at,
         revoked_at: revoked_at,
-        created_by: created_by
+        created_by: created_by,
+        created_by_principal_id: created_by_principal_id
       }
     end)
 
@@ -169,20 +170,21 @@ defmodule Coflux.Orchestration.Principals do
   """
   def get_token_by_external_id(db, external_id) do
     query = """
-      SELECT t.id, t.external_id, t.name, t.created_at, t.expires_at, t.revoked_at
+      SELECT t.id, t.external_id, t.name, t.created_at, t.expires_at, t.revoked_at, t.created_by
       FROM tokens t
       WHERE t.external_id = ?1
     """
 
     case Store.query_one(db, query, {external_id}) do
-      {:ok, {id, ext_id, name, created_at, expires_at, revoked_at}} ->
+      {:ok, {id, ext_id, name, created_at, expires_at, revoked_at, created_by_principal_id}} ->
         {:ok, %{
           id: id,
           external_id: ext_id,
           name: name,
           created_at: created_at,
           expires_at: expires_at,
-          revoked_at: revoked_at
+          revoked_at: revoked_at,
+          created_by_principal_id: created_by_principal_id
         }}
       {:ok, nil} ->
         {:ok, nil}

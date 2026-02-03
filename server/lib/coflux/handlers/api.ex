@@ -86,6 +86,36 @@ defmodule Coflux.Handlers.Api do
     if operator?(access, workspace), do: :ok, else: {:error, :forbidden}
   end
 
+  # Check if all requested workspace patterns are covered by the caller's access.
+  # Returns true if the caller can grant the requested access level.
+  defp workspaces_covered?(:all, _requested), do: true
+  defp workspaces_covered?(_caller, nil), do: true
+
+  defp workspaces_covered?(caller_patterns, requested) do
+    Enum.all?(requested, &pattern_covered_by?(caller_patterns, &1))
+  end
+
+  defp pattern_covered_by?(caller_patterns, "*") do
+    # Full access - only covered by explicit "*" pattern
+    Enum.any?(caller_patterns, &(&1 == "*"))
+  end
+
+  defp pattern_covered_by?(caller_patterns, pattern) do
+    if String.ends_with?(pattern, "/*") do
+      # Wildcard pattern "X/*" - caller needs "*", same pattern, or broader wildcard
+      prefix = String.slice(pattern, 0..-2//1)
+
+      Enum.any?(caller_patterns, fn cp ->
+        cp == "*" or cp == pattern or
+          (String.ends_with?(cp, "/*") and
+             String.starts_with?(prefix, String.slice(cp, 0..-2//1)))
+      end)
+    else
+      # Exact pattern - use existing workspace_matches?
+      Enum.any?(caller_patterns, &workspace_matches?(pattern, &1))
+    end
+  end
+
   defp handle(req, "GET", ["get_access"], _project_id, %{workspaces: workspaces}) do
     patterns = if workspaces == :all, do: ["*"], else: workspaces
     json_response(req, %{"workspaces" => patterns})
@@ -567,22 +597,32 @@ defmodule Coflux.Handlers.Api do
   # Token management endpoints
 
   defp handle(req, "POST", ["create_token"], project_id, access) do
-    cond do
-      # Require COFLUX_SECRET to be configured for token support
-      Config.secret() == nil ->
-        json_error_response(req, "not_configured",
-          status: 501,
-          details: %{message: "API tokens require COFLUX_SECRET to be configured"}
-        )
+    if Config.secret() == nil do
+      json_error_response(req, "not_configured",
+        status: 501,
+        details: %{message: "API tokens require COFLUX_SECRET to be configured"}
+      )
+    else
+      case read_arguments(req, %{}, %{name: "name", workspaces: {"workspaces", &parse_workspaces/1}}) do
+        {:ok, arguments, req} ->
+          requested_workspaces = arguments[:workspaces]
 
-      # Only allow token creation for principals with full access
-      access.workspaces != :all ->
-        json_error_response(req, "forbidden", status: 403)
+          # Check if caller can grant the requested access level
+          if not workspaces_covered?(access.workspaces, requested_workspaces) do
+            json_error_response(req, "forbidden",
+              status: 403,
+              details: %{message: "Cannot create token with broader access than your own"}
+            )
+          else
+            # If no workspaces specified, inherit caller's workspaces (unless caller has full access)
+            effective_workspaces =
+              case {requested_workspaces, access.workspaces} do
+                {nil, :all} -> nil
+                {nil, patterns} -> patterns
+                {requested, _} -> requested
+              end
 
-      true ->
-        case read_arguments(req, %{}, %{name: "name", workspaces: {"workspaces", &parse_workspaces/1}}) do
-          {:ok, arguments, req} ->
-            opts = if arguments[:workspaces], do: [workspaces: arguments[:workspaces]], else: []
+            opts = if effective_workspaces, do: [workspaces: effective_workspaces], else: []
 
             case Orchestration.create_token(project_id, arguments[:name], access[:principal_id], opts) do
               {:ok, %{token: token, token_id: token_id, external_id: external_id}} ->
@@ -592,10 +632,11 @@ defmodule Coflux.Handlers.Api do
                   "externalId" => external_id
                 })
             end
+          end
 
-          {:error, errors, req} ->
-            json_error_response(req, "bad_request", details: errors)
-        end
+        {:error, errors, req} ->
+          json_error_response(req, "bad_request", details: errors)
+      end
     end
   end
 
@@ -610,43 +651,52 @@ defmodule Coflux.Handlers.Api do
   defp parse_workspaces(_), do: {:error, :invalid}
 
   defp handle(req, "GET", ["list_tokens"], project_id, access) do
-    # Only allow listing tokens for principals with full access
-    if access.workspaces != :all do
-      json_error_response(req, "forbidden", status: 403)
-    else
-      case Orchestration.list_tokens(project_id) do
-        {:ok, tokens} ->
-          json_response(req, %{
-            "tokens" => Enum.map(tokens, fn token ->
-              %{
-                "id" => token.id,
-                "externalId" => token.external_id,
-                "name" => token.name,
-                "workspaces" => token.workspaces,
-                "createdAt" => token.created_at,
-                "expiresAt" => token.expires_at,
-                "revokedAt" => token.revoked_at,
-                "createdBy" => format_principal(token.created_by)
-              }
+    case Orchestration.list_tokens(project_id) do
+      {:ok, tokens} ->
+        # Filter tokens based on caller's access:
+        # - Full access: see all tokens
+        # - Limited access: see only tokens they created
+        filtered_tokens =
+          if access.workspaces == :all do
+            tokens
+          else
+            Enum.filter(tokens, fn token ->
+              token.created_by_principal_id == access[:principal_id]
             end)
-          })
-      end
+          end
+
+        json_response(req, %{
+          "tokens" => Enum.map(filtered_tokens, fn token ->
+            %{
+              "id" => token.id,
+              "externalId" => token.external_id,
+              "name" => token.name,
+              "workspaces" => token.workspaces,
+              "createdAt" => token.created_at,
+              "expiresAt" => token.expires_at,
+              "revokedAt" => token.revoked_at,
+              "createdBy" => format_principal(token.created_by)
+            }
+          end)
+        })
     end
   end
 
   defp handle(req, "POST", ["revoke_token"], project_id, access) do
-    # Only allow revoking tokens for principals with full access
-    if access.workspaces != :all do
-      json_error_response(req, "forbidden", status: 403)
-    else
-      case read_arguments(req, %{external_id: "externalId"}) do
-        {:ok, arguments, req} ->
-          # Look up token by external_id, then revoke by internal id
-          case Orchestration.get_token(project_id, arguments.external_id) do
-            {:ok, nil} ->
-              json_error_response(req, "not_found", status: 404)
+    case read_arguments(req, %{external_id: "externalId"}) do
+      {:ok, arguments, req} ->
+        # Look up token by external_id, then revoke by internal id
+        case Orchestration.get_token(project_id, arguments.external_id) do
+          {:ok, nil} ->
+            json_error_response(req, "not_found", status: 404)
 
-            {:ok, token} ->
+          {:ok, token} ->
+            # Allow revocation if caller has full access OR created this token
+            can_revoke =
+              access.workspaces == :all or
+                token.created_by_principal_id == access[:principal_id]
+
+            if can_revoke do
               case Orchestration.revoke_token(project_id, token.id) do
                 :ok ->
                   :cowboy_req.reply(204, req)
@@ -654,11 +704,13 @@ defmodule Coflux.Handlers.Api do
                 {:error, :not_found} ->
                   json_error_response(req, "not_found", status: 404)
               end
-          end
+            else
+              json_error_response(req, "forbidden", status: 403)
+            end
+        end
 
-        {:error, errors, req} ->
-          json_error_response(req, "bad_request", details: errors)
-      end
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
     end
   end
 
