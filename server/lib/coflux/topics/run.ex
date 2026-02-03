@@ -82,7 +82,7 @@ defmodule Coflux.Topics.Run do
           executionId: Integer.to_string(execution_id),
           workspaceId: Integer.to_string(workspace_id),
           createdAt: created_at,
-          createdBy: created_by,
+          createdBy: build_principal(created_by),
           executeAfter: execute_after,
           assignedAt: nil,
           completedAt: nil,
@@ -176,7 +176,7 @@ defmodule Coflux.Topics.Run do
   defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
-      createdBy: run.created_by,
+      createdBy: build_principal(run.created_by),
       parent: if(parent, do: build_execution(parent)),
       steps:
         steps
@@ -209,7 +209,7 @@ defmodule Coflux.Topics.Run do
                     executionId: Integer.to_string(execution.execution_id),
                     workspaceId: Integer.to_string(execution.workspace_id),
                     createdAt: execution.created_at,
-                    createdBy: execution.created_by,
+                    createdBy: build_principal(execution.created_by),
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
                     completedAt: execution.completed_at,
@@ -252,6 +252,8 @@ defmodule Coflux.Topics.Run do
   end
 
   defp build_result(result, created_by \\ nil) do
+    created_by = build_principal(created_by)
+
     case result do
       {:error, type, message, frames, retry} ->
         %{

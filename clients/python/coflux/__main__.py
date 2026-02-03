@@ -85,7 +85,19 @@ def _api_request(
             if data.get("error") == "version_mismatch":
                 details = data["details"]
                 raise VersionMismatchError(details["server"], details["expected"])
-        # TODO: return errors
+        if not response.is_success:
+            # Try to extract error details from response body
+            try:
+                data = response.json()
+                error_msg = data.get("error", response.reason_phrase)
+                details = data.get("details")
+                if details:
+                    click.secho(f"Error: {error_msg}", fg="red", err=True)
+                    click.secho(f"Details: {details}", fg="red", err=True)
+                else:
+                    click.secho(f"Error: {error_msg}", fg="red", err=True)
+            except Exception:
+                click.secho(f"Error: {response.text}", fg="red", err=True)
         response.raise_for_status()
         is_json = response.headers.get("Content-Type") == "application/json"
         return response.json() if is_json else None
@@ -1260,6 +1272,196 @@ def worker(
         )
     else:
         _init(*args, **kwargs)
+
+
+@cli.group()
+def tokens():
+    """
+    Manage API tokens.
+    """
+    pass
+
+
+def _format_timestamp(ts: int | None) -> str:
+    """Format a Unix timestamp as a human-readable string."""
+    if ts is None:
+        return ""
+    from datetime import datetime, timezone
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_principal(principal: dict | None) -> str:
+    """Format a principal for display."""
+    if principal is None:
+        return ""
+    if principal["type"] == "token":
+        return f"token:{principal['externalId']}"
+    return principal["externalId"]
+
+
+def _format_workspaces(workspaces: list[str] | None) -> str:
+    """Format workspaces for display."""
+    if workspaces is None:
+        return "(all)"
+    return ", ".join(workspaces)
+
+
+@tokens.command("list")
+@_project_options(team=True)
+def tokens_list(
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+):
+    """
+    Lists API tokens.
+    """
+    use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
+    try:
+        result = _api_request("GET", host, "list_tokens", resolved_token, secure=use_secure)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            raise click.ClickException("Access denied. Full access required to list tokens.")
+        raise
+
+    tokens_list = result.get("tokens", [])
+    if tokens_list:
+        _print_table(
+            ("ID", "Name", "Created", "Status", "Workspaces"),
+            [
+                (
+                    t["externalId"],
+                    t["name"] or "(unnamed)",
+                    _format_timestamp(t["createdAt"]),
+                    "revoked" if t["revokedAt"] else ("expired" if t.get("expiresAt") and t["expiresAt"] < int(time.time()) else "active"),
+                    _format_workspaces(t.get("workspaces")),
+                )
+                for t in tokens_list
+            ],
+        )
+    else:
+        click.echo("No tokens found.")
+
+
+@tokens.command("create")
+@_project_options(team=True)
+@click.option(
+    "--name",
+    help="A name for the token (for identification)",
+)
+@click.option(
+    "--workspaces",
+    help="Comma-separated list of workspace patterns (e.g., 'production,staging/*'). Omit for access to all workspaces.",
+)
+def tokens_create(
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+    name: str | None,
+    workspaces: str | None,
+):
+    """
+    Creates a new API token.
+
+    The token value is displayed only once. Make sure to copy it.
+
+    Use --workspaces to restrict the token to specific workspaces. Patterns can
+    include wildcards (e.g., 'development/*' matches all workspaces starting with
+    'development/'). If omitted, the token has access to all workspaces.
+    """
+    use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
+    payload: dict[str, t.Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if workspaces is not None:
+        # Parse comma-separated workspace patterns
+        workspace_list = [w.strip() for w in workspaces.split(",") if w.strip()]
+        if workspace_list:
+            payload["workspaces"] = workspace_list
+    try:
+        result = _api_request(
+            "POST",
+            host,
+            "create_token",
+            resolved_token,
+            secure=use_secure,
+            json=payload,
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            raise click.ClickException("Access denied. Full access required to create tokens.")
+        raise
+
+    click.secho("Token created successfully.", fg="green")
+    click.echo()
+    click.echo("Token: " + click.style(result['token'], bold=True))
+    if workspaces:
+        click.echo("Workspaces: " + workspaces)
+    else:
+        click.echo("Workspaces: " + click.style("(all)", dim=True))
+    click.echo()
+    click.secho("Copy this now, it won't be shown again.", fg="yellow")
+
+
+@tokens.command("revoke")
+@_project_options(team=True)
+@click.argument("token_id")
+def tokens_revoke(
+    host: str,
+    token: str | None,
+    team: str | None,
+    secure: bool | None,
+    token_id: str,
+):
+    """
+    Revokes an API token.
+
+    The TOKEN_ID is the external ID of the token (e.g., tok_abc123).
+    """
+    use_secure = _should_use_secure(host, secure)
+    resolved_token = _resolve_token(token, team, host)
+
+    # First, get the token to find its internal ID
+    try:
+        result = _api_request("GET", host, "list_tokens", resolved_token, secure=use_secure)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            raise click.ClickException("Access denied. Full access required to revoke tokens.")
+        raise
+
+    tokens_list = result.get("tokens", [])
+    matching = [t for t in tokens_list if t["externalId"] == token_id]
+
+    if not matching:
+        raise click.ClickException(f"Token '{token_id}' not found.")
+
+    token_info = matching[0]
+    if token_info["revokedAt"]:
+        raise click.ClickException(f"Token '{token_id}' is already revoked.")
+
+    # Revoke the token
+    try:
+        _api_request(
+            "POST",
+            host,
+            "revoke_token",
+            resolved_token,
+            secure=use_secure,
+            json={"externalId": token_id},
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise click.ClickException(f"Token '{token_id}' not found.")
+        if e.response.status_code == 403:
+            raise click.ClickException("Access denied. Full access required to revoke tokens.")
+        raise
+
+    click.secho(f"Token '{token_id}' has been revoked.", fg="green")
 
 
 @cli.command("submit")

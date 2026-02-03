@@ -115,12 +115,15 @@ defmodule Coflux.Topics.Workflow do
 
   defp build_runs(runs) do
     Map.new(runs, fn
-      {external_run_id, created_at, created_by} ->
-        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: created_by}}
+      {external_run_id, created_at, created_by_user_ext_id, created_by_token_ext_id} ->
+        created_by =
+          case {created_by_user_ext_id, created_by_token_ext_id} do
+            {nil, nil} -> nil
+            {user_ext_id, nil} -> %{type: "user", externalId: user_ext_id}
+            {nil, token_ext_id} -> %{type: "token", externalId: token_ext_id}
+          end
 
-      {external_run_id, created_at} ->
-        # Legacy format without created_by
-        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: nil}}
+        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: created_by}}
     end)
   end
 end

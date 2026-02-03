@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, JwksStore, TokensStore, Orchestration, Logs, Topics}
+  alias Coflux.{Config, JwksStore, Orchestration, Logs, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -9,32 +9,22 @@ defmodule Coflux.Application do
 
     Config.init()
 
-    children =
-      [
-        TokensStore,
-        # TODO: separate launch supervisor per project? (and specify max_children?)
-        {Task.Supervisor, name: Coflux.LauncherSupervisor},
-        Orchestration.Supervisor,
-        {Registry, keys: :unique, name: Coflux.Logs.Registry},
-        Logs.Supervisor,
-        {Topical, name: Coflux.TopicalRegistry, topics: topics()},
-        {Coflux.Web, port: port}
-      ] ++ auth_children()
+    children = [
+      # TODO: separate launch supervisor per project? (and specify max_children?)
+      {Task.Supervisor, name: Coflux.LauncherSupervisor},
+      Orchestration.Supervisor,
+      {Registry, keys: :unique, name: Coflux.Logs.Registry},
+      Logs.Supervisor,
+      {Topical, name: Coflux.TopicalRegistry, topics: topics()},
+      {Coflux.Web, port: port},
+      JwksStore
+    ]
 
     opts = [strategy: :one_for_one, name: Coflux.Supervisor]
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
       IO.puts("Server started. Running on port #{port}.")
       {:ok, pid}
-    end
-  end
-
-  # Start JWKS store when Studio auth is enabled (namespaces configured)
-  defp auth_children do
-    if Config.namespaces() do
-      [JwksStore]
-    else
-      []
     end
   end
 

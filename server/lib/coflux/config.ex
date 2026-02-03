@@ -22,14 +22,19 @@ defmodule Coflux.Config do
 
   Authentication methods are enabled based on configuration:
 
-  - **Token auth**: Enabled if `$COFLUX_DATA_DIR/config/tokens.json` exists with entries
+  - **Super token**: Set `COFLUX_SUPER_TOKEN` for a single token with full access
+  - **Database tokens**: Tokens stored in the project database (created via API)
   - **Studio auth (JWT)**: Enabled if `COFLUX_NAMESPACES` is set
 
-  Both can be enabled simultaneously. The auth method is determined by token format:
-  JWTs (containing dots) use Studio auth, other tokens use token auth.
+  Multiple auth methods can be enabled simultaneously. The auth method is determined
+  by token format: JWTs (containing dots) use Studio auth, other tokens check
+  super token first, then database tokens.
 
   - **COFLUX_REQUIRE_AUTH**: Whether authentication is required (default: "true").
     Set to "false" (case insensitive) to allow anonymous requests.
+  - **COFLUX_SUPER_TOKEN**: A super token with full access (can create other tokens)
+  - **COFLUX_SECRET**: Server secret for signing API tokens. Required for API token
+    support. Should be a long random string, kept consistent across restarts.
   - **COFLUX_NAMESPACES**: Comma-separated list of team IDs allowed for Studio auth
   - **COFLUX_STUDIO_URL**: Studio URL for JWKS (default: https://studio.coflux.com)
   """
@@ -45,6 +50,8 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_require_auth, parse_require_auth())
     :persistent_term.put(:coflux_namespaces, parse_namespaces())
     :persistent_term.put(:coflux_studio_url, parse_studio_url())
+    :persistent_term.put(:coflux_super_token_hash, parse_super_token())
+    :persistent_term.put(:coflux_secret, parse_secret())
     :ok
   end
 
@@ -106,6 +113,27 @@ defmodule Coflux.Config do
     :persistent_term.get(:coflux_studio_url)
   end
 
+  @doc """
+  Returns the hashed super token, or nil if not configured.
+
+  The super token (set via COFLUX_SUPER_TOKEN) provides full access to the system
+  and can be used to create other tokens. It is stored as a SHA-256 hash.
+  """
+  def super_token_hash do
+    :persistent_term.get(:coflux_super_token_hash)
+  end
+
+  @doc """
+  Returns the server secret, or nil if not configured.
+
+  This secret is used to derive per-project signing keys for API tokens.
+  Set via COFLUX_SECRET environment variable. API tokens are only supported
+  when this is configured.
+  """
+  def secret do
+    :persistent_term.get(:coflux_secret)
+  end
+
   defp parse_data_dir do
     System.get_env("COFLUX_DATA_DIR", Path.join(File.cwd!(), "data"))
   end
@@ -150,5 +178,25 @@ defmodule Coflux.Config do
 
   defp parse_studio_url do
     System.get_env("COFLUX_STUDIO_URL", @default_studio_url)
+  end
+
+  defp parse_super_token do
+    case System.get_env("COFLUX_SUPER_TOKEN") do
+      nil -> nil
+      "" -> nil
+      token -> hash_token(token)
+    end
+  end
+
+  defp parse_secret do
+    case System.get_env("COFLUX_SECRET") do
+      nil -> nil
+      "" -> nil
+      secret -> secret
+    end
+  end
+
+  defp hash_token(token) do
+    :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
   end
 end

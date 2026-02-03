@@ -15,7 +15,12 @@ defmodule Coflux.JwksStore do
   # Client API
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    # Only start when Studio auth is enabled (namespaces configured)
+    if Config.namespaces() do
+      GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    else
+      :ignore
+    end
   end
 
   @doc """
@@ -78,31 +83,16 @@ defmodule Coflux.JwksStore do
     studio_url = Config.studio_url()
     jwks_url = "#{studio_url}/.well-known/jwks.json"
 
-    case Req.get(jwks_url) do
-      {:ok, %Req.Response{status: 200, body: body}} ->
-        case body do
-          %{"keys" => keys} when is_list(keys) ->
-            Enum.each(keys, fn key ->
-              case key do
-                %{"kid" => kid} = jwk ->
-                  # Store the JWK as a JOSE.JWK struct for verification
-                  jose_jwk = JOSE.JWK.from_map(jwk)
-                  :ets.insert(@table_name, {kid, jose_jwk})
+    with {:ok, %Req.Response{status: 200, body: %{"keys" => keys}}} when is_list(keys) <-
+           Req.get(jwks_url) do
+      Enum.each(keys, fn
+        %{"kid" => kid} = jwk ->
+          jose_jwk = JOSE.JWK.from_map(jwk)
+          :ets.insert(@table_name, {kid, jose_jwk})
 
-                _ ->
-                  IO.warn("JWK missing 'kid' field")
-              end
-            end)
-
-          _ ->
-            IO.warn("Invalid JWKS response format")
-        end
-
-      {:ok, %Req.Response{status: status}} ->
-        IO.warn("Failed to fetch JWKS: HTTP #{status}")
-
-      {:error, reason} ->
-        IO.warn("Failed to fetch JWKS: #{inspect(reason)}")
+        _ ->
+          :ok
+      end)
     end
   end
 end

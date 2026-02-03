@@ -1,6 +1,36 @@
 defmodule Coflux.Orchestration do
   alias Coflux.Orchestration
 
+  # Principal management
+
+  def ensure_principal(project_id, external_id) do
+    call_server(project_id, {:ensure_principal, external_id})
+  end
+
+  # Token management
+
+  def check_token(project_id, token_hash) do
+    call_server(project_id, {:check_token, token_hash})
+  end
+
+  def create_token(project_id, name, principal_id, opts \\ []) do
+    call_server(project_id, {:create_token, name, principal_id, opts})
+  end
+
+  def list_tokens(project_id) do
+    call_server(project_id, :list_tokens)
+  end
+
+  def revoke_token(project_id, token_id) do
+    call_server(project_id, {:revoke_token, token_id})
+  end
+
+  def get_token(project_id, external_id) do
+    call_server(project_id, {:get_token, external_id})
+  end
+
+  # Workspace management
+
   def get_workspaces(project_id) do
     call_server(project_id, :get_workspaces)
   end

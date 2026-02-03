@@ -57,14 +57,23 @@ defmodule Coflux.Orchestration.Results do
     case query_one(
            db,
            """
-           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.created_at, u.external_id
+           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.created_at,
+                  p.user_external_id AS created_by_user_external_id,
+                  t.external_id AS created_by_token_external_id
            FROM results AS r
-           LEFT JOIN users AS u ON r.created_by = u.id
+           LEFT JOIN principals AS p ON r.created_by = p.id
+           LEFT JOIN tokens AS t ON p.token_id = t.id
            WHERE r.execution_id = ?1
            """,
            {execution_id}
          ) do
-      {:ok, {type, error_id, value_id, successor_id, created_at, created_by}} ->
+      {:ok, {type, error_id, value_id, successor_id, created_at, created_by_user_ext_id, created_by_token_ext_id}} ->
+        created_by =
+          case {created_by_user_ext_id, created_by_token_ext_id} do
+            {nil, nil} -> nil
+            {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
+            {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
+          end
         result =
           case {type, error_id, value_id, successor_id} do
             {0, error_id, nil, retry_id} ->

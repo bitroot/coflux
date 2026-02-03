@@ -594,11 +594,14 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT DISTINCT r.external_id, r.created_at, u.external_id AS created_by
+      SELECT DISTINCT r.external_id, r.created_at,
+             p.user_external_id AS created_by_user_external_id,
+             t.external_id AS created_by_token_external_id
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
-      LEFT JOIN users AS u ON r.created_by = u.id
+      LEFT JOIN principals AS p ON r.created_by = p.id
+      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.workspace_id = ?4
       ORDER BY r.created_at DESC
       LIMIT ?5
@@ -611,9 +614,12 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at, u.external_id AS created_by
+      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at,
+             p.user_external_id AS created_by_user_external_id,
+             t.external_id AS created_by_token_external_id
       FROM runs AS r
-      LEFT JOIN users AS u ON r.created_by = u.id
+      LEFT JOIN principals AS p ON r.created_by = p.id
+      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE r.id = ?1
       """,
       {id},
@@ -625,9 +631,12 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at, u.external_id AS created_by
+      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at,
+             p.user_external_id AS created_by_user_external_id,
+             t.external_id AS created_by_token_external_id
       FROM runs AS r
-      LEFT JOIN users AS u ON r.created_by = u.id
+      LEFT JOIN principals AS p ON r.created_by = p.id
+      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE r.external_id = ?1
       """,
       {external_id},
@@ -711,11 +720,14 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at, u.external_id
+      SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at,
+             p.user_external_id AS created_by_user_external_id,
+             t.external_id AS created_by_token_external_id
       FROM steps AS s
       INNER JOIN executions AS e ON e.step_id = s.id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
-      LEFT JOIN users AS u ON e.created_by = u.id
+      LEFT JOIN principals AS p ON e.created_by = p.id
+      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE s.run_id = ?1
       """,
       {run_id}

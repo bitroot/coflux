@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Auth, Orchestration, MapUtils, Version}
+  alias Coflux.{Auth, Config, Orchestration, MapUtils, Version}
 
   @max_parameters 20
 
@@ -116,7 +116,7 @@ defmodule Coflux.Handlers.Api do
       {:ok, arguments, req} ->
         # Check if the new workspace name matches allowed patterns
         if operator?(access, arguments.name) do
-          case Orchestration.create_workspace(project_id, arguments.name, arguments[:base_id], access[:user_id]) do
+          case Orchestration.create_workspace(project_id, arguments.name, arguments[:base_id], access[:principal_id]) do
             {:ok, workspace_id} ->
               json_response(req, %{id: workspace_id})
 
@@ -145,7 +145,7 @@ defmodule Coflux.Handlers.Api do
         with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
              :ok <- require_operator(access, workspace),
              :ok <- check_rename_allowed(access, arguments[:name]),
-             :ok <- Orchestration.update_workspace(project_id, arguments.workspace_id, Map.take(arguments, [:name, :base_id]), access[:user_id]) do
+             :ok <- Orchestration.update_workspace(project_id, arguments.workspace_id, Map.take(arguments, [:name, :base_id]), access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :not_found} ->
@@ -178,7 +178,7 @@ defmodule Coflux.Handlers.Api do
       {:ok, arguments, req} ->
         with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
              :ok <- require_operator(access, workspace),
-             :ok <- Orchestration.pause_workspace(project_id, arguments.workspace_id, access[:user_id]) do
+             :ok <- Orchestration.pause_workspace(project_id, arguments.workspace_id, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
@@ -195,7 +195,7 @@ defmodule Coflux.Handlers.Api do
       {:ok, arguments, req} ->
         with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
              :ok <- require_operator(access, workspace),
-             :ok <- Orchestration.resume_workspace(project_id, arguments.workspace_id, access[:user_id]) do
+             :ok <- Orchestration.resume_workspace(project_id, arguments.workspace_id, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
@@ -212,7 +212,7 @@ defmodule Coflux.Handlers.Api do
       {:ok, arguments, req} ->
         with {:ok, workspace} <- Orchestration.get_workspace_name(project_id, arguments.workspace_id),
              :ok <- require_operator(access, workspace),
-             :ok <- Orchestration.archive_workspace(project_id, arguments.workspace_id, access[:user_id]) do
+             :ok <- Orchestration.archive_workspace(project_id, arguments.workspace_id, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :descendants} ->
@@ -294,6 +294,12 @@ defmodule Coflux.Handlers.Api do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  defp format_principal(nil), do: nil
+
+  defp format_principal(%{type: type, external_id: external_id}) do
+    %{"type" => type, "externalId" => external_id}
+  end
+
   defp handle(req, "POST", ["update_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_name: "workspaceName",
@@ -302,7 +308,7 @@ defmodule Coflux.Handlers.Api do
          }) do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.update_pool(project_id, arguments.workspace_name, arguments.pool_name, arguments.pool, access[:user_id]) do
+             :ok <- Orchestration.update_pool(project_id, arguments.workspace_name, arguments.pool_name, arguments.pool, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
@@ -321,7 +327,7 @@ defmodule Coflux.Handlers.Api do
          }) do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.stop_worker(project_id, arguments.workspace_name, arguments.worker_id, access[:user_id]) do
+             :ok <- Orchestration.stop_worker(project_id, arguments.workspace_name, arguments.worker_id, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
@@ -340,7 +346,7 @@ defmodule Coflux.Handlers.Api do
          }) do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.resume_worker(project_id, arguments.workspace_name, arguments.worker_id, access[:user_id]) do
+             :ok <- Orchestration.resume_worker(project_id, arguments.workspace_name, arguments.worker_id, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
@@ -359,7 +365,7 @@ defmodule Coflux.Handlers.Api do
          }) do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.register_manifests(project_id, arguments.workspace_name, arguments.manifests, access[:user_id]) do
+             :ok <- Orchestration.register_manifests(project_id, arguments.workspace_name, arguments.manifests, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
@@ -377,7 +383,7 @@ defmodule Coflux.Handlers.Api do
          }) do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.archive_module(project_id, arguments.workspace_name, arguments.module_name, access[:user_id]) do
+             :ok <- Orchestration.archive_module(project_id, arguments.workspace_name, arguments.module_name, access[:principal_id]) do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
@@ -439,7 +445,7 @@ defmodule Coflux.Handlers.Api do
                  retries: arguments[:retries],
                  recurrent: arguments[:recurrent] == true,
                  requires: arguments[:requires],
-                 created_by: access[:user_id]
+                 created_by: access[:principal_id]
                ) do
           json_response(req, %{
             "runId" => run_id,
@@ -462,7 +468,7 @@ defmodule Coflux.Handlers.Api do
         execution_id = String.to_integer(arguments.execution_id)
 
         with :ok <- require_operator(access, arguments.workspace_name),
-             :ok <- Orchestration.cancel_execution(project_id, arguments.workspace_name, execution_id, access[:user_id]) do
+             :ok <- Orchestration.cancel_execution(project_id, arguments.workspace_name, execution_id, access[:principal_id]) do
           json_response(req, %{})
         else
           {:error, :forbidden} ->
@@ -485,7 +491,7 @@ defmodule Coflux.Handlers.Api do
       {:ok, arguments, req} ->
         with :ok <- require_operator(access, arguments.workspace_name),
              {:ok, execution_id, attempt} <-
-               Orchestration.rerun_step(project_id, arguments.step_id, arguments.workspace_name, access[:user_id]) do
+               Orchestration.rerun_step(project_id, arguments.step_id, arguments.workspace_name, access[:principal_id]) do
           json_response(req, %{"executionId" => execution_id, "attempt" => attempt})
         else
           {:error, :forbidden} ->
@@ -542,7 +548,7 @@ defmodule Coflux.Handlers.Api do
          ) do
       {:ok, arguments, req} ->
         opts =
-          [provides: arguments[:provides], concurrency: arguments[:concurrency], created_by: access[:user_id]]
+          [provides: arguments[:provides], concurrency: arguments[:concurrency], created_by: access[:principal_id]]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
         with :ok <- require_operator(access, arguments.workspace_name),
@@ -551,6 +557,127 @@ defmodule Coflux.Handlers.Api do
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  # Token management endpoints
+
+  defp handle(req, "POST", ["create_token"], project_id, access) do
+    cond do
+      # Require COFLUX_SECRET to be configured for token support
+      Config.secret() == nil ->
+        json_error_response(req, "not_configured",
+          status: 501,
+          details: %{message: "API tokens require COFLUX_SECRET to be configured"}
+        )
+
+      # Only allow token creation for principals with full access
+      access.workspaces != :all ->
+        json_error_response(req, "forbidden", status: 403)
+
+      true ->
+        case read_arguments(req, %{}, %{name: "name", workspaces: {"workspaces", &parse_workspaces/1}}) do
+          {:ok, arguments, req} ->
+            opts = if arguments[:workspaces], do: [workspaces: arguments[:workspaces]], else: []
+
+            case Orchestration.create_token(project_id, arguments[:name], access[:principal_id], opts) do
+              {:ok, %{token: token, token_id: token_id, external_id: external_id}} ->
+                json_response(req, %{
+                  "token" => token,
+                  "tokenId" => token_id,
+                  "externalId" => external_id
+                })
+            end
+
+          {:error, errors, req} ->
+            json_error_response(req, "bad_request", details: errors)
+        end
+    end
+  end
+
+  defp parse_workspaces(value) when is_list(value) do
+    if Enum.all?(value, &is_binary/1) do
+      {:ok, value}
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_workspaces(_), do: {:error, :invalid}
+
+  defp handle(req, "GET", ["list_tokens"], project_id, access) do
+    # Only allow listing tokens for principals with full access
+    if access.workspaces != :all do
+      json_error_response(req, "forbidden", status: 403)
+    else
+      case Orchestration.list_tokens(project_id) do
+        {:ok, tokens} ->
+          json_response(req, %{
+            "tokens" => Enum.map(tokens, fn token ->
+              %{
+                "id" => token.id,
+                "externalId" => token.external_id,
+                "name" => token.name,
+                "workspaces" => token.workspaces,
+                "createdAt" => token.created_at,
+                "expiresAt" => token.expires_at,
+                "revokedAt" => token.revoked_at,
+                "createdBy" => format_principal(token.created_by)
+              }
+            end)
+          })
+      end
+    end
+  end
+
+  defp handle(req, "POST", ["revoke_token"], project_id, access) do
+    # Only allow revoking tokens for principals with full access
+    if access.workspaces != :all do
+      json_error_response(req, "forbidden", status: 403)
+    else
+      case read_arguments(req, %{external_id: "externalId"}) do
+        {:ok, arguments, req} ->
+          # Look up token by external_id, then revoke by internal id
+          case Orchestration.get_token(project_id, arguments.external_id) do
+            {:ok, nil} ->
+              json_error_response(req, "not_found", status: 404)
+
+            {:ok, token} ->
+              case Orchestration.revoke_token(project_id, token.id) do
+                :ok ->
+                  :cowboy_req.reply(204, req)
+
+                {:error, :not_found} ->
+                  json_error_response(req, "not_found", status: 404)
+              end
+          end
+
+        {:error, errors, req} ->
+          json_error_response(req, "bad_request", details: errors)
+      end
+    end
+  end
+
+  defp handle(req, "GET", ["get_token"], project_id, _access) do
+    case read_arguments(req, %{external_id: "externalId"}) do
+      {:ok, arguments, req} ->
+        case Orchestration.get_token(project_id, arguments.external_id) do
+          {:ok, nil} ->
+            json_error_response(req, "not_found", status: 404)
+
+          {:ok, token} ->
+            json_response(req, %{
+              "id" => token.id,
+              "externalId" => token.external_id,
+              "name" => token.name,
+              "createdAt" => token.created_at,
+              "expiresAt" => token.expires_at,
+              "revokedAt" => token.revoked_at
+            })
         end
 
       {:error, errors, req} ->
