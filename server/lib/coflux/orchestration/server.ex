@@ -269,7 +269,6 @@ defmodule Coflux.Orchestration.Server do
   # Workspace management
 
   def handle_call({:create_workspace, name, base_id, principal_id}, _from, state) do
-
     case Workspaces.create_workspace(state.db, name, base_id, principal_id) do
       {:ok, workspace_id, workspace} ->
         state =
@@ -317,7 +316,6 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:pause_workspace, workspace_id, principal_id}, _from, state) do
-
     case Workspaces.pause_workspace(state.db, workspace_id, principal_id) do
       :ok ->
         state =
@@ -331,7 +329,6 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:resume_workspace, workspace_id, principal_id}, _from, state) do
-
     case Workspaces.resume_workspace(state.db, workspace_id, principal_id) do
       :ok ->
         state =
@@ -347,7 +344,6 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:archive_workspace, workspace_id, principal_id}, _from, state) do
-
     case Workspaces.archive_workspace(state.db, workspace_id, principal_id) do
       :ok ->
         state =
@@ -564,14 +560,12 @@ defmodule Coflux.Orchestration.Server do
       Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
 
     with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name) do
-      principal_id = created_by
-
       db_opts = [
         provides: provides,
         concurrency: concurrency,
         activation_timeout: activation_timeout,
         reconnection_timeout: reconnection_timeout,
-        created_by: principal_id
+        created_by: created_by
       ]
 
       case Sessions.create_session(state.db, workspace_id, nil, db_opts) do
@@ -876,7 +870,8 @@ defmodule Coflux.Orchestration.Server do
           target: target_name
         }
 
-        {:reply, {:ok, run.external_id, external_step_id, execution_id, execution_metadata}, state}
+        {:reply, {:ok, run.external_id, external_step_id, execution_id, execution_metadata},
+         state}
     end
   end
 
@@ -920,7 +915,9 @@ defmodule Coflux.Orchestration.Server do
 
         if base_workspace_id == workspace_id ||
              is_workspace_ancestor?(state, base_workspace_id, workspace_id) do
-          {:ok, execution_id, attempt, state} = rerun_step(state, step, workspace_id, created_by: principal_id)
+          {:ok, execution_id, attempt, state} =
+            rerun_step(state, step, workspace_id, created_by: principal_id)
+
           state = flush_notifications(state)
           {:reply, {:ok, execution_id, attempt}, state}
         else
@@ -949,8 +946,11 @@ defmodule Coflux.Orchestration.Server do
   defp do_cancel_execution(state, execution_id, principal_id \\ nil) do
     root_execution_id =
       case Results.get_result(state.db, execution_id) do
-        {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} -> spawned_execution_id
-        {:ok, _other} -> execution_id
+        {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} ->
+          spawned_execution_id
+
+        {:ok, _other} ->
+          execution_id
       end
 
     {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
@@ -1190,6 +1190,7 @@ defmodule Coflux.Orchestration.Server do
               {:value, value} -> {:value, build_value(value, state.db)}
               other -> other
             end
+
           {{:ok, result}, state}
       end
 
@@ -1501,7 +1502,8 @@ defmodule Coflux.Orchestration.Server do
                  run_executions
                  |> Enum.filter(&(elem(&1, 1) == step.id))
                  |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
-                                created_at, assigned_at, created_by_user_ext_id, created_by_token_ext_id} ->
+                                created_at, assigned_at, created_by_user_ext_id,
+                                created_by_token_ext_id} ->
                    execution_created_by =
                      case {created_by_user_ext_id, created_by_token_ext_id} do
                        {nil, nil} -> nil
@@ -2470,7 +2472,7 @@ defmodule Coflux.Orchestration.Server do
 
         principal =
           case Principals.get_principal(state.db, created_by) do
-            {:ok, {type, external_id}} -> %{type: type, externalId: external_id}
+            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
             {:ok, nil} -> nil
           end
 
@@ -2506,9 +2508,15 @@ defmodule Coflux.Orchestration.Server do
     # TODO: only get run if needed for notify?
     {:ok, run} = Runs.get_run_by_id(state.db, step.run_id)
 
-    case Runs.rerun_step(state.db, step.id, workspace_id, execute_after, dependency_ids, created_by) do
+    case Runs.rerun_step(
+           state.db,
+           step.id,
+           workspace_id,
+           execute_after,
+           dependency_ids,
+           created_by
+         ) do
       {:ok, execution_id, attempt, created_at} ->
-
         {:ok, {run_module, run_target}} = Runs.get_run_target(state.db, run.id)
 
         execute_at = execute_after || created_at
@@ -2548,7 +2556,7 @@ defmodule Coflux.Orchestration.Server do
 
         principal =
           case run.created_by do
-            %{type: type, external_id: external_id} -> %{type: type, externalId: external_id}
+            %{type: type, external_id: external_id} -> %{type: type, external_id: external_id}
             nil -> nil
           end
 
@@ -2825,7 +2833,9 @@ defmodule Coflux.Orchestration.Server do
                   System.os_time(:millisecond) + step.delay
                 end
 
-              {:ok, _, _, state} = rerun_step(state, step, workspace_id, execute_after: execute_after)
+              {:ok, _, _, state} =
+                rerun_step(state, step, workspace_id, execute_after: execute_after)
+
               {nil, state}
 
             true ->
@@ -3202,7 +3212,14 @@ defmodule Coflux.Orchestration.Server do
     put_in(state, [Access.key(:launcher_tasks), task.ref], callback)
   end
 
-  defp update_worker_state(state, worker_id, worker_state, workspace_id, pool_name, principal_id \\ nil) do
+  defp update_worker_state(
+         state,
+         worker_id,
+         worker_state,
+         workspace_id,
+         pool_name,
+         principal_id \\ nil
+       ) do
     :ok = Workers.create_worker_state(state.db, worker_id, worker_state, principal_id)
 
     state

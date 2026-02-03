@@ -7,6 +7,7 @@ import sys
 import time
 import types
 import typing as t
+import datetime as dt
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
@@ -1286,18 +1287,7 @@ def _format_timestamp(ts: int | None) -> str:
     """Format a Unix timestamp as a human-readable string."""
     if ts is None:
         return ""
-    from datetime import datetime, timezone
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def _format_principal(principal: dict | None) -> str:
-    """Format a principal for display."""
-    if principal is None:
-        return ""
-    if principal["type"] == "token":
-        return f"token:{principal['externalId']}"
-    return principal["externalId"]
+    return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _format_workspaces(workspaces: list[str] | None) -> str:
@@ -1421,7 +1411,7 @@ def tokens_revoke(
     """
     Revokes an API token.
 
-    The TOKEN_ID is the external ID of the token (e.g., tok_abc123).
+    The TOKEN_ID is the external ID of the token.
     """
     use_secure = _should_use_secure(host, secure)
     resolved_token = _resolve_token(token, team, host)

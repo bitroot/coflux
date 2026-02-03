@@ -2,6 +2,8 @@ defmodule Coflux.Topics.Workflow do
   use Topical.Topic,
     route: ["workflows", :module, :target, :workspace_id]
 
+  import Coflux.TopicUtils
+
   alias Coflux.Orchestration
 
   def connect(params, context) do
@@ -62,7 +64,7 @@ defmodule Coflux.Topics.Workflow do
     Topic.set(
       topic,
       [:runs, external_run_id],
-      %{id: external_run_id, createdAt: created_at, createdBy: created_by}
+      %{id: external_run_id, createdAt: created_at, createdBy: build_principal(created_by)}
     )
   end
 

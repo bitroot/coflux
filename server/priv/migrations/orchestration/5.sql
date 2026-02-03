@@ -3,7 +3,7 @@
 -- Tokens table for API token authentication
 CREATE TABLE tokens (
   id INTEGER PRIMARY KEY,
-  external_id TEXT NOT NULL UNIQUE,  -- tok_xxx
+  external_id TEXT NOT NULL UNIQUE,
   token_hash TEXT NOT NULL UNIQUE,
   name TEXT,
   workspaces TEXT,  -- JSON array of workspace patterns, NULL for all workspaces
