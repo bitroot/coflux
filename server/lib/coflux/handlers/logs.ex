@@ -67,7 +67,11 @@ defmodule Coflux.Handlers.Logs do
           {:ok, req, opts}
         else
           {:error, field, reason} ->
-            req = json_error_response(req, "invalid_request", details: %{"field" => field, "reason" => reason})
+            req =
+              json_error_response(req, "invalid_request",
+                details: %{"field" => field, "reason" => reason}
+              )
+
             {:ok, req, opts}
         end
 
@@ -138,7 +142,9 @@ defmodule Coflux.Handlers.Logs do
             {:ok, req, opts}
 
           {:error, reason} ->
-            req = json_error_response(req, "query_failed", details: %{"reason" => inspect(reason)})
+            req =
+              json_error_response(req, "query_failed", details: %{"reason" => inspect(reason)})
+
             {:ok, req, opts}
         end
     end
@@ -150,7 +156,9 @@ defmodule Coflux.Handlers.Logs do
     subscribe_opts =
       []
       |> then(fn o -> if execution_id, do: [{:execution_id, execution_id} | o], else: o end)
-      |> then(fn o -> if workspace_ids != [], do: [{:workspace_ids, workspace_ids} | o], else: o end)
+      |> then(fn o ->
+        if workspace_ids != [], do: [{:workspace_ids, workspace_ids} | o], else: o
+      end)
 
     case Logs.Server.subscribe(project_id, run_id, self(), subscribe_opts) do
       {:ok, ref, initial_entries} ->
@@ -234,6 +242,7 @@ defmodule Coflux.Handlers.Logs do
 
   defp parse_id_list(nil), do: []
   defp parse_id_list(""), do: []
+
   defp parse_id_list(value) when is_binary(value) do
     value
     |> String.split(",")

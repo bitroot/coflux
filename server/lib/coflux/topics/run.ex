@@ -165,7 +165,10 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:result_result, execution_id, result, _created_at, created_by}) do
+  defp process_notification(
+         topic,
+         {:result_result, execution_id, result, _created_at, created_by}
+       ) do
     result = build_result(result, created_by)
 
     update_execution(topic, execution_id, fn topic, base_path ->
@@ -277,16 +280,35 @@ defmodule Coflux.Topics.Run do
         %{type: "cancelled", createdBy: created_by}
 
       {:suspended, successor} ->
-        %{type: "suspended", createdBy: created_by, successor: if(successor, do: successor.attempt)}
+        %{
+          type: "suspended",
+          createdBy: created_by,
+          successor: if(successor, do: successor.attempt)
+        }
 
       {:deferred, execution, result} ->
-        %{type: "deferred", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
+        %{
+          type: "deferred",
+          createdBy: created_by,
+          execution: build_execution(execution),
+          result: build_result(result)
+        }
 
       {:cached, execution, result} ->
-        %{type: "cached", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
+        %{
+          type: "cached",
+          createdBy: created_by,
+          execution: build_execution(execution),
+          result: build_result(result)
+        }
 
       {:spawned, execution, result} ->
-        %{type: "spawned", createdBy: created_by, execution: build_execution(execution), result: build_result(result)}
+        %{
+          type: "spawned",
+          createdBy: created_by,
+          execution: build_execution(execution),
+          result: build_result(result)
+        }
 
       nil ->
         nil

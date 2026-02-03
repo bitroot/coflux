@@ -90,7 +90,9 @@ defmodule Coflux.Logs.Store do
         {row, t_cache}
       end)
 
-    fields = {:run_id, :execution_id, :workspace_id, :timestamp, :level, :template_id, :values_json, :created_at}
+    fields =
+      {:run_id, :execution_id, :workspace_id, :timestamp, :level, :template_id, :values_json,
+       :created_at}
 
     case Store.insert_many(db, "messages", fields, rows) do
       {:ok, _ids} -> {:ok, template_cache}
@@ -166,7 +168,10 @@ defmodule Coflux.Logs.Store do
       if workspace_ids && workspace_ids != [] do
         # Build IN clause with positional parameters
         start_idx = length(args) + 1
-        placeholders = workspace_ids |> Enum.with_index(start_idx) |> Enum.map(fn {_, i} -> "?#{i}" end)
+
+        placeholders =
+          workspace_ids |> Enum.with_index(start_idx) |> Enum.map(fn {_, i} -> "?#{i}" end)
+
         clause = "m.workspace_id IN (#{Enum.join(placeholders, ", ")})"
         {clauses ++ [clause], args ++ workspace_ids}
       else
@@ -177,7 +182,9 @@ defmodule Coflux.Logs.Store do
       if after_cursor do
         case parse_cursor(after_cursor) do
           {:ok, timestamp, id} ->
-            clause = "(m.timestamp > ?#{length(args) + 1} OR (m.timestamp = ?#{length(args) + 1} AND m.id > ?#{length(args) + 2}))"
+            clause =
+              "(m.timestamp > ?#{length(args) + 1} OR (m.timestamp = ?#{length(args) + 1} AND m.id > ?#{length(args) + 2}))"
+
             {clauses ++ [clause], args ++ [timestamp, id]}
 
           :error ->
@@ -211,7 +218,10 @@ defmodule Coflux.Logs.Store do
     "#{entry.timestamp}:#{entry.id}"
   end
 
-  defp row_to_entry({id, run_id, execution_id, workspace_id, timestamp, level, template, values_json, _created_at}) do
+  defp row_to_entry(
+         {id, run_id, execution_id, workspace_id, timestamp, level, template, values_json,
+          _created_at}
+       ) do
     # Values are stored as validated JSON - return directly
     values =
       if values_json do

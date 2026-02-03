@@ -36,7 +36,16 @@ defmodule Coflux.Orchestration.Results do
             {7, nil, nil, execution_id}
         end
 
-      case insert_result(db, execution_id, type, error_id, value_id, successor_id, now, created_by) do
+      case insert_result(
+             db,
+             execution_id,
+             type,
+             error_id,
+             value_id,
+             successor_id,
+             now,
+             created_by
+           ) do
         {:ok, _} ->
           {:ok, now}
 
@@ -67,13 +76,16 @@ defmodule Coflux.Orchestration.Results do
            """,
            {execution_id}
          ) do
-      {:ok, {type, error_id, value_id, successor_id, created_at, created_by_user_ext_id, created_by_token_ext_id}} ->
+      {:ok,
+       {type, error_id, value_id, successor_id, created_at, created_by_user_ext_id,
+        created_by_token_ext_id}} ->
         created_by =
           case {created_by_user_ext_id, created_by_token_ext_id} do
             {nil, nil} -> nil
             {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
             {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
           end
+
         result =
           case {type, error_id, value_id, successor_id} do
             {0, error_id, nil, retry_id} ->

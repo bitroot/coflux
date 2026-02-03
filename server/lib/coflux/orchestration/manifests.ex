@@ -266,7 +266,11 @@ defmodule Coflux.Orchestration.Manifests do
           if(workflow.defer, do: Utils.encode_params_list(workflow.defer.params), else: ""),
           Integer.to_string(workflow.delay),
           if(workflow.retries,
-            do: if(workflow.retries.limit, do: Integer.to_string(workflow.retries.limit), else: "unlimited"),
+            do:
+              if(workflow.retries.limit,
+                do: Integer.to_string(workflow.retries.limit),
+                else: "unlimited"
+              ),
             else: ""
           ),
           if(workflow.retries, do: Integer.to_string(workflow.retries.delay_min), else: ""),

@@ -147,7 +147,11 @@ defmodule Coflux.Logs.Server do
     state = flush_buffer(state)
 
     {:ok, initial_logs, _cursor} =
-      Store.query_logs(state.db, run_id: run_id, execution_id: execution_id, workspace_ids: workspace_ids)
+      Store.query_logs(state.db,
+        run_id: run_id,
+        execution_id: execution_id,
+        workspace_ids: workspace_ids
+      )
 
     # Add to subscribers with optional filters
     # Store as {pid, execution_id, workspace_ids}
@@ -238,12 +242,14 @@ defmodule Coflux.Logs.Server do
   end
 
   defp maybe_filter_by_execution_id(entries, nil), do: entries
+
   defp maybe_filter_by_execution_id(entries, execution_id) do
     Enum.filter(entries, &(&1.execution_id == execution_id))
   end
 
   defp maybe_filter_by_workspace_ids(entries, nil), do: entries
   defp maybe_filter_by_workspace_ids(entries, []), do: entries
+
   defp maybe_filter_by_workspace_ids(entries, workspace_ids) do
     Enum.filter(entries, &(&1.workspace_id in workspace_ids))
   end
@@ -286,7 +292,9 @@ defmodule Coflux.Logs.Server do
       |> Enum.map(fn {run_id, subs} ->
         new_subs =
           subs
-          |> Enum.reject(fn {_ref, {sub_pid, _execution_id, _workspace_ids}} -> sub_pid == pid end)
+          |> Enum.reject(fn {_ref, {sub_pid, _execution_id, _workspace_ids}} ->
+            sub_pid == pid
+          end)
           |> Map.new()
 
         {run_id, new_subs}

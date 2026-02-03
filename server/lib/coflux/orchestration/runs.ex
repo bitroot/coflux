@@ -1042,7 +1042,15 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  defp insert_execution(db, step_id, attempt, workspace_id, execute_after, created_at, created_by \\ nil) do
+  defp insert_execution(
+         db,
+         step_id,
+         attempt,
+         workspace_id,
+         execute_after,
+         created_at,
+         created_by \\ nil
+       ) do
     insert_one(db, :executions, %{
       step_id: step_id,
       attempt: attempt,

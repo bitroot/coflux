@@ -232,7 +232,9 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :active}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :paused, current_timestamp(), created_by)
+          {:ok, _} =
+            insert_workspace_state(db, workspace_id, :paused, current_timestamp(), created_by)
+
           :ok
 
         {:ok, %{state: :paused}} ->
@@ -251,7 +253,9 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :paused}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :active, current_timestamp(), created_by)
+          {:ok, _} =
+            insert_workspace_state(db, workspace_id, :active, current_timestamp(), created_by)
+
           :ok
 
         {:ok, %{state: :active}} ->
@@ -276,7 +280,13 @@ defmodule Coflux.Orchestration.Workspaces do
 
             {:ok, false} ->
               {:ok, _} =
-                insert_workspace_state(db, workspace_id, :archived, current_timestamp(), created_by)
+                insert_workspace_state(
+                  db,
+                  workspace_id,
+                  :archived,
+                  current_timestamp(),
+                  created_by
+                )
 
               :ok
           end
@@ -587,7 +597,14 @@ defmodule Coflux.Orchestration.Workspaces do
     })
   end
 
-  defp insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, created_at, created_by) do
+  defp insert_workspace_pool(
+         db,
+         workspace_id,
+         pool_name,
+         pool_definition_id,
+         created_at,
+         created_by
+       ) do
     insert_one(db, :pools, %{
       workspace_id: workspace_id,
       name: pool_name,

@@ -15,8 +15,14 @@ defmodule Coflux.Orchestration.Principals do
   Returns {:ok, principal_id}.
   """
   def ensure_user(db, external_id) do
-    case Store.query_one(db, "SELECT id FROM principals WHERE user_external_id = ?1", {external_id}) do
-      {:ok, {id}} -> {:ok, id}
+    case Store.query_one(
+           db,
+           "SELECT id FROM principals WHERE user_external_id = ?1",
+           {external_id}
+         ) do
+      {:ok, {id}} ->
+        {:ok, id}
+
       {:ok, nil} ->
         Store.insert_one(db, :principals, %{user_external_id: external_id})
     end
@@ -55,6 +61,7 @@ defmodule Coflux.Orchestration.Principals do
   """
   def check_token(db, token_hash) do
     now = System.system_time(:second)
+
     query = """
       SELECT p.id, t.workspaces
       FROM tokens t
@@ -105,21 +112,24 @@ defmodule Coflux.Orchestration.Principals do
     {:ok, external_id} = Store.generate_external_id(db, "tokens", 12)
 
     # Insert token with external_id
-    {:ok, token_id} = Store.insert_one(db, :tokens, %{
-      external_id: external_id,
-      token_hash: random_hash,
-      name: name,
-      workspaces: encode_workspaces(workspaces),
-      created_by: created_by,
-      created_at: now
-    })
+    {:ok, token_id} =
+      Store.insert_one(db, :tokens, %{
+        external_id: external_id,
+        token_hash: random_hash,
+        name: name,
+        workspaces: encode_workspaces(workspaces),
+        created_by: created_by,
+        created_at: now
+      })
 
     # Create principal for this token
-    {:ok, principal_id} = Store.insert_one(db, :principals, %{
-      token_id: token_id
-    })
+    {:ok, principal_id} =
+      Store.insert_one(db, :principals, %{
+        token_id: token_id
+      })
 
-    {:ok, %{token: token, token_id: token_id, principal_id: principal_id, external_id: external_id}}
+    {:ok,
+     %{token: token, token_id: token_id, principal_id: principal_id, external_id: external_id}}
   end
 
   defp encode_workspaces(nil), do: nil
@@ -140,26 +150,29 @@ defmodule Coflux.Orchestration.Principals do
 
     {:ok, rows} = Store.query(db, query, {})
 
-    tokens = Enum.map(rows, fn {id, external_id, name, workspaces_json, created_at, expires_at, revoked_at, created_by_principal_id, creator_user_ext_id, creator_token_ext_id} ->
-      created_by =
-        case {creator_user_ext_id, creator_token_ext_id} do
-          {nil, nil} -> nil
-          {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
-          {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
-        end
+    tokens =
+      Enum.map(rows, fn {id, external_id, name, workspaces_json, created_at, expires_at,
+                         revoked_at, created_by_principal_id, creator_user_ext_id,
+                         creator_token_ext_id} ->
+        created_by =
+          case {creator_user_ext_id, creator_token_ext_id} do
+            {nil, nil} -> nil
+            {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
+            {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
+          end
 
-      %{
-        id: id,
-        external_id: external_id,
-        name: name,
-        workspaces: decode_workspaces(workspaces_json),
-        created_at: created_at,
-        expires_at: expires_at,
-        revoked_at: revoked_at,
-        created_by: created_by,
-        created_by_principal_id: created_by_principal_id
-      }
-    end)
+        %{
+          id: id,
+          external_id: external_id,
+          name: name,
+          workspaces: decode_workspaces(workspaces_json),
+          created_at: created_at,
+          expires_at: expires_at,
+          revoked_at: revoked_at,
+          created_by: created_by,
+          created_by_principal_id: created_by_principal_id
+        }
+      end)
 
     {:ok, tokens}
   end
@@ -177,15 +190,17 @@ defmodule Coflux.Orchestration.Principals do
 
     case Store.query_one(db, query, {external_id}) do
       {:ok, {id, ext_id, name, created_at, expires_at, revoked_at, created_by_principal_id}} ->
-        {:ok, %{
-          id: id,
-          external_id: ext_id,
-          name: name,
-          created_at: created_at,
-          expires_at: expires_at,
-          revoked_at: revoked_at,
-          created_by_principal_id: created_by_principal_id
-        }}
+        {:ok,
+         %{
+           id: id,
+           external_id: ext_id,
+           name: name,
+           created_at: created_at,
+           expires_at: expires_at,
+           revoked_at: revoked_at,
+           created_by_principal_id: created_by_principal_id
+         }}
+
       {:ok, nil} ->
         {:ok, nil}
     end
@@ -199,7 +214,9 @@ defmodule Coflux.Orchestration.Principals do
 
     case Store.query_one(db, "SELECT id FROM tokens WHERE id = ?1", {token_id}) do
       {:ok, {^token_id}} ->
-        {:ok, _} = Store.query(db, "UPDATE tokens SET revoked_at = ?1 WHERE id = ?2", {now, token_id})
+        {:ok, _} =
+          Store.query(db, "UPDATE tokens SET revoked_at = ?1 WHERE id = ?2", {now, token_id})
+
         :ok
 
       {:ok, nil} ->
