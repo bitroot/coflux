@@ -560,7 +560,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp insert_workspace_state(db, workspace_id, state, created_at, created_by \\ nil) do
+  defp insert_workspace_state(db, workspace_id, state, created_at, created_by) do
     insert_one(db, :workspace_states, %{
       workspace_id: workspace_id,
       state: encode_state(state),
@@ -569,7 +569,7 @@ defmodule Coflux.Orchestration.Workspaces do
     })
   end
 
-  defp insert_workspace_name(db, workspace_id, name, created_at, created_by \\ nil) do
+  defp insert_workspace_name(db, workspace_id, name, created_at, created_by) do
     insert_one(db, :workspace_names, %{
       workspace_id: workspace_id,
       name: name,
@@ -578,7 +578,7 @@ defmodule Coflux.Orchestration.Workspaces do
     })
   end
 
-  defp insert_workspace_base(db, workspace_id, base_workspace_id, created_at, created_by \\ nil) do
+  defp insert_workspace_base(db, workspace_id, base_workspace_id, created_at, created_by) do
     insert_one(db, :workspace_bases, %{
       workspace_id: workspace_id,
       base_workspace_id: base_workspace_id,
@@ -587,7 +587,7 @@ defmodule Coflux.Orchestration.Workspaces do
     })
   end
 
-  defp insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, created_at, created_by \\ nil) do
+  defp insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, created_at, created_by) do
     insert_one(db, :pools, %{
       workspace_id: workspace_id,
       name: pool_name,

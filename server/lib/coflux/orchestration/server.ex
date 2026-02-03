@@ -943,55 +943,6 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp do_cancel_execution(state, execution_id, principal_id \\ nil) do
-    root_execution_id =
-      case Results.get_result(state.db, execution_id) do
-        {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} ->
-          spawned_execution_id
-
-        {:ok, _other} ->
-          execution_id
-      end
-
-    {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
-
-    state =
-      Enum.reduce(
-        executions,
-        state,
-        fn {execution_id, module, assigned_at, completed_at}, state ->
-          if !completed_at do
-            # Only record created_by for the root execution (the one user explicitly cancelled)
-            created_by = if execution_id == root_execution_id, do: principal_id, else: nil
-
-            state =
-              case record_and_notify_result(
-                     state,
-                     execution_id,
-                     :cancelled,
-                     module,
-                     created_by
-                   ) do
-                {:ok, state} -> state
-                {:error, :already_recorded} -> state
-              end
-
-            if assigned_at do
-              abort_execution(state, execution_id)
-            else
-              state
-            end
-          else
-            state
-          end
-        end
-      )
-
-    state = flush_notifications(state)
-
-    {:reply, :ok, state}
-  end
-
   def handle_call({:record_heartbeats, executions, external_session_id}, _from, state) do
     # TODO: handle execution statuses?
     case Map.fetch(state.session_ids, external_session_id) do
@@ -2248,6 +2199,57 @@ defmodule Coflux.Orchestration.Server do
     Store.close(state.db)
   end
 
+  # Private helper functions
+
+  defp do_cancel_execution(state, execution_id, principal_id) do
+    root_execution_id =
+      case Results.get_result(state.db, execution_id) do
+        {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} ->
+          spawned_execution_id
+
+        {:ok, _other} ->
+          execution_id
+      end
+
+    {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
+
+    state =
+      Enum.reduce(
+        executions,
+        state,
+        fn {execution_id, module, assigned_at, completed_at}, state ->
+          if !completed_at do
+            # Only record created_by for the root execution (the one user explicitly cancelled)
+            created_by = if execution_id == root_execution_id, do: principal_id, else: nil
+
+            state =
+              case record_and_notify_result(
+                     state,
+                     execution_id,
+                     :cancelled,
+                     module,
+                     created_by
+                   ) do
+                {:ok, state} -> state
+                {:error, :already_recorded} -> state
+              end
+
+            if assigned_at do
+              abort_execution(state, execution_id)
+            else
+              state
+            end
+          else
+            state
+          end
+        end
+      )
+
+    state = flush_notifications(state)
+
+    {:reply, :ok, state}
+  end
+
   defp lookup_workspace_by_name(state, workspace_name) do
     case Map.fetch(state.workspace_names, workspace_name) do
       {:ok, workspace_id} ->
@@ -2500,7 +2502,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp rerun_step(state, step, workspace_id, opts \\ []) do
+  defp rerun_step(state, step, workspace_id, opts) do
     execute_after = Keyword.get(opts, :execute_after, nil)
     dependency_ids = Keyword.get(opts, :dependency_ids, [])
     created_by = Keyword.get(opts, :created_by)

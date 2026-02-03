@@ -197,12 +197,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp check_rename_allowed(_access, nil), do: :ok
-
-  defp check_rename_allowed(access, new_name) do
-    if operator?(access, new_name), do: :ok, else: {:error, :name_restricted}
-  end
-
   defp handle(req, "POST", ["pause_workspace"], project_id, access) do
     case read_arguments(req, %{workspace_id: {"workspaceId", &parse_numeric_id/1}}) do
       {:ok, arguments, req} ->
@@ -310,24 +304,6 @@ defmodule Coflux.Handlers.Api do
       {:error, :workspace_invalid} ->
         json_error_response(req, "workspace_not_found", status: 404)
     end
-  end
-
-  defp format_launcher(nil), do: nil
-
-  defp format_launcher(launcher) do
-    base = %{"type" => Atom.to_string(launcher.type), "image" => launcher.image}
-
-    base
-    |> maybe_put("dockerHost", Map.get(launcher, :docker_host))
-  end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp format_principal(nil), do: nil
-
-  defp format_principal(%{type: type, external_id: external_id}) do
-    %{"type" => type, "externalId" => external_id}
   end
 
   defp handle(req, "POST", ["update_pool"], project_id, access) do
@@ -640,16 +616,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_workspaces(value) when is_list(value) do
-    if Enum.all?(value, &is_binary/1) do
-      {:ok, value}
-    else
-      {:error, :invalid}
-    end
-  end
-
-  defp parse_workspaces(_), do: {:error, :invalid}
-
   defp handle(req, "GET", ["list_tokens"], project_id, access) do
     case Orchestration.list_tokens(project_id) do
       {:ok, tokens} ->
@@ -740,6 +706,42 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, _method, _path, _project, _access) do
     json_error_response(req, "not_found", status: 404)
   end
+
+  # Helper functions for handle/5 clauses
+
+  defp check_rename_allowed(_access, nil), do: :ok
+
+  defp check_rename_allowed(access, new_name) do
+    if operator?(access, new_name), do: :ok, else: {:error, :name_restricted}
+  end
+
+  defp format_launcher(nil), do: nil
+
+  defp format_launcher(launcher) do
+    base = %{"type" => Atom.to_string(launcher.type), "image" => launcher.image}
+
+    base
+    |> maybe_put("dockerHost", Map.get(launcher, :docker_host))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp format_principal(nil), do: nil
+
+  defp format_principal(%{type: type, external_id: external_id}) do
+    %{"type" => type, "externalId" => external_id}
+  end
+
+  defp parse_workspaces(value) when is_list(value) do
+    if Enum.all?(value, &is_binary/1) do
+      {:ok, value}
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_workspaces(_), do: {:error, :invalid}
 
   defp is_valid_json?(value) do
     if value do
@@ -1047,7 +1049,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_boolean(value, opts \\ []) do
+  defp parse_boolean(value, opts) do
     cond do
       opts[:optional] && is_nil(value) -> {:ok, nil}
       is_boolean(value) -> {:ok, value}

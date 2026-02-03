@@ -206,7 +206,7 @@ defmodule Coflux.Orchestration.Results do
          value_id,
          successor_id,
          created_at,
-         created_by \\ nil
+         created_by
        ) do
     insert_one(db, :results, %{
       execution_id: execution_id,

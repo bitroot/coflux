@@ -958,7 +958,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  defp insert_run(db, parent_id, idempotency_key, created_at, created_by \\ nil) do
+  defp insert_run(db, parent_id, idempotency_key, created_at, created_by) do
     case generate_external_id(db, :runs, 2, "R") do
       {:ok, external_id} ->
         case insert_one(db, :runs, %{
