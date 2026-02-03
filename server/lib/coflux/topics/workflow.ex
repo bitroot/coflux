@@ -2,6 +2,8 @@ defmodule Coflux.Topics.Workflow do
   use Topical.Topic,
     route: ["workflows", :module, :target, :workspace_id]
 
+  import Coflux.TopicUtils
+
   alias Coflux.Orchestration
 
   def connect(params, context) do
@@ -49,11 +51,11 @@ defmodule Coflux.Topics.Workflow do
     |> Topic.set([:configuration], build_configuration(target))
   end
 
-  defp process_notification({:run, external_run_id, created_at}, topic) do
+  defp process_notification({:run, external_run_id, created_at, created_by}, topic) do
     Topic.set(
       topic,
       [:runs, external_run_id],
-      %{id: external_run_id, createdAt: created_at}
+      %{id: external_run_id, createdAt: created_at, createdBy: build_principal(created_by)}
     )
   end
 
@@ -105,8 +107,16 @@ defmodule Coflux.Topics.Workflow do
   end
 
   defp build_runs(runs) do
-    Map.new(runs, fn {external_run_id, created_at} ->
-      {external_run_id, %{id: external_run_id, createdAt: created_at}}
+    Map.new(runs, fn
+      {external_run_id, created_at, created_by_user_ext_id, created_by_token_ext_id} ->
+        created_by =
+          case {created_by_user_ext_id, created_by_token_ext_id} do
+            {nil, nil} -> nil
+            {user_ext_id, nil} -> %{type: "user", externalId: user_ext_id}
+            {nil, token_ext_id} -> %{type: "token", externalId: token_ext_id}
+          end
+
+        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: created_by}}
     end)
   end
 end

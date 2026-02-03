@@ -7,8 +7,23 @@ defmodule Coflux.Orchestration.Models do
       :external_id,
       :parent_id,
       :idempotency_key,
-      :created_at
+      :created_at,
+      :created_by
     ]
+
+    def prepare(fields) do
+      {user_external_id, fields} = Keyword.pop(fields, :created_by_user_external_id)
+      {token_external_id, fields} = Keyword.pop(fields, :created_by_token_external_id)
+
+      created_by =
+        case {user_external_id, token_external_id} do
+          {nil, nil} -> nil
+          {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
+          {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
+        end
+
+      Keyword.put(fields, :created_by, created_by)
+    end
   end
 
   defmodule Step do

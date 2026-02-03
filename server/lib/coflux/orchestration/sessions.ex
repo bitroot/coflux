@@ -8,6 +8,7 @@ defmodule Coflux.Orchestration.Sessions do
     concurrency = Keyword.get(opts, :concurrency, 0)
     activation_timeout = Keyword.get(opts, :activation_timeout)
     reconnection_timeout = Keyword.get(opts, :reconnection_timeout)
+    created_by = Keyword.get(opts, :created_by)
 
     with_transaction(db, fn ->
       case generate_external_id(db, :sessions, 12) do
@@ -35,7 +36,8 @@ defmodule Coflux.Orchestration.Sessions do
                  activation_timeout: activation_timeout,
                  reconnection_timeout: reconnection_timeout,
                  secret_hash: {:blob, secret_hash},
-                 created_at: now
+                 created_at: now,
+                 created_by: created_by
                }) do
             {:ok, session_id} ->
               {:ok, session_id, external_id, token, secret_hash, now}

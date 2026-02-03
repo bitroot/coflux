@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, ProjectsStore, TokensStore, Orchestration, Logs, Topics}
+  alias Coflux.{Config, JwksStore, Orchestration, Logs, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -9,18 +9,16 @@ defmodule Coflux.Application do
 
     Config.init()
 
-    children =
-      [
-        ProjectsStore,
-        TokensStore,
-        # TODO: separate launch supervisor per project? (and specify max_children?)
-        {Task.Supervisor, name: Coflux.LauncherSupervisor},
-        Orchestration.Supervisor,
-        {Registry, keys: :unique, name: Coflux.Logs.Registry},
-        Logs.Supervisor,
-        {Topical, name: Coflux.TopicalRegistry, topics: topics()},
-        {Coflux.Web, port: port}
-      ]
+    children = [
+      # TODO: separate launch supervisor per project? (and specify max_children?)
+      {Task.Supervisor, name: Coflux.LauncherSupervisor},
+      Orchestration.Supervisor,
+      {Registry, keys: :unique, name: Coflux.Logs.Registry},
+      Logs.Supervisor,
+      {Topical, name: Coflux.TopicalRegistry, topics: topics()},
+      {Coflux.Web, port: port},
+      JwksStore
+    ]
 
     opts = [strategy: :one_for_one, name: Coflux.Supervisor]
 

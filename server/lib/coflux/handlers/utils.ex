@@ -2,7 +2,7 @@ defmodule Coflux.Handlers.Utils do
   alias Coflux.Config
 
   @doc """
-  Resolves the project from the request.
+  Resolves the project from the hostname.
 
   Behavior depends on configuration:
 
@@ -11,9 +11,12 @@ defmodule Coflux.Handlers.Utils do
   - COFLUX_BASE_DOMAIN only: Extracts project from subdomain (subdomain required)
   - Both set: Extracts from subdomain, but must match COFLUX_PROJECT
   """
-  def resolve_project(req) do
+  def resolve_project(hostname) do
     configured_project = Config.project()
     base_domain = Config.base_domain()
+
+    # Strip port for subdomain matching
+    host = hostname |> String.split(":") |> hd()
 
     case {configured_project, base_domain} do
       {nil, nil} ->
@@ -24,14 +27,12 @@ defmodule Coflux.Handlers.Utils do
 
       {_, base_domain} ->
         # Subdomain routing
-        hostname = :cowboy_req.host(req)
-
         cond do
-          hostname == base_domain ->
+          host == base_domain ->
             {:error, :project_required}
 
-          String.ends_with?(hostname, "." <> base_domain) ->
-            project_id = String.replace_suffix(hostname, "." <> base_domain, "")
+          String.ends_with?(host, "." <> base_domain) ->
+            project_id = String.replace_suffix(host, "." <> base_domain, "")
 
             if configured_project && project_id != configured_project do
               {:error, :project_mismatch}
@@ -42,6 +43,21 @@ defmodule Coflux.Handlers.Utils do
           true ->
             {:error, :invalid_host}
         end
+    end
+  end
+
+  @doc """
+  Gets the host from the request, including port if non-standard.
+  """
+  def get_host(req) do
+    host = :cowboy_req.host(req)
+    port = :cowboy_req.port(req)
+
+    # Include port if it's non-standard
+    case port do
+      80 -> host
+      443 -> host
+      _ -> "#{host}:#{port}"
     end
   end
 

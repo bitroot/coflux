@@ -14,7 +14,7 @@ defmodule Coflux.Handlers.Worker do
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Orchestration, Config, ProjectsStore, Version}
+  alias Coflux.{Orchestration, Version}
 
   @protocol_version "v1"
 
@@ -25,7 +25,9 @@ defmodule Coflux.Handlers.Worker do
 
     case Version.check(expected_version) do
       :ok ->
-        case resolve_project(req) do
+        host = get_host(req)
+
+        case resolve_project(host) do
           {:ok, project_id} ->
             workspace_name = get_query_param(qs, "workspace")
             session_token = extract_session_token(protocols)
@@ -61,34 +63,22 @@ defmodule Coflux.Handlers.Worker do
   end
 
   def websocket_init({project_id, workspace_name, session_token}) do
-    # Validate project against whitelist when using subdomain routing
-    project_valid =
-      if Config.base_domain() do
-        ProjectsStore.exists?(project_id)
-      else
-        true
-      end
+    # TODO: monitor server?
+    case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
+      {:ok, external_id, execution_ids} ->
+        {[session_message(external_id)],
+         %{
+           project_id: project_id,
+           workspace_name: workspace_name,
+           session_id: external_id,
+           execution_ids: execution_ids
+         }}
 
-    if project_valid do
-      # TODO: monitor server?
-      case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
-        {:ok, external_id, execution_ids} ->
-          {[session_message(external_id)],
-           %{
-             project_id: project_id,
-             workspace_name: workspace_name,
-             session_id: external_id,
-             execution_ids: execution_ids
-           }}
+      {:error, :session_invalid} ->
+        {[{:close, 4000, "session_invalid"}], nil}
 
-        {:error, :session_invalid} ->
-          {[{:close, 4000, "session_invalid"}], nil}
-
-        {:error, :workspace_mismatch} ->
-          {[{:close, 4000, "workspace_mismatch"}], nil}
-      end
-    else
-      {[{:close, 4000, "project_not_found"}], nil}
+      {:error, :workspace_mismatch} ->
+        {[{:close, 4000, "workspace_mismatch"}], nil}
     end
   end
 

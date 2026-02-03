@@ -154,7 +154,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  def create_workspace(db, name, base_id) do
+  def create_workspace(db, name, base_id, created_by \\ nil) do
     with_transaction(db, fn ->
       workspace = %{
         state: :active,
@@ -174,16 +174,16 @@ defmodule Coflux.Orchestration.Workspaces do
       else
         now = current_timestamp()
         {:ok, workspace_id} = insert_one(db, :workspaces, %{})
-        {:ok, _} = insert_workspace_state(db, workspace_id, workspace.state, now)
-        {:ok, _} = insert_workspace_name(db, workspace_id, workspace.name, now)
-        {:ok, _} = insert_workspace_base(db, workspace_id, workspace.base_id, now)
+        {:ok, _} = insert_workspace_state(db, workspace_id, workspace.state, now, created_by)
+        {:ok, _} = insert_workspace_name(db, workspace_id, workspace.name, now, created_by)
+        {:ok, _} = insert_workspace_base(db, workspace_id, workspace.base_id, now, created_by)
 
         {:ok, workspace_id, workspace}
       end
     end)
   end
 
-  def update_workspace(db, workspace_id, updates) do
+  def update_workspace(db, workspace_id, updates, created_by \\ nil) do
     with_transaction(db, fn ->
       case get_workspace_by_id(db, workspace_id) do
         {:ok, nil} ->
@@ -206,11 +206,11 @@ defmodule Coflux.Orchestration.Workspaces do
             now = current_timestamp()
 
             if Map.has_key?(updates, :name) && updates.name != workspace.name do
-              {:ok, _} = insert_workspace_name(db, workspace_id, updates.name, now)
+              {:ok, _} = insert_workspace_name(db, workspace_id, updates.name, now, created_by)
             end
 
             if Map.has_key?(updates, :base_id) && updates.base_id != workspace.base_id do
-              {:ok, _} = insert_workspace_base(db, workspace_id, updates.base_id, now)
+              {:ok, _} = insert_workspace_base(db, workspace_id, updates.base_id, now, created_by)
             end
 
             # TODO: don't return workspace - move this to separate function?
@@ -222,7 +222,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def pause_workspace(db, workspace_id) do
+  def pause_workspace(db, workspace_id, created_by \\ nil) do
     with_transaction(db, fn ->
       case get_workspace_by_id(db, workspace_id) do
         {:ok, nil} ->
@@ -232,7 +232,9 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :active}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :paused, current_timestamp())
+          {:ok, _} =
+            insert_workspace_state(db, workspace_id, :paused, current_timestamp(), created_by)
+
           :ok
 
         {:ok, %{state: :paused}} ->
@@ -241,7 +243,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def resume_workspace(db, workspace_id) do
+  def resume_workspace(db, workspace_id, created_by \\ nil) do
     with_transaction(db, fn ->
       case get_workspace_by_id(db, workspace_id) do
         {:ok, nil} ->
@@ -251,7 +253,9 @@ defmodule Coflux.Orchestration.Workspaces do
           {:error, :not_found}
 
         {:ok, %{state: :paused}} ->
-          {:ok, _} = insert_workspace_state(db, workspace_id, :active, current_timestamp())
+          {:ok, _} =
+            insert_workspace_state(db, workspace_id, :active, current_timestamp(), created_by)
+
           :ok
 
         {:ok, %{state: :active}} ->
@@ -260,7 +264,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def archive_workspace(db, workspace_id) do
+  def archive_workspace(db, workspace_id, created_by \\ nil) do
     with_transaction(db, fn ->
       case get_workspace_by_id(db, workspace_id) do
         {:ok, nil} ->
@@ -276,7 +280,13 @@ defmodule Coflux.Orchestration.Workspaces do
 
             {:ok, false} ->
               {:ok, _} =
-                insert_workspace_state(db, workspace_id, :archived, current_timestamp())
+                insert_workspace_state(
+                  db,
+                  workspace_id,
+                  :archived,
+                  current_timestamp(),
+                  created_by
+                )
 
               :ok
           end
@@ -284,7 +294,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def update_pool(db, workspace_id, pool_name, pool) do
+  def update_pool(db, workspace_id, pool_name, pool, created_by \\ nil) do
     # TODO: validate pool (check launcher is specified)
 
     with_transaction(db, fn ->
@@ -306,7 +316,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
 
       if pool_definition_id != existing_pool_definition_id do
-        insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, now)
+        insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, now, created_by)
       else
         {:ok, existing_pool_id}
       end
@@ -560,36 +570,47 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp insert_workspace_state(db, workspace_id, state, created_at) do
+  defp insert_workspace_state(db, workspace_id, state, created_at, created_by) do
     insert_one(db, :workspace_states, %{
       workspace_id: workspace_id,
       state: encode_state(state),
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 
-  defp insert_workspace_name(db, workspace_id, name, created_at) do
+  defp insert_workspace_name(db, workspace_id, name, created_at, created_by) do
     insert_one(db, :workspace_names, %{
       workspace_id: workspace_id,
       name: name,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 
-  defp insert_workspace_base(db, workspace_id, base_workspace_id, created_at) do
+  defp insert_workspace_base(db, workspace_id, base_workspace_id, created_at, created_by) do
     insert_one(db, :workspace_bases, %{
       workspace_id: workspace_id,
       base_workspace_id: base_workspace_id,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 
-  defp insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, created_at) do
+  defp insert_workspace_pool(
+         db,
+         workspace_id,
+         pool_name,
+         pool_definition_id,
+         created_at,
+         created_by
+       ) do
     insert_one(db, :pools, %{
       workspace_id: workspace_id,
       name: pool_name,
       pool_definition_id: pool_definition_id,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 

@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Results do
 
   alias Coflux.Orchestration.Values
 
-  def record_result(db, execution_id, result) do
+  def record_result(db, execution_id, result, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
@@ -36,7 +36,16 @@ defmodule Coflux.Orchestration.Results do
             {7, nil, nil, execution_id}
         end
 
-      case insert_result(db, execution_id, type, error_id, value_id, successor_id, now) do
+      case insert_result(
+             db,
+             execution_id,
+             type,
+             error_id,
+             value_id,
+             successor_id,
+             now,
+             created_by
+           ) do
         {:ok, _} ->
           {:ok, now}
 
@@ -57,13 +66,26 @@ defmodule Coflux.Orchestration.Results do
     case query_one(
            db,
            """
-           SELECT type, error_id, value_id, successor_id, created_at
-           FROM results
-           WHERE execution_id = ?1
+           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.created_at,
+                  p.user_external_id AS created_by_user_external_id,
+                  t.external_id AS created_by_token_external_id
+           FROM results AS r
+           LEFT JOIN principals AS p ON r.created_by = p.id
+           LEFT JOIN tokens AS t ON p.token_id = t.id
+           WHERE r.execution_id = ?1
            """,
            {execution_id}
          ) do
-      {:ok, {type, error_id, value_id, successor_id, created_at}} ->
+      {:ok,
+       {type, error_id, value_id, successor_id, created_at, created_by_user_ext_id,
+        created_by_token_ext_id}} ->
+        created_by =
+          case {created_by_user_ext_id, created_by_token_ext_id} do
+            {nil, nil} -> nil
+            {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
+            {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
+          end
+
         result =
           case {type, error_id, value_id, successor_id} do
             {0, error_id, nil, retry_id} ->
@@ -96,7 +118,7 @@ defmodule Coflux.Orchestration.Results do
               {:spawned, execution_id}
           end
 
-        {:ok, {result, created_at}}
+        {:ok, {result, created_at, created_by}}
 
       {:ok, nil} ->
         {:ok, nil}
@@ -195,7 +217,8 @@ defmodule Coflux.Orchestration.Results do
          error_id,
          value_id,
          successor_id,
-         created_at
+         created_at,
+         created_by
        ) do
     insert_one(db, :results, %{
       execution_id: execution_id,
@@ -203,7 +226,8 @@ defmodule Coflux.Orchestration.Results do
       error_id: error_id,
       value_id: value_id,
       successor_id: successor_id,
-      created_at: created_at
+      created_at: created_at,
+      created_by: created_by
     })
   end
 

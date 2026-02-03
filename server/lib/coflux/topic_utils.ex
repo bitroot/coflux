@@ -72,4 +72,10 @@ defmodule Coflux.TopicUtils do
       target: execution.target
     }
   end
+
+  def build_principal(nil), do: nil
+
+  def build_principal(%{type: type, external_id: external_id}) do
+    %{type: type, externalId: external_id}
+  end
 end

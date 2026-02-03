@@ -30,7 +30,8 @@ defmodule Coflux.MixProject do
       {:unzip, "~> 0.12.0"},
       {:mime, "~> 2.0"},
       {:req, "~> 0.5"},
-      {:file_system, "~> 1.0"}
+      {:joken, "~> 2.6"},
+      {:jose, "~> 1.11"}
     ]
   end
 end
