@@ -385,6 +385,7 @@ defmodule Coflux.Handlers.Api do
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -410,6 +411,7 @@ defmodule Coflux.Handlers.Api do
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -434,6 +436,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -458,6 +461,7 @@ defmodule Coflux.Handlers.Api do
           :cowboy_req.reply(204, req)
         else
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -1208,10 +1212,11 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         # limit can be nil (unlimited) or an integer
+        # delay_min and delay_max default to 0 if not provided (database requires NOT NULL)
         with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
              {:ok, delay_min} <- parse_integer(Map.get(value, "delayMin"), optional: true),
              {:ok, delay_max} <- parse_integer(Map.get(value, "delayMax"), optional: true) do
-          {:ok, %{limit: limit, delay_min: delay_min, delay_max: delay_max}}
+          {:ok, %{limit: limit, delay_min: delay_min || 0, delay_max: delay_max || 0}}
         end
 
       true ->

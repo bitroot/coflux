@@ -1,0 +1,18 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "coflux"
+version = "0.8.1"
+description = "Coflux Python SDK"
+authors = ["Coflux Labs"]
+license = "Apache-2.0"
+readme = "README.md"
+packages = [{include = "coflux"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
