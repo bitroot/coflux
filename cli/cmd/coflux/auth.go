@@ -27,11 +27,13 @@ var logoutCmd = &cobra.Command{
 }
 
 var (
-	loginHost string
+	loginHost      string
+	loginNoBrowser bool
 )
 
 func init() {
 	loginCmd.Flags().StringVar(&loginHost, "host", "https://studio.coflux.com", "Studio URL for authentication")
+	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "Don't open a browser automatically")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
@@ -48,8 +50,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %s\n\n", start.VerificationURI)
 
 	// Try to open browser automatically
-	if openErr := openBrowser(start.VerificationURI); openErr != nil {
-		fmt.Println("(Unable to open browser automatically)")
+	if !loginNoBrowser {
+		if openErr := openBrowser(start.VerificationURI); openErr != nil {
+			fmt.Println("(Unable to open browser automatically)")
+		}
 	}
 
 	fmt.Println("Waiting for authentication...")
