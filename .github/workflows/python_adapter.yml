@@ -24,7 +24,7 @@ jobs:
 
           server_version = Path("server/VERSION").read_text().strip()
           with open("adapters/python/pyproject.toml", "rb") as f:
-              adapter_version = tomllib.load(f)["tool"]["poetry"]["version"]
+              adapter_version = tomllib.load(f)["project"]["version"]
 
           if server_version != adapter_version:
               raise SystemExit(
@@ -33,21 +33,18 @@ jobs:
               )
           print(f"Versions match: {server_version}")
 
-      - name: Install poetry
-        run: pipx install poetry
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-          cache: poetry
+        run: uv python install 3.11
 
       - name: Install dependencies
-        run: poetry install
+        run: uv sync
         working-directory: adapters/python
 
       - name: Build
-        run: poetry build
+        run: uv build
         working-directory: adapters/python
 
   publish:
@@ -63,17 +60,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install poetry
-        run: pipx install poetry
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-          cache: poetry
+        run: uv python install 3.11
 
       - name: Install httpx
-        run: pip install httpx
+        run: uv pip install httpx --system
 
       - name: Check published
         shell: python
@@ -85,7 +79,7 @@ jobs:
           from pathlib import Path
 
           with open("adapters/python/pyproject.toml", "rb") as f:
-            version = tomllib.load(f)["tool"]["poetry"]["version"]
+            version = tomllib.load(f)["project"]["version"]
 
           r = httpx.get(f"https://pypi.org/pypi/coflux/{version}/json")
           assert r.status_code in (200, 404), f"unexpected status code: {r.status_code}"
@@ -95,13 +89,9 @@ jobs:
               f.write(f"version={version}\n")
               f.write(f"published={published}\n")
 
-      - name: Install dependencies
-        run: poetry install
-        working-directory: adapters/python
-
       - name: Build
         if: steps.checkversion.outputs.published == 'false'
-        run: poetry build
+        run: uv build
         working-directory: adapters/python
 
       - name: Publish
