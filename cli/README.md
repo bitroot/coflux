@@ -11,51 +11,83 @@ go build -o coflux ./cmd/coflux
 
 ## Usage
 
-### Discovery
+### Setup
 
-Discover workflow and task targets in Python modules:
+Configure a project interactively:
 
 ```bash
-# Basic discovery
-coflux discover myapp.workflows myapp.tasks
-
-# With explicit Python interpreter
-coflux discover --python /path/to/python --module myapp.workflows
+coflux setup
 ```
+
+This creates a `coflux.toml` with server host, workspace, adapter, and modules.
 
 ### Worker
 
 Start a worker that connects to the Coflux server:
 
 ```bash
-# Using command-line options
-coflux worker --project myproject --workspace dev myapp.workflows
+# Uses modules from coflux.toml
+coflux worker
 
-# Using coflux.toml configuration
+# Override modules
 coflux worker myapp.workflows myapp.tasks
+
+# Development mode (watch for changes + auto-register)
+coflux worker --dev
+```
+
+### Register
+
+Register module manifests with the server (without starting a worker):
+
+```bash
+coflux register
+coflux register myapp.workflows myapp.tasks
+coflux register --dry-run
+```
+
+### Submit
+
+Submit a workflow to be run:
+
+```bash
+coflux submit mymodule.my_workflow '["arg1", "arg2"]'
+```
+
+### Server
+
+Start a local Coflux server using Docker:
+
+```bash
+coflux server
+coflux server --port 8080
+coflux server --data-dir ./my-data
 ```
 
 ### Authentication
 
-Login to Coflux Studio:
-
 ```bash
-coflux login
+coflux login    # Authenticate with Coflux Studio
+coflux logout   # Remove stored credentials
 ```
 
-Logout:
+### Management Commands
 
 ```bash
-coflux logout
+coflux workspaces list
+coflux pools list
+coflux tokens list
+coflux assets inspect <asset-id>
+coflux blobs get <key>
 ```
 
 ## Configuration
 
-Create a `coflux.toml` file:
+Create a `coflux.toml` file (or use `coflux setup`):
 
 ```toml
-project = "myproject"
 workspace = "default"
+modules = ["myapp.workflows", "myapp.tasks"]
 concurrency = 8
 
 [server]
