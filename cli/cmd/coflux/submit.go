@@ -80,10 +80,15 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		options["requires"] = requires
 	}
 
-	if err := client.SubmitWorkflow(cmd.Context(), workspace, module, targetName, submitArgs, options); err != nil {
+	result, err := client.SubmitWorkflow(cmd.Context(), workspace, module, targetName, submitArgs, options)
+	if err != nil {
 		return fmt.Errorf("failed to submit workflow: %w", err)
 	}
 
-	fmt.Println("Workflow submitted.")
+	if getJSON() {
+		return outputJSON(result)
+	}
+
+	fmt.Printf("Workflow submitted (run: %s).\n", result.RunID)
 	return nil
 }

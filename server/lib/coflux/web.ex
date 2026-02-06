@@ -16,7 +16,8 @@ defmodule Coflux.Web do
          {"/blobs/:key", Handlers.Blobs, []},
          {"/logs", Handlers.Logs, []},
          {"/worker", Handlers.Worker, []},
-         {"/topics", Handlers.Topics, registry: Coflux.TopicalRegistry},
+         {"/topics", Handlers.Topics.WebSocket, registry: Coflux.TopicalRegistry},
+         {"/topics/[...]", Handlers.Topics.Rest, registry: Coflux.TopicalRegistry},
          {"/api/[...]", Handlers.Api, []},
          {"/[...]", Handlers.Root, []}
        ]}

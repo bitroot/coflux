@@ -1,4 +1,4 @@
-defmodule Coflux.Handlers.Topics do
+defmodule Coflux.Handlers.Topics.WebSocket do
   @moduledoc """
   WebSocket handler for topic subscriptions.
 
@@ -14,7 +14,7 @@ defmodule Coflux.Handlers.Topics do
 
   import Coflux.Handlers.Utils
 
-  alias Topical.Adapters.Cowboy.WebsocketHandler, as: TopicalHandler
+  alias Topical.Adapters.Cowboy.WebsocketHandler
   alias Coflux.{Auth, Version}
 
   @protocol_version "v1"
@@ -33,7 +33,7 @@ defmodule Coflux.Handlers.Topics do
 
       case Version.check(expected_version) do
         :ok ->
-          TopicalHandler.init(req, opts)
+          WebsocketHandler.init(req, opts)
 
         {:error, server_version, expected_version} ->
           req =
@@ -109,6 +109,6 @@ defmodule Coflux.Handlers.Topics do
     end)
   end
 
-  defdelegate websocket_handle(data, state), to: TopicalHandler
-  defdelegate websocket_info(info, state), to: TopicalHandler
+  defdelegate websocket_handle(data, state), to: WebsocketHandler
+  defdelegate websocket_info(info, state), to: WebsocketHandler
 end

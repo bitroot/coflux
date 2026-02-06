@@ -64,8 +64,15 @@ func (c *Client) RegisterManifests(ctx context.Context, workspace string, manife
 	return c.post(ctx, "/api/register_manifests", body, nil)
 }
 
+// SubmitResult contains the IDs returned from submitting a workflow
+type SubmitResult struct {
+	RunID       string `json:"runId"`
+	StepID      string `json:"stepId"`
+	ExecutionID string `json:"executionId"`
+}
+
 // SubmitWorkflow submits a workflow for execution
-func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target string, arguments [][]any, options map[string]any) error {
+func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target string, arguments [][]any, options map[string]any) (*SubmitResult, error) {
 	body := map[string]any{
 		"workspaceName": workspace,
 		"module":        module,
@@ -74,7 +81,11 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target s
 	}
 	maps.Copy(body, options)
 
-	return c.post(ctx, "/api/submit_workflow", body, nil)
+	var result SubmitResult
+	if err := c.post(ctx, "/api/submit_workflow", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // GetWorkflow retrieves a workflow definition
@@ -210,6 +221,15 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 		"externalId": externalID,
 	}
 	return c.post(ctx, "/api/revoke_token", body, nil)
+}
+
+// CaptureTopic captures a topic snapshot via the REST endpoint
+func (c *Client) CaptureTopic(ctx context.Context, path string) (map[string]any, error) {
+	var result map[string]any
+	if err := c.get(ctx, "/topics/"+path, nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // HTTP helpers

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/bitroot/coflux/cli/internal/api"
 	"github.com/bitroot/coflux/cli/internal/auth"
+	"github.com/spf13/viper"
 )
 
 const studioURL = "https://studio.coflux.com"
@@ -46,6 +48,21 @@ func requireWorkspace() (string, error) {
 		return "", fmt.Errorf("workspace is required (use --workspace, COFLUX_WORKSPACE, or set in config)")
 	}
 	return ws, nil
+}
+
+// getJSON returns whether JSON output is requested
+func getJSON() bool {
+	return viper.GetBool("json")
+}
+
+// outputJSON marshals v as indented JSON and prints it to stdout
+func outputJSON(v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
 }
 
 // splitTarget splits a full target name into module and name

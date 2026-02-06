@@ -54,7 +54,6 @@ defmodule Coflux.Topics.Run do
       Topic.set(topic, [:steps, external_step_id], %{
         module: step.module,
         target: step.target,
-        type: step.type,
         parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
         cacheConfig: build_cache_config(step.cache_config),
         cacheKey: build_key(step.cache_key),
@@ -193,7 +192,6 @@ defmodule Coflux.Topics.Run do
            %{
              module: step.module,
              target: step.target,
-             type: step.type,
              parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
              cacheConfig: build_cache_config(step.cache_config),
              cacheKey: build_key(step.cache_key),
