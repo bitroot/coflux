@@ -268,16 +268,40 @@ defmodule Coflux.Handlers.Logs do
 
   defp valid_value?(_), do: false
 
-  defp valid_reference?(%{"type" => "execution", "executionId" => id})
-       when is_binary(id) or is_integer(id),
+  defp valid_reference?(%{
+         "type" => "execution",
+         "executionId" => id,
+         "runId" => run_id,
+         "stepId" => step_id,
+         "attempt" => attempt
+       })
+       when (is_binary(id) or is_integer(id)) and
+              is_binary(run_id) and
+              (is_binary(step_id) or is_integer(step_id)) and
+              is_integer(attempt),
        do: true
 
-  defp valid_reference?(%{"type" => "asset", "assetId" => id})
-       when is_binary(id) or is_integer(id),
+  defp valid_reference?(%{
+         "type" => "asset",
+         "assetId" => id,
+         "name" => name,
+         "totalCount" => total_count,
+         "totalSize" => total_size
+       })
+       when (is_binary(id) or is_integer(id)) and
+              (is_binary(name) or is_nil(name)) and
+              is_integer(total_count) and
+              is_integer(total_size),
        do: true
 
-  defp valid_reference?(%{"type" => "fragment", "format" => f, "blobKey" => k, "size" => s})
-       when is_binary(f) and is_binary(k) and is_integer(s),
+  defp valid_reference?(%{
+         "type" => "fragment",
+         "format" => f,
+         "blobKey" => k,
+         "size" => s,
+         "metadata" => m
+       })
+       when is_binary(f) and is_binary(k) and is_integer(s) and is_map(m),
        do: true
 
   defp valid_reference?(_), do: false

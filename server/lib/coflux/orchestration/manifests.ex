@@ -273,8 +273,8 @@ defmodule Coflux.Orchestration.Manifests do
               ),
             else: ""
           ),
-          if(workflow.retries, do: Integer.to_string(workflow.retries.delay_min), else: ""),
-          if(workflow.retries, do: Integer.to_string(workflow.retries.delay_max), else: ""),
+          if(workflow.retries[:delay_min], do: Integer.to_string(workflow.retries.delay_min), else: ""),
+          if(workflow.retries[:delay_max], do: Integer.to_string(workflow.retries.delay_max), else: ""),
           if(workflow.recurrent, do: "1", else: "0"),
           hash_requires(workflow.requires),
           workflow.instruction || ""

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coflux"
+version = "0.8.1"
+description = "Coflux Python SDK"
+authors = [{name = "Coflux Labs"}]
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]

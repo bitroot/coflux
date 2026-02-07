@@ -1,0 +1,111 @@
+name: Python adapter
+
+on:
+  push:
+    paths:
+      - adapters/python/**
+      - .github/workflows/python_adapter.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check version matches server
+        shell: python
+        run: |
+          import tomllib
+          from pathlib import Path
+
+          server_version = Path("server/VERSION").read_text().strip()
+          with open("adapters/python/pyproject.toml", "rb") as f:
+              adapter_version = tomllib.load(f)["project"]["version"]
+
+          if server_version != adapter_version:
+              raise SystemExit(
+                  f"Version mismatch: server/VERSION is {server_version}, "
+                  f"but pyproject.toml is {adapter_version}"
+              )
+          print(f"Versions match: {server_version}")
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+        working-directory: adapters/python
+
+      - name: Build
+        run: uv build
+        working-directory: adapters/python
+
+  publish:
+    if: github.ref == 'refs/heads/main' && github.repository == 'bitroot/coflux'
+    runs-on: ubuntu-latest
+    needs: [test]
+    concurrency: ${{ github.workflow }}-publish
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install httpx
+        run: uv pip install httpx --system
+
+      - name: Check published
+        shell: python
+        id: checkversion
+        run: |
+          import os
+          import tomllib
+          import httpx
+          from pathlib import Path
+
+          with open("adapters/python/pyproject.toml", "rb") as f:
+            version = tomllib.load(f)["project"]["version"]
+
+          r = httpx.get(f"https://pypi.org/pypi/coflux/{version}/json")
+          assert r.status_code in (200, 404), f"unexpected status code: {r.status_code}"
+          published = "false" if r.status_code == 404 else "true"
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open('a') as f:
+              f.write(f"version={version}\n")
+              f.write(f"published={published}\n")
+
+      - name: Build
+        if: steps.checkversion.outputs.published == 'false'
+        run: uv build
+        working-directory: adapters/python
+
+      - name: Publish
+        if: steps.checkversion.outputs.published == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: adapters/python/dist
+
+      - name: Release
+        if: steps.checkversion.outputs.published == 'false'
+        env:
+          VERSION: ${{ steps.checkversion.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create adapters/python/$VERSION \
+            --title "Python adapter ($VERSION)" \
+            --notes "https://pypi.org/project/coflux/$VERSION/"

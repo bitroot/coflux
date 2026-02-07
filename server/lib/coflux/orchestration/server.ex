@@ -539,6 +539,17 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:get_manifests, workspace_name}, _from, state) do
+    case lookup_workspace_by_name(state, workspace_name) do
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+
+      {:ok, workspace_id, _} ->
+        {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
+        {:reply, {:ok, manifests}, state}
+    end
+  end
+
   def handle_call({:get_workflow, workspace_name, module, target_name}, _from, state) do
     with {:ok, workspace_id, _} <- lookup_workspace_by_name(state, workspace_name),
          {:ok, workflow} <-
@@ -2791,11 +2802,11 @@ defmodule Coflux.Orchestration.Server do
 
             result_retryable?(result) && step.retry_limit == -1 ->
               # Unlimited retries - random delay between min and max
-              delay_s =
+              delay_ms =
                 step.retry_delay_min +
                   :rand.uniform() * (step.retry_delay_max - step.retry_delay_min)
 
-              execute_after = System.os_time(:millisecond) + delay_s * 1000
+              execute_after = System.os_time(:millisecond) + delay_ms
 
               {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id, execute_after: execute_after)
@@ -2814,12 +2825,12 @@ defmodule Coflux.Orchestration.Server do
 
               if consecutive_failures <= step.retry_limit do
                 # TODO: add jitter (within min/max delay)
-                delay_s =
+                delay_ms =
                   step.retry_delay_min +
                     (consecutive_failures - 1) / step.retry_limit *
                       (step.retry_delay_max - step.retry_delay_min)
 
-                execute_after = System.os_time(:millisecond) + delay_s * 1000
+                execute_after = System.os_time(:millisecond) + delay_ms
 
                 {:ok, retry_id, _, state} =
                   rerun_step(state, step, workspace_id, execute_after: execute_after)
