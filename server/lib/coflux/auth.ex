@@ -4,8 +4,9 @@ defmodule Coflux.Auth do
 
   ## Super Token
 
-  Set COFLUX_SUPER_TOKEN to enable a super token with full access. This token
-  can be used to bootstrap the system and create other tokens.
+  Set COFLUX_SUPER_TOKEN_HASH (SHA-256 hex digest of the raw token) to enable
+  a super token with full access. This token can be used to bootstrap the
+  system and create other tokens.
 
   ## Signed API Tokens
 

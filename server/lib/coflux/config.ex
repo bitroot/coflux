@@ -22,7 +22,7 @@ defmodule Coflux.Config do
 
   Authentication methods are enabled based on configuration:
 
-  - **Super token**: Set `COFLUX_SUPER_TOKEN` for a single token with full access
+  - **Super token**: Set `COFLUX_SUPER_TOKEN_HASH` (SHA-256 hex) for a single token with full access
   - **Database tokens**: Tokens stored in the project database (created via API)
   - **Studio auth (JWT)**: Enabled if `COFLUX_NAMESPACES` is set
 
@@ -32,7 +32,7 @@ defmodule Coflux.Config do
 
   - **COFLUX_REQUIRE_AUTH**: Whether authentication is required (default: "true").
     Set to "false" (case insensitive) to allow anonymous requests.
-  - **COFLUX_SUPER_TOKEN**: A super token with full access (can create other tokens)
+  - **COFLUX_SUPER_TOKEN_HASH**: SHA-256 hex hash of a super token with full access
   - **COFLUX_SECRET**: Server secret for signing API tokens. Required for API token
     support. Should be a long random string, kept consistent across restarts.
   - **COFLUX_NAMESPACES**: Comma-separated list of team IDs allowed for Studio auth
@@ -114,10 +114,10 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the hashed super token, or nil if not configured.
+  Returns the super token hash, or nil if not configured.
 
-  The super token (set via COFLUX_SUPER_TOKEN) provides full access to the system
-  and can be used to create other tokens. It is stored as a SHA-256 hash.
+  Set via COFLUX_SUPER_TOKEN_HASH (a SHA-256 hex digest). The raw token never
+  needs to exist on the server — only the hash is stored.
   """
   def super_token_hash do
     :persistent_term.get(:coflux_super_token_hash)
@@ -181,10 +181,10 @@ defmodule Coflux.Config do
   end
 
   defp parse_super_token do
-    case System.get_env("COFLUX_SUPER_TOKEN") do
+    case System.get_env("COFLUX_SUPER_TOKEN_HASH") do
       nil -> nil
       "" -> nil
-      token -> hash_token(token)
+      hash -> hash
     end
   end
 
@@ -194,9 +194,5 @@ defmodule Coflux.Config do
       "" -> nil
       secret -> secret
     end
-  end
-
-  defp hash_token(token) do
-    :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
   end
 end
