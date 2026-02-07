@@ -66,26 +66,26 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      - name: Install httpx
-        run: uv pip install httpx --system
-
       - name: Check published
-        shell: python
         id: checkversion
+        shell: python
         run: |
-          import os
-          import tomllib
-          import httpx
+          import os, tomllib, urllib.request, urllib.error
           from pathlib import Path
 
           with open("adapters/python/pyproject.toml", "rb") as f:
-            version = tomllib.load(f)["project"]["version"]
+              version = tomllib.load(f)["project"]["version"]
 
-          r = httpx.get(f"https://pypi.org/pypi/coflux/{version}/json")
-          assert r.status_code in (200, 404), f"unexpected status code: {r.status_code}"
-          published = "false" if r.status_code == 404 else "true"
+          try:
+              urllib.request.urlopen(f"https://pypi.org/pypi/coflux/{version}/json")
+              published = "true"
+          except urllib.error.HTTPError as e:
+              if e.code == 404:
+                  published = "false"
+              else:
+                  raise
 
-          with Path(os.environ["GITHUB_OUTPUT"]).open('a') as f:
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as f:
               f.write(f"version={version}\n")
               f.write(f"published={published}\n")
 
