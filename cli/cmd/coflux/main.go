@@ -31,8 +31,14 @@ var rootCmd = &cobra.Command{
 
 It supports managing and interacting with the orchestration server, hosting
 workers, and authenticating with Studio.`,
-	Version:           version,
-	PersistentPreRunE: initConfig,
+	Version:       version,
+	SilenceErrors: true,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Silence usage after arg validation passes — arg/flag errors
+		// still show usage, but runtime errors (API failures, etc.) don't.
+		cmd.SilenceUsage = true
+		return initConfig(cmd, args)
+	},
 }
 
 func init() {
@@ -65,7 +71,6 @@ func init() {
 
 	// Core commands
 	rootCmd.AddCommand(workerCmd)
-	rootCmd.AddCommand(registerCmd)
 	rootCmd.AddCommand(submitCmd)
 	rootCmd.AddCommand(runsCmd)
 	rootCmd.AddCommand(setupCmd)
@@ -77,10 +82,12 @@ func init() {
 
 	// Management commands
 	rootCmd.AddCommand(workspacesCmd)
+	rootCmd.AddCommand(manifestsCmd)
 	rootCmd.AddCommand(poolsCmd)
 	rootCmd.AddCommand(tokensCmd)
 	rootCmd.AddCommand(assetsCmd)
 	rootCmd.AddCommand(blobsCmd)
+	rootCmd.AddCommand(logsCmd)
 }
 
 func initConfig(cmd *cobra.Command, args []string) error {

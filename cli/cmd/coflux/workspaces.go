@@ -16,6 +16,8 @@ func init() {
 	workspacesCmd.AddCommand(workspacesCreateCmd)
 	workspacesCmd.AddCommand(workspacesUpdateCmd)
 	workspacesCmd.AddCommand(workspacesArchiveCmd)
+	workspacesCmd.AddCommand(workspacesPauseCmd)
+	workspacesCmd.AddCommand(workspacesResumeCmd)
 }
 
 // workspaces list
@@ -222,6 +224,90 @@ func runWorkspacesArchive(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Archived workspace '%s'.\n", workspace)
+	return nil
+}
+
+// workspaces pause
+var workspacesPauseCmd = &cobra.Command{
+	Use:   "pause",
+	Short: "Pause a workspace",
+	RunE:  runWorkspacesPause,
+}
+
+func runWorkspacesPause(cmd *cobra.Command, args []string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaces, err := client.GetWorkspaces(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	var workspaceID string
+	for id, ws := range workspaces {
+		if getString(ws, "name") == workspace {
+			workspaceID = id
+			break
+		}
+	}
+	if workspaceID == "" {
+		return fmt.Errorf("workspace not found: %s", workspace)
+	}
+
+	if err := client.PauseWorkspace(cmd.Context(), workspaceID); err != nil {
+		return err
+	}
+
+	fmt.Printf("Paused workspace '%s'.\n", workspace)
+	return nil
+}
+
+// workspaces resume
+var workspacesResumeCmd = &cobra.Command{
+	Use:   "resume",
+	Short: "Resume a paused workspace",
+	RunE:  runWorkspacesResume,
+}
+
+func runWorkspacesResume(cmd *cobra.Command, args []string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaces, err := client.GetWorkspaces(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	var workspaceID string
+	for id, ws := range workspaces {
+		if getString(ws, "name") == workspace {
+			workspaceID = id
+			break
+		}
+	}
+	if workspaceID == "" {
+		return fmt.Errorf("workspace not found: %s", workspace)
+	}
+
+	if err := client.ResumeWorkspace(cmd.Context(), workspaceID); err != nil {
+		return err
+	}
+
+	fmt.Printf("Resumed workspace '%s'.\n", workspace)
 	return nil
 }
 

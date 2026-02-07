@@ -14,6 +14,8 @@ var runsCmd = &cobra.Command{
 func init() {
 	runsCmd.AddCommand(runsInspectCmd)
 	runsCmd.AddCommand(runsResultCmd)
+	runsCmd.AddCommand(runsRerunCmd)
+	runsCmd.AddCommand(runsCancelCmd)
 }
 
 var runsInspectCmd = &cobra.Command{
@@ -30,6 +32,20 @@ Example:
 	RunE: runRunsInspect,
 }
 
+var runsRerunCmd = &cobra.Command{
+	Use:   "rerun <step-id>",
+	Short: "Re-run a step",
+	Long: `Re-run a step.
+
+Creates a new execution attempt for the specified step.
+
+Example:
+  coflux runs rerun abc123
+  coflux runs rerun --json abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRunsRerun,
+}
+
 var runsResultCmd = &cobra.Command{
 	Use:   "result <run-id>",
 	Short: "Get the result of a run",
@@ -44,20 +60,20 @@ Example:
 }
 
 // captureRunTopic resolves the workspace and captures the run topic.
-func captureRunTopic(cmd *cobra.Command, runID string) (map[string]any, error) {
+func captureRunTopic(cmd *cobra.Command, runID string) (map[string]any, string, error) {
 	workspace, err := requireWorkspace()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	client, err := newClient()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	workspaces, err := client.GetWorkspaces(cmd.Context())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get workspaces: %w", err)
+		return nil, "", fmt.Errorf("failed to get workspaces: %w", err)
 	}
 
 	var workspaceID string
@@ -68,15 +84,15 @@ func captureRunTopic(cmd *cobra.Command, runID string) (map[string]any, error) {
 		}
 	}
 	if workspaceID == "" {
-		return nil, fmt.Errorf("workspace %q not found", workspace)
+		return nil, "", fmt.Errorf("workspace %q not found", workspace)
 	}
 
 	topicPath := fmt.Sprintf("runs/%s/%s", runID, workspaceID)
 	data, err := client.CaptureTopic(cmd.Context(), topicPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get run: %w", err)
+		return nil, "", fmt.Errorf("failed to get run: %w", err)
 	}
-	return data, nil
+	return data, workspaceID, nil
 }
 
 // findRootStep finds the root step (no parentId) and its latest execution.
@@ -107,7 +123,7 @@ func findRootStep(data map[string]any) (step map[string]any, exec map[string]any
 func runRunsInspect(cmd *cobra.Command, args []string) error {
 	runID := args[0]
 
-	data, err := captureRunTopic(cmd, runID)
+	data, _, err := captureRunTopic(cmd, runID)
 	if err != nil {
 		return err
 	}
@@ -184,7 +200,7 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 func runRunsResult(cmd *cobra.Command, args []string) error {
 	runID := args[0]
 
-	data, err := captureRunTopic(cmd, runID)
+	data, _, err := captureRunTopic(cmd, runID)
 	if err != nil {
 		return err
 	}
@@ -256,5 +272,69 @@ func runRunsResult(cmd *cobra.Command, args []string) error {
 		fmt.Println(resultType)
 	}
 
+	return nil
+}
+
+var runsCancelCmd = &cobra.Command{
+	Use:   "cancel <execution-id>",
+	Short: "Cancel an execution",
+	Long: `Cancel an execution.
+
+Cancels the specified execution and all of its descendants.
+
+Example:
+  coflux runs cancel 12345`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRunsCancel,
+}
+
+func runRunsCancel(cmd *cobra.Command, args []string) error {
+	executionID := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	if err := client.CancelExecution(cmd.Context(), workspace, executionID); err != nil {
+		return fmt.Errorf("failed to cancel execution: %w", err)
+	}
+
+	if getJSON() {
+		return outputJSON(map[string]any{"cancelled": true})
+	}
+
+	fmt.Println("Execution cancelled.")
+	return nil
+}
+
+func runRunsRerun(cmd *cobra.Command, args []string) error {
+	stepID := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	result, err := client.RerunStep(cmd.Context(), workspace, stepID)
+	if err != nil {
+		return fmt.Errorf("failed to rerun step: %w", err)
+	}
+
+	if getJSON() {
+		return outputJSON(result)
+	}
+
+	fmt.Printf("Step re-run (execution: %s, attempt: %d).\n", result.ExecutionID, result.Attempt)
 	return nil
 }

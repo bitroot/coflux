@@ -153,7 +153,8 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 
 	// Setup log store
 	logURL := w.cfg.HTTPURL() + "/logs"
-	w.logs = logstore.NewHTTPStore(logURL, 100, 500*time.Millisecond, w.logger)
+	flushInterval := time.Duration(w.cfg.Logs.Store.FlushInterval * float64(time.Second))
+	w.logs = logstore.NewHTTPStore(logURL, w.cfg.Logs.Store.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
 
 	// Determine pool size (default to CPU count + 4)
@@ -384,12 +385,14 @@ func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 		}
 
 		// Convert to adapter argument
+		adapterRefs := refsToAdapter(value.References)
 		switch value.Type {
 		case api.ValueTypeRaw:
 			result[i] = adapter.Argument{
-				Type:   "inline",
-				Format: "json",
-				Value:  value.Content,
+				Type:       "inline",
+				Format:     "json",
+				Value:      value.Content,
+				References: adapterRefs,
 			}
 		case api.ValueTypeBlob:
 			// Download blob to cache
@@ -409,13 +412,32 @@ func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 				}
 			}
 			result[i] = adapter.Argument{
-				Type:   "file",
-				Format: format,
-				Path:   path,
+				Type:       "file",
+				Format:     format,
+				Path:       path,
+				References: adapterRefs,
 			}
 		}
 	}
 	return result, nil
+}
+
+func refsToAdapter(refs []api.Reference) [][]any {
+	if len(refs) == 0 {
+		return nil
+	}
+	result := make([][]any, len(refs))
+	for i, ref := range refs {
+		switch ref.Type {
+		case api.RefTypeExecution:
+			result[i] = []any{"execution", ref.ExecutionID, ref.RunID, ref.StepID, ref.Attempt, ref.Module, ref.Target}
+		case api.RefTypeAsset:
+			result[i] = []any{"asset", ref.AssetID, ref.Name, ref.TotalCount, ref.TotalSize}
+		case api.RefTypeFragment:
+			result[i] = []any{"fragment", ref.Serializer, ref.BlobKey, ref.Size, ref.Metadata}
+		}
+	}
+	return result
 }
 
 func (w *Worker) handleAbort(params []any) error {
@@ -548,6 +570,12 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		delay = int64(*params.Delay)
 	}
 
+	// Determine target type (default to "task" for backward compatibility)
+	targetType := params.Type
+	if targetType == "" {
+		targetType = "task"
+	}
+
 	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires
 	conn, err := w.requireConn()
 	if err != nil {
@@ -556,7 +584,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 	result, err := conn.Request(ctx, "submit",
 		module,             // module
 		name,               // target
-		"task",             // type
+		targetType,         // type
 		args,               // arguments
 		params.ExecutionID, // parent_id
 		params.GroupID,     // group_id
@@ -588,9 +616,13 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 func (w *Worker) convertArgumentsToServer(args []adapter.Argument) ([]any, error) {
 	result := make([]any, len(args))
 	for i, arg := range args {
+		refs := make([]any, len(arg.References))
+		for j, ref := range arg.References {
+			refs[j] = ref
+		}
 		switch arg.Type {
 		case "inline":
-			result[i] = []any{"raw", arg.Value, []any{}}
+			result[i] = []any{"raw", arg.Value, refs}
 		case "file":
 			// Upload blob
 			key, err := w.blobs.Upload(arg.Path)
@@ -603,7 +635,7 @@ func (w *Worker) convertArgumentsToServer(args []adapter.Argument) ([]any, error
 			if info != nil {
 				size = info.Size()
 			}
-			result[i] = []any{"blob", key, size, []any{}}
+			result[i] = []any{"blob", key, size, refs}
 		}
 	}
 	return result, nil

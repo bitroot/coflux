@@ -438,13 +438,16 @@ defmodule Coflux.Handlers.Worker do
       ["fragment", format, blob_key, size, metadata] ->
         {:fragment, format, blob_key, size, metadata}
 
-      ["execution", execution_id] ->
-        {:execution, String.to_integer(execution_id)}
+      ["execution", execution_id | _rest] ->
+        {:execution, to_id(execution_id)}
 
-      ["asset", asset_external_id] ->
+      ["asset", asset_external_id | _rest] ->
         {:asset, asset_external_id}
     end)
   end
+
+  defp to_id(v) when is_integer(v), do: v
+  defp to_id(v) when is_binary(v), do: String.to_integer(v)
 
   defp parse_value(value) do
     case value do

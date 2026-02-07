@@ -87,10 +87,10 @@ func (s *HTTPStore) Log(entry Entry) error {
 
 	s.buffer = append(s.buffer, entry)
 
-	// Flush if batch is full
-	if len(s.buffer) >= s.batchSize {
+	// Flush if batch is full or flush interval is zero (immediate mode)
+	if len(s.buffer) >= s.batchSize || s.flushInterval == 0 {
 		s.triggerFlush()
-	} else if s.timer == nil && s.flushInterval > 0 {
+	} else if s.timer == nil {
 		// Start timer for flush interval
 		s.timer = time.AfterFunc(s.flushInterval, func() {
 			s.mu.Lock()

@@ -81,7 +81,6 @@ func (p *Pool) Start(ctx context.Context) error {
 	for i := 0; i < p.size; i++ {
 		pe, err := p.spawnExecutor(ctx, i)
 		if err != nil {
-			// Clean up already spawned executors
 			for _, existing := range p.executors {
 				_ = existing.executor.Close()
 			}

@@ -469,6 +469,29 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "GET", ["get_manifests"], project_id, _access) do
+    qs = :cowboy_req.parse_qs(req)
+    workspace_name = get_query_param(qs, "workspace")
+
+    case Orchestration.get_manifests(project_id, workspace_name) do
+      {:ok, manifests} ->
+        composed =
+          Map.new(manifests, fn {module, workflows} ->
+            targets =
+              Map.new(workflows, fn {name, workflow} ->
+                {name, compose_workflow(workflow)}
+              end)
+
+            {module, targets}
+          end)
+
+        json_response(req, composed)
+
+      {:error, :workspace_invalid} ->
+        json_error_response(req, "not_found", status: 404)
+    end
+  end
+
   defp handle(req, "GET", ["get_workflow"], project_id, _access) do
     qs = :cowboy_req.parse_qs(req)
     workspace_name = get_query_param(qs, "workspace")

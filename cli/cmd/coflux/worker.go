@@ -20,18 +20,15 @@ import (
 )
 
 var workerCmd = &cobra.Command{
-	Use:   "worker [modules...]",
+	Use:   "worker <modules...>",
 	Short: "Start a Coflux worker",
 	Long: `Start a worker that connects to the Coflux server, registers discovered
 targets, and executes workflows and tasks as assigned.
 
-Modules can be specified as arguments or configured in coflux.toml.
-Run 'coflux setup' to configure the adapter and modules.
-
 Examples:
-  coflux worker                              # Uses modules from coflux.toml
-  coflux worker myapp.workflows myapp.tasks  # Override modules
-  coflux worker --dev                        # Development mode (watch + register)`,
+  coflux worker myapp.workflows myapp.tasks
+  coflux worker --dev myapp.workflows        # Development mode (watch + register)`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runWorker,
 }
 
@@ -42,6 +39,7 @@ var (
 	workerConcurrency int
 	workerSession     string
 	workerProvides    []string
+	workerAdapter     []string
 )
 
 func init() {
@@ -51,6 +49,7 @@ func init() {
 	workerCmd.Flags().IntVar(&workerConcurrency, "concurrency", 0, "Number of concurrent executors (default: CPU count + 4)")
 	workerCmd.Flags().StringVar(&workerSession, "session", "", "Session ID (for pool-launched workers)")
 	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu=A100,H100 --provides region=us-east-1)")
+	workerCmd.Flags().StringSliceVar(&workerAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
 }
 
 func runWorker(cmd *cobra.Command, args []string) error {
@@ -96,13 +95,11 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	}
 	cfg.Server.Token = token
 
-	// Determine modules (args override config)
 	modules := args
-	if len(modules) == 0 {
-		modules = cfg.Modules
-	}
-	if len(modules) == 0 {
-		return fmt.Errorf("no modules specified; add 'modules' to coflux.toml or pass as arguments")
+
+	// Override adapter if specified via flag
+	if len(workerAdapter) > 0 {
+		cfg.Adapter = workerAdapter
 	}
 
 	// Check adapter is configured

@@ -5,7 +5,6 @@ package config
 type Config struct {
 	Workspace   string              `mapstructure:"workspace"`
 	Team        string              `mapstructure:"team"`
-	Modules     []string            `mapstructure:"modules"`
 	Adapter     []string            `mapstructure:"adapter"`
 	Concurrency int                 `mapstructure:"concurrency"`
 	Session     string              `mapstructure:"session"` // Pre-existing session ID (for pool-launched workers)

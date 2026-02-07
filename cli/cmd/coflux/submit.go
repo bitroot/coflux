@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -46,13 +45,6 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get workflow: %w", err)
 	}
 
-	// Calculate execute_after if delay is set
-	var executeAfter *int64
-	if delay, ok := workflow["delay"].(float64); ok && delay > 0 {
-		ts := int64((float64(time.Now().Unix()) + delay) * 1000)
-		executeAfter = &ts
-	}
-
 	// Build arguments array (format: [["json", arg], ...])
 	submitArgs := make([][]any, len(arguments))
 	for i, arg := range arguments {
@@ -70,11 +62,14 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if defer_, ok := workflow["defer"]; ok {
 		options["defer"] = defer_
 	}
-	if executeAfter != nil {
-		options["executeAfter"] = *executeAfter
+	if delay, ok := workflow["delay"].(float64); ok && delay > 0 {
+		options["delay"] = int64(delay)
 	}
 	if retries, ok := workflow["retries"]; ok {
 		options["retries"] = retries
+	}
+	if recurrent, ok := workflow["recurrent"].(bool); ok && recurrent {
+		options["recurrent"] = true
 	}
 	if requires, ok := workflow["requires"]; ok {
 		options["requires"] = requires

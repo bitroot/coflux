@@ -10,9 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .decorators import Execution
+
 # Try to import pydantic
 try:
     import pydantic
+
     HAS_PYDANTIC = True
 except ImportError:
     pydantic = None  # type: ignore
@@ -28,6 +31,13 @@ def deserialize_argument(arg: dict[str, Any]) -> Any:
     Returns:
         Deserialized Python value.
     """
+    # Check for execution reference - reconstruct Execution handle
+    references = arg.get("references", [])
+    if references:
+        for ref in references:
+            if isinstance(ref, list) and len(ref) >= 2 and ref[0] == "execution":
+                return Execution(ref)
+
     arg_type = arg.get("type")
     format_name = arg.get("format", "json")
     metadata = arg.get("metadata", {})
@@ -44,7 +54,9 @@ def deserialize_argument(arg: dict[str, Any]) -> Any:
         raise ValueError(f"Unknown argument type: {arg_type}")
 
 
-def _deserialize_value(value: Any, format_name: str, metadata: dict[str, Any] | None = None) -> Any:
+def _deserialize_value(
+    value: Any, format_name: str, metadata: dict[str, Any] | None = None
+) -> Any:
     """Deserialize an inline value."""
     if format_name == "json":
         # Value is already deserialized from JSON
@@ -55,13 +67,16 @@ def _deserialize_value(value: Any, format_name: str, metadata: dict[str, Any] | 
     elif format_name == "pickle":
         # Inline pickle is base64-encoded
         import base64
+
         data = base64.b64decode(value)
         return pickle.loads(data)
     else:
         raise ValueError(f"Unknown format for inline value: {format_name}")
 
 
-def _deserialize_file(path: str, format_name: str, metadata: dict[str, Any] | None = None) -> Any:
+def _deserialize_file(
+    path: str, format_name: str, metadata: dict[str, Any] | None = None
+) -> Any:
     """Deserialize a value from a file."""
     file_path = Path(path)
     if not file_path.exists():
@@ -76,6 +91,7 @@ def _deserialize_file(path: str, format_name: str, metadata: dict[str, Any] | No
     elif format_name == "parquet":
         try:
             import pandas as pd
+
             return pd.read_parquet(file_path)
         except ImportError:
             raise ImportError("pandas is required to deserialize parquet format")
@@ -96,17 +112,23 @@ def _deserialize_pydantic(value: Any, metadata: dict[str, Any]) -> Any:
     model_module = metadata.get("model_module")
 
     if not model_class_name or not model_module:
-        raise ValueError("Pydantic format requires model_class and model_module in metadata")
+        raise ValueError(
+            "Pydantic format requires model_class and model_module in metadata"
+        )
 
     # Import the module and get the model class
     try:
         module = importlib.import_module(model_module)
         model_class = getattr(module, model_class_name)
     except (ImportError, AttributeError) as e:
-        raise ValueError(f"Failed to load Pydantic model {model_module}.{model_class_name}: {e}")
+        raise ValueError(
+            f"Failed to load Pydantic model {model_module}.{model_class_name}: {e}"
+        )
 
     # Validate it's a Pydantic model
-    if not (hasattr(model_class, "model_validate") or hasattr(model_class, "parse_obj")):
+    if not (
+        hasattr(model_class, "model_validate") or hasattr(model_class, "parse_obj")
+    ):
         raise ValueError(f"{model_class_name} is not a Pydantic model")
 
     # Deserialize using Pydantic v2 API (model_validate) or v1 API (parse_obj)
@@ -188,8 +210,7 @@ def _is_json_serializable(value: Any) -> bool:
         return all(_is_json_serializable(v) for v in value)
     if isinstance(value, dict):
         return all(
-            isinstance(k, str) and _is_json_serializable(v)
-            for k, v in value.items()
+            isinstance(k, str) and _is_json_serializable(v) for k, v in value.items()
         )
     return False
 
@@ -198,6 +219,7 @@ def _is_dataframe(value: Any) -> bool:
     """Check if a value is a pandas DataFrame."""
     try:
         import pandas as pd
+
         return isinstance(value, pd.DataFrame)
     except ImportError:
         return False
@@ -216,6 +238,7 @@ def _serialize_to_temp_file(value: Any, format_name: str) -> str:
         return path
     elif format_name == "parquet":
         import pandas as pd
+
         fd, path = tempfile.mkstemp(suffix=".parquet")
         os.close(fd)  # Close fd since to_parquet opens by path
         if isinstance(value, pd.DataFrame):

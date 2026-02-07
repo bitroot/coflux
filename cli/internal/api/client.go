@@ -66,9 +66,9 @@ func (c *Client) RegisterManifests(ctx context.Context, workspace string, manife
 
 // SubmitResult contains the IDs returned from submitting a workflow
 type SubmitResult struct {
-	RunID       string `json:"runId"`
-	StepID      string `json:"stepId"`
-	ExecutionID string `json:"executionId"`
+	RunID       string      `json:"runId"`
+	StepID      string      `json:"stepId"`
+	ExecutionID json.Number `json:"executionId"`
 }
 
 // SubmitWorkflow submits a workflow for execution
@@ -86,6 +86,18 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target s
 		return nil, err
 	}
 	return &result, nil
+}
+
+// GetManifests retrieves the latest manifests for a workspace
+func (c *Client) GetManifests(ctx context.Context, workspace string) (map[string]any, error) {
+	var result map[string]any
+	params := url.Values{
+		"workspace": {workspace},
+	}
+	if err := c.get(ctx, "/api/get_manifests", params, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // GetWorkflow retrieves a workflow definition
@@ -149,6 +161,31 @@ func (c *Client) ArchiveWorkspace(ctx context.Context, workspaceID string) error
 		"workspaceId": workspaceID,
 	}
 	return c.post(ctx, "/api/archive_workspace", body, nil)
+}
+
+// PauseWorkspace pauses a workspace (stops dispatching new executions)
+func (c *Client) PauseWorkspace(ctx context.Context, workspaceID string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+	}
+	return c.post(ctx, "/api/pause_workspace", body, nil)
+}
+
+// ResumeWorkspace resumes a paused workspace
+func (c *Client) ResumeWorkspace(ctx context.Context, workspaceID string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+	}
+	return c.post(ctx, "/api/resume_workspace", body, nil)
+}
+
+// ArchiveModule archives a module in a workspace (hides its targets)
+func (c *Client) ArchiveModule(ctx context.Context, workspace, moduleName string) error {
+	body := map[string]any{
+		"workspaceName": workspace,
+		"moduleName":    moduleName,
+	}
+	return c.post(ctx, "/api/archive_module", body, nil)
 }
 
 // Pools API
@@ -221,6 +258,34 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 		"externalId": externalID,
 	}
 	return c.post(ctx, "/api/revoke_token", body, nil)
+}
+
+// RerunStepResult contains the IDs returned from re-running a step
+type RerunStepResult struct {
+	ExecutionID json.Number `json:"executionId"`
+	Attempt     int         `json:"attempt"`
+}
+
+// RerunStep triggers a re-run of an existing step
+func (c *Client) RerunStep(ctx context.Context, workspace, stepID string) (*RerunStepResult, error) {
+	body := map[string]any{
+		"workspaceName": workspace,
+		"stepId":        stepID,
+	}
+	var result RerunStepResult
+	if err := c.post(ctx, "/api/rerun_step", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// CancelExecution cancels a running or pending execution
+func (c *Client) CancelExecution(ctx context.Context, workspace, executionID string) error {
+	body := map[string]any{
+		"workspaceName": workspace,
+		"executionId":   executionID,
+	}
+	return c.post(ctx, "/api/cancel_execution", body, nil)
 }
 
 // CaptureTopic captures a topic snapshot via the REST endpoint

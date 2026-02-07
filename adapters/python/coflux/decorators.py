@@ -360,14 +360,38 @@ class Target(t.Generic[P, T]):
 
         ctx = get_context()
 
-        # Serialize arguments
+        # Serialize arguments, detecting Execution objects for wait_for
         serialized_args = []
-        for arg in args:
-            result = serialize_result(arg)
-            if result is None:
-                serialized_args.append({"type": "inline", "format": "json", "value": None})
+        execution_indices: set[int] = set()
+        for i, arg in enumerate(args):
+            if isinstance(arg, Execution):
+                # Serialize as null with execution reference
+                ref = ["execution", arg.id]
+                if arg.metadata:
+                    ref.extend([
+                        arg.metadata.run_id,
+                        arg.metadata.step_id,
+                        arg.metadata.attempt,
+                        arg.metadata.module,
+                        arg.metadata.target,
+                    ])
+                serialized_args.append({
+                    "type": "inline",
+                    "format": "json",
+                    "value": None,
+                    "references": [ref],
+                })
+                execution_indices.add(i)
             else:
-                serialized_args.append(result)
+                result = serialize_result(arg)
+                if result is None:
+                    serialized_args.append({"type": "inline", "format": "json", "value": None})
+                else:
+                    serialized_args.append(result)
+
+        # Combine detected execution indices with declared wait_for
+        wait_for = execution_indices | self._definition.wait_for
+        wait_for_val = sorted(wait_for) if wait_for else None
 
         # Build full target name
         full_target = f"{self._module}.{self._name}"
@@ -403,6 +427,7 @@ class Target(t.Generic[P, T]):
         reference = ctx.submit_execution(
             full_target,
             serialized_args,
+            wait_for=wait_for_val,
             cache=cache_dict,
             defer=defer_dict,
             memo=memo_val,

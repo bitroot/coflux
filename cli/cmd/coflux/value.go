@@ -5,10 +5,11 @@ import (
 	"strings"
 )
 
-// formatData recursively formats a Data value as human-readable text.
-// The references slice corresponds to the value's references array,
-// used to resolve {"type": "ref", "index": N} entries.
-func formatData(data any, references []any) string {
+type refFormatter func(ref any) string
+
+// formatDataWith recursively formats a Data value as human-readable text,
+// using the provided reference formatter to resolve {"type": "ref", "index": N} entries.
+func formatDataWith(data any, references []any, fmtRef refFormatter) string {
 	switch v := data.(type) {
 	case string:
 		return fmt.Sprintf(`"%s"`, v)
@@ -27,7 +28,7 @@ func formatData(data any, references []any) string {
 	case []any:
 		items := make([]string, len(v))
 		for i, item := range v {
-			items[i] = formatData(item, references)
+			items[i] = formatDataWith(item, references, fmtRef)
 		}
 		return "[" + strings.Join(items, ", ") + "]"
 	case map[string]any:
@@ -37,8 +38,8 @@ func formatData(data any, references []any) string {
 			items, _ := v["items"].([]any)
 			pairs := make([]string, 0, len(items)/2)
 			for i := 0; i+1 < len(items); i += 2 {
-				key := formatData(items[i], references)
-				val := formatData(items[i+1], references)
+				key := formatDataWith(items[i], references, fmtRef)
+				val := formatDataWith(items[i+1], references, fmtRef)
 				pairs = append(pairs, key+": "+val)
 			}
 			return "{" + strings.Join(pairs, ", ") + "}"
@@ -46,26 +47,33 @@ func formatData(data any, references []any) string {
 			items, _ := v["items"].([]any)
 			parts := make([]string, len(items))
 			for i, item := range items {
-				parts[i] = formatData(item, references)
+				parts[i] = formatDataWith(item, references, fmtRef)
 			}
 			return "{" + strings.Join(parts, ", ") + "}"
 		case "tuple":
 			items, _ := v["items"].([]any)
 			parts := make([]string, len(items))
 			for i, item := range items {
-				parts[i] = formatData(item, references)
+				parts[i] = formatDataWith(item, references, fmtRef)
 			}
 			return "(" + strings.Join(parts, ", ") + ")"
 		case "ref":
 			index, _ := v["index"].(float64)
 			idx := int(index)
 			if idx >= 0 && idx < len(references) {
-				return formatReference(references[idx])
+				return fmtRef(references[idx])
 			}
 			return "<ref ?>"
 		}
 	}
 	return fmt.Sprintf("%v", data)
+}
+
+// formatData recursively formats a Data value as human-readable text.
+// The references slice corresponds to the value's references array,
+// used to resolve {"type": "ref", "index": N} entries.
+func formatData(data any, references []any) string {
+	return formatDataWith(data, references, formatReference)
 }
 
 func formatReference(ref any) string {
@@ -102,4 +110,43 @@ func formatReference(ref any) string {
 		return fmt.Sprintf("<fragment %s (%s)>", format, humanSize(int64(size)))
 	}
 	return "<ref ?>"
+}
+
+// formatLogReference formats a reference in the flat log format.
+// Log references have fields at the top level (e.g. r["module"], r["target"])
+// rather than nested under r["execution"] or r["asset"].
+func formatLogReference(ref any) string {
+	r, ok := ref.(map[string]any)
+	if !ok {
+		return "<ref ?>"
+	}
+
+	typ, _ := r["type"].(string)
+	switch typ {
+	case "execution":
+		module, _ := r["module"].(string)
+		target, _ := r["target"].(string)
+		if module != "" || target != "" {
+			return fmt.Sprintf("<step %s.%s>", module, target)
+		}
+		return "<step>"
+	case "asset":
+		name, _ := r["name"].(string)
+		totalCount, _ := r["totalCount"].(float64)
+		totalSize, _ := r["totalSize"].(float64)
+		if name != "" {
+			return fmt.Sprintf("<asset %q (%d files, %s)>", name, int(totalCount), humanSize(int64(totalSize)))
+		}
+		return fmt.Sprintf("<asset (%d files, %s)>", int(totalCount), humanSize(int64(totalSize)))
+	case "fragment":
+		format, _ := r["format"].(string)
+		size, _ := r["size"].(float64)
+		return fmt.Sprintf("<fragment %s (%s)>", format, humanSize(int64(size)))
+	}
+	return "<ref ?>"
+}
+
+// formatLogData formats a log value's data using the flat log reference format.
+func formatLogData(data any, references []any) string {
+	return formatDataWith(data, references, formatLogReference)
 }

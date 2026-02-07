@@ -76,6 +76,8 @@ type Argument struct {
 	Path string `json:"path,omitempty"`
 	// Optional metadata (e.g., model class name for pydantic)
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// References (e.g., execution, asset, fragment)
+	References [][]any `json:"references,omitempty"`
 }
 
 // Response is sent from CLI to executor in response to a request
@@ -160,6 +162,7 @@ type ExecutorRequest struct {
 type SubmitExecutionParams struct {
 	ExecutionID string              `json:"execution_id"` // parent execution
 	Target      string              `json:"target"`
+	Type        string              `json:"type,omitempty"` // "task" or "workflow" (default: "task")
 	Arguments   []Argument          `json:"arguments"`
 	WaitFor     any                 `json:"wait_for,omitempty"` // reference to wait for
 	GroupID     *int                `json:"group_id,omitempty"` // group to associate with

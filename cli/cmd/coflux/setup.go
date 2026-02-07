@@ -14,7 +14,6 @@ import (
 var (
 	setupHost      string
 	setupWorkspace string
-	setupModules   string
 	setupAdapter   string
 	setupDetect    bool
 )
@@ -27,7 +26,6 @@ var setupCmd = &cobra.Command{
 This command helps configure your project to work with Coflux by:
 - Setting the server host and workspace
 - Detecting your Python environment (venv, poetry, uv)
-- Configuring which modules contain your tasks/workflows
 
 Examples:
   coflux setup                    # Interactive setup
@@ -39,7 +37,6 @@ Examples:
 func init() {
 	setupCmd.Flags().StringVarP(&setupHost, "host", "H", "", "Server host")
 	setupCmd.Flags().StringVarP(&setupWorkspace, "workspace", "w", "", "Workspace name")
-	setupCmd.Flags().StringVarP(&setupModules, "modules", "m", "", "Modules containing tasks/workflows (comma-separated)")
 	setupCmd.Flags().StringVar(&setupAdapter, "adapter", "", "Adapter command (e.g., 'python -m coflux')")
 	setupCmd.Flags().BoolVar(&setupDetect, "detect", false, "Auto-detect adapter without prompting")
 }
@@ -129,14 +126,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	existingWorkspace := filepath.Base(mustGetwd())
 	if w, ok := existingConfig["workspace"].(string); ok && w != "" {
 		existingWorkspace = w
-	}
-	var existingModules []string
-	if m, ok := existingConfig["modules"].([]any); ok {
-		for _, v := range m {
-			if s, ok := v.(string); ok {
-				existingModules = append(existingModules, s)
-			}
-		}
 	}
 	var existingAdapter []string
 	if a, ok := existingConfig["adapter"].([]any); ok {
@@ -242,41 +231,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		fmt.Println("Warning: No adapter configured. You'll need to add 'adapter' to coflux.toml before running 'coflux worker'.")
 	}
 
-	fmt.Println()
-	fmt.Println("=== Modules ===")
-
-	// Get modules
-	var modules []string
-	if setupModules != "" {
-		// Explicitly provided via flag
-		for _, m := range strings.Split(setupModules, ",") {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				modules = append(modules, m)
-			}
-		}
-	} else if len(existingModules) > 0 {
-		// Use existing config
-		modules = existingModules
-		fmt.Printf("Using existing modules: %s\n", strings.Join(modules, ", "))
-	} else {
-		// Prompt user
-		fmt.Println("Which Python modules contain your tasks/workflows?")
-		fmt.Print("Modules (comma-separated): ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-		for _, m := range strings.Split(input, ",") {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				modules = append(modules, m)
-			}
-		}
-	}
-
-	if len(modules) == 0 {
-		fmt.Println("Warning: No modules configured. You'll need to add 'modules' to coflux.toml or pass them to 'coflux worker'.")
-	}
-
 	// Update config
 	if existingConfig["server"] == nil {
 		existingConfig["server"] = make(map[string]any)
@@ -285,9 +239,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	existingConfig["workspace"] = workspace
 	if len(adapterCmd) > 0 {
 		existingConfig["adapter"] = adapterCmd
-	}
-	if len(modules) > 0 {
-		existingConfig["modules"] = modules
 	}
 
 	// Write config
@@ -311,7 +262,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	absPath, _ := filepath.Abs(configPath)
 	fmt.Printf("Configuration written to '%s'.\n", absPath)
 	fmt.Println()
-	fmt.Println("Run 'coflux worker' to start.")
+	fmt.Println("Run 'coflux worker <modules...>' to start.")
 	return nil
 }
 

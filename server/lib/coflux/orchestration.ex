@@ -83,6 +83,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:archive_module, workspace_name, module_name, user_id})
   end
 
+  def get_manifests(project_id, workspace_name) do
+    call_server(project_id, {:get_manifests, workspace_name})
+  end
+
   def get_workflow(project_id, workspace_name, module, target_name) do
     call_server(project_id, {:get_workflow, workspace_name, module, target_name})
   end
