@@ -1,15 +1,18 @@
 defmodule Coflux.Orchestration.Workers do
   import Coflux.Store
+  import Bitwise
 
   def create_worker(db, pool_id) do
     now = current_timestamp()
+    external_id = generate_uuid()
 
     case insert_one(db, :workers, %{
            pool_id: pool_id,
+           external_id: external_id,
            created_at: now
          }) do
       {:ok, worker_id} ->
-        {:ok, worker_id, now}
+        {:ok, worker_id, external_id, now}
     end
   end
 
@@ -80,6 +83,7 @@ defmodule Coflux.Orchestration.Workers do
            """
            SELECT
              w.id,
+             w.external_id,
              w.created_at,
              p.id,
              p.name,
@@ -110,8 +114,8 @@ defmodule Coflux.Orchestration.Workers do
         {:ok,
          Enum.map(
            rows,
-           fn {worker_id, created_at, pool_id, pool_name, workspace_id, state, data} ->
-             {worker_id, created_at, pool_id, pool_name, workspace_id, decode_state(state),
+           fn {worker_id, external_id, created_at, pool_id, pool_name, workspace_id, state, data} ->
+             {worker_id, external_id, created_at, pool_id, pool_name, workspace_id, decode_state(state),
               if(data, do: :erlang.binary_to_term(data))}
            end
          )}
@@ -123,7 +127,7 @@ defmodule Coflux.Orchestration.Workers do
     query(
       db,
       """
-      SELECT w.id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
+      SELECT w.id, w.external_id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
              d.created_at, d.error
       FROM workers AS w
       INNER JOIN pools AS p ON p.id = w.pool_id
@@ -143,6 +147,16 @@ defmodule Coflux.Orchestration.Workers do
       """,
       {pool_name, limit}
     )
+  end
+
+  defp generate_uuid() do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    :io_lib.format(
+      "~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b",
+      [a, b, bor(band(c, 0x0FFF), 0x4000), bor(band(d, 0x3FFF), 0x8000), e]
+    )
+    |> IO.iodata_to_binary()
   end
 
   defp current_timestamp() do

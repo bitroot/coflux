@@ -14,7 +14,7 @@ defmodule Coflux.Topics.Workflow do
     project_id = Map.fetch!(params, :project)
     module = Map.fetch!(params, :module)
     target_name = Map.fetch!(params, :target)
-    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
+    workspace_id = Map.fetch!(params, :workspace_id)
 
     case Orchestration.subscribe_workflow(
            project_id,

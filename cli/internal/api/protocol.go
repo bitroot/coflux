@@ -281,8 +281,15 @@ func ParseReference(data []any) (*Reference, error) {
 }
 
 func getString(v any) string {
-	if s, ok := v.(string); ok {
-		return s
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val))
+		}
+		return fmt.Sprintf("%g", val)
+	default:
+		return ""
 	}
-	return ""
 }

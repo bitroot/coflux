@@ -12,7 +12,7 @@ defmodule Coflux.Topics.Run do
   def init(params) do
     project_id = Map.fetch!(params, :project)
     external_run_id = Map.fetch!(params, :run_id)
-    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
+    workspace_id = Map.fetch!(params, :workspace_id)
 
     case Orchestration.subscribe_run(
            project_id,
@@ -49,12 +49,13 @@ defmodule Coflux.Topics.Run do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:step, external_step_id, step, workspace_id}) do
-    if workspace_id in topic.state.workspace_ids do
-      Topic.set(topic, [:steps, external_step_id], %{
+  defp process_notification(topic, {:step, step_number, step, workspace_external_id}) do
+    if workspace_external_id in topic.state.workspace_ids do
+      Topic.set(topic, [:steps, "#{topic.state.external_run_id}:#{step_number}"], %{
+        stepNumber: step_number,
         module: step.module,
         target: step.target,
-        parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
+        parentId: step.parent_id,
         cacheConfig: build_cache_config(step.cache_config),
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
@@ -70,16 +71,16 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:execution, step_id, attempt, execution_id, workspace_id, created_at, execute_after,
-          dependencies, created_by}
+         {:execution, step_number, attempt, execution_external_id, workspace_external_id,
+          created_at, execute_after, dependencies, created_by}
        ) do
-    if workspace_id in topic.state.workspace_ids do
+    if workspace_external_id in topic.state.workspace_ids do
       Topic.set(
         topic,
-        [:steps, step_id, :executions, Integer.to_string(attempt)],
+        [:steps, "#{topic.state.external_run_id}:#{step_number}", :executions, Integer.to_string(attempt)],
         %{
-          executionId: Integer.to_string(execution_id),
-          workspaceId: Integer.to_string(workspace_id),
+          executionId: execution_external_id,
+          workspaceId: workspace_external_id,
           createdAt: created_at,
           createdBy: build_principal(created_by),
           executeAfter: execute_after,
@@ -89,7 +90,7 @@ defmodule Coflux.Topics.Run do
           assets: %{},
           dependencies:
             Map.new(dependencies, fn {dependency_id, dependency} ->
-              {Integer.to_string(dependency_id), build_dependency(dependency)}
+              {dependency_id, build_dependency(dependency)}
             end),
           children: [],
           result: nil
@@ -100,18 +101,18 @@ defmodule Coflux.Topics.Run do
     end
   end
 
-  defp process_notification(topic, {:group, execution_id, group_id, name}) do
-    update_execution(topic, execution_id, fn topic, base_path ->
+  defp process_notification(topic, {:group, execution_external_id, group_id, name}) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:groups, Integer.to_string(group_id)], name)
     end)
   end
 
-  defp process_notification(topic, {:asset, execution_id, external_asset_id, asset}) do
+  defp process_notification(topic, {:asset, execution_external_id, external_asset_id, asset}) do
     asset = build_asset(asset)
 
     update_execution(
       topic,
-      execution_id,
+      execution_external_id,
       fn topic, base_path ->
         Topic.set(
           topic,
@@ -123,41 +124,41 @@ defmodule Coflux.Topics.Run do
   end
 
   defp process_notification(topic, {:assigned, assigned}) do
-    Enum.reduce(assigned, topic, fn {execution_id, assigned_at}, topic ->
-      update_execution(topic, execution_id, fn topic, base_path ->
+    Enum.reduce(assigned, topic, fn {execution_external_id, assigned_at}, topic ->
+      update_execution(topic, execution_external_id, fn topic, base_path ->
         Topic.set(topic, base_path ++ [:assignedAt], assigned_at)
       end)
     end)
   end
 
-  defp process_notification(topic, {:result_dependency, execution_id, dependency_id, dependency}) do
+  defp process_notification(topic, {:result_dependency, execution_external_id, dependency_id, dependency}) do
     dependency = build_dependency(dependency)
 
     update_execution(
       topic,
-      execution_id,
+      execution_external_id,
       fn topic, base_path ->
         Topic.merge(
           topic,
-          base_path ++ [:dependencies, Integer.to_string(dependency_id)],
+          base_path ++ [:dependencies, dependency_id],
           dependency
         )
       end
     )
   end
 
-  defp process_notification(topic, {:child, parent_id, child}) do
-    child = build_child(child)
+  defp process_notification(topic, {:child, parent_execution_external_id, child}) do
+    child = build_child(child, topic.state.external_run_id)
 
-    update_execution(topic, parent_id, fn topic, base_path ->
+    update_execution(topic, parent_execution_external_id, fn topic, base_path ->
       Topic.insert(topic, base_path ++ [:children], child)
     end)
   end
 
-  defp process_notification(topic, {:result, execution_id, result, created_at, created_by}) do
+  defp process_notification(topic, {:result, execution_external_id, result, created_at, created_by}) do
     result = build_result(result, created_by)
 
-    update_execution(topic, execution_id, fn topic, base_path ->
+    update_execution(topic, execution_external_id, fn topic, base_path ->
       topic
       |> Topic.set(base_path ++ [:result], result)
       |> Topic.set(base_path ++ [:completedAt], created_at)
@@ -166,11 +167,11 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:result_result, execution_id, result, _created_at, created_by}
+         {:result_result, execution_external_id, result, _created_at, created_by}
        ) do
     result = build_result(result, created_by)
 
-    update_execution(topic, execution_id, fn topic, base_path ->
+    update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:result, :result], result)
     end)
   end
@@ -188,11 +189,12 @@ defmodule Coflux.Topics.Run do
           |> Enum.any?(&(&1.workspace_id in workspace_ids))
         end)
         |> Map.new(fn {step_id, step} ->
-          {step_id,
+          {"#{run.external_id}:#{step_id}",
            %{
+             stepNumber: step_id,
              module: step.module,
              target: step.target,
-             parentId: if(step.parent_id, do: Integer.to_string(step.parent_id)),
+             parentId: step.parent_id,
              cacheConfig: build_cache_config(step.cache_config),
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
@@ -207,8 +209,8 @@ defmodule Coflux.Topics.Run do
                |> Map.new(fn {attempt, execution} ->
                  {Integer.to_string(attempt),
                   %{
-                    executionId: Integer.to_string(execution.execution_id),
-                    workspaceId: Integer.to_string(execution.workspace_id),
+                    executionId: execution.execution_id,
+                    workspaceId: execution.workspace_id,
                     createdAt: execution.created_at,
                     createdBy: build_principal(execution.created_by),
                     executeAfter: execution.execute_after,
@@ -220,7 +222,7 @@ defmodule Coflux.Topics.Run do
                         {external_asset_id, build_asset(asset)}
                       end),
                     dependencies: build_dependencies(execution.dependencies),
-                    children: Enum.map(execution.children, &build_child/1),
+                    children: Enum.map(execution.children, &build_child(&1, run.external_id)),
                     result: build_result(execution.result, execution.result_created_by)
                   }}
                end)
@@ -313,8 +315,8 @@ defmodule Coflux.Topics.Run do
     end
   end
 
-  defp build_child({external_step_id, attempt, group_id}) do
-    %{stepId: external_step_id, attempt: attempt, groupId: group_id}
+  defp build_child({step_number, attempt, group_id}, external_run_id) do
+    %{stepId: "#{external_run_id}:#{step_number}", attempt: attempt, groupId: group_id}
   end
 
   defp build_cache_config(cache_config) do
@@ -336,12 +338,10 @@ defmodule Coflux.Topics.Run do
     end
   end
 
-  defp update_execution(topic, execution_id, fun) do
-    execution_id_s = Integer.to_string(execution_id)
-
+  defp update_execution(topic, execution_external_id, fun) do
     Enum.reduce(topic.value.steps, topic, fn {step_id, step}, topic ->
       Enum.reduce(step.executions, topic, fn {attempt, execution}, topic ->
-        if execution.executionId == execution_id_s do
+        if execution.executionId == execution_external_id do
           fun.(topic, [:steps, step_id, :executions, attempt])
         else
           topic

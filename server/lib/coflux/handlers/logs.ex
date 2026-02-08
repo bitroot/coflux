@@ -109,8 +109,8 @@ defmodule Coflux.Handlers.Logs do
     accept = :cowboy_req.header("accept", req, "application/json")
 
     run_id = get_query_param(qs, "run")
-    execution_id = get_query_param(qs, "execution", &String.to_integer/1)
-    workspace_ids = parse_id_list(get_query_param(qs, "workspaces"))
+    execution_id = get_query_param(qs, "execution")
+    workspace_ids = parse_string_list(get_query_param(qs, "workspaces"))
     after_cursor = get_query_param(qs, "after")
 
     cond do
@@ -215,8 +215,8 @@ defmodule Coflux.Handlers.Logs do
       if valid_values?(values) do
         entry = %{
           run_id: Map.get(msg, "runId"),
-          execution_id: parse_integer(Map.get(msg, "executionId")),
-          workspace_id: parse_integer(Map.get(msg, "workspaceId")),
+          execution_id: Map.get(msg, "executionId"),
+          workspace_id: Map.get(msg, "workspaceId"),
           timestamp: Map.get(msg, "timestamp"),
           level: Map.get(msg, "level"),
           template: Map.get(msg, "template"),
@@ -236,17 +236,11 @@ defmodule Coflux.Handlers.Logs do
 
   defp parse_messages(_), do: {:error, "messages", "must be an array"}
 
-  defp parse_integer(value) when is_integer(value), do: value
-  defp parse_integer(value) when is_binary(value), do: String.to_integer(value)
-  defp parse_integer(nil), do: nil
+  defp parse_string_list(nil), do: []
+  defp parse_string_list(""), do: []
 
-  defp parse_id_list(nil), do: []
-  defp parse_id_list(""), do: []
-
-  defp parse_id_list(value) when is_binary(value) do
-    value
-    |> String.split(",")
-    |> Enum.map(&String.to_integer/1)
+  defp parse_string_list(value) when is_binary(value) do
+    String.split(value, ",")
   end
 
   # Validation functions - check structure but pass through as-is
@@ -275,9 +269,9 @@ defmodule Coflux.Handlers.Logs do
          "stepId" => step_id,
          "attempt" => attempt
        })
-       when (is_binary(id) or is_integer(id)) and
+       when is_binary(id) and
               is_binary(run_id) and
-              (is_binary(step_id) or is_integer(step_id)) and
+              is_binary(step_id) and
               is_integer(attempt),
        do: true
 
@@ -308,8 +302,8 @@ defmodule Coflux.Handlers.Logs do
 
   defp format_entry(entry) do
     %{
-      "executionId" => Integer.to_string(entry.execution_id),
-      "workspaceId" => Integer.to_string(entry.workspace_id),
+      "executionId" => entry.execution_id,
+      "workspaceId" => entry.workspace_id,
       "timestamp" => entry.timestamp,
       "level" => entry.level,
       "template" => entry.template,

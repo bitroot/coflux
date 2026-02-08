@@ -29,10 +29,10 @@ defmodule Coflux.TopicUtils do
           metadata: metadata
         }
 
-      {:execution, execution_id, execution} ->
+      {:execution, execution_external_id, execution} ->
         %{
           type: "execution",
-          executionId: Integer.to_string(execution_id),
+          executionId: execution_external_id,
           execution: build_execution(execution)
         }
 
@@ -67,6 +67,7 @@ defmodule Coflux.TopicUtils do
     %{
       runId: execution.run_id,
       stepId: execution.step_id,
+      stepNumber: execution.step_number,
       attempt: execution.attempt,
       module: execution.module,
       target: execution.target

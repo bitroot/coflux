@@ -191,6 +191,9 @@ defmodule Coflux.Handlers.Utils do
               end
 
             case Map.fetch(body, field) do
+              {:ok, nil} when not required ->
+                {values, errors}
+
               {:ok, value} ->
                 case parser.(value) do
                   {:ok, value} ->

@@ -38,10 +38,11 @@ var runsRerunCmd = &cobra.Command{
 	Long: `Re-run a step.
 
 Creates a new execution attempt for the specified step.
+The step ID has the format <run-id>:<step-number> (e.g., "RwD6:3").
 
 Example:
-  coflux runs rerun abc123
-  coflux runs rerun --json abc123`,
+  coflux runs rerun RwD6:3
+  coflux runs rerun --json RwD6:3`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsRerun,
 }
@@ -71,20 +72,9 @@ func captureRunTopic(cmd *cobra.Command, runID string) (map[string]any, string, 
 		return nil, "", err
 	}
 
-	workspaces, err := client.GetWorkspaces(cmd.Context())
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to get workspaces: %w", err)
-	}
-
-	var workspaceID string
-	for id, ws := range workspaces {
-		if name, ok := ws["name"].(string); ok && name == workspace {
-			workspaceID = id
-			break
-		}
-	}
-	if workspaceID == "" {
-		return nil, "", fmt.Errorf("workspace %q not found", workspace)
+		return nil, "", err
 	}
 
 	topicPath := fmt.Sprintf("runs/%s/%s", runID, workspaceID)
@@ -301,7 +291,12 @@ func runRunsCancel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := client.CancelExecution(cmd.Context(), workspace, executionID); err != nil {
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	if err := client.CancelExecution(cmd.Context(), workspaceID, executionID); err != nil {
 		return fmt.Errorf("failed to cancel execution: %w", err)
 	}
 
@@ -326,7 +321,12 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.RerunStep(cmd.Context(), workspace, stepID)
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	result, err := client.RerunStep(cmd.Context(), workspaceID, stepID)
 	if err != nil {
 		return fmt.Errorf("failed to rerun step: %w", err)
 	}

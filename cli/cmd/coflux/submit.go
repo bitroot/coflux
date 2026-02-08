@@ -34,13 +34,18 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
 	module, targetName := splitTarget(target)
 	if module == "" {
 		return fmt.Errorf("invalid target format: expected 'module.target', got '%s'", target)
 	}
 
 	// Get workflow definition to get options
-	workflow, err := client.GetWorkflow(cmd.Context(), workspace, module, targetName)
+	workflow, err := client.GetWorkflow(cmd.Context(), workspaceID, module, targetName)
 	if err != nil {
 		return fmt.Errorf("failed to get workflow: %w", err)
 	}
@@ -75,7 +80,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		options["requires"] = requires
 	}
 
-	result, err := client.SubmitWorkflow(cmd.Context(), workspace, module, targetName, submitArgs, options)
+	result, err := client.SubmitWorkflow(cmd.Context(), workspaceID, module, targetName, submitArgs, options)
 	if err != nil {
 		return fmt.Errorf("failed to submit workflow: %w", err)
 	}

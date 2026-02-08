@@ -145,9 +145,14 @@ func runManifestsRegister(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
 	manifests := buildManifests(manifest)
 
-	if err := registerManifests(cmd.Context(), client, workspace, manifests); err != nil {
+	if err := registerManifests(cmd.Context(), client, workspaceID, manifests); err != nil {
 		return fmt.Errorf("failed to register manifests: %w", err)
 	}
 
@@ -168,7 +173,12 @@ func runManifestsArchive(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := client.ArchiveModule(cmd.Context(), workspace, moduleName); err != nil {
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	if err := client.ArchiveModule(cmd.Context(), workspaceID, moduleName); err != nil {
 		return fmt.Errorf("failed to archive module: %w", err)
 	}
 
@@ -187,7 +197,12 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	manifests, err := client.GetManifests(cmd.Context(), workspace)
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	manifests, err := client.GetManifests(cmd.Context(), workspaceID)
 	if err != nil {
 		return fmt.Errorf("failed to get manifests: %w", err)
 	}
@@ -357,6 +372,6 @@ func buildParameters(params []adapter.Parameter) []map[string]any {
 	return result
 }
 
-func registerManifests(ctx context.Context, client *api.Client, workspace string, manifests map[string]map[string]any) error {
-	return client.RegisterManifests(ctx, workspace, manifests)
+func registerManifests(ctx context.Context, client *api.Client, workspaceID string, manifests map[string]map[string]any) error {
+	return client.RegisterManifests(ctx, workspaceID, manifests)
 }

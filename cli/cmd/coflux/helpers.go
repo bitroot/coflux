@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,13 +42,27 @@ func newClient() (*api.Client, error) {
 	return api.NewClient(getHost(), isSecure(), token), nil
 }
 
-// requireWorkspace returns the workspace or an error if not set
+// requireWorkspace returns the workspace name or an error if not set
 func requireWorkspace() (string, error) {
 	ws := getWorkspace()
 	if ws == "" {
 		return "", fmt.Errorf("workspace is required (use --workspace, COFLUX_WORKSPACE, or set in config)")
 	}
 	return ws, nil
+}
+
+// resolveWorkspaceID resolves a workspace name to its external ID
+func resolveWorkspaceID(ctx context.Context, client *api.Client, name string) (string, error) {
+	workspaces, err := client.GetWorkspaces(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get workspaces: %w", err)
+	}
+	for id, ws := range workspaces {
+		if getString(ws, "name") == name {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("workspace not found: %s", name)
 }
 
 // getJSON returns whether JSON output is requested
