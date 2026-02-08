@@ -945,6 +945,31 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  def find_cached_execution_by_cache_key(db, cache_key, recorded_after) do
+    case query(
+           db,
+           """
+           SELECT e.id, r2.external_id
+           FROM steps AS s
+           INNER JOIN executions AS e ON e.step_id = s.id
+           INNER JOIN runs AS r2 ON r2.id = s.run_id
+           LEFT JOIN results AS r ON r.execution_id = e.id
+           WHERE
+             s.cache_key = ?1
+             AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?2))
+           ORDER BY e.created_at DESC
+           LIMIT 1
+           """,
+           {{:blob, cache_key}, recorded_after}
+         ) do
+      {:ok, [{execution_id, run_external_id}]} ->
+        {:ok, {execution_id, run_external_id}}
+
+      {:ok, []} ->
+        {:ok, nil}
+    end
+  end
+
   def get_result_successors(db, execution_id) do
     query(
       db,
@@ -956,10 +981,11 @@ defmodule Coflux.Orchestration.Runs do
         FROM successors AS ss
         INNER JOIN results AS r ON r.successor_id = ss.execution_id
       )
-      SELECT s.run_id, ss.execution_id
+      SELECT run.external_id, ss.execution_id
       FROM successors AS ss
       INNER JOIN executions AS e ON e.id = ss.execution_id
       INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS run ON run.id = s.run_id
       """,
       {execution_id}
     )

@@ -188,6 +188,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_targets, workspace_id, pid})
   end
 
+  def rotate_epoch(project_id) do
+    call_server(project_id, :rotate_epoch)
+  end
+
   def unsubscribe(project_id, ref) do
     cast_server(project_id, {:unsubscribe, ref})
   end
