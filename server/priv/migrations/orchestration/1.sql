@@ -49,6 +49,7 @@ CREATE TABLE workflows (
   retry_limit INTEGER NOT NULL,
   retry_delay_min INTEGER NOT NULL,
   retry_delay_max INTEGER NOT NULL,
+  recurrent INTEGER NOT NULL DEFAULT 0,
   requires_tag_set_id INTEGER,
   UNIQUE (manifest_id, name),
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE,
@@ -58,37 +59,46 @@ CREATE TABLE workflows (
   FOREIGN KEY (requires_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE spaces (id INTEGER PRIMARY KEY) STRICT;
+CREATE TABLE workspaces (
+  id INTEGER PRIMARY KEY,
+  external_id TEXT
+) STRICT;
 
-CREATE TABLE space_manifests (
-  space_id INTEGER NOT NULL,
+CREATE UNIQUE INDEX idx_workspaces_external_id ON workspaces(external_id);
+
+CREATE TABLE workspace_manifests (
+  workspace_id INTEGER NOT NULL,
   module TEXT NOT NULL,
   manifest_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE space_states (
-  space_id INTEGER NOT NULL,
+CREATE TABLE workspace_states (
+  workspace_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: archived
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE space_names (
-  space_id INTEGER NOT NULL,
+CREATE TABLE workspace_names (
+  workspace_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE space_bases (
-  space_id INTEGER NOT NULL,
-  base_id INTEGER,
+CREATE TABLE workspace_bases (
+  workspace_id INTEGER NOT NULL,
+  base_workspace_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
-  FOREIGN KEY (base_id) REFERENCES spaces ON DELETE CASCADE
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
+  FOREIGN KEY (base_workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE launchers (
@@ -115,20 +125,27 @@ CREATE TABLE pool_definition_modules (
 
 CREATE TABLE pools (
   id INTEGER PRIMARY KEY,
-  space_id INTEGER NOT NULL,
+  external_id TEXT,
+  workspace_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   pool_definition_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (pool_definition_id) REFERENCES pool_definitions ON DELETE RESTRICT
 ) STRICT;
 
+CREATE UNIQUE INDEX idx_pools_external_id ON pools(external_id);
+
 CREATE TABLE workers (
   id INTEGER PRIMARY KEY,
+  external_id TEXT,
   pool_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (pool_id) REFERENCES pools ON DELETE CASCADE
 ) STRICT;
+
+CREATE UNIQUE INDEX idx_workers_external_id ON workers(external_id);
 
 CREATE TABLE worker_launch_results (
   worker_id INTEGER PRIMARY KEY,
@@ -147,6 +164,7 @@ CREATE TABLE worker_states (
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: draining
   -- TODO: reason? (0: user, 1: scaling down?, 2: config update?)
   created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
@@ -155,6 +173,7 @@ CREATE TABLE worker_stops (
   worker_id INTEGER NOT NULL,
   -- TODO: reason? (manual, scaling down, pool removed, ?)
   created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
@@ -167,6 +186,7 @@ CREATE TABLE worker_stop_results (
 
 CREATE TABLE worker_deactivations (
   worker_id INTEGER PRIMARY KEY,
+  error TEXT,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
@@ -174,13 +194,30 @@ CREATE TABLE worker_deactivations (
 CREATE TABLE sessions (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
-  space_id INTEGER NOT NULL,
+  workspace_id INTEGER NOT NULL,
   worker_id INTEGER,
   provides_tag_set_id INTEGER,
+  concurrency INTEGER NOT NULL DEFAULT 0,
+  activation_timeout INTEGER,
+  reconnection_timeout INTEGER,
+  secret_hash BLOB,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (worker_id) REFERENCES workers ON DELETE RESTRICT,
   FOREIGN KEY (provides_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE session_activations (
+  session_id INTEGER PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE session_expirations (
+  session_id INTEGER PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE runs (
@@ -189,12 +226,13 @@ CREATE TABLE runs (
   parent_id INTEGER,
   idempotency_key TEXT UNIQUE,
   created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (parent_id) REFERENCES executions ON DELETE SET NULL
 ) STRICT;
 
 CREATE TABLE steps (
   id INTEGER PRIMARY KEY,
-  external_id TEXT NOT NULL UNIQUE,
+  number INTEGER,
   run_id INTEGER NOT NULL,
   parent_id INTEGER, -- TODO: remove?
   module TEXT NOT NULL,
@@ -209,6 +247,8 @@ CREATE TABLE steps (
   retry_limit INTEGER NOT NULL,
   retry_delay_min INTEGER NOT NULL,
   retry_delay_max INTEGER NOT NULL,
+  recurrent INTEGER NOT NULL DEFAULT 0,
+  delay INTEGER NOT NULL DEFAULT 0,
   requires_tag_set_id INTEGER,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (run_id) REFERENCES runs ON DELETE CASCADE,
@@ -236,12 +276,13 @@ CREATE TABLE executions (
   id INTEGER PRIMARY KEY,
   step_id INTEGER NOT NULL,
   attempt INTEGER NOT NULL,
-  space_id INTEGER NOT NULL,
+  workspace_id INTEGER NOT NULL,
   execute_after INTEGER,
   created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   UNIQUE (step_id, attempt),
   FOREIGN KEY (step_id) REFERENCES steps ON DELETE CASCADE,
-  FOREIGN KEY (space_id) REFERENCES spaces ON DELETE CASCADE
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE assets (
@@ -407,6 +448,7 @@ CREATE TABLE results (
   value_id INTEGER,
   successor_id INTEGER,
   created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
   FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT,
@@ -483,4 +525,25 @@ CREATE TABLE message_values (
   FOREIGN KEY (message_id) REFERENCES messages ON DELETE CASCADE,
   FOREIGN KEY (label_id) REFERENCES message_labels ON DELETE RESTRICT,
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
+) STRICT;
+
+-- Principal and token tracking
+
+CREATE TABLE tokens (
+  id INTEGER PRIMARY KEY,
+  external_id TEXT NOT NULL UNIQUE,
+  token_hash TEXT NOT NULL UNIQUE,
+  name TEXT,
+  workspaces TEXT,  -- JSON array of workspace patterns, NULL for all workspaces
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  revoked_at INTEGER
+) STRICT;
+
+CREATE TABLE principals (
+  id INTEGER PRIMARY KEY,
+  user_external_id TEXT UNIQUE,  -- For users (from JWT sub claim), NULL for tokens
+  token_id INTEGER UNIQUE REFERENCES tokens ON DELETE CASCADE,
+  CHECK ((user_external_id IS NOT NULL AND token_id IS NULL) OR (user_external_id IS NULL AND token_id IS NOT NULL))
 ) STRICT;
