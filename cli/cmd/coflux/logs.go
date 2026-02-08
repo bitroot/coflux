@@ -59,24 +59,22 @@ func buildExecutionLabelMap(data map[string]any) map[string]string {
 			if eid, ok := e["executionId"].(string); ok {
 				labels[eid] = label
 			}
-			// Also try float64 (JSON numbers)
-			if eid, ok := e["executionId"].(float64); ok {
-				labels[fmt.Sprintf("%d", int64(eid))] = label
-			}
 		}
 	}
 	return labels
 }
 
 // resolveStepAttempt looks up the execution ID for a "stepId:attempt" string
-// using the run topic snapshot.
+// using the run topic snapshot. Step IDs are compound (e.g., "RwD6:2"), so the
+// full format is "RwD6:2:1" (run_id:step_number:attempt). We split on the last
+// colon to separate the step ID from the attempt.
 func resolveStepAttempt(data map[string]any, stepAttempt string) (string, error) {
-	parts := strings.SplitN(stepAttempt, ":", 2)
-	if len(parts) != 2 {
+	lastColon := strings.LastIndex(stepAttempt, ":")
+	if lastColon < 0 {
 		return "", fmt.Errorf("invalid step:attempt format %q (expected step-id:attempt)", stepAttempt)
 	}
-	stepID := parts[0]
-	attempt := parts[1]
+	stepID := stepAttempt[:lastColon]
+	attempt := stepAttempt[lastColon+1:]
 
 	steps, _ := data["steps"].(map[string]any)
 	stepData, ok := steps[stepID]
@@ -98,9 +96,6 @@ func resolveStepAttempt(data map[string]any, stepAttempt string) (string, error)
 	}
 	if eid, ok := e["executionId"].(string); ok {
 		return eid, nil
-	}
-	if eid, ok := e["executionId"].(float64); ok {
-		return fmt.Sprintf("%d", int64(eid)), nil
 	}
 	return "", fmt.Errorf("no executionId found for step %q attempt %s", stepID, attempt)
 }

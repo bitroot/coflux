@@ -35,76 +35,72 @@ defmodule Coflux.Orchestration do
     call_server(project_id, :get_workspaces)
   end
 
-  def get_workspace_name(project_id, workspace_id) do
-    call_server(project_id, {:get_workspace_name, workspace_id})
+  def create_workspace(project_id, name, base_id, access \\ nil) do
+    call_server(project_id, {:create_workspace, name, base_id, access})
   end
 
-  def create_workspace(project_id, name, base_id, user_id \\ nil) do
-    call_server(project_id, {:create_workspace, name, base_id, user_id})
+  def update_workspace(project_id, workspace_id, updates, access \\ nil) do
+    call_server(project_id, {:update_workspace, workspace_id, updates, access})
   end
 
-  def update_workspace(project_id, workspace_id, updates, user_id \\ nil) do
-    call_server(project_id, {:update_workspace, workspace_id, updates, user_id})
+  def pause_workspace(project_id, workspace_id, access \\ nil) do
+    call_server(project_id, {:pause_workspace, workspace_id, access})
   end
 
-  def pause_workspace(project_id, workspace_name, user_id \\ nil) do
-    call_server(project_id, {:pause_workspace, workspace_name, user_id})
+  def resume_workspace(project_id, workspace_id, access \\ nil) do
+    call_server(project_id, {:resume_workspace, workspace_id, access})
   end
 
-  def resume_workspace(project_id, workspace_name, user_id \\ nil) do
-    call_server(project_id, {:resume_workspace, workspace_name, user_id})
+  def archive_workspace(project_id, workspace_id, access \\ nil) do
+    call_server(project_id, {:archive_workspace, workspace_id, access})
   end
 
-  def archive_workspace(project_id, workspace_name, user_id \\ nil) do
-    call_server(project_id, {:archive_workspace, workspace_name, user_id})
+  def get_pools(project_id, workspace_id) do
+    call_server(project_id, {:get_pools, workspace_id})
   end
 
-  def get_pools(project_id, workspace_name) do
-    call_server(project_id, {:get_pools, workspace_name})
+  def update_pool(project_id, workspace_id, pool_name, pool, access \\ nil) do
+    call_server(project_id, {:update_pool, workspace_id, pool_name, pool, access})
   end
 
-  def update_pool(project_id, workspace_name, pool_name, pool, user_id \\ nil) do
-    call_server(project_id, {:update_pool, workspace_name, pool_name, pool, user_id})
+  def stop_worker(project_id, workspace_id, worker_id, access \\ nil) do
+    call_server(project_id, {:stop_worker, workspace_id, worker_id, access})
   end
 
-  def stop_worker(project_id, workspace_name, worker_id, user_id \\ nil) do
-    call_server(project_id, {:stop_worker, workspace_name, worker_id, user_id})
+  def resume_worker(project_id, workspace_id, worker_id, access \\ nil) do
+    call_server(project_id, {:resume_worker, workspace_id, worker_id, access})
   end
 
-  def resume_worker(project_id, workspace_name, worker_id, user_id \\ nil) do
-    call_server(project_id, {:resume_worker, workspace_name, worker_id, user_id})
+  def register_manifests(project_id, workspace_id, manifests, access \\ nil) do
+    call_server(project_id, {:register_manifests, workspace_id, manifests, access})
   end
 
-  def register_manifests(project_id, workspace_name, manifests, user_id \\ nil) do
-    call_server(project_id, {:register_manifests, workspace_name, manifests, user_id})
+  def archive_module(project_id, workspace_id, module_name, access \\ nil) do
+    call_server(project_id, {:archive_module, workspace_id, module_name, access})
   end
 
-  def archive_module(project_id, workspace_name, module_name, user_id \\ nil) do
-    call_server(project_id, {:archive_module, workspace_name, module_name, user_id})
+  def get_manifests(project_id, workspace_id) do
+    call_server(project_id, {:get_manifests, workspace_id})
   end
 
-  def get_manifests(project_id, workspace_name) do
-    call_server(project_id, {:get_manifests, workspace_name})
+  def get_workflow(project_id, workspace_id, module, target_name) do
+    call_server(project_id, {:get_workflow, workspace_id, module, target_name})
   end
 
-  def get_workflow(project_id, workspace_name, module, target_name) do
-    call_server(project_id, {:get_workflow, workspace_name, module, target_name})
+  def resume_session(project_id, session_id, workspace_id, pid) do
+    call_server(project_id, {:resume_session, session_id, workspace_id, pid})
   end
 
-  def resume_session(project_id, session_id, workspace_name, pid) do
-    call_server(project_id, {:resume_session, session_id, workspace_name, pid})
-  end
-
-  def create_session(project_id, workspace_name, opts \\ []) do
-    call_server(project_id, {:create_session, workspace_name, opts})
+  def create_session(project_id, workspace_id, access \\ nil, opts \\ []) do
+    call_server(project_id, {:create_session, workspace_id, access, opts})
   end
 
   def declare_targets(project_id, session_id, targets) do
     call_server(project_id, {:declare_targets, session_id, targets})
   end
 
-  def start_run(project_id, module, target, type, arguments, opts \\ []) do
-    call_server(project_id, {:start_run, module, target, type, arguments, opts})
+  def start_run(project_id, module, target, type, arguments, access \\ nil, opts \\ []) do
+    call_server(project_id, {:start_run, module, target, type, arguments, access, opts})
   end
 
   def schedule_step(project_id, parent_id, module, target, type, arguments, opts \\ []) do
@@ -118,12 +114,15 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:register_group, parent_id, group_id, name})
   end
 
-  def cancel_execution(project_id, workspace_name, execution_id, user_id \\ nil) do
-    call_server(project_id, {:cancel_execution, workspace_name, execution_id, user_id})
+  def cancel_execution(project_id, workspace_id, execution_id, access \\ nil) do
+    call_server(project_id, {:cancel_execution, workspace_id, execution_id, access})
   end
 
-  def rerun_step(project_id, step_id, workspace_name, user_id \\ nil) do
-    call_server(project_id, {:rerun_step, step_id, workspace_name, user_id})
+  def rerun_step(project_id, step_id, workspace_id, access \\ nil) do
+    call_server(
+      project_id,
+      {:rerun_step, step_id, workspace_id, access}
+    )
   end
 
   def record_heartbeats(project_id, executions, session_id) do

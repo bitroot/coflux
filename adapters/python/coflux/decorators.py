@@ -427,6 +427,7 @@ class Target(t.Generic[P, T]):
         reference = ctx.submit_execution(
             full_target,
             serialized_args,
+            type=self._definition.type,
             wait_for=wait_for_val,
             cache=cache_dict,
             defer=defer_dict,

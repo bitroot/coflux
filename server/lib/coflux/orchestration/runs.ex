@@ -3,13 +3,13 @@ defmodule Coflux.Orchestration.Runs do
 
   import Coflux.Store
 
-  def get_step_by_external_id(db, external_id) do
+  def get_step_by_number(db, run_id, step_number) do
     query_one(
       db,
       """
       SELECT
         id,
-        external_id,
+        number,
         run_id,
         parent_id,
         module,
@@ -29,9 +29,9 @@ defmodule Coflux.Orchestration.Runs do
         requires_tag_set_id,
         created_at
       FROM steps
-      WHERE external_id = ?1
+      WHERE run_id = ?1 AND number = ?2
       """,
-      {external_id},
+      {run_id, step_number},
       Models.Step
     )
   end
@@ -42,7 +42,7 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT
         s.id,
-        s.external_id,
+        s.number,
         s.run_id,
         s.parent_id,
         s.module,
@@ -107,7 +107,7 @@ defmodule Coflux.Orchestration.Runs do
              WHERE e.workspace_id = ?1
              GROUP BY s.module, s.target
            )
-           SELECT s.module, s.target, s.type, r.external_id, s.external_id, e.attempt
+           SELECT s.module, s.target, s.type, r.external_id, s.number, e.attempt
            FROM executions AS e
            INNER JOIN steps AS s ON s.id = e.step_id
            INNER JOIN latest_executions AS le ON s.module = le.module AND s.target = le.target AND e.created_at = le.max_created_at
@@ -118,10 +118,10 @@ defmodule Coflux.Orchestration.Runs do
          ) do
       {:ok, rows} ->
         {:ok,
-         Enum.map(rows, fn {module_name, target_name, target_type, run_external_id,
-                            step_external_id, attempt} ->
+         Enum.map(rows, fn {module_name, target_name, target_type, run_external_id, step_number,
+                            attempt} ->
            {module_name, target_name, Utils.decode_step_type(target_type), run_external_id,
-            step_external_id, attempt}
+            step_number, attempt}
          end)}
     end
   end
@@ -284,10 +284,10 @@ defmodule Coflux.Orchestration.Runs do
         end
       end
 
-    {external_step_id, execution_id, attempt, now, memo_hit, cache_key} =
+    {step_number, execution_id, attempt, now, memo_hit, cache_key} =
       case memoised_execution do
-        {external_step_id, execution_id, attempt, now} ->
-          {external_step_id, execution_id, attempt, now, true, nil}
+        {step_number, execution_id, attempt, now} ->
+          {step_number, execution_id, attempt, now, true, nil}
 
         nil ->
           cache_key =
@@ -320,7 +320,7 @@ defmodule Coflux.Orchestration.Runs do
               do: build_key(defer.params, arguments, "#{module}:#{target}")
 
           # TODO: validate parent belongs to run?
-          {:ok, step_id, external_step_id} =
+          {:ok, step_id, step_number} =
             insert_step(
               db,
               run_id,
@@ -361,7 +361,7 @@ defmodule Coflux.Orchestration.Runs do
           {:ok, execution_id} =
             insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
-          {external_step_id, execution_id, attempt, now, false, cache_key}
+          {step_number, execution_id, attempt, now, false, cache_key}
       end
 
     child_added =
@@ -374,7 +374,7 @@ defmodule Coflux.Orchestration.Runs do
 
     {:ok,
      %{
-       external_step_id: external_step_id,
+       step_number: step_number,
        execution_id: execution_id,
        attempt: attempt,
        created_at: now,
@@ -488,6 +488,7 @@ defmodule Coflux.Orchestration.Runs do
         s.id AS step_id,
         s.run_id,
         run.external_id AS run_external_id,
+        s.number AS step_number,
         s.module,
         s.target,
         s.type,
@@ -518,27 +519,33 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_module_executions(db, module) do
-    query(
-      db,
-      """
-      SELECT
-        e.id,
-        s.target,
-        r.external_id,
-        s.external_id,
-        e.attempt,
-        e.execute_after,
-        e.created_at,
-        a.created_at
-      FROM executions AS e
-      INNER JOIN steps AS s ON s.id = e.step_id
-      INNER JOIN runs AS r ON r.id = s.run_id
-      LEFT JOIN assignments AS a ON a.execution_id = e.id
-      LEFT JOIN results AS re ON re.execution_id = e.id
-      WHERE s.module = ?1 AND re.created_at IS NULL
-      """,
-      {module}
-    )
+    case query(
+           db,
+           """
+           SELECT
+             s.target,
+             r.external_id,
+             s.number,
+             e.attempt,
+             e.execute_after,
+             e.created_at,
+             a.created_at
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           INNER JOIN runs AS r ON r.id = s.run_id
+           LEFT JOIN assignments AS a ON a.execution_id = e.id
+           LEFT JOIN results AS re ON re.execution_id = e.id
+           WHERE s.module = ?1 AND re.created_at IS NULL
+           """,
+           {module}
+         ) do
+      {:ok, rows} ->
+        {:ok,
+         Enum.map(rows, fn {target, run_external_id, step_number, attempt, execute_after,
+                            created_at, assigned_at} ->
+           {target, run_external_id, step_number, attempt, execute_after, created_at, assigned_at}
+         end)}
+    end
   end
 
   def get_pending_executions_for_workspace(db, workspace_id) do
@@ -648,7 +655,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.external_id, s.external_id, e.attempt, s.module, s.target
+      SELECT r.external_id, s.number, e.attempt, s.module, s.target
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
       INNER JOIN runs AS r ON r.id = s.run_id
@@ -690,7 +697,7 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT
         id,
-        external_id,
+        number,
         run_id,
         parent_id,
         module,
@@ -831,7 +838,7 @@ defmodule Coflux.Orchestration.Runs do
     case query(
            db,
            """
-           SELECT c.parent_id, s2.external_id, e2.attempt, c.group_id
+           SELECT c.parent_id, s2.number, e2.attempt, c.group_id
            FROM children AS c
            INNER JOIN executions AS e1 ON e1.id = c.parent_id
            INNER JOIN steps AS s1 ON s1.id = e1.step_id
@@ -846,8 +853,8 @@ defmodule Coflux.Orchestration.Runs do
          Enum.group_by(
            rows,
            fn {parent_id, _, _, _} -> parent_id end,
-           fn {_, external_step_id, attempt, group_id} ->
-             {external_step_id, attempt, group_id}
+           fn {_, step_number, attempt, group_id} ->
+             {step_number, attempt, group_id}
            end
          )}
     end
@@ -890,7 +897,7 @@ defmodule Coflux.Orchestration.Runs do
     case query(
            db,
            """
-           SELECT s.external_id, e.id, e.attempt, e.created_at
+           SELECT s.number, e.id, e.attempt, e.created_at
            FROM steps AS s
            INNER JOIN executions AS e ON e.step_id = s.id
            LEFT JOIN results AS r ON r.execution_id = e.id
@@ -995,32 +1002,46 @@ defmodule Coflux.Orchestration.Runs do
          requires_tag_set_id,
          now
        ) do
-    case generate_external_id(db, :steps, 3, "S") do
-      {:ok, external_id} ->
-        case insert_one(db, :steps, %{
-               external_id: external_id,
-               run_id: run_id,
-               parent_id: parent_id,
-               module: module,
-               target: target,
-               type: Utils.encode_step_type(type),
-               priority: priority,
-               wait_for: Utils.encode_params_set(wait_for || []),
-               cache_key: if(cache_key, do: {:blob, cache_key}),
-               cache_config_id: cache_config_id,
-               defer_key: if(defer_key, do: {:blob, defer_key}),
-               memo_key: if(memo_key, do: {:blob, memo_key}),
-               retry_limit: retry_limit,
-               retry_delay_min: retry_delay_min,
-               retry_delay_max: retry_delay_max,
-               recurrent: if(recurrent, do: 1, else: 0),
-               delay: delay,
-               requires_tag_set_id: requires_tag_set_id,
-               created_at: now
-             }) do
-          {:ok, step_id} ->
-            {:ok, step_id, external_id}
-        end
+    {:ok, step_number} = get_next_step_number(db, run_id)
+
+    case insert_one(db, :steps, %{
+           run_id: run_id,
+           number: step_number,
+           parent_id: parent_id,
+           module: module,
+           target: target,
+           type: Utils.encode_step_type(type),
+           priority: priority,
+           wait_for: Utils.encode_params_set(wait_for || []),
+           cache_key: if(cache_key, do: {:blob, cache_key}),
+           cache_config_id: cache_config_id,
+           defer_key: if(defer_key, do: {:blob, defer_key}),
+           memo_key: if(memo_key, do: {:blob, memo_key}),
+           retry_limit: retry_limit,
+           retry_delay_min: retry_delay_min,
+           retry_delay_max: retry_delay_max,
+           recurrent: if(recurrent, do: 1, else: 0),
+           delay: delay,
+           requires_tag_set_id: requires_tag_set_id,
+           created_at: now
+         }) do
+      {:ok, step_id} ->
+        {:ok, step_id, step_number}
+    end
+  end
+
+  defp get_next_step_number(db, run_id) do
+    case query(
+           db,
+           """
+           SELECT COALESCE(MAX(number), 0) + 1
+           FROM steps
+           WHERE run_id = ?1
+           """,
+           {run_id}
+         ) do
+      {:ok, [{next_number}]} ->
+        {:ok, next_number}
     end
   end
 
@@ -1074,6 +1095,50 @@ defmodule Coflux.Orchestration.Runs do
       on_conflict: "DO NOTHING"
     )
   end
+
+  def get_execution_key(db, execution_id) do
+    case query_one(
+           db,
+           """
+           SELECT r.external_id, s.number, e.attempt
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           INNER JOIN runs AS r ON r.id = s.run_id
+           WHERE e.id = ?1
+           """,
+           {execution_id}
+         ) do
+      {:ok, {run_external_id, step_number, attempt}} ->
+        {:ok, {run_external_id, step_number, attempt}}
+
+      {:ok, nil} ->
+        {:error, :not_found}
+    end
+  end
+
+  def get_execution_keys(db, execution_ids) do
+    Enum.reduce(execution_ids, {:ok, %{}}, fn execution_id, {:ok, acc} ->
+      case get_execution_key(db, execution_id) do
+        {:ok, key} -> {:ok, Map.put(acc, execution_id, key)}
+        {:error, _} -> {:ok, acc}
+      end
+    end)
+  end
+
+  def get_execution_id(db, run_external_id, step_number, attempt) do
+    query_one(
+      db,
+      """
+      SELECT e.id
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = s.run_id
+      WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+      """,
+      {run_external_id, step_number, attempt}
+    )
+  end
+
 
   defp current_timestamp() do
     System.os_time(:millisecond)

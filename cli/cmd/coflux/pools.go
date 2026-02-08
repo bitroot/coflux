@@ -36,7 +36,12 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	pools, err := client.GetPools(cmd.Context(), workspace)
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	pools, err := client.GetPools(cmd.Context(), workspaceID)
 	if err != nil {
 		return err
 	}
@@ -102,8 +107,13 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
 	// Get existing pool
-	pool, _ := client.GetPool(cmd.Context(), workspace, name)
+	pool, _ := client.GetPool(cmd.Context(), workspaceID, name)
 	if pool == nil {
 		pool = make(map[string]any)
 	}
@@ -129,7 +139,7 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		pool["launcher"] = launcher
 	}
 
-	if err := client.UpdatePool(cmd.Context(), workspace, name, pool); err != nil {
+	if err := client.UpdatePool(cmd.Context(), workspaceID, name, pool); err != nil {
 		return err
 	}
 
@@ -158,7 +168,12 @@ func runPoolsDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := client.UpdatePool(cmd.Context(), workspace, name, nil); err != nil {
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	if err := client.UpdatePool(cmd.Context(), workspaceID, name, nil); err != nil {
 		return err
 	}
 

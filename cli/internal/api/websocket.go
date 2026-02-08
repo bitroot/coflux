@@ -93,7 +93,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 	}
 
 	params := url.Values{}
-	params.Set("workspace", c.workspace)
+	params.Set("workspaceId", c.workspace)
 	params.Set("version", APIVersion)
 
 	u := url.URL{

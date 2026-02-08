@@ -12,8 +12,8 @@ defmodule Coflux.Topics.Workspaces do
     {:ok, workspaces, ref} = Orchestration.subscribe_workspaces(project_id, self())
 
     workspaces =
-      Map.new(workspaces, fn {workspace_id, workspace} ->
-        {Integer.to_string(workspace_id), build_workspace(workspace)}
+      Map.new(workspaces, fn {_workspace_id, workspace} ->
+        {workspace.external_id, build_workspace(workspace)}
       end)
 
     {:ok, Topic.new(workspaces, %{ref: ref})}
@@ -24,18 +24,18 @@ defmodule Coflux.Topics.Workspaces do
     {:ok, topic}
   end
 
-  defp process_notification(topic, {:workspace, workspace_id, workspace}) do
-    Topic.set(topic, [Integer.to_string(workspace_id)], build_workspace(workspace))
+  defp process_notification(topic, {:workspace, _workspace_id, workspace}) do
+    Topic.set(topic, [workspace.external_id], build_workspace(workspace))
   end
 
-  defp process_notification(topic, {:state, workspace_id, state}) do
-    Topic.set(topic, [Integer.to_string(workspace_id), :state], build_state(state))
+  defp process_notification(topic, {:state, workspace_external_id, state}) do
+    Topic.set(topic, [workspace_external_id, :state], build_state(state))
   end
 
   defp build_workspace(workspace) do
     %{
       name: workspace.name,
-      baseId: if(workspace.base_id, do: Integer.to_string(workspace.base_id)),
+      baseId: workspace[:base_external_id],
       state: build_state(workspace.state)
     }
   end

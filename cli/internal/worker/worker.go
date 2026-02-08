@@ -38,11 +38,12 @@ type Worker struct {
 	adapter adapter.Adapter
 	logger  *slog.Logger
 
-	client    *api.Client
-	sessionID string
-	pool      *pool.Pool
-	blobs     *blob.Manager
-	logs      logstore.Store
+	client      *api.Client
+	workspaceID string // resolved external workspace ID
+	sessionID   string
+	pool        *pool.Pool
+	blobs       *blob.Manager
+	logs        logstore.Store
 
 	connMu sync.RWMutex
 	conn   *api.Connection
@@ -103,6 +104,13 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	// Create API client
 	w.client = api.NewClient(w.cfg.Server.Host, w.cfg.IsSecure(), w.cfg.Server.Token)
 
+	// Resolve workspace name to external ID
+	workspaceID, err := w.resolveWorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	w.workspaceID = workspaceID
+
 	// Discover targets
 	w.logger.Info("discovering targets", "modules", modules)
 	manifest, err := w.adapter.Discover(ctx, modules)
@@ -115,7 +123,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if register {
 		w.logger.Info("registering manifests")
 		manifests := w.buildManifests(manifest)
-		if err := w.client.RegisterManifests(ctx, w.cfg.Workspace, manifests); err != nil {
+		if err := w.client.RegisterManifests(ctx, w.workspaceID, manifests); err != nil {
 			return fmt.Errorf("failed to register manifests: %w", err)
 		}
 		w.logger.Info("manifests registered")
@@ -131,7 +139,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		// Create new session
 		w.logger.Info("creating session", "workspace", w.cfg.Workspace)
 		var err error
-		sessionID, err = w.client.CreateSession(ctx, w.cfg.Workspace, w.cfg.Provides, w.cfg.Concurrency)
+		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, w.cfg.Provides, w.cfg.Concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
@@ -175,6 +183,21 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	return w.runWithReconnect(ctx, targets)
 }
 
+// resolveWorkspaceID resolves a workspace name to its external ID
+func (w *Worker) resolveWorkspaceID(ctx context.Context) (string, error) {
+	workspaces, err := w.client.GetWorkspaces(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get workspaces: %w", err)
+	}
+	for id, ws := range workspaces {
+		name, _ := ws["name"].(string)
+		if name == w.cfg.Workspace {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("workspace not found: %s", w.cfg.Workspace)
+}
+
 // runWithReconnect runs the WebSocket connection with automatic reconnection
 func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[string][]string) error {
 	reconnectWait := initialReconnectWait
@@ -213,7 +236,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	conn := api.NewConnection(
 		w.cfg.Server.Host,
 		w.cfg.IsSecure(),
-		w.cfg.Workspace,
+		w.workspaceID,
 		w.sessionID,
 		w.logger,
 	)

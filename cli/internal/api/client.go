@@ -32,9 +32,9 @@ func NewClient(host string, secure bool, token string) *Client {
 }
 
 // CreateSession creates a new worker session
-func (c *Client) CreateSession(ctx context.Context, workspace string, provides map[string][]string, concurrency int) (string, error) {
+func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string, concurrency int) (string, error) {
 	body := map[string]any{
-		"workspaceName": workspace,
+		"workspaceId": workspaceID,
 	}
 	if provides != nil {
 		body["provides"] = provides
@@ -55,10 +55,10 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, provides m
 }
 
 // RegisterManifests registers workflow manifests
-func (c *Client) RegisterManifests(ctx context.Context, workspace string, manifests map[string]map[string]any) error {
+func (c *Client) RegisterManifests(ctx context.Context, workspaceID string, manifests map[string]map[string]any) error {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"manifests":     manifests,
+		"workspaceId": workspaceID,
+		"manifests":   manifests,
 	}
 
 	return c.post(ctx, "/api/register_manifests", body, nil)
@@ -66,18 +66,18 @@ func (c *Client) RegisterManifests(ctx context.Context, workspace string, manife
 
 // SubmitResult contains the IDs returned from submitting a workflow
 type SubmitResult struct {
-	RunID       string      `json:"runId"`
-	StepID      string      `json:"stepId"`
-	ExecutionID json.Number `json:"executionId"`
+	RunID       string `json:"runId"`
+	StepID      string `json:"stepId"`
+	ExecutionID string `json:"executionId"`
 }
 
 // SubmitWorkflow submits a workflow for execution
-func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target string, arguments [][]any, options map[string]any) (*SubmitResult, error) {
+func (c *Client) SubmitWorkflow(ctx context.Context, workspaceID, module, target string, arguments [][]any, options map[string]any) (*SubmitResult, error) {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"module":        module,
-		"target":        target,
-		"arguments":     arguments,
+		"workspaceId": workspaceID,
+		"module":      module,
+		"target":      target,
+		"arguments":   arguments,
 	}
 	maps.Copy(body, options)
 
@@ -89,10 +89,10 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspace, module, target s
 }
 
 // GetManifests retrieves the latest manifests for a workspace
-func (c *Client) GetManifests(ctx context.Context, workspace string) (map[string]any, error) {
+func (c *Client) GetManifests(ctx context.Context, workspaceID string) (map[string]any, error) {
 	var result map[string]any
 	params := url.Values{
-		"workspace": {workspace},
+		"workspaceId": {workspaceID},
 	}
 	if err := c.get(ctx, "/api/get_manifests", params, &result); err != nil {
 		return nil, err
@@ -101,12 +101,12 @@ func (c *Client) GetManifests(ctx context.Context, workspace string) (map[string
 }
 
 // GetWorkflow retrieves a workflow definition
-func (c *Client) GetWorkflow(ctx context.Context, workspace, module, target string) (map[string]any, error) {
+func (c *Client) GetWorkflow(ctx context.Context, workspaceID, module, target string) (map[string]any, error) {
 	var result map[string]any
 	params := url.Values{
-		"workspace": {workspace},
-		"module":    {module},
-		"target":    {target},
+		"workspaceId": {workspaceID},
+		"module":      {module},
+		"target":      {target},
 	}
 	if err := c.get(ctx, "/api/get_workflow", params, &result); err != nil {
 		return nil, err
@@ -180,10 +180,10 @@ func (c *Client) ResumeWorkspace(ctx context.Context, workspaceID string) error 
 }
 
 // ArchiveModule archives a module in a workspace (hides its targets)
-func (c *Client) ArchiveModule(ctx context.Context, workspace, moduleName string) error {
+func (c *Client) ArchiveModule(ctx context.Context, workspaceID, moduleName string) error {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"moduleName":    moduleName,
+		"workspaceId": workspaceID,
+		"moduleName":  moduleName,
 	}
 	return c.post(ctx, "/api/archive_module", body, nil)
 }
@@ -191,9 +191,9 @@ func (c *Client) ArchiveModule(ctx context.Context, workspace, moduleName string
 // Pools API
 
 // GetPools lists all pools in a workspace
-func (c *Client) GetPools(ctx context.Context, workspace string) (map[string]map[string]any, error) {
+func (c *Client) GetPools(ctx context.Context, workspaceID string) (map[string]map[string]any, error) {
 	var result map[string]map[string]any
-	params := url.Values{"workspace": {workspace}}
+	params := url.Values{"workspaceId": {workspaceID}}
 	if err := c.get(ctx, "/api/get_pools", params, &result); err != nil {
 		return nil, err
 	}
@@ -201,9 +201,9 @@ func (c *Client) GetPools(ctx context.Context, workspace string) (map[string]map
 }
 
 // GetPool gets a single pool
-func (c *Client) GetPool(ctx context.Context, workspace, pool string) (map[string]any, error) {
+func (c *Client) GetPool(ctx context.Context, workspaceID, pool string) (map[string]any, error) {
 	var result map[string]any
-	params := url.Values{"workspace": {workspace}, "pool": {pool}}
+	params := url.Values{"workspaceId": {workspaceID}, "pool": {pool}}
 	if err := c.get(ctx, "/api/get_pool", params, &result); err != nil {
 		return nil, err
 	}
@@ -211,11 +211,11 @@ func (c *Client) GetPool(ctx context.Context, workspace, pool string) (map[strin
 }
 
 // UpdatePool updates or creates a pool
-func (c *Client) UpdatePool(ctx context.Context, workspace, poolName string, pool any) error {
+func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, pool any) error {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"poolName":      poolName,
-		"pool":          pool,
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+		"pool":        pool,
 	}
 	return c.post(ctx, "/api/update_pool", body, nil)
 }
@@ -262,15 +262,15 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 
 // RerunStepResult contains the IDs returned from re-running a step
 type RerunStepResult struct {
-	ExecutionID json.Number `json:"executionId"`
-	Attempt     int         `json:"attempt"`
+	ExecutionID string `json:"executionId"`
+	Attempt     int    `json:"attempt"`
 }
 
 // RerunStep triggers a re-run of an existing step
-func (c *Client) RerunStep(ctx context.Context, workspace, stepID string) (*RerunStepResult, error) {
+func (c *Client) RerunStep(ctx context.Context, workspaceID, stepID string) (*RerunStepResult, error) {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"stepId":        stepID,
+		"workspaceId": workspaceID,
+		"stepId":      stepID,
 	}
 	var result RerunStepResult
 	if err := c.post(ctx, "/api/rerun_step", body, &result); err != nil {
@@ -280,10 +280,10 @@ func (c *Client) RerunStep(ctx context.Context, workspace, stepID string) (*Reru
 }
 
 // CancelExecution cancels a running or pending execution
-func (c *Client) CancelExecution(ctx context.Context, workspace, executionID string) error {
+func (c *Client) CancelExecution(ctx context.Context, workspaceID, executionID string) error {
 	body := map[string]any{
-		"workspaceName": workspace,
-		"executionId":   executionID,
+		"workspaceId": workspaceID,
+		"executionId": executionID,
 	}
 	return c.post(ctx, "/api/cancel_execution", body, nil)
 }

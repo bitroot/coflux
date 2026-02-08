@@ -9,8 +9,8 @@ CREATE TABLE templates (
 CREATE TABLE messages (
   id INTEGER PRIMARY KEY,
   run_id TEXT NOT NULL,
-  execution_id INTEGER NOT NULL,
-  workspace_id INTEGER NOT NULL,
+  execution_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
   timestamp INTEGER NOT NULL,
   level INTEGER NOT NULL,
   template_id INTEGER REFERENCES templates(id),

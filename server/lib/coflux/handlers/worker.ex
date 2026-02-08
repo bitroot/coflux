@@ -29,11 +29,11 @@ defmodule Coflux.Handlers.Worker do
 
         case resolve_project(host) do
           {:ok, project_id} ->
-            workspace_name = get_query_param(qs, "workspace")
+            workspace_id = get_query_param(qs, "workspaceId")
             session_token = extract_session_token(protocols)
 
             req = :cowboy_req.set_resp_header("sec-websocket-protocol", @protocol_version, req)
-            {:cowboy_websocket, req, {project_id, workspace_name, session_token}}
+            {:cowboy_websocket, req, {project_id, workspace_id, session_token}}
 
           {:error, :not_configured} ->
             req = json_error_response(req, "not_configured", status: 500)
@@ -62,16 +62,16 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_init({project_id, workspace_name, session_token}) do
+  def websocket_init({project_id, workspace_id, session_token}) do
     # TODO: monitor server?
-    case Orchestration.resume_session(project_id, session_token, workspace_name, self()) do
-      {:ok, external_id, execution_ids} ->
+    case Orchestration.resume_session(project_id, session_token, workspace_id, self()) do
+      {:ok, external_id, external_execution_ids} ->
         {[session_message(external_id)],
          %{
            project_id: project_id,
-           workspace_name: workspace_name,
+           workspace_id: workspace_id,
            session_id: external_id,
-           execution_ids: execution_ids
+           execution_ids: MapSet.new(external_execution_ids)
          }}
 
       {:error, :session_invalid} ->
@@ -100,7 +100,6 @@ defmodule Coflux.Handlers.Worker do
 
       "register_group" ->
         [parent_id, group_id, name] = message["params"]
-        parent_id = String.to_integer(parent_id)
 
         if is_recognised_execution?(parent_id, state) do
           case(
@@ -135,8 +134,6 @@ defmodule Coflux.Handlers.Worker do
           requires
         ] = message["params"]
 
-        parent_id = String.to_integer(parent_id)
-
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
                  state.project_id,
@@ -155,10 +152,9 @@ defmodule Coflux.Handlers.Worker do
                  recurrent: recurrent == true,
                  requires: requires
                ) do
-            {:ok, _run_id, _step_id, execution_id, metadata} ->
-              # Return execution_id with metadata for log references
+            {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
-                Integer.to_string(execution_id),
+                execution_external_id,
                 metadata.run_id,
                 metadata.step_id,
                 metadata.attempt,
@@ -177,7 +173,6 @@ defmodule Coflux.Handlers.Worker do
 
       "record_heartbeats" ->
         [executions] = message["params"]
-        executions = Map.new(executions, fn {k, v} -> {String.to_integer(k), v} end)
 
         if Enum.all?(Map.keys(executions), &is_recognised_execution?(&1, state)) do
           :ok =
@@ -194,7 +189,6 @@ defmodule Coflux.Handlers.Worker do
 
       "notify_terminated" ->
         [execution_ids] = message["params"]
-        execution_ids = Enum.map(execution_ids, &String.to_integer/1)
 
         # TODO: just ignore?
         if Enum.all?(execution_ids, &is_recognised_execution?(&1, state)) do
@@ -211,7 +205,6 @@ defmodule Coflux.Handlers.Worker do
 
       "put_result" ->
         [execution_id, value] = message["params"]
-        execution_id = String.to_integer(execution_id)
 
         if is_recognised_execution?(execution_id, state) do
           :ok =
@@ -228,7 +221,6 @@ defmodule Coflux.Handlers.Worker do
 
       "put_error" ->
         [execution_id, error] = message["params"]
-        execution_id = String.to_integer(execution_id)
 
         if is_recognised_execution?(execution_id, state) do
           {type, message, frames} = parse_error(error)
@@ -247,9 +239,8 @@ defmodule Coflux.Handlers.Worker do
 
       "cancel" ->
         [execution_id] = message["params"]
-        execution_id = String.to_integer(execution_id)
 
-        case Orchestration.cancel_execution(state.project_id, state.workspace_name, execution_id) do
+        case Orchestration.cancel_execution(state.project_id, state.workspace_id, execution_id) do
           :ok ->
             {[], state}
 
@@ -262,7 +253,6 @@ defmodule Coflux.Handlers.Worker do
 
       "suspend" ->
         [execution_id, execute_after] = message["params"]
-        execution_id = String.to_integer(execution_id)
         # TODO: validate execute_after
 
         if is_recognised_execution?(execution_id, state) do
@@ -280,8 +270,6 @@ defmodule Coflux.Handlers.Worker do
 
       "get_result" ->
         [execution_id, from_execution_id, timeout_ms] = message["params"]
-        execution_id = String.to_integer(execution_id)
-        from_execution_id = String.to_integer(from_execution_id)
 
         if is_recognised_execution?(from_execution_id, state) do
           case Orchestration.get_result(
@@ -303,7 +291,6 @@ defmodule Coflux.Handlers.Worker do
 
       "put_asset" ->
         [execution_id, name, entries] = message["params"]
-        execution_id = String.to_integer(execution_id)
 
         # TODO: validate
 
@@ -330,7 +317,6 @@ defmodule Coflux.Handlers.Worker do
 
       "get_asset" ->
         [asset_external_id, from_execution_id] = message["params"]
-        from_execution_id = String.to_integer(from_execution_id)
 
         if is_recognised_execution?(from_execution_id, state) do
           case Orchestration.get_asset(
@@ -360,20 +346,22 @@ defmodule Coflux.Handlers.Worker do
   end
 
   def websocket_info(
-        {:execute, execution_id, module, target, arguments, run_id, workspace_id},
+        {:execute, execution_external_id, module, target, arguments, run_id,
+         workspace_external_id},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
-    state = Map.update!(state, :execution_ids, &MapSet.put(&1, execution_id))
+
+    state = Map.update!(state, :execution_ids, &MapSet.put(&1, execution_external_id))
 
     {[
        command_message("execute", [
-         Integer.to_string(execution_id),
+         execution_external_id,
          module,
          target,
          arguments,
          run_id,
-         Integer.to_string(workspace_id)
+         workspace_external_id
        ])
      ], state}
   end
@@ -382,8 +370,8 @@ defmodule Coflux.Handlers.Worker do
     {[success_message(request_id, compose_result(result))], state}
   end
 
-  def websocket_info({:abort, execution_id}, state) do
-    {[command_message("abort", [Integer.to_string(execution_id)])], state}
+  def websocket_info({:abort, execution_external_id}, state) do
+    {[command_message("abort", [execution_external_id])], state}
   end
 
   def websocket_info(:stop, state) do
@@ -439,15 +427,12 @@ defmodule Coflux.Handlers.Worker do
         {:fragment, format, blob_key, size, metadata}
 
       ["execution", execution_id | _rest] ->
-        {:execution, to_id(execution_id)}
+        {:execution, execution_id}
 
       ["asset", asset_external_id | _rest] ->
         {:asset, asset_external_id}
     end)
   end
-
-  defp to_id(v) when is_integer(v), do: v
-  defp to_id(v) when is_binary(v), do: String.to_integer(v)
 
   defp parse_value(value) do
     case value do
@@ -503,10 +488,10 @@ defmodule Coflux.Handlers.Worker do
       {:fragment, format, blob_key, size, metadata} ->
         ["fragment", format, blob_key, size, metadata]
 
-      {:execution, execution_id, metadata} ->
+      {:execution, execution_external_id, metadata} ->
         [
           "execution",
-          Integer.to_string(execution_id),
+          execution_external_id,
           metadata.run_id,
           metadata.step_id,
           metadata.attempt,

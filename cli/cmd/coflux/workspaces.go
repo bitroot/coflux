@@ -137,20 +137,9 @@ func runWorkspacesUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaces, err := client.GetWorkspaces(cmd.Context())
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
-	}
-
-	var workspaceID string
-	for id, ws := range workspaces {
-		if getString(ws, "name") == workspace {
-			workspaceID = id
-			break
-		}
-	}
-	if workspaceID == "" {
-		return fmt.Errorf("workspace not found: %s", workspace)
 	}
 
 	updates := make(map[string]any)
@@ -158,6 +147,10 @@ func runWorkspacesUpdate(cmd *cobra.Command, args []string) error {
 		updates["name"] = wsUpdateName
 	}
 	if wsUpdateBase != "" {
+		workspaces, err := client.GetWorkspaces(cmd.Context())
+		if err != nil {
+			return err
+		}
 		var baseID string
 		for id, ws := range workspaces {
 			if getString(ws, "name") == wsUpdateBase {
@@ -203,20 +196,9 @@ func runWorkspacesArchive(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaces, err := client.GetWorkspaces(cmd.Context())
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
-	}
-
-	var workspaceID string
-	for id, ws := range workspaces {
-		if getString(ws, "name") == workspace {
-			workspaceID = id
-			break
-		}
-	}
-	if workspaceID == "" {
-		return fmt.Errorf("workspace not found: %s", workspace)
 	}
 
 	if err := client.ArchiveWorkspace(cmd.Context(), workspaceID); err != nil {
@@ -245,20 +227,9 @@ func runWorkspacesPause(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaces, err := client.GetWorkspaces(cmd.Context())
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
-	}
-
-	var workspaceID string
-	for id, ws := range workspaces {
-		if getString(ws, "name") == workspace {
-			workspaceID = id
-			break
-		}
-	}
-	if workspaceID == "" {
-		return fmt.Errorf("workspace not found: %s", workspace)
 	}
 
 	if err := client.PauseWorkspace(cmd.Context(), workspaceID); err != nil {
@@ -287,20 +258,9 @@ func runWorkspacesResume(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaces, err := client.GetWorkspaces(cmd.Context())
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
-	}
-
-	var workspaceID string
-	for id, ws := range workspaces {
-		if getString(ws, "name") == workspace {
-			workspaceID = id
-			break
-		}
-	}
-	if workspaceID == "" {
-		return fmt.Errorf("workspace not found: %s", workspace)
 	}
 
 	if err := client.ResumeWorkspace(cmd.Context(), workspaceID); err != nil {

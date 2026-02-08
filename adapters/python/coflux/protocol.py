@@ -148,6 +148,7 @@ def request_submit_execution(
     execution_id: str,
     target: str,
     arguments: list[dict[str, Any]],
+    type: str | None = None,
     wait_for: Any = None,
     group_id: int | None = None,
     cache: dict[str, Any] | None = None,
@@ -164,6 +165,8 @@ def request_submit_execution(
         "target": target,
         "arguments": arguments,
     }
+    if type is not None:
+        params["type"] = type
     if wait_for is not None:
         params["wait_for"] = wait_for
     if group_id is not None:

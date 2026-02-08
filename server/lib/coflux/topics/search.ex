@@ -128,7 +128,7 @@ defmodule Coflux.Topics.Search do
       {type, module_name, target_name, latest_run} when type in [:workflow, :task] ->
         run =
           case latest_run do
-            {run_id, step_id, attempt} -> %{runId: run_id, stepId: step_id, attempt: attempt}
+            {run_id, step_id, attempt} -> %{runId: run_id, stepId: "#{run_id}:#{step_id}", stepNumber: step_id, attempt: attempt}
             nil -> nil
           end
 

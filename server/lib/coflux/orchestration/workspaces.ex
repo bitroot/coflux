@@ -9,6 +9,7 @@ defmodule Coflux.Orchestration.Workspaces do
            """
            SELECT
              w.id,
+             w.external_id,
              (SELECT ws.state
                FROM workspace_states AS ws
                WHERE ws.workspace_id = w.id
@@ -29,8 +30,9 @@ defmodule Coflux.Orchestration.Workspaces do
          ) do
       {:ok, rows} ->
         workspaces =
-          Enum.reduce(rows, %{}, fn {workspace_id, state, name, base_id}, result ->
+          Enum.reduce(rows, %{}, fn {workspace_id, external_id, state, name, base_id}, result ->
             Map.put(result, workspace_id, %{
+              external_id: external_id,
               name: name,
               base_id: base_id,
               state: decode_state(state)
@@ -173,12 +175,13 @@ defmodule Coflux.Orchestration.Workspaces do
         {:error, errors}
       else
         now = current_timestamp()
-        {:ok, workspace_id} = insert_one(db, :workspaces, %{})
+        {:ok, external_id} = generate_external_id(db, :workspaces, 2, "W")
+        {:ok, workspace_id} = insert_one(db, :workspaces, %{external_id: external_id})
         {:ok, _} = insert_workspace_state(db, workspace_id, workspace.state, now, created_by)
         {:ok, _} = insert_workspace_name(db, workspace_id, workspace.name, now, created_by)
         {:ok, _} = insert_workspace_base(db, workspace_id, workspace.base_id, now, created_by)
 
-        {:ok, workspace_id, workspace}
+        {:ok, workspace_id, Map.put(workspace, :external_id, external_id)}
       end
     end)
   end
@@ -605,7 +608,10 @@ defmodule Coflux.Orchestration.Workspaces do
          created_at,
          created_by
        ) do
+    {:ok, external_id} = generate_external_id(db, :pools, 2, "P")
+
     insert_one(db, :pools, %{
+      external_id: external_id,
       workspace_id: workspace_id,
       name: pool_name,
       pool_definition_id: pool_definition_id,

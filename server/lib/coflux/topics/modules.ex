@@ -9,7 +9,7 @@ defmodule Coflux.Topics.Modules do
 
   def init(params) do
     project_id = Map.fetch!(params, :project)
-    workspace_id = String.to_integer(Map.fetch!(params, :workspace_id))
+    workspace_id = Map.fetch!(params, :workspace_id)
 
     {:ok, manifests, executions, ref} =
       Orchestration.subscribe_modules(project_id, workspace_id, self())

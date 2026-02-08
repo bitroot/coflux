@@ -31,7 +31,7 @@ defmodule Coflux.Orchestration.Models do
 
     defstruct [
       :id,
-      :external_id,
+      :number,
       :run_id,
       :parent_id,
       :module,
@@ -65,6 +65,7 @@ defmodule Coflux.Orchestration.Models do
       :step_id,
       :run_id,
       :run_external_id,
+      :step_number,
       :module,
       :target,
       :type,
