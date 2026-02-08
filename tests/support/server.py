@@ -4,6 +4,8 @@ import os
 import socket
 import subprocess
 import time
+import urllib.request
+import urllib.error
 import uuid
 
 _SERVER_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "server")
@@ -15,13 +17,15 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _wait_for_port(port, timeout=15):
+def _wait_for_ready(port, timeout=15):
+    """Wait until the server is accepting HTTP requests."""
+    url = f"http://127.0.0.1:{port}/.well-known/com.coflux"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return
-        except (ConnectionRefusedError, OSError):
+            urllib.request.urlopen(url, timeout=1)
+            return
+        except (urllib.error.URLError, OSError):
             time.sleep(0.1)
     raise TimeoutError(f"server not ready on port {port} within {timeout}s")
 
@@ -63,7 +67,7 @@ class ManagedServer:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        _wait_for_port(self.port, timeout=timeout)
+        _wait_for_ready(self.port, timeout=timeout)
 
     def _start_docker(self, image, timeout):
         self._container = f"coflux-test-{uuid.uuid4().hex[:8]}"
@@ -87,7 +91,7 @@ class ManagedServer:
             check=True,
             stdout=subprocess.DEVNULL,
         )
-        _wait_for_port(self.port, timeout=timeout)
+        _wait_for_ready(self.port, timeout=timeout)
 
     def stop(self):
         if self._container:
