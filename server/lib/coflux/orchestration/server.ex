@@ -221,12 +221,43 @@ defmodule Coflux.Orchestration.Server do
         end
       )
 
+    # Restore pending assignments into session state instead of abandoning them.
+    # Workers will reconnect and report via heartbeats which executions they're
+    # still running. Any that aren't reported will be abandoned by the heartbeat
+    # handler. If the worker doesn't reconnect at all, session expiry handles it.
     {:ok, pending} = Runs.get_pending_assignments(state.db)
 
+    # Group by session and collect all execution IDs
+    {by_session, all_execution_ids} =
+      Enum.reduce(pending, {%{}, []}, fn {session_id, execution_id}, {by_session, all} ->
+        by_session = Map.update(by_session, session_id, [execution_id], &[execution_id | &1])
+        {by_session, [execution_id | all]}
+      end)
+
+    # Populate execution_ids cache (external -> internal) so heartbeats can resolve them
+    {:ok, key_map} = Runs.get_execution_keys(state.db, all_execution_ids)
+
     state =
-      Enum.reduce(pending, state, fn {execution_id}, state ->
-        {:ok, state} = process_result(state, execution_id, :abandoned)
-        state
+      Enum.reduce(key_map, state, fn {execution_id, {run_ext_id, step_num, attempt}}, state ->
+        ext_id = execution_external_id(run_ext_id, step_num, attempt)
+        put_in(state, [Access.key(:execution_ids), ext_id], execution_id)
+      end)
+
+    # Add pending executions to each session's executing set
+    state =
+      Enum.reduce(by_session, state, fn {session_id, execution_ids}, state ->
+        if Map.has_key?(state.sessions, session_id) do
+          update_in(
+            state.sessions[session_id].executing,
+            &Enum.reduce(execution_ids, &1, fn id, set -> MapSet.put(set, id) end)
+          )
+        else
+          # Session no longer active - abandon these executions
+          Enum.reduce(execution_ids, state, fn execution_id, state ->
+            {:ok, state} = process_result(state, execution_id, :abandoned)
+            state
+          end)
+        end
       end)
 
     {:noreply, state}
@@ -514,7 +545,13 @@ defmodule Coflux.Orchestration.Server do
          {:ok, worker} <- lookup_worker(state, worker_id, workspace_id) do
       state =
         state
-        |> update_worker_state(worker_id, :draining, workspace_id, worker.pool_name, access[:principal_id])
+        |> update_worker_state(
+          worker_id,
+          :draining,
+          workspace_id,
+          worker.pool_name,
+          access[:principal_id]
+        )
         |> flush_notifications()
 
       send(self(), :tick)
@@ -537,7 +574,13 @@ defmodule Coflux.Orchestration.Server do
          {:ok, worker} <- lookup_worker(state, worker_id, workspace_id) do
       state =
         state
-        |> update_worker_state(worker_id, :active, workspace_id, worker.pool_name, access[:principal_id])
+        |> update_worker_state(
+          worker_id,
+          :active,
+          workspace_id,
+          worker.pool_name,
+          access[:principal_id]
+        )
         |> flush_notifications()
 
       send(self(), :tick)
@@ -559,7 +602,12 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, error}, state}
 
       {:ok, workspace_id, _} ->
-        case Manifests.register_manifests(state.db, workspace_id, manifests, access[:principal_id]) do
+        case Manifests.register_manifests(
+               state.db,
+               workspace_id,
+               manifests,
+               access[:principal_id]
+             ) do
           :ok ->
             state =
               manifests
@@ -804,7 +852,15 @@ defmodule Coflux.Orchestration.Server do
     case require_workspace(state, workspace_external_id, access) do
       {:ok, workspace_id, _} ->
         {:ok, external_run_id, step_number, _execution_id, state} =
-          schedule_run(state, module, target_name, type, arguments, workspace_id, Keyword.put(opts, :created_by, access[:principal_id]))
+          schedule_run(
+            state,
+            module,
+            target_name,
+            type,
+            arguments,
+            workspace_id,
+            Keyword.put(opts, :created_by, access[:principal_id])
+          )
 
         execution_external_id = execution_external_id(external_run_id, step_number, 1)
 
@@ -1233,84 +1289,83 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, :not_found}, state}
 
       {:ok, execution_id} ->
+        # Resolve from_execution_id from external to internal
+        from_execution_id =
+          if from_execution_external_id do
+            Map.fetch!(state.execution_ids, from_execution_external_id)
+          end
 
-    # Resolve from_execution_id from external to internal
-    from_execution_id =
-      if from_execution_external_id do
-        Map.fetch!(state.execution_ids, from_execution_external_id)
-      end
+        # TODO: check execution_id exists? (call resolve_result first?)
+        # TODO: require from_execution_id to be set if timeout_ms is specified?
 
-    # TODO: check execution_id exists? (call resolve_result first?)
-    # TODO: require from_execution_id to be set if timeout_ms is specified?
+        state =
+          if from_execution_id do
+            {:ok, id} = Runs.record_result_dependency(state.db, from_execution_id, execution_id)
 
-    state =
-      if from_execution_id do
-        {:ok, id} = Runs.record_result_dependency(state.db, from_execution_id, execution_id)
+            if id do
+              {:ok, run_id} = Runs.get_execution_run_id(state.db, from_execution_id)
 
-        if id do
-          {:ok, run_id} = Runs.get_execution_run_id(state.db, from_execution_id)
+              # TODO: only resolve if there are listeners to notify
+              dependency = resolve_execution(state.db, execution_id)
 
-          # TODO: only resolve if there are listeners to notify
-          dependency = resolve_execution(state.db, execution_id)
+              dep_ext_id = dependency.execution_external_id
 
-          dep_ext_id = dependency.execution_external_id
-
-          notify_listeners(
-            state,
-            {:run, run_id},
-            {:result_dependency, from_execution_external_id, dep_ext_id, dependency}
-          )
-        else
-          state
-        end
-      else
-        state
-      end
-
-    {result, state} =
-      case resolve_result(state.db, execution_id) do
-        {:pending, execution_id} ->
-          state =
-            if timeout_ms == 0 do
-              {:ok, state} =
-                process_result(state, from_execution_id, {:suspended, nil, [execution_id]})
-
-              state
+              notify_listeners(
+                state,
+                {:run, run_id},
+                {:result_dependency, from_execution_external_id, dep_ext_id, dependency}
+              )
             else
-              now = System.monotonic_time(:millisecond)
-              suspend_at = if timeout_ms, do: now + timeout_ms
+              state
+            end
+          else
+            state
+          end
 
+        {result, state} =
+          case resolve_result(state.db, execution_id) do
+            {:pending, execution_id} ->
               state =
-                update_in(
-                  state,
-                  [Access.key(:waiting), Access.key(execution_id, [])],
-                  &[{from_execution_id, request_id, suspend_at} | &1]
-                )
+                if timeout_ms == 0 do
+                  {:ok, state} =
+                    process_result(state, from_execution_id, {:suspended, nil, [execution_id]})
 
-              if timeout_ms do
-                reschedule_next_suspend(state)
-              else
-                state
-              end
-            end
+                  state
+                else
+                  now = System.monotonic_time(:millisecond)
+                  suspend_at = if timeout_ms, do: now + timeout_ms
 
-          {:wait, state}
+                  state =
+                    update_in(
+                      state,
+                      [Access.key(:waiting), Access.key(execution_id, [])],
+                      &[{from_execution_id, request_id, suspend_at} | &1]
+                    )
 
-        {:ok, result} ->
-          # Only enrich value results with resolved references (asset metadata, execution metadata)
-          # Other result types (error, abandoned, etc.) don't need enrichment for the client
-          result =
-            case result do
-              {:value, value} -> {:value, build_value(value, state.db)}
-              other -> other
-            end
+                  if timeout_ms do
+                    reschedule_next_suspend(state)
+                  else
+                    state
+                  end
+                end
 
-          {{:ok, result}, state}
-      end
+              {:wait, state}
 
-    state = flush_notifications(state)
+            {:ok, result} ->
+              # Only enrich value results with resolved references (asset metadata, execution metadata)
+              # Other result types (error, abandoned, etc.) don't need enrichment for the client
+              result =
+                case result do
+                  {:value, value} -> {:value, build_value(value, state.db)}
+                  other -> other
+                end
 
-    {:reply, result, state}
+              {{:ok, result}, state}
+          end
+
+        state = flush_notifications(state)
+
+        {:reply, result, state}
     end
   end
 

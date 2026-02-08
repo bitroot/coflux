@@ -115,8 +115,8 @@ defmodule Coflux.Orchestration.Workers do
          Enum.map(
            rows,
            fn {worker_id, external_id, created_at, pool_id, pool_name, workspace_id, state, data} ->
-             {worker_id, external_id, created_at, pool_id, pool_name, workspace_id, decode_state(state),
-              if(data, do: :erlang.binary_to_term(data))}
+             {worker_id, external_id, created_at, pool_id, pool_name, workspace_id,
+              decode_state(state), if(data, do: :erlang.binary_to_term(data))}
            end
          )}
     end

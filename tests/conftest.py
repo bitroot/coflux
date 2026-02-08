@@ -8,12 +8,20 @@ from contextlib import contextmanager
 
 import pytest
 import support.cli as cli
-from support.executor import TestExecutor
+from support.executor import Executor
 from support.manifest import manifest
+from support.server import ManagedServer
 
-SERVER_PORT = os.environ.get("COFLUX_TEST_PORT", "7777")
-SERVER_TOKEN = os.environ.get("COFLUX_SERVER_TOKEN", "")
 ADAPTER_SCRIPT = os.path.join(os.path.dirname(__file__), "support", "adapter.py")
+
+
+@pytest.fixture(scope="session")
+def server(tmp_path_factory):
+    data_dir = str(tmp_path_factory.mktemp("server_data"))
+    srv = ManagedServer(data_dir)
+    srv.start()
+    yield srv
+    srv.stop()
 
 
 @pytest.fixture
@@ -22,7 +30,7 @@ def project_id():
 
 
 @pytest.fixture
-def worker(project_id, tmp_path):
+def worker(server, project_id, tmp_path):
     _worker_count = [0]
 
     @contextmanager
@@ -41,22 +49,23 @@ def worker(project_id, tmp_path):
         manifest_json = json.dumps(manifest(targets))
         _worker_count[0] += 1
         socket_path = str(tmp_path / f"executor-{_worker_count[0]}.sock")
-        host = f"{project_id}.localhost:{SERVER_PORT}"
+        host = f"{project_id}.localhost:{server.port}"
 
-        env = os.environ.copy()
-        env["COFLUX_SERVER_HOST"] = host
-        env["COFLUX_SERVER_TOKEN"] = SERVER_TOKEN
-        env["COFLUX_WORKSPACE"] = workspace
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
+        env = {
+            "PATH": os.environ["PATH"],
+            "COFLUX_SERVER_HOST": host,
+            "COFLUX_WORKSPACE": workspace,
+            "COFLUX_TEST_MANIFEST": manifest_json,
+            "COFLUX_TEST_SOCKET": socket_path,
+            "COFLUX_LOGS_STORE_FLUSH_INTERVAL": "0",
+        }
 
         # Create the workspace (each test gets a fresh project)
         if create_workspace:
             cli.workspaces_create(workspace, env=env)
 
         # Start executor socket server
-        executor = TestExecutor(socket_path)
+        executor = Executor(socket_path)
         executor.start()
 
         adapter = f"python3,{ADAPTER_SCRIPT}"

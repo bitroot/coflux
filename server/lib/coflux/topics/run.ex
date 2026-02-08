@@ -77,7 +77,12 @@ defmodule Coflux.Topics.Run do
     if workspace_external_id in topic.state.workspace_ids do
       Topic.set(
         topic,
-        [:steps, "#{topic.state.external_run_id}:#{step_number}", :executions, Integer.to_string(attempt)],
+        [
+          :steps,
+          "#{topic.state.external_run_id}:#{step_number}",
+          :executions,
+          Integer.to_string(attempt)
+        ],
         %{
           executionId: execution_external_id,
           workspaceId: workspace_external_id,
@@ -131,7 +136,10 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:result_dependency, execution_external_id, dependency_id, dependency}) do
+  defp process_notification(
+         topic,
+         {:result_dependency, execution_external_id, dependency_id, dependency}
+       ) do
     dependency = build_dependency(dependency)
 
     update_execution(
@@ -155,7 +163,10 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:result, execution_external_id, result, created_at, created_by}) do
+  defp process_notification(
+         topic,
+         {:result, execution_external_id, result, created_at, created_by}
+       ) do
     result = build_result(result, created_by)
 
     update_execution(topic, execution_external_id, fn topic, base_path ->

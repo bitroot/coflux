@@ -131,7 +131,7 @@ class ExecutorConnection:
         self._conn.close()
 
 
-class TestExecutor:
+class Executor:
     """Manages the Unix socket server and accepts connections from test-adapter shims."""
 
     def __init__(self, socket_path: str):
