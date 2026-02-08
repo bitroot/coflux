@@ -7,11 +7,17 @@ import (
 
 // Server message types (server -> client)
 const (
-	MsgTypeSession = 0 // [0, session_id]
+	MsgTypeSession = 0 // [0, session_id, [execution_ids...]]
 	MsgTypeCommand = 1 // [1, {command: string, params: []}]
 	MsgTypeSuccess = 2 // [2, request_id, result]
 	MsgTypeError   = 3 // [3, request_id, error]
 )
+
+// SessionMessage represents a session message from the server
+type SessionMessage struct {
+	SessionID    string
+	ExecutionIDs []string
+}
 
 // Request represents an outgoing request to the server
 type Request struct {
@@ -47,7 +53,13 @@ func ParseServerMessage(data []byte) (msgType int, payload any, err error) {
 		if err := json.Unmarshal(msg[1], &sessionID); err != nil {
 			return 0, nil, fmt.Errorf("failed to parse session ID: %w", err)
 		}
-		return msgType, sessionID, nil
+		var executionIDs []string
+		if len(msg) >= 3 {
+			if err := json.Unmarshal(msg[2], &executionIDs); err != nil {
+				return 0, nil, fmt.Errorf("failed to parse execution IDs: %w", err)
+			}
+		}
+		return msgType, SessionMessage{SessionID: sessionID, ExecutionIDs: executionIDs}, nil
 
 	case MsgTypeCommand:
 		var cmd CommandMessage

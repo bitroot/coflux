@@ -566,7 +566,7 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT a.execution_id
+      SELECT a.session_id, a.execution_id
       FROM assignments AS a
       LEFT JOIN results AS r ON r.execution_id = a.execution_id
       WHERE r.created_at IS NULL
@@ -1138,7 +1138,6 @@ defmodule Coflux.Orchestration.Runs do
       {run_external_id, step_number, attempt}
     )
   end
-
 
   defp current_timestamp() do
     System.os_time(:millisecond)

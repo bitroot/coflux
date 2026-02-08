@@ -66,7 +66,7 @@ defmodule Coflux.Handlers.Worker do
     # TODO: monitor server?
     case Orchestration.resume_session(project_id, session_token, workspace_id, self()) do
       {:ok, external_id, external_execution_ids} ->
-        {[session_message(external_id)],
+        {[session_message(external_id, external_execution_ids)],
          %{
            project_id: project_id,
            workspace_id: workspace_id,
@@ -174,34 +174,35 @@ defmodule Coflux.Handlers.Worker do
       "record_heartbeats" ->
         [executions] = message["params"]
 
-        if Enum.all?(Map.keys(executions), &is_recognised_execution?(&1, state)) do
+        executions =
+          Map.filter(executions, fn {id, _} -> is_recognised_execution?(id, state) end)
+
+        if Enum.any?(executions) do
           :ok =
             Orchestration.record_heartbeats(
               state.project_id,
               executions,
               state.session_id
             )
-
-          {[], state}
-        else
-          {[{:close, 4000, "execution_invalid"}], nil}
         end
+
+        {[], state}
 
       "notify_terminated" ->
         [execution_ids] = message["params"]
 
-        # TODO: just ignore?
-        if Enum.all?(execution_ids, &is_recognised_execution?(&1, state)) do
+        execution_ids =
+          Enum.filter(execution_ids, &is_recognised_execution?(&1, state))
+
+        if Enum.any?(execution_ids) do
           :ok =
             Orchestration.notify_terminated(state.project_id, execution_ids)
-
-          state =
-            Map.update!(state, :execution_ids, &MapSet.difference(&1, MapSet.new(execution_ids)))
-
-          {[], state}
-        else
-          {[{:close, 4000, "execution_invalid"}], nil}
         end
+
+        state =
+          Map.update!(state, :execution_ids, &MapSet.difference(&1, MapSet.new(execution_ids)))
+
+        {[], state}
 
       "put_result" ->
         [execution_id, value] = message["params"]
@@ -382,8 +383,8 @@ defmodule Coflux.Handlers.Worker do
     MapSet.member?(state.execution_ids, execution_id)
   end
 
-  defp session_message(session_id) do
-    {:text, Jason.encode!([0, session_id])}
+  defp session_message(session_id, execution_ids) do
+    {:text, Jason.encode!([0, session_id, execution_ids])}
   end
 
   defp command_message(command, params) do

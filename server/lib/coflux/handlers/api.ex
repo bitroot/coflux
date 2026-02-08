@@ -627,8 +627,11 @@ defmodule Coflux.Handlers.Api do
           {:ok, session_id} ->
             json_response(req, %{"sessionId" => session_id})
 
-          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
-          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -857,7 +860,6 @@ defmodule Coflux.Handlers.Api do
   defp is_valid_pool_name?(name) do
     is_valid_string?(name, regex: ~r/^[a-z][a-z0-9_-]{0,19}$/i)
   end
-
 
   defp parse_pool_name(name) do
     if is_valid_pool_name?(name) do

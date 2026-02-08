@@ -17,8 +17,8 @@ defmodule Coflux.Topics.Module do
       Orchestration.subscribe_module(project_id, module, workspace_id, self())
 
     value =
-      Map.new(executions, fn {target_name, external_run_id, step_number,
-                              attempt, execute_after, created_at, assigned_at} ->
+      Map.new(executions, fn {target_name, external_run_id, step_number, attempt, execute_after,
+                              created_at, assigned_at} ->
         execution_id = "#{external_run_id}:#{step_number}:#{attempt}"
 
         {execution_id,

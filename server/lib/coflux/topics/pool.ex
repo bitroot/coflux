@@ -70,7 +70,10 @@ defmodule Coflux.Topics.Pool do
     |> Topic.set([:workers, worker_external_id, :stopError], error)
   end
 
-  defp process_notification(topic, {:worker_deactivated, worker_external_id, deactivated_at, error}) do
+  defp process_notification(
+         topic,
+         {:worker_deactivated, worker_external_id, deactivated_at, error}
+       ) do
     topic
     |> Topic.set([:workers, worker_external_id, :deactivatedAt], deactivated_at)
     |> Topic.set([:workers, worker_external_id, :error], error)

@@ -148,37 +148,11 @@ jobs:
       - name: Install test dependencies
         run: pip install pytest pytest-xdist
 
-      - name: Start server
-        run: |
-          docker run -d --name coflux-server \
-            -p 7777:7777 \
-            -e COFLUX_BASE_DOMAIN=localhost \
-            -e COFLUX_REQUIRE_AUTH=false \
-            coflux:ci
-
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:7777/.well-known/com.coflux > /dev/null 2>&1; then
-              echo "Server ready (attempt $i)"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Server failed to start within 60 seconds"
-          docker logs coflux-server
-          exit 1
-
       - name: Run E2E tests
         env:
           COFLUX_BIN: cli/coflux-linux-amd64
+          COFLUX_IMAGE: coflux:ci
         run: pytest tests/ -n auto
-
-      - name: Server logs
-        if: failure()
-        run: docker logs coflux-server
-
-      - name: Stop server
-        if: always()
-        run: docker stop coflux-server 2>/dev/null || true
 
   release-cli:
     if: github.ref == 'refs/heads/main' && github.repository == 'bitroot/coflux'

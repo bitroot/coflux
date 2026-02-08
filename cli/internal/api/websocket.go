@@ -45,6 +45,9 @@ type Connection struct {
 	requests  map[int]Callbacks
 	handlers  map[string]func(params []any) error
 
+	// Callbacks
+	onSession func(executionIDs []string)
+
 	// Channels
 	sendCh      chan any
 	recvCh      chan serverMessage
@@ -76,6 +79,13 @@ func NewConnection(host string, secure bool, workspace, sessionID string, logger
 		doneCh:      make(chan struct{}),
 		reconnectCh: make(chan struct{}, 1),
 	}
+}
+
+// SetOnSession registers a callback for when a session message is received
+func (c *Connection) SetOnSession(handler func(executionIDs []string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onSession = handler
 }
 
 // RegisterHandler registers a handler for a command from the server
@@ -248,12 +258,17 @@ func (c *Connection) writeLoop(ctx context.Context) {
 func (c *Connection) handleMessage(msgType int, payload any) error {
 	switch msgType {
 	case MsgTypeSession:
-		sessionID, ok := payload.(string)
+		session, ok := payload.(SessionMessage)
 		if !ok {
-			return fmt.Errorf("invalid session ID type")
+			return fmt.Errorf("invalid session message type")
 		}
-		c.logger.Info("received session ID", "session_id", sessionID)
-		// Session ID from server confirms connection
+		c.logger.Info("received session", "session_id", session.SessionID, "execution_ids", len(session.ExecutionIDs))
+		c.mu.Lock()
+		handler := c.onSession
+		c.mu.Unlock()
+		if handler != nil {
+			handler(session.ExecutionIDs)
+		}
 		return nil
 
 	case MsgTypeCommand:

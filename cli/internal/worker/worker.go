@@ -29,7 +29,7 @@ import (
 const (
 	heartbeatInterval    = 5 * time.Second
 	initialReconnectWait = 1 * time.Second
-	maxReconnectWait     = 30 * time.Second
+	maxReconnectWait     = 10 * time.Second
 )
 
 // Worker manages the worker lifecycle
@@ -57,6 +57,10 @@ type executionState struct {
 	startTime   time.Time
 	runID       string // External run ID for logs
 	workspaceID string // External workspace ID for logs
+
+	// Buffered result (set when execution finishes, cleared after successful send)
+	pendingNotify string // "put_result" or "put_error", empty if nothing pending
+	pendingValue  any    // server-format value or error tuple
 }
 
 // New creates a new worker
@@ -203,7 +207,7 @@ func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[st
 	reconnectWait := initialReconnectWait
 
 	for {
-		err := w.runConnection(ctx, targets)
+		connected, err := w.runConnection(ctx, targets)
 
 		// Check if context was cancelled
 		if ctx.Err() != nil {
@@ -215,6 +219,14 @@ func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[st
 			return err
 		}
 
+		// Reset backoff after a successful connection (transient disconnect)
+		if connected {
+			reconnectWait = initialReconnectWait
+		}
+
+		// Exponential backoff with cap
+		reconnectWait = min(reconnectWait*2, maxReconnectWait)
+
 		// Log disconnection and wait before reconnecting
 		delay := reconnectWait + time.Duration(rand.Float64()*float64(reconnectWait)/2)
 		w.logger.Warn("disconnected from server, reconnecting", "error", err, "delay", delay)
@@ -224,14 +236,13 @@ func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[st
 			return ctx.Err()
 		case <-time.After(delay):
 		}
-
-		// Exponential backoff with cap
-		reconnectWait = min(reconnectWait*2, maxReconnectWait)
 	}
 }
 
-// runConnection establishes and runs a single WebSocket connection
-func (w *Worker) runConnection(ctx context.Context, targets map[string]map[string][]string) error {
+// runConnection establishes and runs a single WebSocket connection.
+// Returns (true, err) if a connection was established (even if it later failed),
+// or (false, err) if the connection could not be established at all.
+func (w *Worker) runConnection(ctx context.Context, targets map[string]map[string][]string) (bool, error) {
 	// Create new connection
 	conn := api.NewConnection(
 		w.cfg.Server.Host,
@@ -242,11 +253,15 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	)
 	conn.RegisterHandler("execute", w.handleExecute)
 	conn.RegisterHandler("abort", w.handleAbort)
+	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
-		return err
+		return false, err
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		w.setConn(nil)
+		_ = conn.Close()
+	}()
 
 	// Make connection available to other goroutines
 	w.setConn(conn)
@@ -259,7 +274,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 
 	// Declare targets via WebSocket (now that write loop is running)
 	if err := conn.Notify("declare_targets", targets); err != nil {
-		return err
+		return true, err
 	}
 	w.logger.Info("connected and declared targets")
 
@@ -269,7 +284,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	go w.heartbeatLoop(heartbeatCtx)
 
 	// Wait for connection loop to complete
-	return <-errCh
+	return true, <-errCh
 }
 
 // isFatalError checks if an error should prevent reconnection
@@ -1115,73 +1130,151 @@ func getInt(v any) int {
 }
 
 func (w *Worker) ReportResult(ctx context.Context, executionID string, result *adapter.Value) error {
-	w.mu.Lock()
-	delete(w.executions, executionID)
-	w.mu.Unlock()
-
-	// Convert result to server format
-	// Server expects ["raw", data, references] or ["blob", key, size, references]
-	var serverValue any
-	if result == nil {
-		// None/null result - send as raw null
-		serverValue = []any{"raw", nil, []any{}}
-	} else {
-		switch result.Type {
-		case "inline":
-			serverValue = []any{"raw", result.Value, []any{}}
-		case "file":
-			key, err := w.blobs.Upload(result.Path)
-			if err != nil {
-				return fmt.Errorf("failed to upload result: %w", err)
-			}
-			info, _ := os.Stat(result.Path)
-			size := int64(0)
-			if info != nil {
-				size = info.Size()
-			}
-			serverValue = []any{"blob", key, size, []any{}}
-		default:
-			// Unknown type, send as raw null
-			serverValue = []any{"raw", nil, []any{}}
-		}
-	}
-
-	// Send via WebSocket notification (like Python's put_result)
-	conn := w.getConn()
-	if conn == nil {
-		w.logger.Warn("cannot report result - not connected", "execution_id", executionID)
-		return ErrNotConnected
-	}
-	if err := conn.Notify("put_result", executionID, serverValue); err != nil {
+	// Convert result to server format eagerly (blob uploads happen here, outside lock)
+	serverValue, err := w.convertResultToServerFormat(result)
+	if err != nil {
 		return err
 	}
 
-	// Notify server that this execution is terminated (removes from active count)
-	return conn.Notify("notify_terminated", []string{executionID})
+	// Buffer the result on the execution state
+	w.mu.Lock()
+	state, ok := w.executions[executionID]
+	if ok {
+		state.pendingNotify = "put_result"
+		state.pendingValue = serverValue
+	}
+	w.mu.Unlock()
+
+	if !ok {
+		// Execution already pruned (e.g., server no longer cares) - discard
+		return nil
+	}
+
+	// Try to send immediately
+	w.trySendResult(executionID)
+	return nil
 }
 
 func (w *Worker) ReportError(ctx context.Context, executionID string, errorType, message, traceback string) error {
-	w.mu.Lock()
-	delete(w.executions, executionID)
-	w.mu.Unlock()
-
 	// Build error tuple matching Python's format: (type, message, frames)
-	// frames is a list of [filename, lineno, name, line] tuples
 	frames := parseTraceback(traceback)
 	errorTuple := []any{errorType, message, frames}
 
-	// Send via WebSocket notification (like Python's put_error)
-	conn := w.getConn()
-	if conn == nil {
-		w.logger.Warn("cannot report error - not connected", "execution_id", executionID)
-		return ErrNotConnected
+	// Buffer the error on the execution state
+	w.mu.Lock()
+	state, ok := w.executions[executionID]
+	if ok {
+		state.pendingNotify = "put_error"
+		state.pendingValue = errorTuple
 	}
-	if err := conn.Notify("put_error", executionID, errorTuple); err != nil {
-		return err
+	w.mu.Unlock()
+
+	if !ok {
+		// Execution already pruned - discard
+		return nil
 	}
 
-	// Notify server that this execution is terminated (removes from active count)
-	return conn.Notify("notify_terminated", []string{executionID})
+	// Try to send immediately
+	w.trySendResult(executionID)
+	return nil
+}
+
+// convertResultToServerFormat converts an adapter result to server wire format.
+// This may upload blobs, so it should be called outside of any lock.
+func (w *Worker) convertResultToServerFormat(result *adapter.Value) (any, error) {
+	if result == nil {
+		return []any{"raw", nil, []any{}}, nil
+	}
+	switch result.Type {
+	case "inline":
+		return []any{"raw", result.Value, []any{}}, nil
+	case "file":
+		key, err := w.blobs.Upload(result.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload result: %w", err)
+		}
+		info, _ := os.Stat(result.Path)
+		size := int64(0)
+		if info != nil {
+			size = info.Size()
+		}
+		return []any{"blob", key, size, []any{}}, nil
+	default:
+		return []any{"raw", nil, []any{}}, nil
+	}
+}
+
+// trySendResult attempts to deliver the buffered result for an execution.
+// If the send fails (e.g., disconnected), the result stays buffered for retry on reconnect.
+func (w *Worker) trySendResult(executionID string) {
+	conn := w.getConn()
+	if conn == nil || !conn.IsConnected() {
+		return
+	}
+
+	// Read pending data under read lock
+	w.mu.RLock()
+	state, ok := w.executions[executionID]
+	if !ok || state.pendingNotify == "" {
+		w.mu.RUnlock()
+		return
+	}
+	notify := state.pendingNotify
+	value := state.pendingValue
+	w.mu.RUnlock()
+
+	// Attempt to send. Notify is fire-and-forget (queues to send channel),
+	// so we can't confirm delivery. We intentionally leave the execution in
+	// the map with its pending data intact. On reconnect, handleSession will
+	// either prune it (server no longer lists it → result was delivered) or
+	// reflush it (server still lists it → result was lost in transit).
+	if err := conn.Notify(notify, executionID, value); err != nil {
+		w.logger.Warn("failed to send result, will retry on reconnect", "execution_id", executionID, "error", err)
+		return
+	}
+	if err := conn.Notify("notify_terminated", []string{executionID}); err != nil {
+		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
+		return
+	}
+}
+
+// flushPendingResults attempts to deliver all buffered results.
+func (w *Worker) flushPendingResults() {
+	w.mu.RLock()
+	var pending []string
+	for id, state := range w.executions {
+		if state.pendingNotify != "" {
+			pending = append(pending, id)
+		}
+	}
+	w.mu.RUnlock()
+
+	for _, id := range pending {
+		w.trySendResult(id)
+	}
+}
+
+// handleSession is called when a session message is received (including on reconnect).
+// It prunes stale executions and flushes any buffered results.
+func (w *Worker) handleSession(executionIDs []string) {
+	// Build set of server-known execution IDs
+	known := make(map[string]struct{}, len(executionIDs))
+	for _, id := range executionIDs {
+		known[id] = struct{}{}
+	}
+
+	// Prune executions not in the server's list (result was delivered, or
+	// server no longer cares about them).
+	w.mu.Lock()
+	for id := range w.executions {
+		if _, ok := known[id]; !ok {
+			delete(w.executions, id)
+		}
+	}
+	w.mu.Unlock()
+
+	// Flush any buffered results
+	w.flushPendingResults()
 }
 
 func getString(v any) string {
