@@ -237,7 +237,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                     parent_id: parent_id_new,
                     idempotency_key: idempotency_key,
                     created_at: created_at,
-                    created_by: created_by
+                    created_by: remap_principal_id(source_db, target_db, created_by)
                   })
 
                 # Copy all steps and their data
@@ -277,7 +277,8 @@ defmodule Coflux.Orchestration.EpochCopy do
                         type: type,
                         priority: priority,
                         wait_for: wait_for,
-                        cache_config_id: cache_config_id,
+                        cache_config_id:
+                          remap_cache_config_id(source_db, target_db, cache_config_id),
                         cache_key: if(cache_key, do: {:blob, cache_key}),
                         defer_key: if(defer_key, do: {:blob, defer_key}),
                         memo_key: if(memo_key, do: {:blob, memo_key}),
@@ -286,7 +287,8 @@ defmodule Coflux.Orchestration.EpochCopy do
                         retry_delay_max: retry_delay_max,
                         recurrent: recurrent,
                         delay: delay,
-                        requires_tag_set_id: requires_tag_set_id,
+                        requires_tag_set_id:
+                          remap_tag_set_id(source_db, target_db, requires_tag_set_id),
                         created_at: step_created_at
                       })
 
@@ -336,10 +338,10 @@ defmodule Coflux.Orchestration.EpochCopy do
                       insert_one(target_db, :executions, %{
                         step_id: new_step_id,
                         attempt: attempt,
-                        workspace_id: workspace_id,
+                        workspace_id: remap_workspace_id(source_db, target_db, workspace_id),
                         execute_after: execute_after,
                         created_at: exec_created_at,
-                        created_by: exec_created_by
+                        created_by: remap_principal_id(source_db, target_db, exec_created_by)
                       })
 
                     Map.put(acc, old_exec_id, new_exec_id)
@@ -368,11 +370,17 @@ defmodule Coflux.Orchestration.EpochCopy do
                          {old_exec_id}
                        ) do
                     {:ok, {session_id, assign_created_at}} ->
-                      insert_one(target_db, :assignments, %{
-                        execution_id: new_exec_id,
-                        session_id: session_id,
-                        created_at: assign_created_at
-                      })
+                      new_session_id =
+                        remap_session_id(source_db, target_db, session_id)
+
+                      # Session may no longer exist (expired and not copied during rotation)
+                      if new_session_id do
+                        insert_one(target_db, :assignments, %{
+                          execution_id: new_exec_id,
+                          session_id: new_session_id,
+                          created_at: assign_created_at
+                        })
+                      end
 
                     {:ok, nil} ->
                       :ok
@@ -397,7 +405,12 @@ defmodule Coflux.Orchestration.EpochCopy do
                       new_value_id = if value_id, do: ensure_value(source_db, target_db, value_id)
 
                       new_successor_id =
-                        if successor_id, do: Map.get(execution_ids, successor_id, successor_id)
+                        remap_execution_id(
+                          source_db,
+                          target_db,
+                          successor_id,
+                          execution_ids
+                        )
 
                       insert_one(target_db, :results, %{
                         execution_id: new_exec_id,
@@ -406,7 +419,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                         value_id: new_value_id,
                         successor_id: new_successor_id,
                         created_at: result_created_at,
-                        created_by: result_created_by
+                        created_by: remap_principal_id(source_db, target_db, result_created_by)
                       })
 
                     {:ok, nil} ->
@@ -494,18 +507,26 @@ defmodule Coflux.Orchestration.EpochCopy do
                     )
 
                   Enum.each(deps, fn {old_dep_id, dep_created_at} ->
-                    new_dep_id = Map.get(execution_ids, old_dep_id, old_dep_id)
+                    new_dep_id =
+                      remap_execution_id(
+                        source_db,
+                        target_db,
+                        old_dep_id,
+                        execution_ids
+                      )
 
-                    insert_one(
-                      target_db,
-                      :result_dependencies,
-                      %{
-                        execution_id: new_exec_id,
-                        dependency_id: new_dep_id,
-                        created_at: dep_created_at
-                      },
-                      on_conflict: "DO NOTHING"
-                    )
+                    if new_dep_id do
+                      insert_one(
+                        target_db,
+                        :result_dependencies,
+                        %{
+                          execution_id: new_exec_id,
+                          dependency_id: new_dep_id,
+                          created_at: dep_created_at
+                        },
+                        on_conflict: "DO NOTHING"
+                      )
+                    end
                   end)
                 end)
 
@@ -1194,6 +1215,142 @@ defmodule Coflux.Orchestration.EpochCopy do
         end)
 
         new_id
+    end
+  end
+
+  # Remap helpers: resolve config-level IDs from source epoch to target epoch
+  # via stable identifiers (external_id, hash).
+
+  defp remap_workspace_id(_source_db, _target_db, nil), do: nil
+
+  defp remap_workspace_id(source_db, target_db, old_id) do
+    case query_one(source_db, "SELECT external_id FROM workspaces WHERE id = ?1", {old_id}) do
+      {:ok, {ext_id}} ->
+        case query_one(target_db, "SELECT id FROM workspaces WHERE external_id = ?1", {ext_id}) do
+          {:ok, {new_id}} -> new_id
+          {:ok, nil} -> nil
+        end
+
+      {:ok, nil} ->
+        nil
+    end
+  end
+
+  defp remap_principal_id(_source_db, _target_db, nil), do: nil
+
+  defp remap_principal_id(source_db, target_db, old_id) do
+    case query_one(
+           source_db,
+           "SELECT user_external_id FROM principals WHERE id = ?1",
+           {old_id}
+         ) do
+      {:ok, {ext_id}} ->
+        case query_one(
+               target_db,
+               "SELECT id FROM principals WHERE user_external_id = ?1",
+               {ext_id}
+             ) do
+          {:ok, {new_id}} -> new_id
+          {:ok, nil} -> nil
+        end
+
+      {:ok, nil} ->
+        nil
+    end
+  end
+
+  defp remap_session_id(_source_db, _target_db, nil), do: nil
+
+  defp remap_session_id(source_db, target_db, old_id) do
+    case query_one(source_db, "SELECT external_id FROM sessions WHERE id = ?1", {old_id}) do
+      {:ok, {ext_id}} ->
+        case query_one(target_db, "SELECT id FROM sessions WHERE external_id = ?1", {ext_id}) do
+          {:ok, {new_id}} -> new_id
+          {:ok, nil} -> nil
+        end
+
+      {:ok, nil} ->
+        nil
+    end
+  end
+
+  defp remap_cache_config_id(_source_db, _target_db, nil), do: nil
+
+  defp remap_cache_config_id(source_db, target_db, old_id) do
+    case query_one(source_db, "SELECT hash FROM cache_configs WHERE id = ?1", {old_id}) do
+      {:ok, {hash}} ->
+        case query_one(
+               target_db,
+               "SELECT id FROM cache_configs WHERE hash = ?1",
+               {{:blob, hash}}
+             ) do
+          {:ok, {new_id}} -> new_id
+          {:ok, nil} -> nil
+        end
+
+      {:ok, nil} ->
+        nil
+    end
+  end
+
+  defp remap_tag_set_id(_source_db, _target_db, nil), do: nil
+
+  defp remap_tag_set_id(source_db, target_db, old_id) do
+    case query_one(source_db, "SELECT hash FROM tag_sets WHERE id = ?1", {old_id}) do
+      {:ok, {hash}} ->
+        case query_one(
+               target_db,
+               "SELECT id FROM tag_sets WHERE hash = ?1",
+               {{:blob, hash}}
+             ) do
+          {:ok, {new_id}} -> new_id
+          {:ok, nil} -> nil
+        end
+
+      {:ok, nil} ->
+        nil
+    end
+  end
+
+  defp remap_execution_id(_source_db, _target_db, nil, _local_ids), do: nil
+
+  defp remap_execution_id(source_db, target_db, old_id, local_execution_ids) do
+    case Map.fetch(local_execution_ids, old_id) do
+      {:ok, new_id} ->
+        new_id
+
+      :error ->
+        # Execution is in a different run — resolve via external key
+        case query_one(
+               source_db,
+               """
+               SELECT r.external_id, s.number, e.attempt
+               FROM executions AS e
+               INNER JOIN steps AS s ON s.id = e.step_id
+               INNER JOIN runs AS r ON r.id = s.run_id
+               WHERE e.id = ?1
+               """,
+               {old_id}
+             ) do
+          {:ok, {run_ext_id, step_num, attempt}} ->
+            case query_one(
+                   target_db,
+                   """
+                   SELECT e.id
+                   FROM executions AS e
+                   INNER JOIN steps AS s ON s.id = e.step_id
+                   INNER JOIN runs AS r ON r.id = s.run_id
+                   WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+                   """,
+                   {run_ext_id, step_num, attempt}
+                 ) do
+              {:ok, {new_id}} -> new_id
+              {:ok, nil} -> nil
+            end
+
+          {:ok, nil} ->
+            nil
+        end
     end
   end
 end
