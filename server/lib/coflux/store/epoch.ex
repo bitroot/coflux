@@ -1,7 +1,9 @@
 defmodule Coflux.Store.Epoch do
   @moduledoc """
-  Manages epoch databases for a project. Each project has a series of epoch databases:
-  one active (receiving writes), the rest archived and immutable.
+  Manages epoch databases for a project using a three-tier model:
+  - **active**: open, read-write (one at a time)
+  - **unindexed**: open, read-only (awaiting Bloom filter indexing)
+  - **indexed**: closed, opened on demand (tracked in EpochIndex)
 
   Epoch files live at:
     data_dir/projects/{project_id}/epochs/YYYYMMDD_XXXX.sqlite
@@ -17,13 +19,14 @@ defmodule Coflux.Store.Epoch do
             name: nil,
             active_db: nil,
             active_epoch_id: nil,
-            archived: []
+            unindexed: []
 
   @doc """
   Open the epoch store for a project. If no epochs exist, creates the first one.
+  `unindexed_epoch_ids` specifies which archived epochs should be kept open (not yet indexed).
   Returns {:ok, epoch_state}.
   """
-  def open(project_id, name) do
+  def open(project_id, name, unindexed_epoch_ids \\ []) do
     epochs_dir = epochs_dir(project_id)
     File.mkdir_p!(epochs_dir)
 
@@ -47,7 +50,7 @@ defmodule Coflux.Store.Epoch do
            name: name,
            active_db: db,
            active_epoch_id: epoch_id,
-           archived: []
+           unindexed: []
          }}
 
       files ->
@@ -59,11 +62,17 @@ defmodule Coflux.Store.Epoch do
         {:ok, active_db} = Sqlite3.open(active_path)
         :ok = Migrations.run(active_db, name)
 
-        # Open archived epochs (read-only)
+        # Only open DB handles for unindexed epochs
+        unindexed_set = MapSet.new(unindexed_epoch_ids)
         archived_files = Enum.drop(files, -1)
 
-        archived =
-          Enum.map(archived_files, fn file ->
+        unindexed =
+          archived_files
+          |> Enum.filter(fn file ->
+            epoch_id = Path.basename(file, ".sqlite")
+            MapSet.member?(unindexed_set, epoch_id)
+          end)
+          |> Enum.map(fn file ->
             epoch_id = Path.basename(file, ".sqlite")
             path = Path.join(epochs_dir, file)
             {:ok, db} = Sqlite3.open(path)
@@ -76,14 +85,15 @@ defmodule Coflux.Store.Epoch do
            name: name,
            active_db: active_db,
            active_epoch_id: active_epoch_id,
-           archived: archived
+           unindexed: unindexed
          }}
     end
   end
 
   @doc """
   Create a new epoch, making it the active one.
-  Returns {:ok, new_epoch_state, old_epoch_db}.
+  The old active epoch moves to the unindexed list.
+  Returns {:ok, new_epoch_state, old_epoch_id}.
   """
   def rotate(%__MODULE__{} = epoch_state) do
     epochs_dir = epochs_dir(epoch_state.project_id)
@@ -100,10 +110,10 @@ defmodule Coflux.Store.Epoch do
       epoch_state
       | active_db: new_db,
         active_epoch_id: new_epoch_id,
-        archived: epoch_state.archived ++ [{old_epoch_id, old_db}]
+        unindexed: epoch_state.unindexed ++ [{old_epoch_id, old_db}]
     }
 
-    {:ok, new_state, old_db}
+    {:ok, new_state, old_epoch_id}
   end
 
   @doc """
@@ -112,17 +122,23 @@ defmodule Coflux.Store.Epoch do
   def active_db(%__MODULE__{active_db: db}), do: db
 
   @doc """
-  Get all epoch db handles (active first, then reverse chronological).
+  Get unindexed epoch entries as [{epoch_id, db}] in reverse chronological order (newest first).
   """
-  def all_dbs(%__MODULE__{active_db: active_db, archived: archived}) do
-    [active_db | archived |> Enum.reverse() |> Enum.map(&elem(&1, 1))]
+  def unindexed_dbs(%__MODULE__{unindexed: unindexed}) do
+    Enum.reverse(unindexed)
   end
 
   @doc """
-  Get archived epoch entries as [{epoch_id, db}] in reverse chronological order (newest first).
+  Remove an epoch from the unindexed list and close its DB handle.
+  Called after Bloom filters have been built and the epoch is now indexed.
   """
-  def archived_dbs(%__MODULE__{archived: archived}) do
-    Enum.reverse(archived)
+  def promote_to_indexed(%__MODULE__{} = state, epoch_id) do
+    {to_close, remaining} =
+      Enum.split_with(state.unindexed, fn {id, _db} -> id == epoch_id end)
+
+    Enum.each(to_close, fn {_id, db} -> Sqlite3.close(db) end)
+
+    %{state | unindexed: remaining}
   end
 
   @doc """
@@ -139,25 +155,29 @@ defmodule Coflux.Store.Epoch do
   end
 
   @doc """
-  Close all epoch databases.
+  Close all open epoch databases (active + unindexed).
+  Indexed epochs have no open handles.
   """
-  def close(%__MODULE__{active_db: active_db, archived: archived}) do
+  def close(%__MODULE__{active_db: active_db, unindexed: unindexed}) do
     Sqlite3.close(active_db)
 
-    Enum.each(archived, fn {_epoch_id, db} ->
+    Enum.each(unindexed, fn {_epoch_id, db} ->
       Sqlite3.close(db)
     end)
 
     :ok
   end
 
-  # Private helpers
-
-  defp epochs_dir(project_id) do
+  @doc """
+  Returns the epochs directory path for a project.
+  """
+  def epochs_dir(project_id) do
     ["projects", project_id, "epochs"]
     |> Path.join()
     |> Utils.data_path()
   end
+
+  # Private helpers
 
   defp generate_epoch_id(epochs_dir) do
     date = Date.utc_today() |> Date.to_iso8601(:basic)

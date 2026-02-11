@@ -86,7 +86,13 @@ defmodule Coflux.Orchestration.Server do
               launcher_tasks: %{},
 
               # Coflux.Store.EpochIndex struct for Bloom filter lookups
-              epoch_index: nil
+              epoch_index: nil,
+
+              # ref of running background index build task
+              index_task: nil,
+
+              # [epoch_id] awaiting Bloom filter build (FIFO)
+              index_queue: []
   end
 
   def start_link(opts) do
@@ -95,16 +101,53 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def init(project_id) do
-    case Epoch.open(project_id, "orchestration") do
+    {:ok, epoch_index} = EpochIndex.load(project_id)
+
+    # Crash recovery: scan for archived epoch files not in the index at all
+    # (crash between rotate and writing placeholder)
+    epochs_dir = Epoch.epochs_dir(project_id)
+    File.mkdir_p!(epochs_dir)
+
+    epoch_files =
+      epochs_dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".sqlite"))
+      |> Enum.sort()
+
+    archived_files = Enum.drop(epoch_files, -1)
+    indexed_epoch_ids = MapSet.new(epoch_index.entries, & &1.epoch_id)
+
+    epoch_index =
+      Enum.reduce(archived_files, epoch_index, fn file, idx ->
+        epoch_id = Path.basename(file, ".sqlite")
+
+        if MapSet.member?(indexed_epoch_ids, epoch_id) do
+          idx
+        else
+          # Add placeholder with nil blooms
+          now = System.os_time(:millisecond)
+          EpochIndex.add_epoch(idx, epoch_id, now, nil, nil)
+        end
+      end)
+
+    # Save if we added any placeholders
+    if length(epoch_index.entries) != MapSet.size(indexed_epoch_ids) do
+      :ok = EpochIndex.save(project_id, epoch_index)
+    end
+
+    # Determine which epochs need open DB handles (unindexed = nil blooms)
+    unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(epoch_index)
+
+    case Epoch.open(project_id, "orchestration", unindexed_epoch_ids) do
       {:ok, epochs} ->
         db = Epoch.active_db(epochs)
-        {:ok, epoch_index} = EpochIndex.load(project_id)
 
         state = %State{
           project_id: project_id,
           db: db,
           epochs: epochs,
-          epoch_index: epoch_index
+          epoch_index: epoch_index,
+          index_queue: unindexed_epoch_ids
         }
 
         send(self(), :tick)
@@ -284,6 +327,9 @@ defmodule Coflux.Orchestration.Server do
 
     # Schedule periodic epoch rotation check
     Process.send_after(self(), :check_rotation, @rotation_check_interval_ms)
+
+    # Kick off background Bloom filter builds for any unindexed epochs
+    state = maybe_start_index_build(state)
 
     {:noreply, state}
   end
@@ -2522,6 +2568,21 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
+  def handle_info({task_ref, {run_bloom, cache_bloom}}, state)
+      when task_ref == state.index_task do
+    Process.demonitor(task_ref, [:flush])
+    [epoch_id | rest] = state.index_queue
+
+    epoch_index = EpochIndex.update_blooms(state.epoch_index, epoch_id, run_bloom, cache_bloom)
+    :ok = EpochIndex.save(state.project_id, epoch_index)
+    epochs = Epoch.promote_to_indexed(state.epochs, epoch_id)
+
+    state =
+      %{state | epoch_index: epoch_index, epochs: epochs, index_task: nil, index_queue: rest}
+
+    {:noreply, maybe_start_index_build(state)}
+  end
+
   def handle_info({task_ref, result}, state) when is_map_key(state.launcher_tasks, task_ref) do
     state = process_launcher_result(state, task_ref, {:ok, result})
     {:noreply, state}
@@ -2577,6 +2638,13 @@ defmodule Coflux.Orchestration.Server do
 
       Map.has_key?(state.launcher_tasks, ref) ->
         state = process_launcher_result(state, ref, :error)
+        {:noreply, state}
+
+      ref == state.index_task ->
+        # Move failed epoch to back of queue for retry
+        [failed | rest] = state.index_queue
+        state = %{state | index_task: nil, index_queue: rest ++ [failed]}
+        state = maybe_start_index_build(state)
         {:noreply, state}
 
       true ->
@@ -3057,17 +3125,18 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp do_rotate_epoch(state) do
-    {:ok, new_epochs, old_db} = Epoch.rotate(state.epochs)
+    {:ok, new_epochs, old_epoch_id} = Epoch.rotate(state.epochs)
     new_db = Epoch.active_db(new_epochs)
+
+    # Get the old DB from the unindexed list (it was just appended)
+    {^old_epoch_id, old_db} = List.last(new_epochs.unindexed)
     id_mappings = EpochCopy.copy_config(old_db, new_db)
 
-    # Build Bloom filters for the old (now archived) epoch
-    {run_bloom, cache_bloom} = EpochIndex.build_blooms_for_epoch(old_db)
-    old_epoch_id = state.epochs.active_epoch_id
+    # Write placeholder entry to EpochIndex (nil blooms — built in background)
     now = System.os_time(:millisecond)
 
     epoch_index =
-      EpochIndex.add_epoch(state.epoch_index, old_epoch_id, now, run_bloom, cache_bloom)
+      EpochIndex.add_epoch(state.epoch_index, old_epoch_id, now, nil, nil)
 
     :ok = EpochIndex.save(state.project_id, epoch_index)
 
@@ -3075,9 +3144,31 @@ defmodule Coflux.Orchestration.Server do
     |> Map.put(:epochs, new_epochs)
     |> Map.put(:db, new_db)
     |> Map.put(:epoch_index, epoch_index)
+    |> Map.update!(:index_queue, &(&1 ++ [old_epoch_id]))
     |> remap_config_ids(id_mappings)
     |> Map.put(:execution_ids, %{})
+    |> maybe_start_index_build()
   end
+
+  defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
+    project_id = state.project_id
+    path = Path.join(Epoch.epochs_dir(project_id), "#{epoch_id}.sqlite")
+
+    task =
+      Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
+        {:ok, db} = Exqlite.Sqlite3.open(path)
+
+        try do
+          EpochIndex.build_blooms_for_epoch(db)
+        after
+          Exqlite.Sqlite3.close(db)
+        end
+      end)
+
+    %{state | index_task: task.ref}
+  end
+
+  defp maybe_start_index_build(state), do: state
 
   defp remap_config_ids(state, %{} = mappings) do
     ws_map = Map.get(mappings, :workspace_ids, %{})
@@ -3266,39 +3357,65 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp find_and_copy_run_from_archives(state, run_external_id) do
-    # Use Bloom filter to narrow down candidate epochs
-    candidate_epoch_ids =
-      if state.epoch_index do
-        EpochIndex.find_epochs_for_run(state.epoch_index, run_external_id)
-      else
-        nil
-      end
+    # Tier 1: Check unindexed DBs (always open, newest first)
+    unindexed = Epoch.unindexed_dbs(state.epochs)
 
-    archived = Epoch.archived_dbs(state.epochs)
+    result =
+      Enum.reduce_while(unindexed, :not_found, fn {_epoch_id, archive_db}, :not_found ->
+        case Coflux.Store.query_one(
+               archive_db,
+               "SELECT id FROM runs WHERE external_id = ?1",
+               {run_external_id}
+             ) do
+          {:ok, {_id}} ->
+            {:ok, remap, _visited} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
+            {:halt, {:ok, remap}}
 
-    # Filter archived DBs to only check candidates (if Bloom filter available)
-    archived_to_check =
-      if candidate_epoch_ids do
-        candidate_set = MapSet.new(candidate_epoch_ids)
-        Enum.filter(archived, fn {epoch_id, _db} -> MapSet.member?(candidate_set, epoch_id) end)
-      else
-        archived
-      end
+          {:ok, nil} ->
+            {:cont, :not_found}
+        end
+      end)
 
-    Enum.reduce_while(archived_to_check, :not_found, fn {_epoch_id, archive_db}, :not_found ->
-      case Coflux.Store.query_one(
-             archive_db,
-             "SELECT id FROM runs WHERE external_id = ?1",
-             {run_external_id}
-           ) do
-        {:ok, {_id}} ->
-          {:ok, remap, _visited} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
-          {:halt, {:ok, remap}}
+    if result != :not_found do
+      result
+    else
+      # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
+      candidate_epoch_ids =
+        if state.epoch_index do
+          EpochIndex.find_epochs_for_run(state.epoch_index, run_external_id)
+        else
+          []
+        end
 
-        {:ok, nil} ->
-          {:cont, :not_found}
-      end
-    end)
+      Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
+        path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
+
+        case Exqlite.Sqlite3.open(path) do
+          {:ok, archive_db} ->
+            try do
+              case Coflux.Store.query_one(
+                     archive_db,
+                     "SELECT id FROM runs WHERE external_id = ?1",
+                     {run_external_id}
+                   ) do
+                {:ok, {_id}} ->
+                  {:ok, remap, _visited} =
+                    EpochCopy.copy_run(archive_db, state.db, run_external_id)
+
+                  {:halt, {:ok, remap}}
+
+                {:ok, nil} ->
+                  {:cont, :not_found}
+              end
+            after
+              Exqlite.Sqlite3.close(archive_db)
+            end
+
+          {:error, _} ->
+            {:cont, :not_found}
+        end
+      end)
+    end
   end
 
   defp find_cached_execution_across_epochs(
@@ -3308,7 +3425,7 @@ defmodule Coflux.Orchestration.Server do
          cache_key,
          recorded_after
        ) do
-    # First check active epoch
+    # Tier 0: Check active epoch
     case Runs.find_cached_execution(
            state.db,
            cache_workspace_ids,
@@ -3320,49 +3437,83 @@ defmodule Coflux.Orchestration.Server do
         cached_execution_id
 
       {:ok, nil} ->
-        # Use Bloom filter to narrow down candidate epochs
-        candidate_epoch_ids =
-          if state.epoch_index && is_binary(cache_key) do
-            EpochIndex.find_epochs_for_cache_key(state.epoch_index, cache_key)
-          else
-            nil
-          end
+        # Tier 1: Check unindexed DBs (always open, newest first)
+        unindexed = Epoch.unindexed_dbs(state.epochs)
 
-        archived = Epoch.archived_dbs(state.epochs)
+        result =
+          Enum.reduce_while(unindexed, nil, fn {_epoch_id, archive_db}, nil ->
+            case Runs.find_cached_execution_by_cache_key(
+                   archive_db,
+                   cache_key,
+                   recorded_after
+                 ) do
+              {:ok, {_archive_exec_id, archive_run_ext_id}} ->
+                {:ok, _remap, _visited} =
+                  EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
 
-        archived_to_check =
-          if candidate_epoch_ids do
-            candidate_set = MapSet.new(candidate_epoch_ids)
+                case Runs.find_cached_execution(
+                       state.db,
+                       cache_workspace_ids,
+                       step_id,
+                       cache_key,
+                       recorded_after
+                     ) do
+                  {:ok, cached_id} -> {:halt, cached_id}
+                end
 
-            Enum.filter(archived, fn {epoch_id, _db} ->
-              MapSet.member?(candidate_set, epoch_id)
-            end)
-          else
-            archived
-          end
+              {:ok, nil} ->
+                {:cont, nil}
+            end
+          end)
 
-        Enum.reduce_while(archived_to_check, nil, fn {_epoch_id, archive_db}, nil ->
-          case Runs.find_cached_execution_by_cache_key(archive_db, cache_key, recorded_after) do
-            {:ok, {_archive_exec_id, archive_run_ext_id}} ->
-              # Copy the run to active epoch
-              {:ok, _remap, _visited} =
-                EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
+        if result do
+          result
+        else
+          # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
+          candidate_epoch_ids =
+            if state.epoch_index && is_binary(cache_key) do
+              EpochIndex.find_epochs_for_cache_key(state.epoch_index, cache_key)
+            else
+              []
+            end
 
-              # Re-find in active epoch now that it's been copied
-              case Runs.find_cached_execution(
-                     state.db,
-                     cache_workspace_ids,
-                     step_id,
-                     cache_key,
-                     recorded_after
-                   ) do
-                {:ok, cached_id} -> {:halt, cached_id}
-              end
+          Enum.reduce_while(candidate_epoch_ids, nil, fn epoch_id, nil ->
+            path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
 
-            {:ok, nil} ->
-              {:cont, nil}
-          end
-        end)
+            case Exqlite.Sqlite3.open(path) do
+              {:ok, archive_db} ->
+                try do
+                  case Runs.find_cached_execution_by_cache_key(
+                         archive_db,
+                         cache_key,
+                         recorded_after
+                       ) do
+                    {:ok, {_archive_exec_id, archive_run_ext_id}} ->
+                      {:ok, _remap, _visited} =
+                        EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
+
+                      case Runs.find_cached_execution(
+                             state.db,
+                             cache_workspace_ids,
+                             step_id,
+                             cache_key,
+                             recorded_after
+                           ) do
+                        {:ok, cached_id} -> {:halt, cached_id}
+                      end
+
+                    {:ok, nil} ->
+                      {:cont, nil}
+                  end
+                after
+                  Exqlite.Sqlite3.close(archive_db)
+                end
+
+              {:error, _} ->
+                {:cont, nil}
+            end
+          end)
+        end
     end
   end
 

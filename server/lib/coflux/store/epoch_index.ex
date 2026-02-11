@@ -60,13 +60,38 @@ defmodule Coflux.Store.EpochIndex do
   end
 
   @doc """
+  Replace nil blooms with real ones for a given epoch_id entry.
+  """
+  def update_blooms(%__MODULE__{} = index, epoch_id, run_bloom, cache_bloom) do
+    entries =
+      Enum.map(index.entries, fn entry ->
+        if entry.epoch_id == epoch_id do
+          %{entry | run_bloom: run_bloom, cache_bloom: cache_bloom}
+        else
+          entry
+        end
+      end)
+
+    %{index | entries: entries}
+  end
+
+  @doc """
+  Returns epoch_ids of entries where blooms are nil (not yet indexed).
+  """
+  def unindexed_epoch_ids(%__MODULE__{} = index) do
+    index.entries
+    |> Enum.filter(fn entry -> entry.run_bloom == nil end)
+    |> Enum.map(& &1.epoch_id)
+  end
+
+  @doc """
   Find epoch IDs that may contain a run with the given external ID.
   Returns epoch IDs in reverse chronological order (newest first).
   """
   def find_epochs_for_run(%__MODULE__{} = index, run_external_id) do
     index.entries
     |> Enum.filter(fn entry ->
-      Bloom.member?(entry.run_bloom, run_external_id)
+      entry.run_bloom != nil and Bloom.member?(entry.run_bloom, run_external_id)
     end)
     |> Enum.reverse()
     |> Enum.map(& &1.epoch_id)
@@ -79,7 +104,7 @@ defmodule Coflux.Store.EpochIndex do
   def find_epochs_for_cache_key(%__MODULE__{} = index, cache_key) do
     index.entries
     |> Enum.filter(fn entry ->
-      Bloom.member?(entry.cache_bloom, cache_key)
+      entry.cache_bloom != nil and Bloom.member?(entry.cache_bloom, cache_key)
     end)
     |> Enum.reverse()
     |> Enum.map(& &1.epoch_id)
@@ -121,8 +146,12 @@ defmodule Coflux.Store.EpochIndex do
   defp serialize(%__MODULE__{entries: entries}) do
     entry_data =
       Enum.map(entries, fn entry ->
-        run_bloom_bin = Bloom.serialize(entry.run_bloom)
-        cache_bloom_bin = Bloom.serialize(entry.cache_bloom)
+        {run_bloom_bin, cache_bloom_bin} =
+          if entry.run_bloom && entry.cache_bloom do
+            {Bloom.serialize(entry.run_bloom), Bloom.serialize(entry.cache_bloom)}
+          else
+            {<<>>, <<>>}
+          end
 
         <<
           byte_size(entry.epoch_id)::unsigned-16,
@@ -146,11 +175,14 @@ defmodule Coflux.Store.EpochIndex do
           cache_bloom_len::unsigned-32, cache_bloom_bin::binary-size(cache_bloom_len),
           rest::binary>> = data
 
+        run_bloom = if run_bloom_len > 0, do: Bloom.deserialize(run_bloom_bin)
+        cache_bloom = if cache_bloom_len > 0, do: Bloom.deserialize(cache_bloom_bin)
+
         entry = %Entry{
           epoch_id: epoch_id,
           created_at: created_at,
-          run_bloom: Bloom.deserialize(run_bloom_bin),
-          cache_bloom: Bloom.deserialize(cache_bloom_bin)
+          run_bloom: run_bloom,
+          cache_bloom: cache_bloom
         }
 
         {entries ++ [entry], rest}
