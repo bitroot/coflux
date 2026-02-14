@@ -421,12 +421,32 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp hash_pool_definition(launcher_id, provides_tag_set_id, modules) do
+  defp hash_pool_definition(db, launcher_id, provides_tag_set_id, modules) do
+    launcher_hash =
+      if launcher_id do
+        {:ok, {hash}} =
+          query_one!(db, "SELECT hash FROM launchers WHERE id = ?1", {launcher_id})
+
+        hash
+      else
+        <<0>>
+      end
+
+    tag_set_hash =
+      if provides_tag_set_id do
+        {:ok, {hash}} =
+          query_one!(db, "SELECT hash FROM tag_sets WHERE id = ?1", {provides_tag_set_id})
+
+        hash
+      else
+        <<0>>
+      end
+
     data =
       Enum.intersperse(
         [
-          Integer.to_string(launcher_id || 0),
-          Integer.to_string(provides_tag_set_id || 0),
+          launcher_hash,
+          tag_set_hash,
           Enum.join(Enum.sort(modules), "\n")
         ],
         0
@@ -454,7 +474,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
       end
 
-    hash = hash_pool_definition(launcher_id, provides_tag_set_id, modules)
+    hash = hash_pool_definition(db, launcher_id, provides_tag_set_id, modules)
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->

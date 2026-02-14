@@ -205,7 +205,7 @@ defmodule Coflux.Orchestration.Runs do
     end)
   end
 
-  defp get_argument_key_parts(parameter) do
+  defp get_argument_key_parts(db, parameter) do
     references =
       case parameter do
         {:raw, _data, references} -> references
@@ -223,10 +223,20 @@ defmodule Coflux.Orchestration.Runs do
               )
 
             {:execution_ref, ref_id} ->
-              [2, Integer.to_string(ref_id)]
+              {:ok, {run_ext, step_num, attempt}} =
+                query_one!(
+                  db,
+                  "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+                  {ref_id}
+                )
+
+              [2, "#{run_ext}:#{step_num}:#{attempt}"]
 
             {:asset, asset_id} ->
-              [3, Integer.to_string(asset_id)]
+              {:ok, {external_id}} =
+                query_one!(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id})
+
+              [3, external_id]
           end)
       ]
 
@@ -237,14 +247,14 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  defp build_key(params, arguments, namespace, version \\ nil) do
+  defp build_key(db, params, arguments, namespace, version \\ nil) do
     params =
       if params == true,
         do: Enum.map(Enum.with_index(arguments), fn {_, i} -> i end),
         else: params
 
     parameter_parts =
-      Enum.map(params, &get_argument_key_parts(Enum.at(arguments, &1)))
+      Enum.map(params, &get_argument_key_parts(db, Enum.at(arguments, &1)))
 
     data =
       [namespace, version || ""]
@@ -282,7 +292,7 @@ defmodule Coflux.Orchestration.Runs do
     # Calculate execute_after from delay
     execute_after = if delay > 0, do: now + delay
 
-    memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
+    memo_key = if memo, do: build_key(db, memo, arguments, "#{module}:#{target}")
 
     memoised_execution =
       if memo_key do
@@ -300,6 +310,7 @@ defmodule Coflux.Orchestration.Runs do
           cache_key =
             if cache do
               build_key(
+                db,
                 cache.params,
                 arguments,
                 cache.namespace || "#{module}:#{target}",
@@ -324,7 +335,7 @@ defmodule Coflux.Orchestration.Runs do
 
           defer_key =
             if defer,
-              do: build_key(defer.params, arguments, "#{module}:#{target}")
+              do: build_key(db, defer.params, arguments, "#{module}:#{target}")
 
           # TODO: validate parent belongs to run?
           {:ok, step_id, step_number} =

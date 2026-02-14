@@ -86,28 +86,42 @@ defmodule Coflux.Orchestration.Values do
     end
   end
 
-  defp hash_value(data, blob_id, references) do
+  defp hash_value(db, value) do
+    {data, blob_key, references} =
+      case value do
+        {:raw, data, references} -> {data, nil, references}
+        {:blob, blob_key, _size, references} -> {nil, blob_key, references}
+      end
+
     reference_parts =
-      Enum.flat_map(references, fn reference ->
-        case reference do
-          {:fragment, format, blob_key, _size, metadata} ->
-            Enum.concat(
-              [1, format, blob_key],
-              Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
+      Enum.flat_map(references, fn
+        {:fragment, format, blob_key, _size, metadata} ->
+          Enum.concat(
+            [1, format, blob_key],
+            Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
+          )
+
+        {:execution_ref, ref_id} ->
+          {:ok, {run_ext, step_num, attempt}} =
+            query_one!(
+              db,
+              "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+              {ref_id}
             )
 
-          {:execution_ref, ref_id} ->
-            [2, Integer.to_string(ref_id)]
+          [2, "#{run_ext}:#{step_num}:#{attempt}"]
 
-          {:asset, asset_id} ->
-            [3, Integer.to_string(asset_id)]
-        end
+        {:asset, asset_id} ->
+          {:ok, {external_id}} =
+            query_one!(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id})
+
+          [3, external_id]
       end)
 
     data =
       [
         if(!is_nil(data), do: Jason.encode!(data), else: 0),
-        if(blob_id, do: Integer.to_string(blob_id), else: 0)
+        if(blob_key, do: blob_key, else: 0)
       ]
       |> Enum.concat(reference_parts)
       |> Enum.intersperse(0)
@@ -126,7 +140,7 @@ defmodule Coflux.Orchestration.Values do
           {nil, blob_id, references}
       end
 
-    hash = hash_value(data, blob_id, references)
+    hash = hash_value(db, value)
 
     case query_one(db, "SELECT id FROM values_ WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->
