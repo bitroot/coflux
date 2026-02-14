@@ -64,6 +64,7 @@ type ExecuteRequestParams struct {
 	ExecutionID string     `json:"execution_id"`
 	Target      string     `json:"target"`
 	Arguments   []Argument `json:"arguments"`
+	WorkingDir  string     `json:"working_dir,omitempty"`
 }
 
 // Argument represents a serialized argument value

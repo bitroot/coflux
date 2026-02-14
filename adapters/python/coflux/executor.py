@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 
 from . import protocol
@@ -13,9 +15,13 @@ from .output import capture_output
 from .serialization import deserialize_argument, serialize_result
 
 
-def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any]]) -> None:
+def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any]], working_dir: str | None = None) -> None:
     """Execute a target with the given arguments."""
+    original_dir = os.getcwd()
     try:
+        if working_dir:
+            os.chdir(working_dir)
+
         # Parse target name (module.name)
         parts = target.rsplit(".", 1)
         if len(parts) != 2:
@@ -32,7 +38,7 @@ def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any
         deserialized_args = [deserialize_argument(arg) for arg in arguments]
 
         # Set up execution context
-        set_context(ExecutorContext(execution_id))
+        set_context(ExecutorContext(execution_id, working_dir=Path(working_dir) if working_dir else None))
 
         # Call the target function with output capture
         # Note: We call the underlying function, not the Target wrapper
@@ -54,6 +60,7 @@ def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any
             traceback=tb,
         )
     finally:
+        os.chdir(original_dir)
         set_context(None)
 
 
@@ -79,6 +86,7 @@ def run_executor() -> int:
                 execution_id=params["execution_id"],
                 target=params["target"],
                 arguments=params.get("arguments", []),
+                working_dir=params.get("working_dir"),
             )
         else:
             print(f"Unknown method: {method}", file=sys.stderr)

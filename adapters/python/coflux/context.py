@@ -265,6 +265,12 @@ class ExecutorContext:
                 ):
                     rel_path = str(file_path.relative_to(base_dir))
                     paths_to_upload.append((rel_path, file_path))
+        elif entries is None:
+            # No entries or match specified — persist all files in working dir
+            for file_path in base_dir.rglob("*"):
+                if file_path.is_file():
+                    rel_path = str(file_path.relative_to(base_dir))
+                    paths_to_upload.append((rel_path, file_path))
         elif isinstance(entries, (str, Path)):
             path = Path(entries)
             if not path.is_absolute():
