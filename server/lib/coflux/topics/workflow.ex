@@ -6,6 +6,8 @@ defmodule Coflux.Topics.Workflow do
 
   alias Coflux.Orchestration
 
+  @max_runs 50
+
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}
   end
@@ -21,6 +23,7 @@ defmodule Coflux.Topics.Workflow do
            module,
            target_name,
            workspace_id,
+           @max_runs,
            self()
          ) do
       {:ok, workflow, instruction, runs, ref} ->
@@ -52,11 +55,21 @@ defmodule Coflux.Topics.Workflow do
   end
 
   defp process_notification({:run, external_run_id, created_at, created_by}, topic) do
-    Topic.set(
-      topic,
-      [:runs, external_run_id],
-      %{id: external_run_id, createdAt: created_at, createdBy: build_principal(created_by)}
-    )
+    topic =
+      Topic.set(
+        topic,
+        [:runs, external_run_id],
+        %{id: external_run_id, createdAt: created_at, createdBy: build_principal(created_by)}
+      )
+
+    runs = topic.value.runs
+
+    if map_size(runs) > @max_runs do
+      {oldest_id, _} = Enum.min_by(runs, fn {_id, run} -> run.createdAt end)
+      Topic.unset(topic, [:runs], oldest_id)
+    else
+      topic
+    end
   end
 
   defp build_parameters(parameters) do

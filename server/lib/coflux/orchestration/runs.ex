@@ -615,7 +615,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_target_runs(db, module, target, type, workspace_id, limit \\ 50) do
+  def get_target_runs(db, module, target, type, workspace_id, limit) do
     query(
       db,
       """

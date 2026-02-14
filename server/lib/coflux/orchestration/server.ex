@@ -21,6 +21,7 @@ defmodule Coflux.Orchestration.Server do
 
   @default_activation_timeout_ms 600_000
   @default_reconnection_timeout_ms 30_000
+  @target_runs_archive_depth 5
   @connected_worker_poll_interval_ms 30_000
   @disconnected_worker_poll_interval_ms 5_000
   @worker_idle_timeout_ms 5_000
@@ -1697,7 +1698,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:subscribe_workflow, module, target_name, workspace_external_id, pid},
+        {:subscribe_workflow, module, target_name, workspace_external_id, max_runs, pid},
         _from,
         state
       ) do
@@ -1708,9 +1709,10 @@ defmodule Coflux.Orchestration.Server do
            if(workflow && workflow.instruction_id,
              do: Manifests.get_instruction(state.db, workflow.instruction_id),
              else: {:ok, nil}
-           ),
-         {:ok, runs} =
-           Runs.get_target_runs(state.db, module, target_name, :workflow, workspace_id) do
+           ) do
+      runs =
+        get_target_runs_across_epochs(state, module, target_name, :workflow, workspace_id, max_runs)
+
       {:ok, ref, state} =
         add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
 
@@ -3247,6 +3249,111 @@ defmodule Coflux.Orchestration.Server do
         else
           _ -> {:error, :not_found}
         end
+    end
+  end
+
+  defp get_target_runs_across_epochs(state, module, target_name, type, workspace_id, limit) do
+    {:ok, runs} =
+      Runs.get_target_runs(state.db, module, target_name, type, workspace_id, limit)
+
+    if length(runs) < limit do
+      unindexed_map =
+        state.epochs
+        |> Epoch.unindexed_dbs()
+        |> Map.new()
+
+      indexed_epoch_ids =
+        if state.epoch_index do
+          state.epoch_index.entries
+          |> Enum.filter(& &1.run_bloom)
+          |> Enum.map(& &1.epoch_id)
+        else
+          []
+        end
+
+      # Merge unindexed + indexed epoch IDs, sort newest first, take depth limit
+      all_epoch_ids =
+        Map.keys(unindexed_map) ++ indexed_epoch_ids
+
+      archives =
+        all_epoch_ids
+        |> Enum.sort(:desc)
+        |> Enum.take(@target_runs_archive_depth)
+        |> Enum.map(fn epoch_id ->
+          case Map.fetch(unindexed_map, epoch_id) do
+            {:ok, db} -> {:open, db}
+            :error -> {:closed, epoch_id}
+          end
+        end)
+
+      seen = MapSet.new(runs, &elem(&1, 0))
+
+      archives
+      |> Enum.reduce_while({runs, seen}, fn archive, {acc, seen} ->
+        remaining = limit - length(acc)
+
+        archive_runs =
+          query_archive_target_runs(
+            state,
+            archive,
+            module,
+            target_name,
+            type,
+            workspace_id,
+            remaining
+          )
+
+        new_runs = Enum.reject(archive_runs, &MapSet.member?(seen, elem(&1, 0)))
+        new_seen = MapSet.union(seen, MapSet.new(new_runs, &elem(&1, 0)))
+        combined = acc ++ new_runs
+
+        if length(combined) >= limit do
+          {:halt, {Enum.take(combined, limit), new_seen}}
+        else
+          {:cont, {combined, new_seen}}
+        end
+      end)
+      |> elem(0)
+    else
+      runs
+    end
+  end
+
+  defp query_archive_target_runs(
+         _state,
+         {:open, db},
+         module,
+         target_name,
+         type,
+         workspace_id,
+         limit
+       ) do
+    {:ok, runs} = Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
+    runs
+  end
+
+  defp query_archive_target_runs(
+         state,
+         {:closed, epoch_id},
+         module,
+         target_name,
+         type,
+         workspace_id,
+         limit
+       ) do
+    path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
+
+    case Exqlite.Sqlite3.open(path) do
+      {:ok, db} ->
+        try do
+          {:ok, runs} = Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
+          runs
+        after
+          Exqlite.Sqlite3.close(db)
+        end
+
+      {:error, _} ->
+        []
     end
   end
 
