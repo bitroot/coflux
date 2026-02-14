@@ -3447,37 +3447,49 @@ defmodule Coflux.Orchestration.Server do
         {:in_epoch, cached_execution_id}
 
       {:ok, nil} ->
+        workspace_external_ids =
+          Enum.map(cache_workspace_ids, &workspace_external_id(state, &1))
+
         query_fn = fn archive_db ->
-          case Runs.find_cached_execution_by_cache_key(
-                 archive_db,
-                 cache_key,
-                 recorded_after
-               ) do
-            {:ok, {archive_exec_id, _archive_run_ext_id}} ->
-              # Instead of copying the entire run, resolve the result value
-              # from the archive and create an execution_ref
-              case resolve_result(archive_db, archive_exec_id) do
-                {:ok, {:value, value}} ->
-                  # Copy the value into active epoch
-                  value_for_active = copy_value_to_active_epoch(archive_db, state.db, value)
-                  # Create execution ref for the cached execution
-                  {:ok, {run_ext, step_num, attempt}} =
-                    Runs.get_execution_key(archive_db, archive_exec_id)
+          archive_workspace_ids =
+            Runs.resolve_workspace_ids(archive_db, workspace_external_ids)
 
-                  {:ok, ref_id} =
-                    Runs.get_or_create_execution_ref(state.db, run_ext, step_num, attempt)
+          if archive_workspace_ids == [] do
+            :not_found
+          else
+            case Runs.find_cached_execution(
+                   archive_db,
+                   archive_workspace_ids,
+                   nil,
+                   cache_key,
+                   recorded_after
+                 ) do
+              {:ok, archive_exec_id} when not is_nil(archive_exec_id) ->
+                # Instead of copying the entire run, resolve the result value
+                # from the archive and create an execution_ref
+                case resolve_result(archive_db, archive_exec_id) do
+                  {:ok, {:value, value}} ->
+                    # Copy the value into active epoch
+                    value_for_active = copy_value_to_active_epoch(archive_db, state.db, value)
+                    # Create execution ref for the cached execution
+                    {:ok, {run_ext, step_num, attempt}} =
+                      Runs.get_execution_key(archive_db, archive_exec_id)
 
-                  {:found, {:resolved, ref_id, value_for_active}}
+                    {:ok, ref_id} =
+                      Runs.get_or_create_execution_ref(state.db, run_ext, step_num, attempt)
 
-                {:ok, _other} ->
-                  :not_found
+                    {:found, {:resolved, ref_id, value_for_active}}
 
-                {:pending, _} ->
-                  :not_found
-              end
+                  {:ok, _other} ->
+                    :not_found
 
-            {:ok, nil} ->
-              :not_found
+                  {:pending, _} ->
+                    :not_found
+                end
+
+              {:ok, nil} ->
+                :not_found
+            end
           end
         end
 
@@ -4327,7 +4339,7 @@ defmodule Coflux.Orchestration.Server do
         send_session(state, session_id, {:abort, execution_ext_id})
 
       :error ->
-        IO.puts("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
+        Logger.warning("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
         state
     end
   end

@@ -242,54 +242,58 @@ defmodule Coflux.Orchestration.EpochCopy do
               end)
 
               # Copy results
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                case query_one(
-                       source_db,
-                       """
-                       SELECT type, error_id, value_id, successor_id, successor_ref_id, created_at, created_by
-                       FROM results
-                       WHERE execution_id = ?1
-                       """,
-                       {old_exec_id}
-                     ) do
-                  {:ok,
-                   {type, error_id, value_id, successor_id, successor_ref_id, result_created_at,
-                    result_created_by}} ->
-                    new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
+              visited =
+                Enum.reduce(execution_ids, visited, fn {old_exec_id, new_exec_id}, visited ->
+                  case query_one(
+                         source_db,
+                         """
+                         SELECT type, error_id, value_id, successor_id, successor_ref_id, created_at, created_by
+                         FROM results
+                         WHERE execution_id = ?1
+                         """,
+                         {old_exec_id}
+                       ) do
+                    {:ok,
+                     {type, error_id, value_id, successor_id, successor_ref_id, result_created_at,
+                      result_created_by}} ->
+                      new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
 
-                    {new_value_id, new_successor_id, new_successor_ref_id} =
-                      copy_result_successor(
-                        source_db,
-                        target_db,
-                        type,
-                        value_id,
-                        successor_id,
-                        successor_ref_id,
-                        execution_ids
-                      )
+                      {new_value_id, new_successor_id, new_successor_ref_id, visited} =
+                        copy_result_successor(
+                          source_db,
+                          target_db,
+                          type,
+                          value_id,
+                          successor_id,
+                          successor_ref_id,
+                          execution_ids,
+                          visited
+                        )
 
-                    new_value_id =
-                      cond do
-                        new_value_id -> new_value_id
-                        value_id && type == 1 -> ensure_value(source_db, target_db, value_id)
-                        true -> nil
-                      end
+                      new_value_id =
+                        cond do
+                          new_value_id -> new_value_id
+                          value_id && type == 1 -> ensure_value(source_db, target_db, value_id)
+                          true -> nil
+                        end
 
-                    insert_one(target_db, :results, %{
-                      execution_id: new_exec_id,
-                      type: type,
-                      error_id: new_error_id,
-                      value_id: new_value_id,
-                      successor_id: new_successor_id,
-                      successor_ref_id: new_successor_ref_id,
-                      created_at: result_created_at,
-                      created_by: ensure_principal(source_db, target_db, result_created_by)
-                    })
+                      insert_one(target_db, :results, %{
+                        execution_id: new_exec_id,
+                        type: type,
+                        error_id: new_error_id,
+                        value_id: new_value_id,
+                        successor_id: new_successor_id,
+                        successor_ref_id: new_successor_ref_id,
+                        created_at: result_created_at,
+                        created_by: ensure_principal(source_db, target_db, result_created_by)
+                      })
 
-                  {:ok, nil} ->
-                    :ok
-                end
-              end)
+                      visited
+
+                    {:ok, nil} ->
+                      visited
+                  end
+                end)
 
               # Copy children — same-run internal IDs
               {:ok, children} =
@@ -1330,11 +1334,12 @@ defmodule Coflux.Orchestration.EpochCopy do
          _value_id,
          _successor_id,
          _successor_ref_id,
-         _execution_ids
+         _execution_ids,
+         visited
        )
        when type in [1, 3] do
     # Type 1 (value) and type 3 (cancelled) have no successor
-    {nil, nil, nil}
+    {nil, nil, nil, visited}
   end
 
   defp copy_result_successor(
@@ -1344,12 +1349,13 @@ defmodule Coflux.Orchestration.EpochCopy do
          _value_id,
          successor_id,
          _successor_ref_id,
-         execution_ids
+         execution_ids,
+         visited
        )
        when type in [0, 2, 6] do
     # Types 0 (error retry), 2 (abandoned retry), 6 (suspended) — same-run successor
     new_successor_id = if successor_id, do: Map.fetch!(execution_ids, successor_id)
-    {nil, new_successor_id, nil}
+    {nil, new_successor_id, nil, visited}
   end
 
   defp copy_result_successor(
@@ -1359,7 +1365,8 @@ defmodule Coflux.Orchestration.EpochCopy do
          value_id,
          successor_id,
          successor_ref_id,
-         execution_ids
+         execution_ids,
+         visited
        ) do
     # Types 4 (deferred), 5 (cached), 7 (spawned)
     cond do
@@ -1367,32 +1374,32 @@ defmodule Coflux.Orchestration.EpochCopy do
       successor_ref_id != nil ->
         new_ref_id = ensure_execution_ref(source_db, target_db, successor_ref_id)
         new_value_id = ensure_value(source_db, target_db, value_id)
-        {new_value_id, nil, new_ref_id}
+        {new_value_id, nil, new_ref_id, visited}
 
       # In-flight, same run
       successor_id != nil and is_map_key(execution_ids, successor_id) ->
-        {nil, Map.fetch!(execution_ids, successor_id), nil}
+        {nil, Map.fetch!(execution_ids, successor_id), nil, visited}
 
       # In-flight, cross-run — try to resolve the chain in source_db
       successor_id != nil ->
-        resolve_cross_run_successor(source_db, target_db, successor_id)
+        resolve_cross_run_successor(source_db, target_db, successor_id, visited)
 
       # No successor (shouldn't happen for these types)
       true ->
-        {nil, nil, nil}
+        {nil, nil, nil, visited}
     end
   end
 
   # For cross-run successors (types 4, 5, 7): try to resolve the result chain.
   # If resolved to a value, copy the value and create an execution_ref.
   # If still pending, copy the target run and remap the successor_id.
-  defp resolve_cross_run_successor(source_db, target_db, successor_id) do
+  defp resolve_cross_run_successor(source_db, target_db, successor_id, visited) do
     case resolve_result_chain(source_db, successor_id, MapSet.new()) do
       {:ok, chain_value_id} ->
         # Resolved to a value — copy value and create execution_ref for the successor
         new_value_id = ensure_value(source_db, target_db, chain_value_id)
         new_ref_id = create_execution_ref_for_id(source_db, target_db, successor_id)
-        {new_value_id, nil, new_ref_id}
+        {new_value_id, nil, new_ref_id, visited}
 
       _ ->
         # Pending or cancelled — copy the target run, then remap successor_id
@@ -1409,7 +1416,8 @@ defmodule Coflux.Orchestration.EpochCopy do
             {successor_id}
           )
 
-        do_copy_run(source_db, target_db, run_ext_id, MapSet.new())
+        {:ok, _remap, visited} =
+          do_copy_run(source_db, target_db, run_ext_id, visited)
 
         case query_one(
                target_db,
@@ -1422,8 +1430,8 @@ defmodule Coflux.Orchestration.EpochCopy do
                """,
                {run_ext_id, step_num, attempt}
              ) do
-          {:ok, {new_id}} -> {nil, new_id, nil}
-          {:ok, nil} -> {nil, nil, nil}
+          {:ok, {new_id}} -> {nil, new_id, nil, visited}
+          {:ok, nil} -> {nil, nil, nil, visited}
         end
     end
   end

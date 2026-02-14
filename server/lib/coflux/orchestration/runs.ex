@@ -927,6 +927,20 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def find_cached_execution(db, workspace_ids, step_id, cache_key, recorded_after) do
+    step_clause =
+      if step_id do
+        "AND s.id <> ?#{length(workspace_ids) + 3}"
+      else
+        ""
+      end
+
+    params =
+      if step_id do
+        workspace_ids ++ [{:blob, cache_key}, recorded_after, step_id]
+      else
+        workspace_ids ++ [{:blob, cache_key}, recorded_after]
+      end
+
     case query(
            db,
            """
@@ -938,11 +952,11 @@ defmodule Coflux.Orchestration.Runs do
              e.workspace_id IN (#{build_placeholders(length(workspace_ids))})
              AND s.cache_key = ?#{length(workspace_ids) + 1}
              AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?#{length(workspace_ids) + 2}))
-             AND s.id <> ?#{length(workspace_ids) + 3}
+             #{step_clause}
            ORDER BY e.created_at DESC
            LIMIT 1
            """,
-           List.to_tuple(workspace_ids ++ [{:blob, cache_key}, recorded_after, step_id])
+           List.to_tuple(params)
          ) do
       {:ok, [{execution_id}]} ->
         {:ok, execution_id}
@@ -952,29 +966,13 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def find_cached_execution_by_cache_key(db, cache_key, recorded_after) do
-    case query(
-           db,
-           """
-           SELECT e.id, r2.external_id
-           FROM steps AS s
-           INNER JOIN executions AS e ON e.step_id = s.id
-           INNER JOIN runs AS r2 ON r2.id = s.run_id
-           LEFT JOIN results AS r ON r.execution_id = e.id
-           WHERE
-             s.cache_key = ?1
-             AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?2))
-           ORDER BY e.created_at DESC
-           LIMIT 1
-           """,
-           {{:blob, cache_key}, recorded_after}
-         ) do
-      {:ok, [{execution_id, run_external_id}]} ->
-        {:ok, {execution_id, run_external_id}}
-
-      {:ok, []} ->
-        {:ok, nil}
-    end
+  def resolve_workspace_ids(db, workspace_external_ids) do
+    Enum.flat_map(workspace_external_ids, fn external_id ->
+      case query(db, "SELECT id FROM workspaces WHERE external_id = ?1", {external_id}) do
+        {:ok, [{id}]} -> [id]
+        {:ok, []} -> []
+      end
+    end)
   end
 
   def get_result_successors(db, execution_id) do
