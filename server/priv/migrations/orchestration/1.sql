@@ -225,6 +225,8 @@ CREATE TABLE execution_refs (
   run_external_id TEXT NOT NULL,
   step_number INTEGER NOT NULL,
   attempt INTEGER NOT NULL,
+  module TEXT,
+  target TEXT,
   UNIQUE(run_external_id, step_number, attempt)
 ) STRICT;
 

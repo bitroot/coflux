@@ -1722,149 +1722,13 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:subscribe_run, external_run_id, pid}, _from, state) do
-    case Runs.get_run_by_external_id(state.db, external_run_id) do
-      {:ok, nil} ->
-        {:reply, {:error, :not_found}, state}
-
-      {:ok, run} ->
-        parent =
-          if run.parent_ref_id do
-            resolve_execution_ref(state.db, run.parent_ref_id)
-          end
-
-        {:ok, steps} = Runs.get_run_steps(state.db, run.id)
-        {:ok, run_executions} = Runs.get_run_executions(state.db, run.id)
-        {:ok, run_dependencies} = Runs.get_run_dependencies(state.db, run.id)
-        {:ok, run_children} = Runs.get_run_children(state.db, run.id)
-        {:ok, groups} = Runs.get_groups_for_run(state.db, run.id)
-
-        cache_configs =
-          steps
-          |> Enum.map(& &1.cache_config_id)
-          |> Enum.reject(&is_nil/1)
-          |> Enum.uniq()
-          |> Enum.reduce(%{}, fn cache_config_id, cache_configs ->
-            case CacheConfigs.get_cache_config(state.db, cache_config_id) do
-              {:ok, cache_config} -> Map.put(cache_configs, cache_config_id, cache_config)
-            end
-          end)
-
-        results =
-          run_executions
-          |> Enum.map(&elem(&1, 0))
-          |> Enum.reduce(%{}, fn execution_id, results ->
-            {result, completed_at, result_created_by} =
-              case Results.get_result(state.db, execution_id) do
-                {:ok, {result, completed_at, created_by}} ->
-                  result = build_result(result, state.db)
-                  {result, completed_at, created_by}
-
-                {:ok, nil} ->
-                  {nil, nil, nil}
-              end
-
-            Map.put(results, execution_id, {result, completed_at, result_created_by})
-          end)
-
-        steps =
-          Map.new(steps, fn step ->
-            {:ok, arguments} = Runs.get_step_arguments(state.db, step.id)
-            arguments = Enum.map(arguments, &build_value(&1, state.db))
-
-            requires =
-              if step.requires_tag_set_id do
-                case TagSets.get_tag_set(state.db, step.requires_tag_set_id) do
-                  {:ok, requires} -> requires
-                end
-              else
-                %{}
-              end
-
-            parent_execution_external_id =
-              if step.parent_id do
-                {:ok, {r, s, a}} = Runs.get_execution_key(state.db, step.parent_id)
-                execution_external_id(r, s, a)
-              end
-
-            {step.number,
-             %{
-               module: step.module,
-               target: step.target,
-               type: step.type,
-               parent_id: parent_execution_external_id,
-               cache_config:
-                 if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
-               cache_key: step.cache_key,
-               memo_key: step.memo_key,
-               created_at: step.created_at,
-               arguments: arguments,
-               requires: requires,
-               executions:
-                 run_executions
-                 |> Enum.filter(&(elem(&1, 1) == step.id))
-                 |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
-                                created_at, assigned_at, created_by_user_ext_id,
-                                created_by_token_ext_id} ->
-                   execution_created_by =
-                     case {created_by_user_ext_id, created_by_token_ext_id} do
-                       {nil, nil} -> nil
-                       {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
-                       {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
-                     end
-
-                   {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
-                   exec_external_id = execution_external_id(r, s, a)
-
-                   workspace_external_id = state.workspaces[workspace_id].external_id
-
-                   {result, completed_at, result_created_by} = Map.fetch!(results, execution_id)
-
-                   execution_groups =
-                     groups
-                     |> Enum.filter(fn {e_id, _, _} -> e_id == execution_id end)
-                     |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
-
-                   # TODO: load assets in one query
-                   {:ok, asset_ids} = Results.get_assets_for_execution(state.db, execution_id)
-
-                   assets =
-                     asset_ids
-                     |> Enum.map(&resolve_asset(state.db, &1))
-                     |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
-                       {external_id, {name, total_count, total_size, entry}}
-                     end)
-
-                   # TODO: batch? get `get_dependencies` to resolve?
-                   dependencies =
-                     run_dependencies
-                     |> Map.get(execution_id, [])
-                     |> Map.new(fn dependency_ref_id ->
-                       metadata = resolve_execution_ref(state.db, dependency_ref_id)
-                       {metadata.execution_external_id, metadata}
-                     end)
-
-                   {attempt,
-                    %{
-                      execution_id: exec_external_id,
-                      workspace_id: workspace_external_id,
-                      created_at: created_at,
-                      created_by: execution_created_by,
-                      execute_after: execute_after,
-                      assigned_at: assigned_at,
-                      completed_at: completed_at,
-                      groups: execution_groups,
-                      assets: assets,
-                      dependencies: dependencies,
-                      result: result,
-                      result_created_by: result_created_by,
-                      children: Map.get(run_children, execution_id, [])
-                    }}
-                 end)
-             }}
-          end)
-
+    case find_and_build_run_data(state, external_run_id) do
+      {:ok, run, parent, steps} ->
         {:ok, ref, state} = add_listener(state, {:run, run.external_id}, pid)
         {:reply, {:ok, run, parent, steps, ref}, state}
+
+      :not_found ->
+        {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -3386,6 +3250,173 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp find_and_build_run_data(state, external_run_id) do
+    case Runs.get_run_by_external_id(state.db, external_run_id) do
+      {:ok, run} when not is_nil(run) ->
+        build_run_data(state, state.db, run)
+
+      {:ok, nil} ->
+        query_fn = fn archive_db ->
+          case Runs.get_run_by_external_id(archive_db, external_run_id) do
+            {:ok, run} when not is_nil(run) ->
+              {:found, build_run_data(state, archive_db, run)}
+
+            {:ok, nil} ->
+              :not_found
+          end
+        end
+
+        bloom_fn = fn epoch_index ->
+          EpochIndex.find_epochs_for_run(epoch_index, external_run_id)
+        end
+
+        case search_archived_epochs(state, query_fn, bloom_fn) do
+          {:found, result} -> result
+          :not_found -> :not_found
+        end
+    end
+  end
+
+  defp build_run_data(state, db, run) do
+    parent =
+      if run.parent_ref_id do
+        resolve_execution_ref(db, run.parent_ref_id)
+      end
+
+    {:ok, steps} = Runs.get_run_steps(db, run.id)
+    {:ok, run_executions} = Runs.get_run_executions(db, run.id)
+    {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
+    {:ok, run_children} = Runs.get_run_children(db, run.id)
+    {:ok, groups} = Runs.get_groups_for_run(db, run.id)
+
+    cache_configs =
+      steps
+      |> Enum.map(& &1.cache_config_id)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.reduce(%{}, fn cache_config_id, cache_configs ->
+        case CacheConfigs.get_cache_config(db, cache_config_id) do
+          {:ok, cache_config} -> Map.put(cache_configs, cache_config_id, cache_config)
+        end
+      end)
+
+    results =
+      run_executions
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.reduce(%{}, fn execution_id, results ->
+        {result, completed_at, result_created_by} =
+          case Results.get_result(db, execution_id) do
+            {:ok, {result, completed_at, created_by}} ->
+              result = build_result(result, db)
+              {result, completed_at, created_by}
+
+            {:ok, nil} ->
+              {nil, nil, nil}
+          end
+
+        Map.put(results, execution_id, {result, completed_at, result_created_by})
+      end)
+
+    steps =
+      Map.new(steps, fn step ->
+        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
+        arguments = Enum.map(arguments, &build_value(&1, db))
+
+        requires =
+          if step.requires_tag_set_id do
+            case TagSets.get_tag_set(db, step.requires_tag_set_id) do
+              {:ok, requires} -> requires
+            end
+          else
+            %{}
+          end
+
+        parent_execution_external_id =
+          if step.parent_id do
+            {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
+            execution_external_id(r, s, a)
+          end
+
+        {step.number,
+         %{
+           module: step.module,
+           target: step.target,
+           type: step.type,
+           parent_id: parent_execution_external_id,
+           cache_config:
+             if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
+           cache_key: step.cache_key,
+           memo_key: step.memo_key,
+           created_at: step.created_at,
+           arguments: arguments,
+           requires: requires,
+           executions:
+             run_executions
+             |> Enum.filter(&(elem(&1, 1) == step.id))
+             |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
+                            created_at, assigned_at, created_by_user_ext_id,
+                            created_by_token_ext_id} ->
+               execution_created_by =
+                 case {created_by_user_ext_id, created_by_token_ext_id} do
+                   {nil, nil} -> nil
+                   {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
+                   {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
+                 end
+
+               {:ok, {r, s, a}} = Runs.get_execution_key(db, execution_id)
+               exec_external_id = execution_external_id(r, s, a)
+
+               workspace_external_id = state.workspaces[workspace_id].external_id
+
+               {result, completed_at, result_created_by} = Map.fetch!(results, execution_id)
+
+               execution_groups =
+                 groups
+                 |> Enum.filter(fn {e_id, _, _} -> e_id == execution_id end)
+                 |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
+
+               # TODO: load assets in one query
+               {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
+
+               assets =
+                 asset_ids
+                 |> Enum.map(&resolve_asset(db, &1))
+                 |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
+                   {external_id, {name, total_count, total_size, entry}}
+                 end)
+
+               # TODO: batch? get `get_dependencies` to resolve?
+               dependencies =
+                 run_dependencies
+                 |> Map.get(execution_id, [])
+                 |> Map.new(fn dependency_ref_id ->
+                   metadata = resolve_execution_ref(db, dependency_ref_id)
+                   {metadata.execution_external_id, metadata}
+                 end)
+
+               {attempt,
+                %{
+                  execution_id: exec_external_id,
+                  workspace_id: workspace_external_id,
+                  created_at: created_at,
+                  created_by: execution_created_by,
+                  execute_after: execute_after,
+                  assigned_at: assigned_at,
+                  completed_at: completed_at,
+                  groups: execution_groups,
+                  assets: assets,
+                  dependencies: dependencies,
+                  result: result,
+                  result_created_by: result_created_by,
+                  children: Map.get(run_children, execution_id, [])
+                }}
+             end)
+         }}
+      end)
+
+    {:ok, run, parent, steps}
+  end
+
   defp ensure_run_in_active_epoch(state, run_external_id) do
     case Runs.get_run_by_external_id(state.db, run_external_id) do
       {:ok, run} when not is_nil(run) ->
@@ -3475,8 +3506,18 @@ defmodule Coflux.Orchestration.Server do
                     {:ok, {run_ext, step_num, attempt}} =
                       Runs.get_execution_key(archive_db, archive_exec_id)
 
+                    {:ok, {_, _, _, module, target}} =
+                      Runs.get_run_by_execution(archive_db, archive_exec_id)
+
                     {:ok, ref_id} =
-                      Runs.get_or_create_execution_ref(state.db, run_ext, step_num, attempt)
+                      Runs.get_or_create_execution_ref(
+                        state.db,
+                        run_ext,
+                        step_num,
+                        attempt,
+                        module,
+                        target
+                      )
 
                     {:found, {:resolved, ref_id, value_for_active}}
 
@@ -3524,10 +3565,11 @@ defmodule Coflux.Orchestration.Server do
   defp copy_value_refs_to_active(source_db, target_db, references) do
     Enum.map(references, fn
       {:execution_ref, old_ref_id} ->
-        {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(source_db, old_ref_id)
+        {:ok, {run_ext, step_num, attempt, module, target}} =
+          Runs.get_execution_ref(source_db, old_ref_id)
 
         {:ok, new_ref_id} =
-          Runs.get_or_create_execution_ref(target_db, run_ext, step_num, attempt)
+          Runs.get_or_create_execution_ref(target_db, run_ext, step_num, attempt, module, target)
 
         {:execution_ref, new_ref_id}
 
@@ -3636,19 +3678,8 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp resolve_execution_ref(db, ref_id) do
-    {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, ref_id)
+    {:ok, {run_ext, step_num, attempt, module, target}} = Runs.get_execution_ref(db, ref_id)
     ext_id = execution_external_id(run_ext, step_num, attempt)
-
-    # Try to get module/target if execution is in current epoch
-    {module, target} =
-      case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-        {:ok, {id}} when not is_nil(id) ->
-          {:ok, {_, _, _, m, t}} = Runs.get_run_by_execution(db, id)
-          {m, t}
-
-        _ ->
-          {nil, nil}
-      end
 
     %{
       execution_external_id: ext_id,
@@ -3693,8 +3724,18 @@ defmodule Coflux.Orchestration.Server do
         {:ok, run_ext_id, step_num, attempt} =
           parse_execution_external_id(execution_external_id)
 
+        {module, target} =
+          case Runs.get_execution_id(db, run_ext_id, step_num, attempt) do
+            {:ok, {id}} when not is_nil(id) ->
+              {:ok, {_, _, _, m, t}} = Runs.get_run_by_execution(db, id)
+              {m, t}
+
+            _ ->
+              {nil, nil}
+          end
+
         {:ok, ref_id} =
-          Runs.get_or_create_execution_ref(db, run_ext_id, step_num, attempt)
+          Runs.get_or_create_execution_ref(db, run_ext_id, step_num, attempt, module, target)
 
         {:execution_ref, ref_id}
 
@@ -4127,7 +4168,7 @@ defmodule Coflux.Orchestration.Server do
 
       Enum.all?(references, fn
         {:execution_ref, ref_id} ->
-          {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, ref_id)
+          {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
 
           case Runs.get_execution_id(db, run_ext, step_num, attempt) do
             {:ok, {execution_id}} when not is_nil(execution_id) ->
@@ -4154,7 +4195,8 @@ defmodule Coflux.Orchestration.Server do
     case Runs.get_result_dependencies(db, execution_id) do
       {:ok, dependencies} ->
         Enum.all?(dependencies, fn {dependency_ref_id} ->
-          {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, dependency_ref_id)
+          {:ok, {run_ext, step_num, attempt, _, _}} =
+            Runs.get_execution_ref(db, dependency_ref_id)
 
           case Runs.get_execution_id(db, run_ext, step_num, attempt) do
             {:ok, {dep_execution_id}} when not is_nil(dep_execution_id) ->

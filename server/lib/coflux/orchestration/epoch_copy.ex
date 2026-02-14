@@ -1278,23 +1278,23 @@ defmodule Coflux.Orchestration.EpochCopy do
 
   # Copy an execution_ref from source_db to target_db by its stable triple.
   defp ensure_execution_ref(source_db, target_db, old_ref_id) do
-    {:ok, {run_ext_id, step_num, attempt}} =
+    {:ok, {run_ext_id, step_num, attempt, module, target}} =
       query_one!(
         source_db,
-        "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+        "SELECT run_external_id, step_number, attempt, module, target FROM execution_refs WHERE id = ?1",
         {old_ref_id}
       )
 
-    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt)
+    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
   end
 
   # Create an execution_ref in target_db from an internal execution_id in source_db.
   defp create_execution_ref_for_id(source_db, target_db, execution_id) do
-    {:ok, {run_ext_id, step_num, attempt}} =
+    {:ok, {run_ext_id, step_num, attempt, module, target}} =
       query_one!(
         source_db,
         """
-        SELECT r.external_id, s.number, e.attempt
+        SELECT r.external_id, s.number, e.attempt, s.module, s.target
         FROM executions AS e
         INNER JOIN steps AS s ON s.id = e.step_id
         INNER JOIN runs AS r ON r.id = s.run_id
@@ -1303,15 +1303,21 @@ defmodule Coflux.Orchestration.EpochCopy do
         {execution_id}
       )
 
-    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt)
+    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
   end
 
-  defp get_or_create_execution_ref(db, run_ext_id, step_num, attempt) do
+  defp get_or_create_execution_ref(db, run_ext_id, step_num, attempt, module, target) do
     {:ok, _} =
       insert_one(
         db,
         :execution_refs,
-        %{run_external_id: run_ext_id, step_number: step_num, attempt: attempt},
+        %{
+          run_external_id: run_ext_id,
+          step_number: step_num,
+          attempt: attempt,
+          module: module,
+          target: target
+        },
         on_conflict: "DO NOTHING"
       )
 

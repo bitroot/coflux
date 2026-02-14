@@ -1205,7 +1205,7 @@ defmodule Coflux.Orchestration.Runs do
 
   # Execution ref helpers
 
-  def get_or_create_execution_ref(db, run_external_id, step_number, attempt) do
+  def get_or_create_execution_ref(db, run_external_id, step_number, attempt, module, target) do
     # INSERT OR IGNORE to handle the unique constraint
     {:ok, _} =
       insert_one(
@@ -1214,7 +1214,9 @@ defmodule Coflux.Orchestration.Runs do
         %{
           run_external_id: run_external_id,
           step_number: step_number,
-          attempt: attempt
+          attempt: attempt,
+          module: module,
+          target: target
         },
         on_conflict: "DO NOTHING"
       )
@@ -1236,11 +1238,11 @@ defmodule Coflux.Orchestration.Runs do
   def get_execution_ref(db, ref_id) do
     case query_one(
            db,
-           "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+           "SELECT run_external_id, step_number, attempt, module, target FROM execution_refs WHERE id = ?1",
            {ref_id}
          ) do
-      {:ok, {run_external_id, step_number, attempt}} ->
-        {:ok, {run_external_id, step_number, attempt}}
+      {:ok, {run_external_id, step_number, attempt, module, target}} ->
+        {:ok, {run_external_id, step_number, attempt, module, target}}
 
       {:ok, nil} ->
         {:error, :not_found}
@@ -1250,7 +1252,8 @@ defmodule Coflux.Orchestration.Runs do
   def create_execution_ref_for(db, execution_id) do
     case get_execution_key(db, execution_id) do
       {:ok, {run_external_id, step_number, attempt}} ->
-        get_or_create_execution_ref(db, run_external_id, step_number, attempt)
+        {:ok, {_, _, _, module, target}} = get_run_by_execution(db, execution_id)
+        get_or_create_execution_ref(db, run_external_id, step_number, attempt, module, target)
 
       {:error, :not_found} ->
         {:error, :not_found}
