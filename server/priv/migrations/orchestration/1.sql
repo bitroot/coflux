@@ -220,14 +220,22 @@ CREATE TABLE session_expirations (
   FOREIGN KEY (session_id) REFERENCES sessions ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE execution_refs (
+  id INTEGER PRIMARY KEY,
+  run_external_id TEXT NOT NULL,
+  step_number INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  UNIQUE(run_external_id, step_number, attempt)
+) STRICT;
+
 CREATE TABLE runs (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
-  parent_id INTEGER,
+  parent_ref_id INTEGER,
   idempotency_key TEXT UNIQUE,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
-  FOREIGN KEY (parent_id) REFERENCES executions ON DELETE SET NULL
+  FOREIGN KEY (parent_ref_id) REFERENCES execution_refs ON DELETE SET NULL
 ) STRICT;
 
 CREATE TABLE steps (
@@ -349,11 +357,11 @@ CREATE TABLE assignments (
 
 CREATE TABLE result_dependencies (
   execution_id INTEGER NOT NULL,
-  dependency_id INTEGER NOT NULL,
+  dependency_ref_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (execution_id, dependency_id),
+  PRIMARY KEY (execution_id, dependency_ref_id),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
-  FOREIGN KEY (dependency_id) REFERENCES executions ON DELETE RESTRICT
+  FOREIGN KEY (dependency_ref_id) REFERENCES execution_refs ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE asset_dependencies (
@@ -411,15 +419,15 @@ CREATE TABLE value_references (
   value_id INTEGER NOT NULL,
   position INTEGER NOT NULL,
   fragment_id INTEGER,
-  execution_id INTEGER,
+  execution_ref_id INTEGER,
   asset_id INTEGER,
   PRIMARY KEY (value_id, position),
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE CASCADE,
   FOREIGN KEY (fragment_id) REFERENCES fragments ON DELETE RESTRICT,
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE RESTRICT,
+  FOREIGN KEY (execution_ref_id) REFERENCES execution_refs ON DELETE RESTRICT,
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE RESTRICT,
   CHECK (
-    (fragment_id IS NOT NULL) + (execution_id IS NOT NULL) + (asset_id IS NOT NULL) = 1
+    (fragment_id IS NOT NULL) + (execution_ref_id IS NOT NULL) + (asset_id IS NOT NULL) = 1
   )
 ) STRICT;
 
@@ -447,49 +455,59 @@ CREATE TABLE results (
   error_id INTEGER,
   value_id INTEGER,
   successor_id INTEGER,
+  successor_ref_id INTEGER,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
   FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT,
   FOREIGN KEY (successor_id) REFERENCES executions ON DELETE RESTRICT,
+  FOREIGN KEY (successor_ref_id) REFERENCES execution_refs ON DELETE RESTRICT,
   CHECK (
     CASE type
       WHEN 0 THEN error_id
       AND NOT value_id
+      AND NOT successor_ref_id
       WHEN 1 THEN value_id
       AND NOT (
         successor_id
         OR error_id
+        OR successor_ref_id
       )
       WHEN 2 THEN NOT (
         error_id
         OR value_id
+        OR successor_ref_id
       )
       WHEN 3 THEN NOT (
         error_id
         OR successor_id
         OR value_id
+        OR successor_ref_id
       )
-      WHEN 4 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      -- Types 4 (deferred), 5 (cached), 7 (spawned):
+      -- Either successor_id is set (in-flight, no ref, no value)
+      -- Or successor_ref_id + value_id are set (resolved, no successor_id)
+      WHEN 4 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
-      WHEN 5 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      WHEN 5 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
       WHEN 6 THEN successor_id
       AND NOT (
         error_id
         OR value_id
+        OR successor_ref_id
       )
-      WHEN 7 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      WHEN 7 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
       ELSE FALSE
     END

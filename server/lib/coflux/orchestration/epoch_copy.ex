@@ -77,7 +77,7 @@ defmodule Coflux.Orchestration.EpochCopy do
       case query_one(
              source_db,
              """
-             SELECT id, external_id, parent_id, idempotency_key, created_at, created_by
+             SELECT id, external_id, parent_ref_id, idempotency_key, created_at, created_by
              FROM runs
              WHERE external_id = ?1
              """,
@@ -86,25 +86,24 @@ defmodule Coflux.Orchestration.EpochCopy do
         {:ok, nil} ->
           {:ok, %{}, visited}
 
-        {:ok, {old_run_id, ext_id, parent_id, idempotency_key, created_at, created_by}} ->
+        {:ok, {old_run_id, ext_id, parent_ref_id, idempotency_key, created_at, created_by}} ->
           # Check if already exists in target
           case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
             {:ok, {_existing_id}} ->
               {:ok, %{}, visited}
 
             {:ok, nil} ->
-              {visited, parent_id_new} =
-                if parent_id do
-                  resolve_parent_run(source_db, target_db, parent_id, visited)
-                else
-                  {visited, nil}
+              # parent_ref_id is an execution_ref — copy it to target
+              new_parent_ref_id =
+                if parent_ref_id do
+                  ensure_execution_ref(source_db, target_db, parent_ref_id)
                 end
 
               # Insert the run
               {:ok, new_run_id} =
                 insert_one(target_db, :runs, %{
                   external_id: ext_id,
-                  parent_id: parent_id_new,
+                  parent_ref_id: new_parent_ref_id,
                   idempotency_key: idempotency_key,
                   created_at: created_at,
                   created_by: ensure_principal(source_db, target_db, created_by)
@@ -138,8 +137,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                                                    retry_delay_max, recurrent, delay,
                                                    requires_tag_set_id, step_created_at},
                                                   {step_acc, exec_acc} ->
-                  # Resolve parent_id: the initial step has NULL, others reference
-                  # an execution that was inserted with an earlier step.
+                  # steps.parent_id is same-run internal — strict remap
                   new_parent_id =
                     if step_parent_id, do: Map.fetch!(exec_acc, step_parent_id)
 
@@ -176,7 +174,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                     )
 
                   Enum.each(args, fn {position, value_id} ->
-                    new_value_id = ensure_value(source_db, target_db, value_id, exec_acc)
+                    new_value_id = ensure_value(source_db, target_db, value_id)
 
                     insert_one(target_db, :step_arguments, %{
                       step_id: new_step_id,
@@ -248,24 +246,34 @@ defmodule Coflux.Orchestration.EpochCopy do
                 case query_one(
                        source_db,
                        """
-                       SELECT type, error_id, value_id, successor_id, created_at, created_by
+                       SELECT type, error_id, value_id, successor_id, successor_ref_id, created_at, created_by
                        FROM results
                        WHERE execution_id = ?1
                        """,
                        {old_exec_id}
                      ) do
                   {:ok,
-                   {type, error_id, value_id, successor_id, result_created_at, result_created_by}} ->
+                   {type, error_id, value_id, successor_id, successor_ref_id, result_created_at,
+                    result_created_by}} ->
                     new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
-                    new_value_id = if value_id, do: ensure_value(source_db, target_db, value_id, execution_ids)
 
-                    new_successor_id =
-                      remap_execution_id(
+                    {new_value_id, new_successor_id, new_successor_ref_id} =
+                      copy_result_successor(
                         source_db,
                         target_db,
+                        type,
+                        value_id,
                         successor_id,
+                        successor_ref_id,
                         execution_ids
                       )
+
+                    new_value_id =
+                      cond do
+                        new_value_id -> new_value_id
+                        value_id && type == 1 -> ensure_value(source_db, target_db, value_id)
+                        true -> nil
+                      end
 
                     insert_one(target_db, :results, %{
                       execution_id: new_exec_id,
@@ -273,6 +281,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                       error_id: new_error_id,
                       value_id: new_value_id,
                       successor_id: new_successor_id,
+                      successor_ref_id: new_successor_ref_id,
                       created_at: result_created_at,
                       created_by: ensure_principal(source_db, target_db, result_created_by)
                     })
@@ -282,7 +291,7 @@ defmodule Coflux.Orchestration.EpochCopy do
                 end
               end)
 
-              # Copy children
+              # Copy children — same-run internal IDs
               {:ok, children} =
                 query(
                   source_db,
@@ -297,22 +306,20 @@ defmodule Coflux.Orchestration.EpochCopy do
                 )
 
               Enum.each(children, fn {old_parent, old_child, group_id, child_created_at} ->
-                new_parent = Map.get(execution_ids, old_parent)
-                new_child = Map.get(execution_ids, old_child)
+                new_parent = Map.fetch!(execution_ids, old_parent)
+                new_child = Map.fetch!(execution_ids, old_child)
 
-                if new_parent && new_child do
-                  insert_one(
-                    target_db,
-                    :children,
-                    %{
-                      parent_id: new_parent,
-                      child_id: new_child,
-                      group_id: group_id,
-                      created_at: child_created_at
-                    },
-                    on_conflict: "DO NOTHING"
-                  )
-                end
+                insert_one(
+                  target_db,
+                  :children,
+                  %{
+                    parent_id: new_parent,
+                    child_id: new_child,
+                    group_id: group_id,
+                    created_at: child_created_at
+                  },
+                  on_conflict: "DO NOTHING"
+                )
               end)
 
               # Copy groups
@@ -352,36 +359,28 @@ defmodule Coflux.Orchestration.EpochCopy do
                 end)
               end)
 
-              # Copy result_dependencies
+              # Copy result_dependencies — uses execution_refs
               Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
                 {:ok, deps} =
                   query(
                     source_db,
-                    "SELECT dependency_id, created_at FROM result_dependencies WHERE execution_id = ?1",
+                    "SELECT dependency_ref_id, created_at FROM result_dependencies WHERE execution_id = ?1",
                     {old_exec_id}
                   )
 
-                Enum.each(deps, fn {old_dep_id, dep_created_at} ->
-                  new_dep_id =
-                    remap_execution_id(
-                      source_db,
-                      target_db,
-                      old_dep_id,
-                      execution_ids
-                    )
+                Enum.each(deps, fn {old_dep_ref_id, dep_created_at} ->
+                  new_dep_ref_id = ensure_execution_ref(source_db, target_db, old_dep_ref_id)
 
-                  if new_dep_id do
-                    insert_one(
-                      target_db,
-                      :result_dependencies,
-                      %{
-                        execution_id: new_exec_id,
-                        dependency_id: new_dep_id,
-                        created_at: dep_created_at
-                      },
-                      on_conflict: "DO NOTHING"
-                    )
-                  end
+                  insert_one(
+                    target_db,
+                    :result_dependencies,
+                    %{
+                      execution_id: new_exec_id,
+                      dependency_ref_id: new_dep_ref_id,
+                      created_at: dep_created_at
+                    },
+                    on_conflict: "DO NOTHING"
+                  )
                 end)
               end)
 
@@ -443,60 +442,6 @@ defmodule Coflux.Orchestration.EpochCopy do
                }, visited}
           end
       end
-    end
-  end
-
-  defp resolve_parent_run(source_db, target_db, parent_id, visited) do
-    # parent_id references an execution - find its run
-    case query_one(
-           source_db,
-           """
-           SELECT r.external_id
-           FROM executions AS e
-           INNER JOIN steps AS s ON s.id = e.step_id
-           INNER JOIN runs AS r ON r.id = s.run_id
-           WHERE e.id = ?1
-           """,
-           {parent_id}
-         ) do
-      {:ok, {parent_run_ext_id}} ->
-        {:ok, _remap, visited} =
-          do_copy_run(source_db, target_db, parent_run_ext_id, visited)
-
-        # Re-resolve the parent execution ID in the target DB
-        case query_one(
-               source_db,
-               """
-               SELECT r.external_id, s.number, e.attempt
-               FROM executions AS e
-               INNER JOIN steps AS s ON s.id = e.step_id
-               INNER JOIN runs AS r ON r.id = s.run_id
-               WHERE e.id = ?1
-               """,
-               {parent_id}
-             ) do
-          {:ok, {p_run_ext, p_step_num, p_attempt}} ->
-            case query_one(
-                   target_db,
-                   """
-                   SELECT e.id
-                   FROM executions AS e
-                   INNER JOIN steps AS s ON s.id = e.step_id
-                   INNER JOIN runs AS r ON r.id = s.run_id
-                   WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
-                   """,
-                   {p_run_ext, p_step_num, p_attempt}
-                 ) do
-              {:ok, {new_parent_id}} -> {visited, new_parent_id}
-              {:ok, nil} -> {visited, nil}
-            end
-
-          {:ok, nil} ->
-            {visited, nil}
-        end
-
-      {:ok, nil} ->
-        {visited, nil}
     end
   end
 
@@ -778,7 +723,7 @@ defmodule Coflux.Orchestration.EpochCopy do
   end
 
   # Ensure a value exists in target_db, copying from source_db if needed
-  defp ensure_value(source_db, target_db, value_id, execution_ids) do
+  defp ensure_value(source_db, target_db, value_id) do
     {:ok, {hash, content, blob_id}} =
       query_one!(
         source_db,
@@ -804,17 +749,17 @@ defmodule Coflux.Orchestration.EpochCopy do
         {:ok, refs} =
           query(
             source_db,
-            "SELECT position, fragment_id, execution_id, asset_id FROM value_references WHERE value_id = ?1",
+            "SELECT position, fragment_id, execution_ref_id, asset_id FROM value_references WHERE value_id = ?1",
             {value_id}
           )
 
-        Enum.each(refs, fn {position, fragment_id, execution_id, asset_id} ->
+        Enum.each(refs, fn {position, fragment_id, execution_ref_id, asset_id} ->
           new_fragment_id = if fragment_id, do: ensure_fragment(source_db, target_db, fragment_id)
           new_asset_id = if asset_id, do: ensure_asset(source_db, target_db, asset_id)
 
-          new_execution_id =
-            if execution_id,
-              do: remap_execution_id(source_db, target_db, execution_id, execution_ids)
+          new_execution_ref_id =
+            if execution_ref_id,
+              do: ensure_execution_ref(source_db, target_db, execution_ref_id)
 
           insert_one(
             target_db,
@@ -823,7 +768,7 @@ defmodule Coflux.Orchestration.EpochCopy do
               value_id: new_id,
               position: position,
               fragment_id: new_fragment_id,
-              execution_id: new_execution_id,
+              execution_ref_id: new_execution_ref_id,
               asset_id: new_asset_id
             },
             on_conflict: "DO NOTHING"
@@ -1327,45 +1272,197 @@ defmodule Coflux.Orchestration.EpochCopy do
     end
   end
 
-  defp remap_execution_id(_source_db, _target_db, nil, _local_ids), do: nil
+  # Copy an execution_ref from source_db to target_db by its stable triple.
+  defp ensure_execution_ref(source_db, target_db, old_ref_id) do
+    {:ok, {run_ext_id, step_num, attempt}} =
+      query_one!(
+        source_db,
+        "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+        {old_ref_id}
+      )
 
-  defp remap_execution_id(source_db, target_db, old_id, local_execution_ids) do
-    case Map.fetch(local_execution_ids, old_id) do
-      {:ok, new_id} ->
-        new_id
+    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt)
+  end
 
-      :error ->
-        # Execution is in a different run — resolve via external key
+  # Create an execution_ref in target_db from an internal execution_id in source_db.
+  defp create_execution_ref_for_id(source_db, target_db, execution_id) do
+    {:ok, {run_ext_id, step_num, attempt}} =
+      query_one!(
+        source_db,
+        """
+        SELECT r.external_id, s.number, e.attempt
+        FROM executions AS e
+        INNER JOIN steps AS s ON s.id = e.step_id
+        INNER JOIN runs AS r ON r.id = s.run_id
+        WHERE e.id = ?1
+        """,
+        {execution_id}
+      )
+
+    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt)
+  end
+
+  defp get_or_create_execution_ref(db, run_ext_id, step_num, attempt) do
+    {:ok, _} =
+      insert_one(
+        db,
+        :execution_refs,
+        %{run_external_id: run_ext_id, step_number: step_num, attempt: attempt},
+        on_conflict: "DO NOTHING"
+      )
+
+    {:ok, {ref_id}} =
+      query_one(
+        db,
+        "SELECT id FROM execution_refs WHERE run_external_id = ?1 AND step_number = ?2 AND attempt = ?3",
+        {run_ext_id, step_num, attempt}
+      )
+
+    ref_id
+  end
+
+  # Handle successor copying for result types.
+  # Returns {new_value_id, new_successor_id, new_successor_ref_id}.
+  defp copy_result_successor(
+         _source_db,
+         _target_db,
+         type,
+         _value_id,
+         _successor_id,
+         _successor_ref_id,
+         _execution_ids
+       )
+       when type in [1, 3] do
+    # Type 1 (value) and type 3 (cancelled) have no successor
+    {nil, nil, nil}
+  end
+
+  defp copy_result_successor(
+         _source_db,
+         _target_db,
+         type,
+         _value_id,
+         successor_id,
+         _successor_ref_id,
+         execution_ids
+       )
+       when type in [0, 2, 6] do
+    # Types 0 (error retry), 2 (abandoned retry), 6 (suspended) — same-run successor
+    new_successor_id = if successor_id, do: Map.fetch!(execution_ids, successor_id)
+    {nil, new_successor_id, nil}
+  end
+
+  defp copy_result_successor(
+         source_db,
+         target_db,
+         _type,
+         value_id,
+         successor_id,
+         successor_ref_id,
+         execution_ids
+       ) do
+    # Types 4 (deferred), 5 (cached), 7 (spawned)
+    cond do
+      # Already resolved: successor_ref_id + value_id both set
+      successor_ref_id != nil ->
+        new_ref_id = ensure_execution_ref(source_db, target_db, successor_ref_id)
+        new_value_id = ensure_value(source_db, target_db, value_id)
+        {new_value_id, nil, new_ref_id}
+
+      # In-flight, same run
+      successor_id != nil and is_map_key(execution_ids, successor_id) ->
+        {nil, Map.fetch!(execution_ids, successor_id), nil}
+
+      # In-flight, cross-run — try to resolve the chain in source_db
+      successor_id != nil ->
+        resolve_cross_run_successor(source_db, target_db, successor_id)
+
+      # No successor (shouldn't happen for these types)
+      true ->
+        {nil, nil, nil}
+    end
+  end
+
+  # For cross-run successors (types 4, 5, 7): try to resolve the result chain.
+  # If resolved to a value, copy the value and create an execution_ref.
+  # If still pending, copy the target run and remap the successor_id.
+  defp resolve_cross_run_successor(source_db, target_db, successor_id) do
+    case resolve_result_chain(source_db, successor_id, MapSet.new()) do
+      {:ok, chain_value_id} ->
+        # Resolved to a value — copy value and create execution_ref for the successor
+        new_value_id = ensure_value(source_db, target_db, chain_value_id)
+        new_ref_id = create_execution_ref_for_id(source_db, target_db, successor_id)
+        {new_value_id, nil, new_ref_id}
+
+      _ ->
+        # Pending or cancelled — copy the target run, then remap successor_id
+        {:ok, {run_ext_id, step_num, attempt}} =
+          query_one!(
+            source_db,
+            """
+            SELECT r.external_id, s.number, e.attempt
+            FROM executions AS e
+            INNER JOIN steps AS s ON s.id = e.step_id
+            INNER JOIN runs AS r ON r.id = s.run_id
+            WHERE e.id = ?1
+            """,
+            {successor_id}
+          )
+
+        do_copy_run(source_db, target_db, run_ext_id, MapSet.new())
+
         case query_one(
-               source_db,
+               target_db,
                """
-               SELECT r.external_id, s.number, e.attempt
+               SELECT e.id
                FROM executions AS e
                INNER JOIN steps AS s ON s.id = e.step_id
                INNER JOIN runs AS r ON r.id = s.run_id
-               WHERE e.id = ?1
+               WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
                """,
-               {old_id}
+               {run_ext_id, step_num, attempt}
              ) do
-          {:ok, {run_ext_id, step_num, attempt}} ->
-            case query_one(
-                   target_db,
-                   """
-                   SELECT e.id
-                   FROM executions AS e
-                   INNER JOIN steps AS s ON s.id = e.step_id
-                   INNER JOIN runs AS r ON r.id = s.run_id
-                   WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
-                   """,
-                   {run_ext_id, step_num, attempt}
-                 ) do
-              {:ok, {new_id}} -> new_id
-              {:ok, nil} -> nil
-            end
-
-          {:ok, nil} ->
-            nil
+          {:ok, {new_id}} -> {nil, new_id, nil}
+          {:ok, nil} -> {nil, nil, nil}
         end
+    end
+  end
+
+  # Follow the result successor chain in a single DB to find a terminal value.
+  defp resolve_result_chain(db, execution_id, visited) do
+    if MapSet.member?(visited, execution_id) do
+      :pending
+    else
+      visited = MapSet.put(visited, execution_id)
+
+      case query_one(
+             db,
+             "SELECT type, value_id, successor_id, successor_ref_id FROM results WHERE execution_id = ?1",
+             {execution_id}
+           ) do
+        {:ok, nil} ->
+          :pending
+
+        # Plain value
+        {:ok, {1, value_id, nil, nil}} ->
+          {:ok, value_id}
+
+        # Cancelled
+        {:ok, {3, nil, nil, nil}} ->
+          :cancelled
+
+        # Types 4, 5, 7 already resolved (successor_ref_id + value_id)
+        {:ok, {type, value_id, nil, successor_ref_id}}
+        when type in [4, 5, 7] and not is_nil(successor_ref_id) and not is_nil(value_id) ->
+          {:ok, value_id}
+
+        # Any type with successor_id — follow the chain
+        {:ok, {_type, nil, successor_id, nil}} when not is_nil(successor_id) ->
+          resolve_result_chain(db, successor_id, visited)
+
+        _ ->
+          :pending
+      end
     end
   end
 end

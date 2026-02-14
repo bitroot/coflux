@@ -1385,14 +1385,15 @@ defmodule Coflux.Orchestration.Server do
 
         state =
           if from_execution_id do
-            {:ok, id} = Runs.record_result_dependency(state.db, from_execution_id, execution_id)
+            {:ok, dep_ref_id} = Runs.create_execution_ref_for(state.db, execution_id)
+            {:ok, id} = Runs.record_result_dependency(state.db, from_execution_id, dep_ref_id)
 
             if id do
               {:ok, {run_external_id}} =
                 Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
               # TODO: only resolve if there are listeners to notify
-              dependency = resolve_execution(state.db, execution_id)
+              dependency = resolve_execution_ref(state.db, dep_ref_id)
 
               dep_ext_id = dependency.execution_external_id
 
@@ -1727,8 +1728,8 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok, run} ->
         parent =
-          if run.parent_id do
-            resolve_execution(state.db, run.parent_id)
+          if run.parent_ref_id do
+            resolve_execution_ref(state.db, run.parent_ref_id)
           end
 
         {:ok, steps} = Runs.get_run_steps(state.db, run.id)
@@ -1837,8 +1838,8 @@ defmodule Coflux.Orchestration.Server do
                    dependencies =
                      run_dependencies
                      |> Map.get(execution_id, [])
-                     |> Map.new(fn dependency_id ->
-                       metadata = resolve_execution(state.db, dependency_id)
+                     |> Map.new(fn dependency_ref_id ->
+                       metadata = resolve_execution_ref(state.db, dependency_ref_id)
                        {metadata.execution_external_id, metadata}
                      end)
 
@@ -2027,7 +2028,7 @@ defmodule Coflux.Orchestration.Server do
         fn
           execution, {state, assigned, unassigned} ->
             # TODO: support caching for other attempts?
-            cached_execution_id =
+            cached_result =
               if execution.attempt == 1 && execution.cache_config_id do
                 cache_workspace_ids = get_cache_workspace_ids(state, execution.workspace_id)
                 cache = Map.fetch!(cache_configs, execution.cache_config_id)
@@ -2042,9 +2043,18 @@ defmodule Coflux.Orchestration.Server do
                 )
               end
 
-            if cached_execution_id do
+            if cached_result do
+              result =
+                case cached_result do
+                  {:in_epoch, cached_execution_id} ->
+                    {:cached, cached_execution_id}
+
+                  {:resolved, ref_id, value} ->
+                    {:cached, ref_id, value}
+                end
+
               {:ok, state} =
-                process_result(state, execution.execution_id, {:cached, cached_execution_id})
+                process_result(state, execution.execution_id, result)
 
               {state, assigned, unassigned}
             else
@@ -3022,6 +3032,13 @@ defmodule Coflux.Orchestration.Server do
     dependency_ids = Keyword.get(opts, :dependency_ids, [])
     created_by = Keyword.get(opts, :created_by)
 
+    # Convert internal dependency execution IDs to execution_ref IDs
+    dependency_ref_ids =
+      Enum.map(dependency_ids, fn dep_id ->
+        {:ok, ref_id} = Runs.create_execution_ref_for(state.db, dep_id)
+        ref_id
+      end)
+
     # TODO: only get run if needed for notify?
     {:ok, run} = Runs.get_run_by_id(state.db, step.run_id)
 
@@ -3030,7 +3047,7 @@ defmodule Coflux.Orchestration.Server do
            step.id,
            workspace_id,
            execute_after,
-           dependency_ids,
+           dependency_ref_ids,
            created_by
          ) do
       {:ok, execution_id, attempt, created_at} ->
@@ -3045,8 +3062,8 @@ defmodule Coflux.Orchestration.Server do
           end
 
         dependencies =
-          Map.new(dependency_ids, fn dep_id ->
-            metadata = resolve_execution(state.db, dep_id)
+          Map.new(dependency_ref_ids, fn ref_id ->
+            metadata = resolve_execution_ref(state.db, ref_id)
             {metadata.execution_external_id, metadata}
           end)
 
@@ -3427,7 +3444,7 @@ defmodule Coflux.Orchestration.Server do
            recorded_after
          ) do
       {:ok, cached_execution_id} when not is_nil(cached_execution_id) ->
-        cached_execution_id
+        {:in_epoch, cached_execution_id}
 
       {:ok, nil} ->
         query_fn = fn archive_db ->
@@ -3436,19 +3453,27 @@ defmodule Coflux.Orchestration.Server do
                  cache_key,
                  recorded_after
                ) do
-            {:ok, {_archive_exec_id, archive_run_ext_id}} ->
-              {:ok, _remap, _visited} =
-                EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
+            {:ok, {archive_exec_id, _archive_run_ext_id}} ->
+              # Instead of copying the entire run, resolve the result value
+              # from the archive and create an execution_ref
+              case resolve_result(archive_db, archive_exec_id) do
+                {:ok, {:value, value}} ->
+                  # Copy the value into active epoch
+                  value_for_active = copy_value_to_active_epoch(archive_db, state.db, value)
+                  # Create execution ref for the cached execution
+                  {:ok, {run_ext, step_num, attempt}} =
+                    Runs.get_execution_key(archive_db, archive_exec_id)
 
-              case Runs.find_cached_execution(
-                     state.db,
-                     cache_workspace_ids,
-                     step_id,
-                     cache_key,
-                     recorded_after
-                   ) do
-                {:ok, cached_id} when not is_nil(cached_id) -> {:found, cached_id}
-                {:ok, nil} -> :not_found
+                  {:ok, ref_id} =
+                    Runs.get_or_create_execution_ref(state.db, run_ext, step_num, attempt)
+
+                  {:found, {:resolved, ref_id, value_for_active}}
+
+                {:ok, _other} ->
+                  :not_found
+
+                {:pending, _} ->
+                  :not_found
               end
 
             {:ok, nil} ->
@@ -3469,6 +3494,34 @@ defmodule Coflux.Orchestration.Server do
           :not_found -> nil
         end
     end
+  end
+
+  # Copy a value (as loaded by Values.get_value_by_id) from source_db into target_db.
+  # The value is already in the decoded form {:raw, data, refs} or {:blob, key, size, refs}.
+  # We need to re-create execution_refs in the target and ensure blobs/fragments exist.
+  defp copy_value_to_active_epoch(source_db, target_db, value) do
+    case value do
+      {:raw, data, references} ->
+        {:raw, data, copy_value_refs_to_active(source_db, target_db, references)}
+
+      {:blob, key, size, references} ->
+        {:blob, key, size, copy_value_refs_to_active(source_db, target_db, references)}
+    end
+  end
+
+  defp copy_value_refs_to_active(source_db, target_db, references) do
+    Enum.map(references, fn
+      {:execution_ref, old_ref_id} ->
+        {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(source_db, old_ref_id)
+
+        {:ok, new_ref_id} =
+          Runs.get_or_create_execution_ref(target_db, run_ext, step_num, attempt)
+
+        {:execution_ref, new_ref_id}
+
+      other ->
+        other
+    end)
   end
 
   # Searches archived epochs across both tiers (unindexed, then indexed via Bloom).
@@ -3570,6 +3623,32 @@ defmodule Coflux.Orchestration.Server do
     }
   end
 
+  defp resolve_execution_ref(db, ref_id) do
+    {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, ref_id)
+    ext_id = execution_external_id(run_ext, step_num, attempt)
+
+    # Try to get module/target if execution is in current epoch
+    {module, target} =
+      case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+        {:ok, {id}} when not is_nil(id) ->
+          {:ok, {_, _, _, m, t}} = Runs.get_run_by_execution(db, id)
+          {m, t}
+
+        _ ->
+          {nil, nil}
+      end
+
+    %{
+      execution_external_id: ext_id,
+      run_id: run_ext,
+      step_id: "#{run_ext}:#{step_num}",
+      step_number: step_num,
+      attempt: attempt,
+      module: module,
+      target: target
+    }
+  end
+
   defp resolve_asset(db, asset_id) do
     case Assets.get_asset_summary(db, asset_id) do
       {:ok, external_id, name, total_count, total_size, entry} ->
@@ -3582,8 +3661,8 @@ defmodule Coflux.Orchestration.Server do
       {:fragment, format, blob_key, size, metadata} ->
         {:fragment, format, blob_key, size, metadata}
 
-      {:execution, execution_id} ->
-        metadata = resolve_execution(db, execution_id)
+      {:execution_ref, ref_id} ->
+        metadata = resolve_execution_ref(db, ref_id)
         {:execution, metadata.execution_external_id, metadata}
 
       {:asset, asset_id} ->
@@ -3602,8 +3681,10 @@ defmodule Coflux.Orchestration.Server do
         {:ok, run_ext_id, step_num, attempt} =
           parse_execution_external_id(execution_external_id)
 
-        {:ok, {execution_id}} = Runs.get_execution_id(db, run_ext_id, step_num, attempt)
-        {:execution, execution_id}
+        {:ok, ref_id} =
+          Runs.get_or_create_execution_ref(db, run_ext_id, step_num, attempt)
+
+        {:execution_ref, ref_id}
 
       ref ->
         ref
@@ -3636,6 +3717,10 @@ defmodule Coflux.Orchestration.Server do
       {:deferred, _} -> false
       {:cached, _} -> false
       {:spawned, _} -> false
+      # Resolved ref forms are final (value is already resolved)
+      {:deferred, _, _} -> true
+      {:cached, _, _} -> true
+      {:spawned, _, _} -> true
     end
   end
 
@@ -3659,7 +3744,9 @@ defmodule Coflux.Orchestration.Server do
         successor = if successor_id, do: resolve_execution(db, successor_id)
         {:suspended, successor}
 
-      {type, execution_id} when type in [:deferred, :cached, :spawned] ->
+      # In-flight successor (successor_id is an internal execution ID)
+      {type, execution_id}
+      when type in [:deferred, :cached, :spawned] and is_integer(execution_id) ->
         execution_result =
           case resolve_result(db, execution_id) do
             {:ok, execution_result} -> execution_result
@@ -3667,6 +3754,12 @@ defmodule Coflux.Orchestration.Server do
           end
 
         {type, resolve_execution(db, execution_id), build_result(execution_result, db)}
+
+      # Resolved ref form (ref_id + value)
+      {type, ref_id, value} when type in [:deferred, :cached, :spawned] ->
+        execution_metadata = resolve_execution_ref(db, ref_id)
+        resolved_value = build_value(value, db)
+        {type, execution_metadata, {:value, resolved_value}}
 
       nil ->
         nil
@@ -3873,17 +3966,28 @@ defmodule Coflux.Orchestration.Server do
           {:abandoned, execution_id} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
-          {:deferred, execution_id} ->
+          # In-flight successor (follow chain)
+          {:deferred, execution_id} when is_integer(execution_id) ->
             resolve_result(db, execution_id)
 
-          {:cached, execution_id} ->
+          {:cached, execution_id} when is_integer(execution_id) ->
             resolve_result(db, execution_id)
 
           {:suspended, execution_id} ->
             resolve_result(db, execution_id)
 
-          {:spawned, execution_id} ->
+          {:spawned, execution_id} when is_integer(execution_id) ->
             resolve_result(db, execution_id)
+
+          # Resolved ref forms — value_id is already loaded, return directly
+          {:deferred, _ref_id, value} ->
+            {:ok, {:value, value}}
+
+          {:cached, _ref_id, value} ->
+            {:ok, {:value, value}}
+
+          {:spawned, _ref_id, value} ->
+            {:ok, {:value, value}}
 
           other ->
             {:ok, other}
@@ -4010,10 +4114,18 @@ defmodule Coflux.Orchestration.Server do
         end
 
       Enum.all?(references, fn
-        {:execution, execution_id} ->
-          case resolve_result(db, execution_id) do
-            {:ok, _} -> true
-            {:pending, _} -> false
+        {:execution_ref, ref_id} ->
+          {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, ref_id)
+
+          case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+            {:ok, {execution_id}} when not is_nil(execution_id) ->
+              case resolve_result(db, execution_id) do
+                {:ok, _} -> true
+                {:pending, _} -> false
+              end
+
+            _ ->
+              false
           end
 
         {:fragment, _format, _blob_key, _size, _metadata} ->
@@ -4029,10 +4141,19 @@ defmodule Coflux.Orchestration.Server do
     # TODO: also check assets?
     case Runs.get_result_dependencies(db, execution_id) do
       {:ok, dependencies} ->
-        Enum.all?(dependencies, fn {dependency_id} ->
-          case resolve_result(db, dependency_id) do
-            {:ok, _} -> true
-            {:pending, _} -> false
+        Enum.all?(dependencies, fn {dependency_ref_id} ->
+          {:ok, {run_ext, step_num, attempt}} = Runs.get_execution_ref(db, dependency_ref_id)
+
+          case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+            {:ok, {dep_execution_id}} when not is_nil(dep_execution_id) ->
+              case resolve_result(db, dep_execution_id) do
+                {:ok, _} -> true
+                {:pending, _} -> false
+              end
+
+            _ ->
+              # Execution not in current epoch — cannot check
+              false
           end
         end)
     end

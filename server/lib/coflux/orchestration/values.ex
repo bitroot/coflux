@@ -31,7 +31,7 @@ defmodule Coflux.Orchestration.Values do
           case query(
                  db,
                  """
-                 SELECT fragment_id, execution_id, asset_id
+                 SELECT fragment_id, execution_ref_id, asset_id
                  FROM value_references
                  WHERE value_id = ?1
                  ORDER BY position
@@ -41,7 +41,7 @@ defmodule Coflux.Orchestration.Values do
             {:ok, rows} ->
               Enum.map(rows, fn
                 {fragment_id, nil, nil} -> load_fragment(db, fragment_id)
-                {nil, execution_id, nil} -> {:execution, execution_id}
+                {nil, execution_ref_id, nil} -> {:execution_ref, execution_ref_id}
                 {nil, nil, asset_id} -> {:asset, asset_id}
               end)
           end
@@ -96,8 +96,8 @@ defmodule Coflux.Orchestration.Values do
               Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
             )
 
-          {:execution, execution_id} ->
-            [2, Integer.to_string(execution_id)]
+          {:execution_ref, ref_id} ->
+            [2, Integer.to_string(ref_id)]
 
           {:asset, asset_id} ->
             [3, Integer.to_string(asset_id)]
@@ -144,7 +144,7 @@ defmodule Coflux.Orchestration.Values do
           insert_many(
             db,
             :value_references,
-            {:value_id, :position, :fragment_id, :execution_id, :asset_id},
+            {:value_id, :position, :fragment_id, :execution_ref_id, :asset_id},
             references
             |> Enum.with_index()
             |> Enum.map(fn {reference, position} ->
@@ -155,8 +155,8 @@ defmodule Coflux.Orchestration.Values do
 
                   {value_id, position, fragment_id, nil, nil}
 
-                {:execution, execution_id} ->
-                  {value_id, position, nil, execution_id, nil}
+                {:execution_ref, ref_id} ->
+                  {value_id, position, nil, ref_id, nil}
 
                 {:asset, asset_id} ->
                   {value_id, position, nil, nil, asset_id}
