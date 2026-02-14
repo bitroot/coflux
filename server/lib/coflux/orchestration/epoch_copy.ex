@@ -11,132 +11,48 @@ defmodule Coflux.Orchestration.EpochCopy do
   """
   def copy_config(old_db, new_db) do
     with_transaction(new_db, fn ->
-      # 1. Copy principals and tokens
-      principal_ids = copy_table_with_remap(old_db, new_db, "principals")
-      token_ids = copy_tokens(old_db, new_db, principal_ids)
-
-      # Update principal token_id references
-      Enum.each(principal_ids, fn {old_id, new_id} ->
-        case query_one(old_db, "SELECT token_id FROM principals WHERE id = ?1", {old_id}) do
-          {:ok, {token_id}} when not is_nil(token_id) ->
-            new_token_id = Map.get(token_ids, token_id, token_id)
-
-            execute(
-              new_db,
-              "UPDATE principals SET token_id = ?1 WHERE id = ?2",
-              {new_token_id, new_id}
-            )
-
-          _ ->
-            :ok
-        end
-      end)
-
-      # 2. Copy fragment_formats (small table, copy all)
-      fragment_format_ids = copy_table_with_remap(old_db, new_db, "fragment_formats")
-
-      # 3. Copy tag_sets and tag_set_items (by hash, dedup)
-      tag_set_ids = copy_hash_table(old_db, new_db, "tag_sets")
-      copy_dependent_rows(old_db, new_db, "tag_set_items", "tag_set_id", tag_set_ids)
-
-      # 4. Copy parameter_sets and items (by hash, dedup)
-      parameter_set_ids = copy_hash_table(old_db, new_db, "parameter_sets")
-
-      copy_dependent_rows(
-        old_db,
-        new_db,
-        "parameter_set_items",
-        "parameter_set_id",
-        parameter_set_ids
-      )
-
-      # 5. Copy instructions (by hash, dedup)
-      instruction_ids = copy_hash_table(old_db, new_db, "instructions")
-
-      # 6. Copy cache_configs (by hash, dedup)
-      cache_config_ids = copy_hash_table(old_db, new_db, "cache_configs")
-
-      # 7. Copy workspaces
-      workspace_ids = copy_table_with_remap(old_db, new_db, "workspaces")
+      # 1. Copy workspaces
+      workspace_ids = copy_workspaces(old_db, new_db)
 
       # Copy latest workspace_names per workspace
-      copy_latest_per_workspace(old_db, new_db, "workspace_names", workspace_ids)
+      copy_latest_workspace_names(old_db, new_db, workspace_ids)
 
       # Copy latest workspace_states per workspace
-      copy_latest_per_workspace(old_db, new_db, "workspace_states", workspace_ids)
+      copy_latest_workspace_states(old_db, new_db, workspace_ids)
 
       # Copy latest workspace_bases per workspace
       copy_latest_workspace_bases(old_db, new_db, workspace_ids)
 
-      # 8. Copy launchers (by hash, dedup)
-      launcher_ids = copy_hash_table(old_db, new_db, "launchers")
+      # 2. Copy pools (ensures pool_definitions and launchers on demand)
+      pool_ids = copy_pools(old_db, new_db, workspace_ids)
 
-      # 9. Copy pool_definitions (by hash, dedup)
-      pool_definition_ids = copy_hash_table(old_db, new_db, "pool_definitions")
-
-      copy_dependent_rows(
-        old_db,
-        new_db,
-        "pool_definition_modules",
-        "pool_definition_id",
-        pool_definition_ids
-      )
-
-      # 10. Copy pools (remap workspace_id, pool_definition_id)
-      pool_ids = copy_pools(old_db, new_db, workspace_ids, pool_definition_ids)
-
-      # 11. Copy active workers (remap pool_id)
+      # 3. Copy active workers (remap pool_id)
       worker_ids = copy_active_workers(old_db, new_db, pool_ids)
 
       # Copy latest worker_states
       copy_latest_worker_states(old_db, new_db, worker_ids)
 
-      # 12. Copy active sessions (remap workspace_id, worker_id)
+      # 4. Copy active sessions (ensures tag_sets on demand)
       session_ids =
         copy_active_sessions(
           old_db,
           new_db,
           workspace_ids,
-          worker_ids,
-          tag_set_ids,
-          principal_ids
+          worker_ids
         )
 
       # Copy session_activations for active sessions
       copy_session_activations(old_db, new_db, session_ids)
 
-      # 13. Copy manifests (by hash, dedup)
-      manifest_ids = copy_hash_table(old_db, new_db, "manifests")
-
-      # 14. Copy latest workspace_manifests
-      copy_latest_workspace_manifests(old_db, new_db, workspace_ids, manifest_ids, principal_ids)
-
-      # 15. Copy workflows for copied manifests
-      copy_workflows(
-        old_db,
-        new_db,
-        manifest_ids,
-        parameter_set_ids,
-        instruction_ids,
-        cache_config_ids,
-        tag_set_ids
-      )
+      # 5. Copy latest workspace_manifests and their workflows
+      #    (ensures manifests, parameter_sets, instructions, cache_configs, tag_sets on demand)
+      copy_latest_workspace_manifests(old_db, new_db, workspace_ids)
 
       %{
         workspace_ids: workspace_ids,
         session_ids: session_ids,
         worker_ids: worker_ids,
-        pool_ids: pool_ids,
-        principal_ids: principal_ids,
-        token_ids: token_ids,
-        tag_set_ids: tag_set_ids,
-        manifest_ids: manifest_ids,
-        launcher_ids: launcher_ids,
-        pool_definition_ids: pool_definition_ids,
-        parameter_set_ids: parameter_set_ids,
-        instruction_ids: instruction_ids,
-        cache_config_ids: cache_config_ids,
-        fragment_format_ids: fragment_format_ids
+        pool_ids: pool_ids
       }
     end)
   end
@@ -146,7 +62,13 @@ defmodule Coflux.Orchestration.EpochCopy do
   Follows cross-run references recursively.
   Returns ID remapping for the copied data.
   """
-  def copy_run(source_db, target_db, run_external_id, visited \\ MapSet.new()) do
+  def copy_run(source_db, target_db, run_external_id) do
+    with_transaction(target_db, fn ->
+      do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+    end)
+  end
+
+  defp do_copy_run(source_db, target_db, run_external_id, visited) do
     if MapSet.member?(visited, run_external_id) do
       {:ok, %{}, visited}
     else
@@ -165,551 +87,480 @@ defmodule Coflux.Orchestration.EpochCopy do
           {:ok, %{}, visited}
 
         {:ok, {old_run_id, ext_id, parent_id, idempotency_key, created_at, created_by}} ->
-          with_transaction(target_db, fn ->
-            # Check if already exists in target
-            case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
-              {:ok, {_existing_id}} ->
-                {:ok, %{}, visited}
+          # Check if already exists in target
+          case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
+            {:ok, {_existing_id}} ->
+              {:ok, %{}, visited}
 
-              {:ok, nil} ->
-                # Copy referenced runs first (parent)
-                {visited, parent_id_new} =
-                  if parent_id do
-                    # parent_id references an execution - find its run
-                    case query_one(
-                           source_db,
-                           """
-                           SELECT r.external_id
-                           FROM executions AS e
-                           INNER JOIN steps AS s ON s.id = e.step_id
-                           INNER JOIN runs AS r ON r.id = s.run_id
-                           WHERE e.id = ?1
-                           """,
-                           {parent_id}
-                         ) do
-                      {:ok, {parent_run_ext_id}} ->
-                        {:ok, _remap, visited} =
-                          copy_run(source_db, target_db, parent_run_ext_id, visited)
+            {:ok, nil} ->
+              {visited, parent_id_new} =
+                if parent_id do
+                  resolve_parent_run(source_db, target_db, parent_id, visited)
+                else
+                  {visited, nil}
+                end
 
-                        # Re-resolve the parent execution ID in the target DB
-                        case query_one(
-                               source_db,
-                               """
-                               SELECT r.external_id, s.number, e.attempt
-                               FROM executions AS e
-                               INNER JOIN steps AS s ON s.id = e.step_id
-                               INNER JOIN runs AS r ON r.id = s.run_id
-                               WHERE e.id = ?1
-                               """,
-                               {parent_id}
-                             ) do
-                          {:ok, {p_run_ext, p_step_num, p_attempt}} ->
-                            case query_one(
-                                   target_db,
-                                   """
-                                   SELECT e.id
-                                   FROM executions AS e
-                                   INNER JOIN steps AS s ON s.id = e.step_id
-                                   INNER JOIN runs AS r ON r.id = s.run_id
-                                   WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
-                                   """,
-                                   {p_run_ext, p_step_num, p_attempt}
-                                 ) do
-                              {:ok, {new_parent_id}} -> {visited, new_parent_id}
-                              {:ok, nil} -> {visited, nil}
-                            end
+              # Insert the run
+              {:ok, new_run_id} =
+                insert_one(target_db, :runs, %{
+                  external_id: ext_id,
+                  parent_id: parent_id_new,
+                  idempotency_key: idempotency_key,
+                  created_at: created_at,
+                  created_by: ensure_principal(source_db, target_db, created_by)
+                })
 
-                          {:ok, nil} ->
-                            {visited, nil}
-                        end
+              # Copy steps and executions interleaved (ordered by step number).
+              # Each step's parent_id references an execution from an earlier step,
+              # so by processing in order and inserting executions after each step,
+              # the parent execution is always available.
+              {:ok, steps} =
+                query(
+                  source_db,
+                  """
+                  SELECT
+                    id, number, run_id, parent_id, module, target, type, priority,
+                    wait_for, cache_config_id, cache_key, defer_key, memo_key,
+                    retry_limit, retry_delay_min, retry_delay_max, recurrent, delay,
+                    requires_tag_set_id, created_at
+                  FROM steps
+                  WHERE run_id = ?1
+                  ORDER BY number
+                  """,
+                  {old_run_id}
+                )
 
-                      {:ok, nil} ->
-                        {visited, nil}
-                    end
-                  else
-                    {visited, nil}
-                  end
+              {step_ids, execution_ids} =
+                Enum.reduce(steps, {%{}, %{}}, fn {old_step_id, number, _run_id, step_parent_id,
+                                                   module, target, type, priority, wait_for,
+                                                   cache_config_id, cache_key, defer_key,
+                                                   memo_key, retry_limit, retry_delay_min,
+                                                   retry_delay_max, recurrent, delay,
+                                                   requires_tag_set_id, step_created_at},
+                                                  {step_acc, exec_acc} ->
+                  # Resolve parent_id: the initial step has NULL, others reference
+                  # an execution that was inserted with an earlier step.
+                  new_parent_id =
+                    if step_parent_id, do: Map.fetch!(exec_acc, step_parent_id)
 
-                # Insert the run
-                {:ok, new_run_id} =
-                  insert_one(target_db, :runs, %{
-                    external_id: ext_id,
-                    parent_id: parent_id_new,
-                    idempotency_key: idempotency_key,
-                    created_at: created_at,
-                    created_by: remap_principal_id(source_db, target_db, created_by)
-                  })
+                  {:ok, new_step_id} =
+                    insert_one(target_db, :steps, %{
+                      number: number,
+                      run_id: new_run_id,
+                      parent_id: new_parent_id,
+                      module: module,
+                      target: target,
+                      type: type,
+                      priority: priority,
+                      wait_for: wait_for,
+                      cache_config_id: ensure_cache_config(source_db, target_db, cache_config_id),
+                      cache_key: if(cache_key, do: {:blob, cache_key}),
+                      defer_key: if(defer_key, do: {:blob, defer_key}),
+                      memo_key: if(memo_key, do: {:blob, memo_key}),
+                      retry_limit: retry_limit,
+                      retry_delay_min: retry_delay_min,
+                      retry_delay_max: retry_delay_max,
+                      recurrent: recurrent,
+                      delay: delay,
+                      requires_tag_set_id:
+                        ensure_tag_set(source_db, target_db, requires_tag_set_id),
+                      created_at: step_created_at
+                    })
 
-                # Copy all steps and their data
-                {:ok, steps} =
-                  query(
-                    source_db,
-                    """
-                    SELECT
-                      id, number, run_id, parent_id, module, target, type, priority,
-                      wait_for, cache_config_id, cache_key, defer_key, memo_key,
-                      retry_limit, retry_delay_min, retry_delay_max, recurrent, delay,
-                      requires_tag_set_id, created_at
-                    FROM steps
-                    WHERE run_id = ?1
-                    """,
-                    {old_run_id}
-                  )
-
-                step_ids =
-                  Enum.reduce(steps, %{}, fn {old_step_id, number, _run_id, step_parent_id,
-                                              module, target, type, priority, wait_for,
-                                              cache_config_id, cache_key, defer_key, memo_key,
-                                              retry_limit, retry_delay_min, retry_delay_max,
-                                              recurrent, delay, requires_tag_set_id,
-                                              step_created_at},
-                                             acc ->
-                    # step parent_id references an execution - will be resolved after executions are copied.
-                    # Use 0 as a sentinel for non-initial steps to avoid violating
-                    # the UNIQUE partial index on (run_id) WHERE parent_id IS NULL.
-                    {:ok, new_step_id} =
-                      insert_one(target_db, :steps, %{
-                        number: number,
-                        run_id: new_run_id,
-                        parent_id: if(step_parent_id, do: 0),
-                        module: module,
-                        target: target,
-                        type: type,
-                        priority: priority,
-                        wait_for: wait_for,
-                        cache_config_id:
-                          remap_cache_config_id(source_db, target_db, cache_config_id),
-                        cache_key: if(cache_key, do: {:blob, cache_key}),
-                        defer_key: if(defer_key, do: {:blob, defer_key}),
-                        memo_key: if(memo_key, do: {:blob, memo_key}),
-                        retry_limit: retry_limit,
-                        retry_delay_min: retry_delay_min,
-                        retry_delay_max: retry_delay_max,
-                        recurrent: recurrent,
-                        delay: delay,
-                        requires_tag_set_id:
-                          remap_tag_set_id(source_db, target_db, requires_tag_set_id),
-                        created_at: step_created_at
-                      })
-
-                    # Copy step_arguments
-                    {:ok, args} =
-                      query(
-                        source_db,
-                        "SELECT step_id, position, value_id FROM step_arguments WHERE step_id = ?1 ORDER BY position",
-                        {old_step_id}
-                      )
-
-                    Enum.each(args, fn {_old_sid, position, value_id} ->
-                      # Copy value if needed
-                      new_value_id = ensure_value(source_db, target_db, value_id)
-
-                      insert_one(target_db, :step_arguments, %{
-                        step_id: new_step_id,
-                        position: position,
-                        value_id: new_value_id
-                      })
-                    end)
-
-                    Map.put(acc, old_step_id, {new_step_id, step_parent_id})
-                  end)
-
-                # Copy executions
-                {:ok, execs} =
-                  query(
-                    source_db,
-                    """
-                    SELECT e.id, e.step_id, e.attempt, e.workspace_id,
-                      e.execute_after, e.created_at, e.created_by
-                    FROM executions AS e
-                    INNER JOIN steps AS s ON s.id = e.step_id
-                    WHERE s.run_id = ?1
-                    """,
-                    {old_run_id}
-                  )
-
-                execution_ids =
-                  Enum.reduce(execs, %{}, fn {old_exec_id, old_step_id, attempt, workspace_id,
-                                              execute_after, exec_created_at, exec_created_by},
-                                             acc ->
-                    {new_step_id, _} = Map.fetch!(step_ids, old_step_id)
-
-                    {:ok, new_exec_id} =
-                      insert_one(target_db, :executions, %{
-                        step_id: new_step_id,
-                        attempt: attempt,
-                        workspace_id: remap_workspace_id(source_db, target_db, workspace_id),
-                        execute_after: execute_after,
-                        created_at: exec_created_at,
-                        created_by: remap_principal_id(source_db, target_db, exec_created_by)
-                      })
-
-                    Map.put(acc, old_exec_id, new_exec_id)
-                  end)
-
-                # Update step parent_ids (they reference executions)
-                Enum.each(step_ids, fn {_old_step_id, {new_step_id, old_parent_exec_id}} ->
-                  if old_parent_exec_id do
-                    new_parent_exec_id = Map.get(execution_ids, old_parent_exec_id)
-
-                    if new_parent_exec_id do
-                      execute(
-                        target_db,
-                        "UPDATE steps SET parent_id = ?1 WHERE id = ?2",
-                        {new_parent_exec_id, new_step_id}
-                      )
-                    end
-                  end
-                end)
-
-                # Copy assignments
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  case query_one(
-                         source_db,
-                         "SELECT session_id, created_at FROM assignments WHERE execution_id = ?1",
-                         {old_exec_id}
-                       ) do
-                    {:ok, {session_id, assign_created_at}} ->
-                      new_session_id =
-                        remap_session_id(source_db, target_db, session_id)
-
-                      # Session may no longer exist (expired and not copied during rotation)
-                      if new_session_id do
-                        insert_one(target_db, :assignments, %{
-                          execution_id: new_exec_id,
-                          session_id: new_session_id,
-                          created_at: assign_created_at
-                        })
-                      end
-
-                    {:ok, nil} ->
-                      :ok
-                  end
-                end)
-
-                # Copy results
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  case query_one(
-                         source_db,
-                         """
-                         SELECT type, error_id, value_id, successor_id, created_at, created_by
-                         FROM results
-                         WHERE execution_id = ?1
-                         """,
-                         {old_exec_id}
-                       ) do
-                    {:ok,
-                     {type, error_id, value_id, successor_id, result_created_at,
-                      result_created_by}} ->
-                      new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
-                      new_value_id = if value_id, do: ensure_value(source_db, target_db, value_id)
-
-                      new_successor_id =
-                        remap_execution_id(
-                          source_db,
-                          target_db,
-                          successor_id,
-                          execution_ids
-                        )
-
-                      insert_one(target_db, :results, %{
-                        execution_id: new_exec_id,
-                        type: type,
-                        error_id: new_error_id,
-                        value_id: new_value_id,
-                        successor_id: new_successor_id,
-                        created_at: result_created_at,
-                        created_by: remap_principal_id(source_db, target_db, result_created_by)
-                      })
-
-                    {:ok, nil} ->
-                      :ok
-                  end
-                end)
-
-                # Copy children
-                {:ok, children} =
-                  query(
-                    source_db,
-                    """
-                    SELECT c.parent_id, c.child_id, c.group_id, c.created_at
-                    FROM children AS c
-                    INNER JOIN executions AS e ON e.id = c.parent_id
-                    INNER JOIN steps AS s ON s.id = e.step_id
-                    WHERE s.run_id = ?1
-                    """,
-                    {old_run_id}
-                  )
-
-                Enum.each(children, fn {old_parent, old_child, group_id, child_created_at} ->
-                  new_parent = Map.get(execution_ids, old_parent)
-                  new_child = Map.get(execution_ids, old_child)
-
-                  if new_parent && new_child do
-                    insert_one(
-                      target_db,
-                      :children,
-                      %{
-                        parent_id: new_parent,
-                        child_id: new_child,
-                        group_id: group_id,
-                        created_at: child_created_at
-                      },
-                      on_conflict: "DO NOTHING"
-                    )
-                  end
-                end)
-
-                # Copy groups
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  {:ok, groups} =
+                  # Copy step_arguments
+                  {:ok, args} =
                     query(
                       source_db,
-                      "SELECT group_id, name FROM groups WHERE execution_id = ?1",
-                      {old_exec_id}
+                      "SELECT position, value_id FROM step_arguments WHERE step_id = ?1 ORDER BY position",
+                      {old_step_id}
                     )
 
-                  Enum.each(groups, fn {group_id, name} ->
-                    insert_one(
-                      target_db,
-                      :groups,
-                      %{execution_id: new_exec_id, group_id: group_id, name: name},
-                      on_conflict: "DO NOTHING"
-                    )
-                  end)
-                end)
+                  Enum.each(args, fn {position, value_id} ->
+                    new_value_id = ensure_value(source_db, target_db, value_id, exec_acc)
 
-                # Copy heartbeats
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  {:ok, heartbeats} =
-                    query(
-                      source_db,
-                      "SELECT status, created_at FROM heartbeats WHERE execution_id = ?1",
-                      {old_exec_id}
-                    )
-
-                  Enum.each(heartbeats, fn {status, hb_created_at} ->
-                    insert_one(target_db, :heartbeats, %{
-                      execution_id: new_exec_id,
-                      status: status,
-                      created_at: hb_created_at
+                    insert_one(target_db, :step_arguments, %{
+                      step_id: new_step_id,
+                      position: position,
+                      value_id: new_value_id
                     })
                   end)
-                end)
 
-                # Copy result_dependencies
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  {:ok, deps} =
+                  # Copy executions for this step
+                  {:ok, execs} =
                     query(
                       source_db,
-                      "SELECT dependency_id, created_at FROM result_dependencies WHERE execution_id = ?1",
-                      {old_exec_id}
+                      """
+                      SELECT id, attempt, workspace_id, execute_after, created_at, created_by
+                      FROM executions
+                      WHERE step_id = ?1
+                      """,
+                      {old_step_id}
                     )
 
-                  Enum.each(deps, fn {old_dep_id, dep_created_at} ->
-                    new_dep_id =
+                  exec_acc =
+                    Enum.reduce(execs, exec_acc, fn {old_exec_id, attempt, workspace_id,
+                                                     execute_after, exec_created_at,
+                                                     exec_created_by},
+                                                    acc ->
+                      {:ok, new_exec_id} =
+                        insert_one(target_db, :executions, %{
+                          step_id: new_step_id,
+                          attempt: attempt,
+                          workspace_id: remap_workspace_id(source_db, target_db, workspace_id),
+                          execute_after: execute_after,
+                          created_at: exec_created_at,
+                          created_by: ensure_principal(source_db, target_db, exec_created_by)
+                        })
+
+                      Map.put(acc, old_exec_id, new_exec_id)
+                    end)
+
+                  {Map.put(step_acc, old_step_id, new_step_id), exec_acc}
+                end)
+
+              # Copy assignments
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                case query_one(
+                       source_db,
+                       "SELECT session_id, created_at FROM assignments WHERE execution_id = ?1",
+                       {old_exec_id}
+                     ) do
+                  {:ok, {session_id, assign_created_at}} ->
+                    new_session_id =
+                      remap_session_id(source_db, target_db, session_id)
+
+                    # Session may no longer exist (expired and not copied during rotation)
+                    if new_session_id do
+                      insert_one(target_db, :assignments, %{
+                        execution_id: new_exec_id,
+                        session_id: new_session_id,
+                        created_at: assign_created_at
+                      })
+                    end
+
+                  {:ok, nil} ->
+                    :ok
+                end
+              end)
+
+              # Copy results
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                case query_one(
+                       source_db,
+                       """
+                       SELECT type, error_id, value_id, successor_id, created_at, created_by
+                       FROM results
+                       WHERE execution_id = ?1
+                       """,
+                       {old_exec_id}
+                     ) do
+                  {:ok,
+                   {type, error_id, value_id, successor_id, result_created_at, result_created_by}} ->
+                    new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
+                    new_value_id = if value_id, do: ensure_value(source_db, target_db, value_id, execution_ids)
+
+                    new_successor_id =
                       remap_execution_id(
                         source_db,
                         target_db,
-                        old_dep_id,
+                        successor_id,
                         execution_ids
                       )
 
-                    if new_dep_id do
-                      insert_one(
-                        target_db,
-                        :result_dependencies,
-                        %{
-                          execution_id: new_exec_id,
-                          dependency_id: new_dep_id,
-                          created_at: dep_created_at
-                        },
-                        on_conflict: "DO NOTHING"
-                      )
-                    end
-                  end)
-                end)
+                    insert_one(target_db, :results, %{
+                      execution_id: new_exec_id,
+                      type: type,
+                      error_id: new_error_id,
+                      value_id: new_value_id,
+                      successor_id: new_successor_id,
+                      created_at: result_created_at,
+                      created_by: ensure_principal(source_db, target_db, result_created_by)
+                    })
 
-                # Copy execution_assets
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  {:ok, assets} =
-                    query(
+                  {:ok, nil} ->
+                    :ok
+                end
+              end)
+
+              # Copy children
+              {:ok, children} =
+                query(
+                  source_db,
+                  """
+                  SELECT c.parent_id, c.child_id, c.group_id, c.created_at
+                  FROM children AS c
+                  INNER JOIN executions AS e ON e.id = c.parent_id
+                  INNER JOIN steps AS s ON s.id = e.step_id
+                  WHERE s.run_id = ?1
+                  """,
+                  {old_run_id}
+                )
+
+              Enum.each(children, fn {old_parent, old_child, group_id, child_created_at} ->
+                new_parent = Map.get(execution_ids, old_parent)
+                new_child = Map.get(execution_ids, old_child)
+
+                if new_parent && new_child do
+                  insert_one(
+                    target_db,
+                    :children,
+                    %{
+                      parent_id: new_parent,
+                      child_id: new_child,
+                      group_id: group_id,
+                      created_at: child_created_at
+                    },
+                    on_conflict: "DO NOTHING"
+                  )
+                end
+              end)
+
+              # Copy groups
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, groups} =
+                  query(
+                    source_db,
+                    "SELECT group_id, name FROM groups WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
+
+                Enum.each(groups, fn {group_id, name} ->
+                  insert_one(
+                    target_db,
+                    :groups,
+                    %{execution_id: new_exec_id, group_id: group_id, name: name},
+                    on_conflict: "DO NOTHING"
+                  )
+                end)
+              end)
+
+              # Copy heartbeats
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, heartbeats} =
+                  query(
+                    source_db,
+                    "SELECT status, created_at FROM heartbeats WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
+
+                Enum.each(heartbeats, fn {status, hb_created_at} ->
+                  insert_one(target_db, :heartbeats, %{
+                    execution_id: new_exec_id,
+                    status: status,
+                    created_at: hb_created_at
+                  })
+                end)
+              end)
+
+              # Copy result_dependencies
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, deps} =
+                  query(
+                    source_db,
+                    "SELECT dependency_id, created_at FROM result_dependencies WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
+
+                Enum.each(deps, fn {old_dep_id, dep_created_at} ->
+                  new_dep_id =
+                    remap_execution_id(
                       source_db,
-                      "SELECT asset_id, created_at FROM execution_assets WHERE execution_id = ?1",
-                      {old_exec_id}
+                      target_db,
+                      old_dep_id,
+                      execution_ids
                     )
 
-                  Enum.each(assets, fn {asset_id, asset_created_at} ->
-                    new_asset_id = ensure_asset(source_db, target_db, asset_id)
-
+                  if new_dep_id do
                     insert_one(
                       target_db,
-                      :execution_assets,
+                      :result_dependencies,
                       %{
                         execution_id: new_exec_id,
-                        asset_id: new_asset_id,
-                        created_at: asset_created_at
+                        dependency_id: new_dep_id,
+                        created_at: dep_created_at
                       },
                       on_conflict: "DO NOTHING"
                     )
-                  end)
+                  end
                 end)
+              end)
 
-                # Copy asset_dependencies
-                Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                  {:ok, asset_deps} =
-                    query(
-                      source_db,
-                      "SELECT asset_id, created_at FROM asset_dependencies WHERE execution_id = ?1",
-                      {old_exec_id}
-                    )
+              # Copy execution_assets
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, assets} =
+                  query(
+                    source_db,
+                    "SELECT asset_id, created_at FROM execution_assets WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
 
-                  Enum.each(asset_deps, fn {asset_id, ad_created_at} ->
-                    new_asset_id = ensure_asset(source_db, target_db, asset_id)
+                Enum.each(assets, fn {asset_id, asset_created_at} ->
+                  new_asset_id = ensure_asset(source_db, target_db, asset_id)
 
-                    insert_one(
-                      target_db,
-                      :asset_dependencies,
-                      %{
-                        execution_id: new_exec_id,
-                        asset_id: new_asset_id,
-                        created_at: ad_created_at
-                      },
-                      on_conflict: "DO NOTHING"
-                    )
-                  end)
+                  insert_one(
+                    target_db,
+                    :execution_assets,
+                    %{
+                      execution_id: new_exec_id,
+                      asset_id: new_asset_id,
+                      created_at: asset_created_at
+                    },
+                    on_conflict: "DO NOTHING"
+                  )
                 end)
+              end)
 
-                {:ok,
-                 %{
-                   run_ids: %{old_run_id => new_run_id},
-                   execution_ids: execution_ids,
-                   step_ids: Map.new(step_ids, fn {old, {new, _}} -> {old, new} end)
-                 }, visited}
-            end
-          end)
+              # Copy asset_dependencies
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, asset_deps} =
+                  query(
+                    source_db,
+                    "SELECT asset_id, created_at FROM asset_dependencies WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
+
+                Enum.each(asset_deps, fn {asset_id, ad_created_at} ->
+                  new_asset_id = ensure_asset(source_db, target_db, asset_id)
+
+                  insert_one(
+                    target_db,
+                    :asset_dependencies,
+                    %{
+                      execution_id: new_exec_id,
+                      asset_id: new_asset_id,
+                      created_at: ad_created_at
+                    },
+                    on_conflict: "DO NOTHING"
+                  )
+                end)
+              end)
+
+              {:ok,
+               %{
+                 run_ids: %{old_run_id => new_run_id},
+                 execution_ids: execution_ids,
+                 step_ids: step_ids
+               }, visited}
+          end
       end
+    end
+  end
+
+  defp resolve_parent_run(source_db, target_db, parent_id, visited) do
+    # parent_id references an execution - find its run
+    case query_one(
+           source_db,
+           """
+           SELECT r.external_id
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           INNER JOIN runs AS r ON r.id = s.run_id
+           WHERE e.id = ?1
+           """,
+           {parent_id}
+         ) do
+      {:ok, {parent_run_ext_id}} ->
+        {:ok, _remap, visited} =
+          do_copy_run(source_db, target_db, parent_run_ext_id, visited)
+
+        # Re-resolve the parent execution ID in the target DB
+        case query_one(
+               source_db,
+               """
+               SELECT r.external_id, s.number, e.attempt
+               FROM executions AS e
+               INNER JOIN steps AS s ON s.id = e.step_id
+               INNER JOIN runs AS r ON r.id = s.run_id
+               WHERE e.id = ?1
+               """,
+               {parent_id}
+             ) do
+          {:ok, {p_run_ext, p_step_num, p_attempt}} ->
+            case query_one(
+                   target_db,
+                   """
+                   SELECT e.id
+                   FROM executions AS e
+                   INNER JOIN steps AS s ON s.id = e.step_id
+                   INNER JOIN runs AS r ON r.id = s.run_id
+                   WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+                   """,
+                   {p_run_ext, p_step_num, p_attempt}
+                 ) do
+              {:ok, {new_parent_id}} -> {visited, new_parent_id}
+              {:ok, nil} -> {visited, nil}
+            end
+
+          {:ok, nil} ->
+            {visited, nil}
+        end
+
+      {:ok, nil} ->
+        {visited, nil}
     end
   end
 
   # Private helpers
 
-  defp execute(db, sql, args) do
-    with_prepare(db, sql, fn statement ->
-      :ok = Exqlite.Sqlite3.bind(db, statement, Tuple.to_list(args))
-      :done = Exqlite.Sqlite3.step(db, statement)
-      :ok
+  defp copy_workspaces(old_db, new_db) do
+    {:ok, rows} = query(old_db, "SELECT id, external_id FROM workspaces")
+
+    Enum.reduce(rows, %{}, fn {old_id, external_id}, acc ->
+      {:ok, new_id} = insert_one(new_db, :workspaces, %{external_id: external_id})
+      Map.put(acc, old_id, new_id)
     end)
   end
 
-  defp copy_table_with_remap(old_db, new_db, table) do
-    {:ok, rows} = query(old_db, "SELECT * FROM #{table}")
-
-    if Enum.empty?(rows) do
-      %{}
-    else
-      {:ok, columns} =
-        with_prepare(old_db, "SELECT * FROM #{table} LIMIT 0", fn statement ->
-          Exqlite.Sqlite3.columns(old_db, statement)
-        end)
-
-      col_atoms = Enum.map(columns, &String.to_atom/1)
-
-      Enum.reduce(rows, %{}, fn row, acc ->
-        values = Enum.zip(col_atoms, Tuple.to_list(row)) |> Map.new()
-        old_id = values[:id]
-        values = Map.delete(values, :id)
-
-        case insert_one(new_db, String.to_atom(table), values) do
-          {:ok, new_id} ->
-            Map.put(acc, old_id, new_id)
-        end
-      end)
-    end
-  end
-
-  defp copy_hash_table(old_db, new_db, table) do
-    {:ok, rows} = query(old_db, "SELECT * FROM #{table}")
-
-    if Enum.empty?(rows) do
-      %{}
-    else
-      {:ok, columns} =
-        with_prepare(old_db, "SELECT * FROM #{table} LIMIT 0", fn statement ->
-          Exqlite.Sqlite3.columns(old_db, statement)
-        end)
-
-      col_atoms = Enum.map(columns, &String.to_atom/1)
-
-      Enum.reduce(rows, %{}, fn row, acc ->
-        values = Enum.zip(col_atoms, Tuple.to_list(row)) |> Map.new()
-        old_id = values[:id]
-        hash = values[:hash]
-
-        # Check if already exists in target by hash
-        case query_one(new_db, "SELECT id FROM #{table} WHERE hash = ?1", {{:blob, hash}}) do
-          {:ok, {existing_id}} ->
-            Map.put(acc, old_id, existing_id)
-
-          {:ok, nil} ->
-            values = values |> Map.delete(:id) |> Map.put(:hash, {:blob, hash})
-            {:ok, new_id} = insert_one(new_db, String.to_atom(table), values)
-            Map.put(acc, old_id, new_id)
-        end
-      end)
-    end
-  end
-
-  defp copy_dependent_rows(old_db, new_db, table, fk_column, id_map) do
-    Enum.each(id_map, fn {old_id, new_id} ->
-      {:ok, rows} = query(old_db, "SELECT * FROM #{table} WHERE #{fk_column} = ?1", {old_id})
-
-      unless Enum.empty?(rows) do
-        {:ok, columns} =
-          with_prepare(old_db, "SELECT * FROM #{table} LIMIT 0", fn statement ->
-            Exqlite.Sqlite3.columns(old_db, statement)
-          end)
-
-        col_atoms = Enum.map(columns, &String.to_atom/1)
-
-        Enum.each(rows, fn row ->
-          values =
-            Enum.zip(col_atoms, Tuple.to_list(row))
-            |> Map.new()
-            |> Map.delete(:id)
-            |> Map.put(String.to_atom(fk_column), new_id)
-
-          insert_one(new_db, String.to_atom(table), values, on_conflict: "DO NOTHING")
-        end)
-      end
-    end)
-  end
-
-  defp copy_latest_per_workspace(old_db, new_db, table, workspace_ids) do
+  defp copy_latest_workspace_names(old_db, new_db, workspace_ids) do
     Enum.each(workspace_ids, fn {old_ws_id, new_ws_id} ->
       case query_one(
              old_db,
-             "SELECT * FROM #{table} WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT 1",
+             """
+             SELECT name, created_at, created_by
+             FROM workspace_names
+             WHERE workspace_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1
+             """,
              {old_ws_id}
            ) do
         {:ok, nil} ->
           :ok
 
-        {:ok, row} ->
-          {:ok, columns} =
-            with_prepare(old_db, "SELECT * FROM #{table} LIMIT 0", fn statement ->
-              Exqlite.Sqlite3.columns(old_db, statement)
-            end)
+        {:ok, {name, created_at, created_by}} ->
+          insert_one(new_db, :workspace_names, %{
+            workspace_id: new_ws_id,
+            name: name,
+            created_at: created_at,
+            created_by: ensure_principal(old_db, new_db, created_by)
+          })
+      end
+    end)
+  end
 
-          col_atoms = Enum.map(columns, &String.to_atom/1)
+  defp copy_latest_workspace_states(old_db, new_db, workspace_ids) do
+    Enum.each(workspace_ids, fn {old_ws_id, new_ws_id} ->
+      case query_one(
+             old_db,
+             """
+             SELECT state, created_at, created_by
+             FROM workspace_states
+             WHERE workspace_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1
+             """,
+             {old_ws_id}
+           ) do
+        {:ok, nil} ->
+          :ok
 
-          values =
-            Enum.zip(col_atoms, Tuple.to_list(row))
-            |> Map.new()
-            |> Map.delete(:id)
-            |> Map.put(:workspace_id, new_ws_id)
-
-          insert_one(new_db, String.to_atom(table), values)
+        {:ok, {state, created_at, created_by}} ->
+          insert_one(new_db, :workspace_states, %{
+            workspace_id: new_ws_id,
+            state: state,
+            created_at: created_at,
+            created_by: ensure_principal(old_db, new_db, created_by)
+          })
       end
     end)
   end
@@ -737,46 +588,13 @@ defmodule Coflux.Orchestration.EpochCopy do
             workspace_id: new_ws_id,
             base_workspace_id: new_base_ws_id,
             created_at: created_at,
-            created_by: created_by
+            created_by: ensure_principal(old_db, new_db, created_by)
           })
       end
     end)
   end
 
-  defp copy_tokens(old_db, new_db, principal_ids) do
-    {:ok, rows} =
-      query(
-        old_db,
-        """
-        SELECT id, external_id, token_hash, name, workspaces,
-          created_by, created_at, expires_at, revoked_at
-        FROM tokens
-        WHERE revoked_at IS NULL
-        """
-      )
-
-    Enum.reduce(rows, %{}, fn {old_id, ext_id, token_hash, name, workspaces, created_by,
-                               created_at, expires_at, revoked_at},
-                              acc ->
-      new_created_by = if created_by, do: Map.get(principal_ids, created_by)
-
-      {:ok, new_id} =
-        insert_one(new_db, :tokens, %{
-          external_id: ext_id,
-          token_hash: token_hash,
-          name: name,
-          workspaces: workspaces,
-          created_by: new_created_by,
-          created_at: created_at,
-          expires_at: expires_at,
-          revoked_at: revoked_at
-        })
-
-      Map.put(acc, old_id, new_id)
-    end)
-  end
-
-  defp copy_pools(old_db, new_db, workspace_ids, pool_definition_ids) do
+  defp copy_pools(old_db, new_db, workspace_ids) do
     {:ok, rows} =
       query(
         old_db,
@@ -784,13 +602,14 @@ defmodule Coflux.Orchestration.EpochCopy do
         SELECT id, external_id, workspace_id, name,
           pool_definition_id, created_at, created_by
         FROM pools
+        WHERE pool_definition_id IS NOT NULL
         """
       )
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, name, old_pd_id, created_at, created_by},
                               acc ->
       new_ws_id = Map.get(workspace_ids, old_ws_id, old_ws_id)
-      new_pd_id = if old_pd_id, do: Map.get(pool_definition_ids, old_pd_id, old_pd_id)
+      new_pd_id = ensure_pool_definition(old_db, new_db, old_pd_id)
 
       {:ok, new_id} =
         insert_one(new_db, :pools, %{
@@ -799,7 +618,7 @@ defmodule Coflux.Orchestration.EpochCopy do
           name: name,
           pool_definition_id: new_pd_id,
           created_at: created_at,
-          created_by: created_by
+          created_by: ensure_principal(old_db, new_db, created_by)
         })
 
       Map.put(acc, old_id, new_id)
@@ -860,7 +679,7 @@ defmodule Coflux.Orchestration.EpochCopy do
             worker_id: new_id,
             state: state,
             created_at: created_at,
-            created_by: created_by
+            created_by: ensure_principal(old_db, new_db, created_by)
           })
 
         {:ok, nil} ->
@@ -869,7 +688,7 @@ defmodule Coflux.Orchestration.EpochCopy do
     end)
   end
 
-  defp copy_active_sessions(old_db, new_db, workspace_ids, worker_ids, tag_set_ids, principal_ids) do
+  defp copy_active_sessions(old_db, new_db, workspace_ids, worker_ids) do
     # Only copy sessions that haven't expired
     {:ok, rows} =
       query(old_db, """
@@ -887,8 +706,8 @@ defmodule Coflux.Orchestration.EpochCopy do
                               acc ->
       new_ws_id = Map.get(workspace_ids, old_ws_id, old_ws_id)
       new_worker_id = if old_worker_id, do: Map.get(worker_ids, old_worker_id)
-      new_tag_set_id = if old_tag_set_id, do: Map.get(tag_set_ids, old_tag_set_id, old_tag_set_id)
-      new_created_by = if created_by, do: Map.get(principal_ids, created_by)
+      new_tag_set_id = ensure_tag_set(old_db, new_db, old_tag_set_id)
+      new_created_by = ensure_principal(old_db, new_db, created_by)
 
       {:ok, new_id} =
         insert_one(new_db, :sessions, %{
@@ -924,7 +743,7 @@ defmodule Coflux.Orchestration.EpochCopy do
     end)
   end
 
-  defp copy_latest_workspace_manifests(old_db, new_db, workspace_ids, manifest_ids, principal_ids) do
+  defp copy_latest_workspace_manifests(old_db, new_db, workspace_ids) do
     Enum.each(workspace_ids, fn {old_ws_id, new_ws_id} ->
       # Get latest manifest per module for this workspace
       {:ok, rows} =
@@ -945,78 +764,21 @@ defmodule Coflux.Orchestration.EpochCopy do
         )
 
       Enum.each(rows, fn {module, old_manifest_id, created_at, created_by} ->
-        new_manifest_id =
-          if old_manifest_id, do: Map.get(manifest_ids, old_manifest_id, old_manifest_id)
-
-        new_created_by = if created_by, do: Map.get(principal_ids, created_by)
+        new_manifest_id = ensure_manifest(old_db, new_db, old_manifest_id)
 
         insert_one(new_db, :workspace_manifests, %{
           workspace_id: new_ws_id,
           module: module,
           manifest_id: new_manifest_id,
           created_at: created_at,
-          created_by: new_created_by
+          created_by: ensure_principal(old_db, new_db, created_by)
         })
       end)
     end)
   end
 
-  defp copy_workflows(
-         old_db,
-         new_db,
-         manifest_ids,
-         parameter_set_ids,
-         instruction_ids,
-         cache_config_ids,
-         tag_set_ids
-       ) do
-    Enum.each(manifest_ids, fn {old_manifest_id, new_manifest_id} ->
-      {:ok, rows} =
-        query(
-          old_db,
-          """
-          SELECT name, parameter_set_id, instruction_id, wait_for,
-            cache_config_id, defer_params, delay, retry_limit,
-            retry_delay_min, retry_delay_max, recurrent, requires_tag_set_id
-          FROM workflows
-          WHERE manifest_id = ?1
-          """,
-          {old_manifest_id}
-        )
-
-      Enum.each(rows, fn {name, old_ps_id, old_instr_id, wait_for, old_cc_id, defer_params, delay,
-                          retry_limit, retry_delay_min, retry_delay_max, recurrent, old_rts_id} ->
-        new_ps_id = Map.get(parameter_set_ids, old_ps_id, old_ps_id)
-        new_instr_id = if old_instr_id, do: Map.get(instruction_ids, old_instr_id, old_instr_id)
-        new_cc_id = if old_cc_id, do: Map.get(cache_config_ids, old_cc_id, old_cc_id)
-        new_rts_id = if old_rts_id, do: Map.get(tag_set_ids, old_rts_id, old_rts_id)
-
-        insert_one(
-          new_db,
-          :workflows,
-          %{
-            manifest_id: new_manifest_id,
-            name: name,
-            parameter_set_id: new_ps_id,
-            instruction_id: new_instr_id,
-            wait_for: wait_for,
-            cache_config_id: new_cc_id,
-            defer_params: defer_params,
-            delay: delay,
-            retry_limit: retry_limit,
-            retry_delay_min: retry_delay_min,
-            retry_delay_max: retry_delay_max,
-            recurrent: recurrent,
-            requires_tag_set_id: new_rts_id
-          },
-          on_conflict: "DO NOTHING"
-        )
-      end)
-    end)
-  end
-
   # Ensure a value exists in target_db, copying from source_db if needed
-  defp ensure_value(source_db, target_db, value_id) do
+  defp ensure_value(source_db, target_db, value_id, execution_ids) do
     {:ok, {hash, content, blob_id}} =
       query_one!(
         source_db,
@@ -1046,12 +808,14 @@ defmodule Coflux.Orchestration.EpochCopy do
             {value_id}
           )
 
-        Enum.each(refs, fn {position, fragment_id, _execution_id, asset_id} ->
+        Enum.each(refs, fn {position, fragment_id, execution_id, asset_id} ->
           new_fragment_id = if fragment_id, do: ensure_fragment(source_db, target_db, fragment_id)
           new_asset_id = if asset_id, do: ensure_asset(source_db, target_db, asset_id)
-          # Note: execution_id references are cross-run and may not exist in target yet.
-          # For now, we skip execution references in value copies.
-          # They'll be available after the full run is copied.
+
+          new_execution_id =
+            if execution_id,
+              do: remap_execution_id(source_db, target_db, execution_id, execution_ids)
+
           insert_one(
             target_db,
             :value_references,
@@ -1059,7 +823,7 @@ defmodule Coflux.Orchestration.EpochCopy do
               value_id: new_id,
               position: position,
               fragment_id: new_fragment_id,
-              execution_id: nil,
+              execution_id: new_execution_id,
               asset_id: new_asset_id
             },
             on_conflict: "DO NOTHING"
@@ -1098,11 +862,12 @@ defmodule Coflux.Orchestration.EpochCopy do
 
       {:ok, nil} ->
         new_blob_id = ensure_blob(source_db, target_db, blob_id)
+        new_format_id = ensure_fragment_format(source_db, target_db, format_id)
 
         {:ok, new_id} =
           insert_one(target_db, :fragments, %{
             hash: {:blob, hash},
-            format_id: format_id,
+            format_id: new_format_id,
             blob_id: new_blob_id
           })
 
@@ -1236,26 +1001,314 @@ defmodule Coflux.Orchestration.EpochCopy do
     end
   end
 
-  defp remap_principal_id(_source_db, _target_db, nil), do: nil
+  defp ensure_principal(_source_db, _target_db, nil), do: nil
 
-  defp remap_principal_id(source_db, target_db, old_id) do
-    case query_one(
+  defp ensure_principal(source_db, target_db, old_id) do
+    case query_one!(
            source_db,
-           "SELECT user_external_id FROM principals WHERE id = ?1",
+           "SELECT user_external_id, token_id FROM principals WHERE id = ?1",
            {old_id}
          ) do
-      {:ok, {ext_id}} ->
+      {:ok, {user_ext_id, nil}} ->
+        # User principal — find or create by user_external_id
         case query_one(
                target_db,
                "SELECT id FROM principals WHERE user_external_id = ?1",
-               {ext_id}
+               {user_ext_id}
              ) do
-          {:ok, {new_id}} -> new_id
-          {:ok, nil} -> nil
+          {:ok, {existing_id}} ->
+            existing_id
+
+          {:ok, nil} ->
+            {:ok, new_id} =
+              insert_one(target_db, :principals, %{user_external_id: user_ext_id})
+
+            new_id
         end
 
+      {:ok, {nil, token_id}} ->
+        # Token principal — ensure the token first, then find or create principal
+        new_token_id = ensure_token(source_db, target_db, token_id)
+
+        case query_one(target_db, "SELECT id FROM principals WHERE token_id = ?1", {new_token_id}) do
+          {:ok, {existing_id}} ->
+            existing_id
+
+          {:ok, nil} ->
+            {:ok, new_id} =
+              insert_one(target_db, :principals, %{token_id: new_token_id})
+
+            new_id
+        end
+    end
+  end
+
+  defp ensure_token(source_db, target_db, old_id) do
+    {:ok, {ext_id, token_hash, name, workspaces, created_by, created_at, expires_at}} =
+      query_one!(
+        source_db,
+        """
+        SELECT external_id, token_hash, name, workspaces,
+          created_by, created_at, expires_at
+        FROM tokens
+        WHERE id = ?1
+        """,
+        {old_id}
+      )
+
+    case query_one(target_db, "SELECT id FROM tokens WHERE external_id = ?1", {ext_id}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
       {:ok, nil} ->
-        nil
+        new_created_by = ensure_principal(source_db, target_db, created_by)
+
+        {:ok, new_id} =
+          insert_one(target_db, :tokens, %{
+            external_id: ext_id,
+            token_hash: token_hash,
+            name: name,
+            workspaces: workspaces,
+            created_by: new_created_by,
+            created_at: created_at,
+            expires_at: expires_at
+          })
+
+        new_id
+    end
+  end
+
+  defp ensure_fragment_format(source_db, target_db, format_id) do
+    {:ok, {name}} =
+      query_one!(source_db, "SELECT name FROM fragment_formats WHERE id = ?1", {format_id})
+
+    case query_one(target_db, "SELECT id FROM fragment_formats WHERE name = ?1", {name}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} = insert_one(target_db, :fragment_formats, %{name: name})
+        new_id
+    end
+  end
+
+  defp ensure_tag_set(_source_db, _target_db, nil), do: nil
+
+  defp ensure_tag_set(source_db, target_db, old_id) do
+    {:ok, {hash}} =
+      query_one!(source_db, "SELECT hash FROM tag_sets WHERE id = ?1", {old_id})
+
+    case query_one(target_db, "SELECT id FROM tag_sets WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} = insert_one(target_db, :tag_sets, %{hash: {:blob, hash}})
+
+        {:ok, items} =
+          query(source_db, "SELECT key, value FROM tag_set_items WHERE tag_set_id = ?1", {old_id})
+
+        Enum.each(items, fn {key, value} ->
+          insert_one(target_db, :tag_set_items, %{
+            tag_set_id: new_id,
+            key: key,
+            value: value
+          })
+        end)
+
+        new_id
+    end
+  end
+
+  defp ensure_parameter_set(source_db, target_db, old_id) do
+    {:ok, {hash}} =
+      query_one!(source_db, "SELECT hash FROM parameter_sets WHERE id = ?1", {old_id})
+
+    case query_one(target_db, "SELECT id FROM parameter_sets WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} = insert_one(target_db, :parameter_sets, %{hash: {:blob, hash}})
+
+        {:ok, items} =
+          query(
+            source_db,
+            "SELECT position, name, default_, annotation FROM parameter_set_items WHERE parameter_set_id = ?1 ORDER BY position",
+            {old_id}
+          )
+
+        Enum.each(items, fn {position, name, default_, annotation} ->
+          insert_one(target_db, :parameter_set_items, %{
+            parameter_set_id: new_id,
+            position: position,
+            name: name,
+            default_: default_,
+            annotation: annotation
+          })
+        end)
+
+        new_id
+    end
+  end
+
+  defp ensure_instruction(_source_db, _target_db, nil), do: nil
+
+  defp ensure_instruction(source_db, target_db, old_id) do
+    {:ok, {hash, content}} =
+      query_one!(source_db, "SELECT hash, content FROM instructions WHERE id = ?1", {old_id})
+
+    case query_one(target_db, "SELECT id FROM instructions WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :instructions, %{hash: {:blob, hash}, content: content})
+
+        new_id
+    end
+  end
+
+  defp ensure_cache_config(_source_db, _target_db, nil), do: nil
+
+  defp ensure_cache_config(source_db, target_db, old_id) do
+    {:ok, {hash, params, max_age, namespace, version}} =
+      query_one!(
+        source_db,
+        "SELECT hash, params, max_age, namespace, version FROM cache_configs WHERE id = ?1",
+        {old_id}
+      )
+
+    case query_one(target_db, "SELECT id FROM cache_configs WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :cache_configs, %{
+            hash: {:blob, hash},
+            params: params,
+            max_age: max_age,
+            namespace: namespace,
+            version: version
+          })
+
+        new_id
+    end
+  end
+
+  defp ensure_manifest(_source_db, _target_db, nil), do: nil
+
+  defp ensure_manifest(source_db, target_db, old_id) do
+    {:ok, {hash}} =
+      query_one!(source_db, "SELECT hash FROM manifests WHERE id = ?1", {old_id})
+
+    case query_one(target_db, "SELECT id FROM manifests WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} = insert_one(target_db, :manifests, %{hash: {:blob, hash}})
+
+        # Copy workflows for this manifest
+        {:ok, workflows} =
+          query(
+            source_db,
+            """
+            SELECT name, parameter_set_id, instruction_id, wait_for,
+              cache_config_id, defer_params, delay, retry_limit,
+              retry_delay_min, retry_delay_max, recurrent, requires_tag_set_id
+            FROM workflows
+            WHERE manifest_id = ?1
+            """,
+            {old_id}
+          )
+
+        Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay,
+                                 retry_limit, retry_delay_min, retry_delay_max, recurrent,
+                                 rts_id} ->
+          insert_one(target_db, :workflows, %{
+            manifest_id: new_id,
+            name: name,
+            parameter_set_id: ensure_parameter_set(source_db, target_db, ps_id),
+            instruction_id: ensure_instruction(source_db, target_db, instr_id),
+            wait_for: wait_for,
+            cache_config_id: ensure_cache_config(source_db, target_db, cc_id),
+            defer_params: defer_params,
+            delay: delay,
+            retry_limit: retry_limit,
+            retry_delay_min: retry_delay_min,
+            retry_delay_max: retry_delay_max,
+            recurrent: recurrent,
+            requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id)
+          })
+        end)
+
+        new_id
+    end
+  end
+
+  defp ensure_launcher(_source_db, _target_db, nil), do: nil
+
+  defp ensure_launcher(source_db, target_db, old_id) do
+    {:ok, {hash, type, config}} =
+      query_one!(source_db, "SELECT hash, type, config FROM launchers WHERE id = ?1", {old_id})
+
+    case query_one(target_db, "SELECT id FROM launchers WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :launchers, %{hash: {:blob, hash}, type: type, config: config})
+
+        new_id
+    end
+  end
+
+  defp ensure_pool_definition(_source_db, _target_db, nil), do: nil
+
+  defp ensure_pool_definition(source_db, target_db, old_id) do
+    {:ok, {hash, launcher_id, provides_tag_set_id}} =
+      query_one!(
+        source_db,
+        "SELECT hash, launcher_id, provides_tag_set_id FROM pool_definitions WHERE id = ?1",
+        {old_id}
+      )
+
+    case query_one(
+           target_db,
+           "SELECT id FROM pool_definitions WHERE hash = ?1",
+           {{:blob, hash}}
+         ) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :pool_definitions, %{
+            hash: {:blob, hash},
+            launcher_id: ensure_launcher(source_db, target_db, launcher_id),
+            provides_tag_set_id: ensure_tag_set(source_db, target_db, provides_tag_set_id)
+          })
+
+        # Copy pool_definition_modules
+        {:ok, modules} =
+          query(
+            source_db,
+            "SELECT pattern FROM pool_definition_modules WHERE pool_definition_id = ?1",
+            {old_id}
+          )
+
+        Enum.each(modules, fn {pattern} ->
+          insert_one(target_db, :pool_definition_modules, %{
+            pool_definition_id: new_id,
+            pattern: pattern
+          })
+        end)
+
+        new_id
     end
   end
 
@@ -1265,44 +1318,6 @@ defmodule Coflux.Orchestration.EpochCopy do
     case query_one(source_db, "SELECT external_id FROM sessions WHERE id = ?1", {old_id}) do
       {:ok, {ext_id}} ->
         case query_one(target_db, "SELECT id FROM sessions WHERE external_id = ?1", {ext_id}) do
-          {:ok, {new_id}} -> new_id
-          {:ok, nil} -> nil
-        end
-
-      {:ok, nil} ->
-        nil
-    end
-  end
-
-  defp remap_cache_config_id(_source_db, _target_db, nil), do: nil
-
-  defp remap_cache_config_id(source_db, target_db, old_id) do
-    case query_one(source_db, "SELECT hash FROM cache_configs WHERE id = ?1", {old_id}) do
-      {:ok, {hash}} ->
-        case query_one(
-               target_db,
-               "SELECT id FROM cache_configs WHERE hash = ?1",
-               {{:blob, hash}}
-             ) do
-          {:ok, {new_id}} -> new_id
-          {:ok, nil} -> nil
-        end
-
-      {:ok, nil} ->
-        nil
-    end
-  end
-
-  defp remap_tag_set_id(_source_db, _target_db, nil), do: nil
-
-  defp remap_tag_set_id(source_db, target_db, old_id) do
-    case query_one(source_db, "SELECT hash FROM tag_sets WHERE id = ?1", {old_id}) do
-      {:ok, {hash}} ->
-        case query_one(
-               target_db,
-               "SELECT id FROM tag_sets WHERE hash = ?1",
-               {{:blob, hash}}
-             ) do
           {:ok, {new_id}} -> new_id
           {:ok, nil} -> nil
         end

@@ -56,7 +56,7 @@ defmodule Coflux.Store.EpochIndex do
       cache_bloom: cache_bloom
     }
 
-    %{index | entries: index.entries ++ [entry]}
+    %{index | entries: [entry | index.entries]}
   end
 
   @doc """
@@ -93,7 +93,6 @@ defmodule Coflux.Store.EpochIndex do
     |> Enum.filter(fn entry ->
       entry.run_bloom != nil and Bloom.member?(entry.run_bloom, run_external_id)
     end)
-    |> Enum.reverse()
     |> Enum.map(& &1.epoch_id)
   end
 
@@ -106,7 +105,6 @@ defmodule Coflux.Store.EpochIndex do
     |> Enum.filter(fn entry ->
       entry.cache_bloom != nil and Bloom.member?(entry.cache_bloom, cache_key)
     end)
-    |> Enum.reverse()
     |> Enum.map(& &1.epoch_id)
   end
 
@@ -185,10 +183,10 @@ defmodule Coflux.Store.EpochIndex do
           cache_bloom: cache_bloom
         }
 
-        {entries ++ [entry], rest}
+        {[entry | entries], rest}
       end)
 
-    %__MODULE__{entries: entries}
+    %__MODULE__{entries: Enum.reverse(entries)}
   end
 
   defp index_path(project_id) do

@@ -1,5 +1,6 @@
 defmodule Coflux.Orchestration.Server do
   use GenServer, restart: :transient
+  require Logger
 
   alias Coflux.Store.{Epoch, EpochIndex}
   alias Coflux.MapUtils
@@ -1205,18 +1206,14 @@ defmodule Coflux.Orchestration.Server do
           session.executing
           |> MapSet.difference(reported_ext_ids)
           |> Enum.reduce(state, fn ext_id, state ->
-            case resolve_internal_execution_id(state, ext_id) do
-              {:ok, execution_id} ->
-                case Results.has_result?(state.db, execution_id) do
-                  {:ok, false} ->
-                    {:ok, state} = process_result(state, execution_id, :abandoned)
-                    state
+            execution_id = Map.fetch!(state.execution_ids, ext_id)
 
-                  {:ok, true} ->
-                    state
-                end
+            case Results.has_result?(state.db, execution_id) do
+              {:ok, false} ->
+                {:ok, state} = process_result(state, execution_id, :abandoned)
+                state
 
-              {:error, :not_found} ->
+              {:ok, true} ->
                 state
             end
           end)
@@ -1227,7 +1224,7 @@ defmodule Coflux.Orchestration.Server do
           |> MapSet.difference(session.starting)
           |> MapSet.difference(session.executing)
           |> Enum.reduce(state, fn ext_id, state ->
-            case resolve_internal_execution_id(state, ext_id) do
+            case Map.fetch(state.execution_ids, ext_id) do
               {:ok, execution_id} ->
                 case Results.has_result?(state.db, execution_id) do
                   {:ok, false} ->
@@ -1237,7 +1234,7 @@ defmodule Coflux.Orchestration.Server do
                     send_session(state, session_id, {:abort, ext_id})
                 end
 
-              {:error, :not_found} ->
+              :error ->
                 state
             end
           end)
@@ -1246,9 +1243,9 @@ defmodule Coflux.Orchestration.Server do
         resolved_executions =
           executions
           |> Enum.flat_map(fn {ext_id, v} ->
-            case resolve_internal_execution_id(state, ext_id) do
+            case Map.fetch(state.execution_ids, ext_id) do
               {:ok, int_id} -> [{int_id, v}]
-              {:error, :not_found} -> []
+              :error -> []
             end
           end)
           |> Map.new()
@@ -1285,7 +1282,7 @@ defmodule Coflux.Orchestration.Server do
       |> Enum.reduce(state, fn ext_id, state ->
         # If execution has no result recorded, mark it as abandoned
         state =
-          case resolve_internal_execution_id(state, ext_id) do
+          case Map.fetch(state.execution_ids, ext_id) do
             {:ok, execution_id} ->
               case Results.has_result?(state.db, execution_id) do
                 {:ok, false} ->
@@ -1296,7 +1293,7 @@ defmodule Coflux.Orchestration.Server do
                   state
               end
 
-            {:error, :not_found} ->
+            :error ->
               state
           end
 
@@ -2538,25 +2535,21 @@ defmodule Coflux.Orchestration.Server do
         suspended,
         state,
         fn {from_ext_id, dependency_ext_ids}, state ->
-          case resolve_internal_execution_id(state, from_ext_id) do
-            {:ok, from_execution_id} ->
-              # Resolve dependency IDs to internal
-              dependency_ids =
-                Enum.flat_map(dependency_ext_ids, fn dep_ext_id ->
-                  case resolve_internal_execution_id(state, dep_ext_id) do
-                    {:ok, id} -> [id]
-                    {:error, :not_found} -> []
-                  end
-                end)
+          from_execution_id = Map.fetch!(state.execution_ids, from_ext_id)
 
-              {:ok, state} =
-                process_result(state, from_execution_id, {:suspended, nil, dependency_ids})
+          # Resolve dependency IDs to internal (may reference completed executions in old epochs)
+          dependency_ids =
+            Enum.flat_map(dependency_ext_ids, fn dep_ext_id ->
+              case resolve_internal_execution_id(state, dep_ext_id) do
+                {:ok, id} -> [id]
+                {:error, :not_found} -> []
+              end
+            end)
 
-              state
+          {:ok, state} =
+            process_result(state, from_execution_id, {:suspended, nil, dependency_ids})
 
-            {:error, :not_found} ->
-              state
-          end
+          state
         end
       )
 
@@ -2641,9 +2634,11 @@ defmodule Coflux.Orchestration.Server do
         {:noreply, state}
 
       ref == state.index_task ->
-        # Move failed epoch to back of queue for retry
+        # Drop failed epoch from queue; it remains unindexed and will be
+        # retried on next server startup (via EpochIndex.unindexed_epoch_ids)
         [failed | rest] = state.index_queue
-        state = %{state | index_task: nil, index_queue: rest ++ [failed]}
+        Logger.warning("index build failed for epoch #{failed} in project #{state.project_id}")
+        state = %{state | index_task: nil, index_queue: rest}
         state = maybe_start_index_build(state)
         {:noreply, state}
 
@@ -2850,14 +2845,9 @@ defmodule Coflux.Orchestration.Server do
       session.executing
       |> MapSet.union(session.starting)
       |> Enum.reduce(state, fn ext_id, state ->
-        case resolve_internal_execution_id(state, ext_id) do
-          {:ok, execution_id} ->
-            {:ok, state} = process_result(state, execution_id, :abandoned)
-            state
-
-          {:error, :not_found} ->
-            state
-        end
+        execution_id = Map.fetch!(state.execution_ids, ext_id)
+        {:ok, state} = process_result(state, execution_id, :abandoned)
+        state
       end)
       |> Map.update!(:targets, fn all_targets ->
         Enum.reduce(
@@ -3146,8 +3136,47 @@ defmodule Coflux.Orchestration.Server do
     |> Map.put(:epoch_index, epoch_index)
     |> Map.update!(:index_queue, &(&1 ++ [old_epoch_id]))
     |> remap_config_ids(id_mappings)
-    |> Map.put(:execution_ids, %{})
+    |> copy_in_flight_runs()
     |> maybe_start_index_build()
+  end
+
+  defp copy_in_flight_runs(state) do
+    # Collect all external execution IDs that sessions are currently tracking
+    in_flight_ext_ids =
+      state.sessions
+      |> Enum.flat_map(fn {_sid, session} ->
+        MapSet.to_list(session.executing) ++ MapSet.to_list(session.starting)
+      end)
+
+    # Extract unique run external IDs from the execution references
+    run_ext_ids =
+      in_flight_ext_ids
+      |> Enum.map(fn ext_id ->
+        {:ok, run_ext_id, _step, _attempt} = parse_execution_external_id(ext_id)
+        run_ext_id
+      end)
+      |> Enum.uniq()
+
+    # Copy each run from archives into the active epoch
+    Enum.each(run_ext_ids, fn run_ext_id ->
+      find_and_copy_run_from_archives(state, run_ext_id)
+    end)
+
+    # Repopulate execution_ids cache from the new active DB
+    execution_ids =
+      Enum.reduce(in_flight_ext_ids, %{}, fn ext_id, acc ->
+        {:ok, run_ext_id, step_num, attempt} = parse_execution_external_id(ext_id)
+
+        case Runs.get_execution_id(state.db, run_ext_id, step_num, attempt) do
+          {:ok, {id}} when not is_nil(id) ->
+            Map.put(acc, ext_id, id)
+
+          _ ->
+            acc
+        end
+      end)
+
+    %{state | execution_ids: execution_ids}
   end
 
   defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
@@ -3357,64 +3386,28 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp find_and_copy_run_from_archives(state, run_external_id) do
-    # Tier 1: Check unindexed DBs (always open, newest first)
-    unindexed = Epoch.unindexed_dbs(state.epochs)
+    query_fn = fn archive_db ->
+      case Coflux.Store.query_one(
+             archive_db,
+             "SELECT id FROM runs WHERE external_id = ?1",
+             {run_external_id}
+           ) do
+        {:ok, {_id}} ->
+          {:ok, remap, _visited} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
+          {:found, {:ok, remap}}
 
-    result =
-      Enum.reduce_while(unindexed, :not_found, fn {_epoch_id, archive_db}, :not_found ->
-        case Coflux.Store.query_one(
-               archive_db,
-               "SELECT id FROM runs WHERE external_id = ?1",
-               {run_external_id}
-             ) do
-          {:ok, {_id}} ->
-            {:ok, remap, _visited} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
-            {:halt, {:ok, remap}}
+        {:ok, nil} ->
+          :not_found
+      end
+    end
 
-          {:ok, nil} ->
-            {:cont, :not_found}
-        end
-      end)
+    bloom_fn = fn epoch_index ->
+      EpochIndex.find_epochs_for_run(epoch_index, run_external_id)
+    end
 
-    if result != :not_found do
-      result
-    else
-      # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
-      candidate_epoch_ids =
-        if state.epoch_index do
-          EpochIndex.find_epochs_for_run(state.epoch_index, run_external_id)
-        else
-          []
-        end
-
-      Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
-        path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
-
-        case Exqlite.Sqlite3.open(path) do
-          {:ok, archive_db} ->
-            try do
-              case Coflux.Store.query_one(
-                     archive_db,
-                     "SELECT id FROM runs WHERE external_id = ?1",
-                     {run_external_id}
-                   ) do
-                {:ok, {_id}} ->
-                  {:ok, remap, _visited} =
-                    EpochCopy.copy_run(archive_db, state.db, run_external_id)
-
-                  {:halt, {:ok, remap}}
-
-                {:ok, nil} ->
-                  {:cont, :not_found}
-              end
-            after
-              Exqlite.Sqlite3.close(archive_db)
-            end
-
-          {:error, _} ->
-            {:cont, :not_found}
-        end
-      end)
+    case search_archived_epochs(state, query_fn, bloom_fn) do
+      {:found, result} -> result
+      :not_found -> :not_found
     end
   end
 
@@ -3437,83 +3430,93 @@ defmodule Coflux.Orchestration.Server do
         cached_execution_id
 
       {:ok, nil} ->
-        # Tier 1: Check unindexed DBs (always open, newest first)
-        unindexed = Epoch.unindexed_dbs(state.epochs)
+        query_fn = fn archive_db ->
+          case Runs.find_cached_execution_by_cache_key(
+                 archive_db,
+                 cache_key,
+                 recorded_after
+               ) do
+            {:ok, {_archive_exec_id, archive_run_ext_id}} ->
+              {:ok, _remap, _visited} =
+                EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
 
-        result =
-          Enum.reduce_while(unindexed, nil, fn {_epoch_id, archive_db}, nil ->
-            case Runs.find_cached_execution_by_cache_key(
-                   archive_db,
-                   cache_key,
-                   recorded_after
-                 ) do
-              {:ok, {_archive_exec_id, archive_run_ext_id}} ->
-                {:ok, _remap, _visited} =
-                  EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
+              case Runs.find_cached_execution(
+                     state.db,
+                     cache_workspace_ids,
+                     step_id,
+                     cache_key,
+                     recorded_after
+                   ) do
+                {:ok, cached_id} when not is_nil(cached_id) -> {:found, cached_id}
+                {:ok, nil} -> :not_found
+              end
 
-                case Runs.find_cached_execution(
-                       state.db,
-                       cache_workspace_ids,
-                       step_id,
-                       cache_key,
-                       recorded_after
-                     ) do
-                  {:ok, cached_id} -> {:halt, cached_id}
-                end
-
-              {:ok, nil} ->
-                {:cont, nil}
-            end
-          end)
-
-        if result do
-          result
-        else
-          # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
-          candidate_epoch_ids =
-            if state.epoch_index && is_binary(cache_key) do
-              EpochIndex.find_epochs_for_cache_key(state.epoch_index, cache_key)
-            else
-              []
-            end
-
-          Enum.reduce_while(candidate_epoch_ids, nil, fn epoch_id, nil ->
-            path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
-
-            case Exqlite.Sqlite3.open(path) do
-              {:ok, archive_db} ->
-                try do
-                  case Runs.find_cached_execution_by_cache_key(
-                         archive_db,
-                         cache_key,
-                         recorded_after
-                       ) do
-                    {:ok, {_archive_exec_id, archive_run_ext_id}} ->
-                      {:ok, _remap, _visited} =
-                        EpochCopy.copy_run(archive_db, state.db, archive_run_ext_id)
-
-                      case Runs.find_cached_execution(
-                             state.db,
-                             cache_workspace_ids,
-                             step_id,
-                             cache_key,
-                             recorded_after
-                           ) do
-                        {:ok, cached_id} -> {:halt, cached_id}
-                      end
-
-                    {:ok, nil} ->
-                      {:cont, nil}
-                  end
-                after
-                  Exqlite.Sqlite3.close(archive_db)
-                end
-
-              {:error, _} ->
-                {:cont, nil}
-            end
-          end)
+            {:ok, nil} ->
+              :not_found
+          end
         end
+
+        bloom_fn = fn epoch_index ->
+          if is_binary(cache_key) do
+            EpochIndex.find_epochs_for_cache_key(epoch_index, cache_key)
+          else
+            []
+          end
+        end
+
+        case search_archived_epochs(state, query_fn, bloom_fn) do
+          {:found, result} -> result
+          :not_found -> nil
+        end
+    end
+  end
+
+  # Searches archived epochs across both tiers (unindexed, then indexed via Bloom).
+  # `query_fn` receives an archive DB handle and returns `{:found, result}` or `:not_found`.
+  # `bloom_fn` receives the epoch index and returns candidate epoch IDs.
+  defp search_archived_epochs(state, query_fn, bloom_fn) do
+    # Tier 1: Check unindexed DBs (always open, newest first)
+    unindexed = Epoch.unindexed_dbs(state.epochs)
+
+    result =
+      Enum.reduce_while(unindexed, :not_found, fn {_epoch_id, archive_db}, :not_found ->
+        case query_fn.(archive_db) do
+          {:found, _} = found -> {:halt, found}
+          :not_found -> {:cont, :not_found}
+        end
+      end)
+
+    case result do
+      {:found, _} ->
+        result
+
+      :not_found ->
+        # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
+        candidate_epoch_ids =
+          if state.epoch_index do
+            bloom_fn.(state.epoch_index)
+          else
+            []
+          end
+
+        Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
+          path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
+
+          case Exqlite.Sqlite3.open(path) do
+            {:ok, archive_db} ->
+              try do
+                case query_fn.(archive_db) do
+                  {:found, _} = found -> {:halt, found}
+                  :not_found -> {:cont, :not_found}
+                end
+              after
+                Exqlite.Sqlite3.close(archive_db)
+              end
+
+            {:error, _} ->
+              {:cont, :not_found}
+          end
+        end)
     end
   end
 
