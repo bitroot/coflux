@@ -16,7 +16,7 @@ defmodule Coflux.Logs.Server do
   require Logger
 
   alias Coflux.Logs.Store
-  alias Coflux.Store.{Bloom, Epoch, EpochIndex}
+  alias Coflux.Store.{Bloom, Epochs, Index}
   alias Exqlite.Sqlite3
 
   @flush_interval_ms 500
@@ -122,11 +122,11 @@ defmodule Coflux.Logs.Server do
   @impl true
   def init(project_id) do
     index_path = ["projects", project_id, "logs", "index.json"]
-    {:ok, log_index} = EpochIndex.load(index_path, ["runs"])
-    unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(log_index)
-    archived_epoch_ids = EpochIndex.all_epoch_ids(log_index)
+    {:ok, log_index} = Index.load(index_path, ["runs"])
+    unindexed_epoch_ids = Index.unindexed_epoch_ids(log_index)
+    archived_epoch_ids = Index.all_epoch_ids(log_index)
 
-    case Epoch.open(project_id, "logs",
+    case Epochs.open(project_id, "logs",
            unindexed_epoch_ids: unindexed_epoch_ids,
            archived_epoch_ids: archived_epoch_ids
          ) do
@@ -216,9 +216,9 @@ defmodule Coflux.Logs.Server do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
 
-    log_index = EpochIndex.update_filters(state.log_index, epoch_id, %{"runs" => run_bloom})
-    :ok = EpochIndex.save(log_index)
-    epochs = Epoch.promote_to_indexed(state.epochs, epoch_id)
+    log_index = Index.update_filters(state.log_index, epoch_id, %{"runs" => run_bloom})
+    :ok = Index.save(log_index)
+    epochs = Epochs.promote_to_indexed(state.epochs, epoch_id)
 
     state =
       %{state | log_index: log_index, epochs: epochs, index_task: nil, index_queue: rest}
@@ -251,7 +251,7 @@ defmodule Coflux.Logs.Server do
   @impl true
   def terminate(_reason, state) do
     if state.epochs do
-      Epoch.close(state.epochs)
+      Epochs.close(state.epochs)
     end
 
     :ok
@@ -262,7 +262,7 @@ defmodule Coflux.Logs.Server do
   defp flush_buffer(%{buffer: []} = state), do: state
 
   defp flush_buffer(state) do
-    db = Epoch.active_db(state.epochs)
+    db = Epochs.active_db(state.epochs)
 
     case Store.insert_logs(db, state.buffer, state.template_cache) do
       {:ok, template_cache} ->
@@ -291,7 +291,7 @@ defmodule Coflux.Logs.Server do
   defp schedule_flush(state), do: state
 
   defp maybe_rotate(state) do
-    if Epoch.active_db_size(state.epochs) >= @rotation_size_threshold_bytes do
+    if Epochs.active_db_size(state.epochs) >= @rotation_size_threshold_bytes do
       do_rotate(state)
     else
       state
@@ -299,14 +299,14 @@ defmodule Coflux.Logs.Server do
   end
 
   defp do_rotate(state) do
-    epoch_id = Epoch.next_epoch_id(state.epochs)
+    epoch_id = Epochs.next_epoch_id(state.epochs)
 
     # Write placeholder entry to index first (null value)
-    log_index = EpochIndex.add_epoch(state.log_index, epoch_id)
-    :ok = EpochIndex.save(log_index)
+    log_index = Index.add_epoch(state.log_index, epoch_id)
+    :ok = Index.save(log_index)
 
     # Now rotate
-    {:ok, new_epochs, _old_db} = Epoch.rotate(state.epochs, epoch_id)
+    {:ok, new_epochs, _old_db} = Epochs.rotate(state.epochs, epoch_id)
 
     %{
       state
@@ -321,7 +321,7 @@ defmodule Coflux.Logs.Server do
   ## Private Functions — Bloom Filter Building
 
   defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    path = Epoch.archive_path(state.epochs, epoch_id)
+    path = Epochs.archive_path(state.epochs, epoch_id)
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
@@ -402,7 +402,7 @@ defmodule Coflux.Logs.Server do
       else
         candidates =
           state.log_index
-          |> EpochIndex.find_epochs("runs", run_id)
+          |> Index.find_epochs("runs", run_id)
           |> Enum.reject(&archived_before?(&1, from))
           |> Enum.sort()
 
@@ -456,7 +456,7 @@ defmodule Coflux.Logs.Server do
           |> Keyword.delete(:from)
           |> maybe_apply_cursor(skip_archives?, cursor_timestamp, cursor_id)
 
-        db = Epoch.active_db(state.epochs)
+        db = Epochs.active_db(state.epochs)
         {:ok, active_entries, _cursor} = Store.query_logs(db, active_opts)
         tagged = Enum.map(active_entries, &Map.put(&1, :_epoch_id, :active))
         {entries ++ tagged, remaining - length(active_entries)}
@@ -514,7 +514,7 @@ defmodule Coflux.Logs.Server do
         {db, false}
 
       :error ->
-        path = Epoch.archive_path(state.epochs, epoch_id)
+        path = Epochs.archive_path(state.epochs, epoch_id)
         {:ok, db} = Sqlite3.open(path)
         {db, true}
     end

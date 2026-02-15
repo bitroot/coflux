@@ -1,4 +1,4 @@
-defmodule Coflux.Orchestration.EpochCopy do
+defmodule Coflux.Orchestration.Epoch do
   @moduledoc """
   Copies data between epoch databases during rotation and copy-on-reference.
   """

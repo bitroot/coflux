@@ -2,7 +2,7 @@ defmodule Coflux.Orchestration.Server do
   use GenServer, restart: :transient
   require Logger
 
-  alias Coflux.Store.{Bloom, Epoch, EpochIndex}
+  alias Coflux.Store.{Bloom, Epochs, Index}
   alias Coflux.MapUtils
 
   alias Coflux.Orchestration.{
@@ -16,7 +16,7 @@ defmodule Coflux.Orchestration.Server do
     Workers,
     Manifests,
     Principals,
-    EpochCopy
+    Epoch
   }
 
   @default_activation_timeout_ms 600_000
@@ -87,7 +87,7 @@ defmodule Coflux.Orchestration.Server do
               # task_ref -> callback
               launcher_tasks: %{},
 
-              # Coflux.Store.EpochIndex struct for Bloom filter lookups
+              # Coflux.Store.Index struct for Bloom filter lookups
               epoch_index: nil,
 
               # ref of running background index build task
@@ -104,16 +104,16 @@ defmodule Coflux.Orchestration.Server do
 
   def init(project_id) do
     index_path = ["projects", project_id, "orchestration", "index.json"]
-    {:ok, epoch_index} = EpochIndex.load(index_path, ["runs", "cache_keys"])
-    unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(epoch_index)
-    archived_epoch_ids = EpochIndex.all_epoch_ids(epoch_index)
+    {:ok, epoch_index} = Index.load(index_path, ["runs", "cache_keys"])
+    unindexed_epoch_ids = Index.unindexed_epoch_ids(epoch_index)
+    archived_epoch_ids = Index.all_epoch_ids(epoch_index)
 
-    case Epoch.open(project_id, "orchestration",
+    case Epochs.open(project_id, "orchestration",
            unindexed_epoch_ids: unindexed_epoch_ids,
            archived_epoch_ids: archived_epoch_ids
          ) do
       {:ok, epochs} ->
-        db = Epoch.active_db(epochs)
+        db = Epochs.active_db(epochs)
 
         state = %State{
           project_id: project_id,
@@ -1808,7 +1808,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_info(:check_rotation, state) do
-    db_size = Epoch.active_db_size(state.epochs)
+    db_size = Epochs.active_db_size(state.epochs)
 
     state =
       if db_size >= @rotation_size_threshold_bytes do
@@ -2435,13 +2435,13 @@ defmodule Coflux.Orchestration.Server do
     [epoch_id | rest] = state.index_queue
 
     epoch_index =
-      EpochIndex.update_filters(state.epoch_index, epoch_id, %{
+      Index.update_filters(state.epoch_index, epoch_id, %{
         "runs" => run_bloom,
         "cache_keys" => cache_bloom
       })
 
-    :ok = EpochIndex.save(epoch_index)
-    epochs = Epoch.promote_to_indexed(state.epochs, epoch_id)
+    :ok = Index.save(epoch_index)
+    epochs = Epochs.promote_to_indexed(state.epochs, epoch_id)
 
     state =
       %{state | epoch_index: epoch_index, epochs: epochs, index_task: nil, index_queue: rest}
@@ -2508,7 +2508,7 @@ defmodule Coflux.Orchestration.Server do
 
       ref == state.index_task ->
         # Drop failed epoch from queue; it remains unindexed and will be
-        # retried on next server startup (via EpochIndex.unindexed_epoch_ids)
+        # retried on next server startup (via Index.unindexed_epoch_ids)
         [failed | rest] = state.index_queue
         Logger.warning("index build failed for epoch #{failed} in project #{state.project_id}")
         state = %{state | index_task: nil, index_queue: rest}
@@ -2522,7 +2522,7 @@ defmodule Coflux.Orchestration.Server do
 
   def terminate(_reason, state) do
     if state.epochs do
-      Epoch.close(state.epochs)
+      Epochs.close(state.epochs)
     end
   end
 
@@ -2997,17 +2997,17 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp do_rotate_epoch(state) do
-    epoch_id = Epoch.next_epoch_id(state.epochs)
+    epoch_id = Epochs.next_epoch_id(state.epochs)
 
     # Write placeholder entry to index first (null value)
-    epoch_index = EpochIndex.add_epoch(state.epoch_index, epoch_id)
-    :ok = EpochIndex.save(epoch_index)
+    epoch_index = Index.add_epoch(state.epoch_index, epoch_id)
+    :ok = Index.save(epoch_index)
 
     # Now rotate
-    {:ok, new_epochs, old_db} = Epoch.rotate(state.epochs, epoch_id)
-    new_db = Epoch.active_db(new_epochs)
+    {:ok, new_epochs, old_db} = Epochs.rotate(state.epochs, epoch_id)
+    new_db = Epochs.active_db(new_epochs)
 
-    id_mappings = EpochCopy.copy_config(old_db, new_db)
+    id_mappings = Epoch.copy_config(old_db, new_db)
 
     state
     |> Map.put(:epochs, new_epochs)
@@ -3053,7 +3053,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    path = Epoch.archive_path(state.epochs, epoch_id)
+    path = Epochs.archive_path(state.epochs, epoch_id)
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
@@ -3276,11 +3276,11 @@ defmodule Coflux.Orchestration.Server do
 
       unindexed_map =
         state.epochs
-        |> Epoch.unindexed_dbs()
+        |> Epochs.unindexed_dbs()
         |> Map.new()
 
       indexed_epoch_ids =
-        EpochIndex.indexed_epoch_ids(state.epoch_index, "runs")
+        Index.indexed_epoch_ids(state.epoch_index, "runs")
 
       # Merge unindexed + indexed epoch IDs, sort newest first, take depth limit
       all_epoch_ids =
@@ -3351,7 +3351,7 @@ defmodule Coflux.Orchestration.Server do
          workspace_external_id,
          limit
        ) do
-    path = Epoch.archive_path(state.epochs, epoch_id)
+    path = Epochs.archive_path(state.epochs, epoch_id)
 
     case Exqlite.Sqlite3.open(path) do
       {:ok, db} ->
@@ -3403,7 +3403,7 @@ defmodule Coflux.Orchestration.Server do
         end
 
         bloom_fn = fn epoch_index ->
-          EpochIndex.find_epochs(epoch_index, "runs", external_run_id)
+          Index.find_epochs(epoch_index, "runs", external_run_id)
         end
 
         case search_archived_epochs(state, query_fn, bloom_fn) do
@@ -3581,7 +3581,7 @@ defmodule Coflux.Orchestration.Server do
              {run_external_id}
            ) do
         {:ok, {_id}} ->
-          {:ok, remap} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
+          {:ok, remap} = Epoch.copy_run(archive_db, state.db, run_external_id)
           {:found, {:ok, remap}}
 
         {:ok, nil} ->
@@ -3590,7 +3590,7 @@ defmodule Coflux.Orchestration.Server do
     end
 
     bloom_fn = fn epoch_index ->
-      EpochIndex.find_epochs(epoch_index, "runs", run_external_id)
+      Index.find_epochs(epoch_index, "runs", run_external_id)
     end
 
     case search_archived_epochs(state, query_fn, bloom_fn) do
@@ -3676,7 +3676,7 @@ defmodule Coflux.Orchestration.Server do
 
         bloom_fn = fn epoch_index ->
           if is_binary(cache_key) do
-            EpochIndex.find_epochs(epoch_index, "cache_keys", cache_key)
+            Index.find_epochs(epoch_index, "cache_keys", cache_key)
           else
             []
           end
@@ -3694,7 +3694,7 @@ defmodule Coflux.Orchestration.Server do
   # `bloom_fn` receives the epoch index and returns candidate epoch IDs.
   defp search_archived_epochs(state, query_fn, bloom_fn) do
     # Tier 1: Check unindexed DBs (always open, newest first)
-    unindexed = Epoch.unindexed_dbs(state.epochs)
+    unindexed = Epochs.unindexed_dbs(state.epochs)
 
     result =
       Enum.reduce_while(unindexed, :not_found, fn {_epoch_id, archive_db}, :not_found ->
@@ -3717,7 +3717,7 @@ defmodule Coflux.Orchestration.Server do
           |> Enum.reject(&MapSet.member?(unindexed_ids, &1))
 
         Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
-          path = Epoch.archive_path(state.epochs, epoch_id)
+          path = Epochs.archive_path(state.epochs, epoch_id)
 
           case Exqlite.Sqlite3.open(path) do
             {:ok, archive_db} ->

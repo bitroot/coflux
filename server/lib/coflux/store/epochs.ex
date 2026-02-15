@@ -1,4 +1,4 @@
-defmodule Coflux.Store.Epoch do
+defmodule Coflux.Store.Epochs do
   @moduledoc """
   Manages epoch databases for a project using a three-tier model:
   - **active**: open, read-write — at `projects/{id}/{name}.sqlite`

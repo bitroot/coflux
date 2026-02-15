@@ -1,4 +1,4 @@
-defmodule Coflux.Store.EpochIndex do
+defmodule Coflux.Store.Index do
   @moduledoc """
   Index file for efficient cross-epoch lookups using Bloom filters.
 
