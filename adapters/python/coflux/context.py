@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import collections
 import contextvars
 import datetime as dt
-import io
 import json
-import pickle
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -59,78 +56,9 @@ class ExecutorContext:
         The worker then decides whether to upload to blob store based on its
         own threshold configuration.
         """
-        from .models import Asset
-        from .decorators import Execution
+        from .serialization import encode_value
 
-        references: list[Any] = []
-
-        def _serialize(v: Any) -> Any:
-            if v is None or isinstance(v, (str, bool, int, float)):
-                return v
-            elif isinstance(v, list):
-                return [_serialize(x) for x in v]
-            elif isinstance(v, dict):
-                # Sort dict items for consistent serialization
-                items = (
-                    v.items()
-                    if isinstance(v, collections.OrderedDict)
-                    else sorted(v.items(), key=lambda kv: repr(kv[0]))
-                )
-                return {
-                    "type": "dict",
-                    "items": [_serialize(x) for kv in items for x in kv],
-                }
-            elif isinstance(v, set):
-                return {
-                    "type": "set",
-                    "items": [_serialize(x) for x in sorted(v, key=repr)],
-                }
-            elif isinstance(v, tuple):
-                return {"type": "tuple", "items": [_serialize(x) for x in v]}
-            elif isinstance(v, Execution):
-                # Include execution reference with metadata
-                ref = ["execution", v.id]
-                if v.metadata:
-                    ref.extend([
-                        v.metadata.run_id,
-                        v.metadata.step_id,
-                        v.metadata.attempt,
-                        v.metadata.module,
-                        v.metadata.target,
-                    ])
-                references.append(ref)
-                return {"type": "ref", "index": len(references) - 1}
-            elif isinstance(v, Asset):
-                # Include asset reference with metadata
-                ref = ["asset", v.id]
-                if v.metadata:
-                    ref.extend([
-                        v.metadata.name,
-                        v.metadata.total_count,
-                        v.metadata.total_size,
-                    ])
-                references.append(ref)
-                return {"type": "ref", "index": len(references) - 1}
-            else:
-                # Serialize with pickle and write to temp file as fragment
-                try:
-                    buffer = io.BytesIO()
-                    pickle.dump(v, buffer)
-                    data = buffer.getvalue()
-                    path = self._write_temp_file(data)
-                    references.append([
-                        "fragment",
-                        "pickle",
-                        path,  # file path instead of blob key
-                        len(data),
-                        {"type": str(type(v).__name__)},
-                    ])
-                    return {"type": "ref", "index": len(references) - 1}
-                except Exception:
-                    # Fall back to string representation
-                    return repr(v)
-
-        data = _serialize(value)
+        data, references = encode_value(value, self._write_temp_file)
         encoded = json.dumps(data, separators=(",", ":")).encode()
 
         if len(encoded) > TRANSFER_THRESHOLD:
@@ -233,17 +161,21 @@ class ExecutorContext:
 
     def create_asset(
         self,
-        entries: str | Path | list[str | Path] | None = None,
+        entries=None,
         *,
         at: Path | None = None,
         match: str | None = None,
         name: str | None = None,
     ):
-        """Create and persist an asset from files.
+        """Create and persist an asset from files or existing asset entries.
 
         Args:
-            entries: File path(s) to include. Can be a single path, list of paths,
-                    or None to use pattern matching.
+            entries: What to include. Can be:
+                - A single file path (str or Path)
+                - A list of file paths
+                - An Asset (re-reference all its entries)
+                - A dict mapping paths to file paths, Assets, or AssetEntries
+                - None (use with `match` to find files by pattern)
             at: Base directory for relative paths and pattern matching.
             match: Glob pattern to match files (e.g., "*.csv", "**/*.json").
             name: Optional name for the asset.
@@ -252,13 +184,18 @@ class ExecutorContext:
             The created Asset object.
         """
         import fnmatch as fnmatch_module
-        from .models import Asset, AssetMetadata
+        from .models import Asset, AssetEntry, AssetMetadata
 
         base_dir = (at or self._working_dir).resolve()
+        matcher = fnmatch_module.fnmatch if match else None
         paths_to_upload: list[tuple[str, Path]] = []
+        # Pre-resolved entries referencing existing blobs: {path: (blob_key, size, metadata)}
+        resolved_entries: dict[str, tuple[str, int, dict]] = {}
+
+        if isinstance(entries, Asset):
+            entries = {e.path: e for e in entries.entries}
 
         if entries is None and match:
-            # Use glob pattern to find files
             for file_path in base_dir.rglob("*"):
                 if file_path.is_file() and fnmatch_module.fnmatch(
                     str(file_path.relative_to(base_dir)), match
@@ -266,11 +203,11 @@ class ExecutorContext:
                     rel_path = str(file_path.relative_to(base_dir))
                     paths_to_upload.append((rel_path, file_path))
         elif entries is None:
-            # No entries or match specified — persist all files in working dir
             for file_path in base_dir.rglob("*"):
                 if file_path.is_file():
                     rel_path = str(file_path.relative_to(base_dir))
-                    paths_to_upload.append((rel_path, file_path))
+                    if matcher is None or matcher(rel_path, match):
+                        paths_to_upload.append((rel_path, file_path))
         elif isinstance(entries, (str, Path)):
             path = Path(entries)
             if not path.is_absolute():
@@ -286,23 +223,56 @@ class ExecutorContext:
                 if path.is_file():
                     rel_path = str(path.relative_to(base_dir)) if base_dir in path.parents or path.parent == base_dir else path.name
                     paths_to_upload.append((rel_path, path))
+        elif isinstance(entries, dict):
+            if at is not None:
+                raise ValueError(
+                    "Base directory (`at`) cannot be specified with dictionary of entries"
+                )
+            for path_str, entry in entries.items():
+                if isinstance(entry, (str, Path)):
+                    path = Path(entry).resolve()
+                    if path.is_file():
+                        if matcher is None or matcher(path_str, match):
+                            paths_to_upload.append((path_str, path))
+                elif isinstance(entry, Asset):
+                    for asset_entry in entry.entries:
+                        full_path = f"{path_str}/{asset_entry.path}"
+                        if matcher is None or matcher(full_path, match):
+                            resolved_entries[full_path] = (
+                                asset_entry.blob_key,
+                                asset_entry.size,
+                                asset_entry.metadata,
+                            )
+                elif isinstance(entry, AssetEntry):
+                    if matcher is None or matcher(path_str, match):
+                        resolved_entries[path_str] = (
+                            entry.blob_key,
+                            entry.size,
+                            entry.metadata,
+                        )
+                else:
+                    raise ValueError(f"Unhandled entry type ({type(entry)})")
+        else:
+            raise ValueError(f"Unhandled entries type ({type(entries)})")
 
-        if not paths_to_upload:
+        if not paths_to_upload and not resolved_entries:
             raise ValueError("No files found to create asset")
 
-        # Upload files and get asset reference
-        abs_paths = [str(p) for _, p in paths_to_upload]
+        abs_paths = [str(p) for _, p in paths_to_upload] if paths_to_upload else None
         request_id = protocol.request_persist_asset(
             self.execution_id,
             abs_paths,
             {"name": name} if name else None,
+            resolved_entries if resolved_entries else None,
         )
         response = self._wait_response(request_id)
         asset_id = response.get("asset_id", "")
+        total_size = sum(p.stat().st_size for _, p in paths_to_upload)
+        total_size += sum(size for _, size, _ in resolved_entries.values())
         metadata = AssetMetadata(
             name=name,
-            total_count=len(paths_to_upload),
-            total_size=sum(p.stat().st_size for _, p in paths_to_upload),
+            total_count=len(paths_to_upload) + len(resolved_entries),
+            total_size=total_size,
         )
         return Asset(asset_id, metadata)
 

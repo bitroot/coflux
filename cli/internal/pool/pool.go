@@ -18,7 +18,7 @@ type ExecutionHandler interface {
 	// ResolveReference resolves a reference to get its value
 	ResolveReference(ctx context.Context, executionID string, reference []any) (*adapter.Value, error)
 	// PersistAsset persists files as an asset
-	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any) (map[string]any, error)
+	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
 	GetAsset(ctx context.Context, executionID string, reference []any) (map[string]any, error)
 	// DownloadBlob downloads a blob to a local file
@@ -309,7 +309,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata)
+		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata, req.Entries)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "persist_error", Message: err.Error()}
 		} else {

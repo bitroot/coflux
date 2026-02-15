@@ -123,7 +123,9 @@ defmodule Coflux.Logs.Index do
   # is included (not skipped).
   defp archived_before?(epoch_id, from_ms) do
     case epoch_id_date(epoch_id) do
-      nil -> false
+      nil ->
+        false
+
       date ->
         from_date = from_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_date()
         Date.compare(date, from_date) == :lt

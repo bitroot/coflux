@@ -40,9 +40,24 @@ defmodule Coflux.Orchestration.Values do
                ) do
             {:ok, rows} ->
               Enum.map(rows, fn
-                {fragment_id, nil, nil} -> load_fragment(db, fragment_id)
-                {nil, execution_ref_id, nil} -> {:execution_ref, execution_ref_id}
-                {nil, nil, asset_id} -> {:asset, asset_id}
+                {fragment_id, nil, nil} ->
+                  load_fragment(db, fragment_id)
+
+                {nil, execution_ref_id, nil} ->
+                  {:ok, {run_ext, step_num, attempt}} =
+                    query_one!(
+                      db,
+                      "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
+                      {execution_ref_id}
+                    )
+
+                  {:execution, run_ext, step_num, attempt}
+
+                {nil, nil, asset_id} ->
+                  {:ok, {external_id}} =
+                    query_one!(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id})
+
+                  {:asset, external_id}
               end)
           end
 
@@ -86,7 +101,7 @@ defmodule Coflux.Orchestration.Values do
     end
   end
 
-  defp hash_value(db, value) do
+  defp hash_value(value) do
     {data, blob_key, references} =
       case value do
         {:raw, data, references} -> {data, nil, references}
@@ -101,20 +116,10 @@ defmodule Coflux.Orchestration.Values do
             Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
           )
 
-        {:execution_ref, ref_id} ->
-          {:ok, {run_ext, step_num, attempt}} =
-            query_one!(
-              db,
-              "SELECT run_external_id, step_number, attempt FROM execution_refs WHERE id = ?1",
-              {ref_id}
-            )
-
+        {:execution, run_ext, step_num, attempt} ->
           [2, "#{run_ext}:#{step_num}:#{attempt}"]
 
-        {:asset, asset_id} ->
-          {:ok, {external_id}} =
-            query_one!(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id})
-
+        {:asset, external_id} ->
           [3, external_id]
       end)
 
@@ -140,7 +145,7 @@ defmodule Coflux.Orchestration.Values do
           {nil, blob_id, references}
       end
 
-    hash = hash_value(db, value)
+    hash = hash_value(value)
 
     case query_one(db, "SELECT id FROM values_ WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->
@@ -169,16 +174,42 @@ defmodule Coflux.Orchestration.Values do
 
                   {value_id, position, fragment_id, nil, nil}
 
-                {:execution_ref, ref_id} ->
+                {:execution, run_ext, step_num, attempt} ->
+                  {:ok, ref_id} = ensure_execution_ref(db, run_ext, step_num, attempt)
                   {value_id, position, nil, ref_id, nil}
 
-                {:asset, asset_id} ->
+                {:asset, external_id} ->
+                  {:ok, {asset_id}} =
+                    query_one!(db, "SELECT id FROM assets WHERE external_id = ?1", {external_id})
+
                   {value_id, position, nil, nil, asset_id}
               end
             end)
           )
 
         {:ok, value_id}
+    end
+  end
+
+  defp ensure_execution_ref(db, run_external_id, step_number, attempt) do
+    {:ok, _} =
+      insert_one(
+        db,
+        :execution_refs,
+        %{
+          run_external_id: run_external_id,
+          step_number: step_number,
+          attempt: attempt
+        },
+        on_conflict: "DO NOTHING"
+      )
+
+    case query_one(
+           db,
+           "SELECT id FROM execution_refs WHERE run_external_id = ?1 AND step_number = ?2 AND attempt = ?3",
+           {run_external_id, step_number, attempt}
+         ) do
+      {:ok, {id}} -> {:ok, id}
     end
   end
 

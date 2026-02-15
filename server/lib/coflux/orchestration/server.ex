@@ -932,7 +932,7 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run} = Runs.get_run_by_id(state.db, parent_run_id)
 
     cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
-    arguments = Enum.map(arguments, &convert_value_to_internal_ids(state.db, &1))
+    arguments = Enum.map(arguments, &normalize_value(&1))
 
     case Runs.schedule_step(
            state.db,
@@ -1364,9 +1364,8 @@ defmodule Coflux.Orchestration.Server do
                 Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
               # TODO: only resolve if there are listeners to notify
-              dependency = resolve_execution_ref(state.db, dep_ref_id)
-
-              dep_ext_id = dependency.execution_external_id
+              {dep_ext_id, _module, _target} = dependency =
+                resolve_execution_ref(state.db, dep_ref_id)
 
               notify_listeners(
                 state,
@@ -2906,8 +2905,8 @@ defmodule Coflux.Orchestration.Server do
 
         dependencies =
           Map.new(dependency_ref_ids, fn ref_id ->
-            metadata = resolve_execution_ref(state.db, ref_id)
-            {metadata.execution_external_id, metadata}
+            {ext_id, _module, _target} = execution = resolve_execution_ref(state.db, ref_id)
+            {ext_id, execution}
           end)
 
         execution_external_id =
@@ -3492,8 +3491,10 @@ defmodule Coflux.Orchestration.Server do
                  run_dependencies
                  |> Map.get(execution_id, [])
                  |> Map.new(fn dependency_ref_id ->
-                   metadata = resolve_execution_ref(db, dependency_ref_id)
-                   {metadata.execution_external_id, metadata}
+                   {ext_id, _module, _target} = execution =
+                     resolve_execution_ref(db, dependency_ref_id)
+
+                   {ext_id, execution}
                  end)
 
                {attempt,
@@ -3607,13 +3608,8 @@ defmodule Coflux.Orchestration.Server do
                 # from the archive and create an execution_ref
                 case resolve_result(archive_db, archive_exec_id) do
                   {:ok, {:value, value}} ->
-                    # Copy the value into active epoch
-                    value_for_active = copy_value_to_active_epoch(archive_db, state.db, value)
-                    # Create execution ref for the cached execution
-                    {:ok, {run_ext, step_num, attempt}} =
-                      Runs.get_execution_key(archive_db, archive_exec_id)
-
-                    {:ok, {_, _, _, module, target}} =
+                    # Create execution ref for the cached execution itself
+                    {:ok, {run_ext, step_num, attempt, module, target}} =
                       Runs.get_run_by_execution(archive_db, archive_exec_id)
 
                     {:ok, ref_id} =
@@ -3626,7 +3622,7 @@ defmodule Coflux.Orchestration.Server do
                         target
                       )
 
-                    {:found, {:resolved, ref_id, value_for_active}}
+                    {:found, {:resolved, ref_id, value}}
 
                   {:ok, _other} ->
                     :not_found
@@ -3654,35 +3650,6 @@ defmodule Coflux.Orchestration.Server do
           :not_found -> nil
         end
     end
-  end
-
-  # Copy a value (as loaded by Values.get_value_by_id) from source_db into target_db.
-  # The value is already in the decoded form {:raw, data, refs} or {:blob, key, size, refs}.
-  # We need to re-create execution_refs in the target and ensure blobs/fragments exist.
-  defp copy_value_to_active_epoch(source_db, target_db, value) do
-    case value do
-      {:raw, data, references} ->
-        {:raw, data, copy_value_refs_to_active(source_db, target_db, references)}
-
-      {:blob, key, size, references} ->
-        {:blob, key, size, copy_value_refs_to_active(source_db, target_db, references)}
-    end
-  end
-
-  defp copy_value_refs_to_active(source_db, target_db, references) do
-    Enum.map(references, fn
-      {:execution_ref, old_ref_id} ->
-        {:ok, {run_ext, step_num, attempt, module, target}} =
-          Runs.get_execution_ref(source_db, old_ref_id)
-
-        {:ok, new_ref_id} =
-          Runs.get_or_create_execution_ref(target_db, run_ext, step_num, attempt, module, target)
-
-        {:execution_ref, new_ref_id}
-
-      other ->
-        other
-    end)
   end
 
   # Searches archived epochs across both tiers (unindexed, then indexed via Bloom).
@@ -3770,33 +3737,12 @@ defmodule Coflux.Orchestration.Server do
     {:ok, {external_run_id, step_number, step_attempt, module, target}} =
       Runs.get_run_by_execution(db, execution_id)
 
-    execution_external_id =
-      execution_external_id(external_run_id, step_number, step_attempt)
-
-    %{
-      execution_external_id: execution_external_id,
-      run_id: external_run_id,
-      step_id: "#{external_run_id}:#{step_number}",
-      step_number: step_number,
-      attempt: step_attempt,
-      module: module,
-      target: target
-    }
+    {execution_external_id(external_run_id, step_number, step_attempt), module, target}
   end
 
   defp resolve_execution_ref(db, ref_id) do
     {:ok, {run_ext, step_num, attempt, module, target}} = Runs.get_execution_ref(db, ref_id)
-    ext_id = execution_external_id(run_ext, step_num, attempt)
-
-    %{
-      execution_external_id: ext_id,
-      run_id: run_ext,
-      step_id: "#{run_ext}:#{step_num}",
-      step_number: step_num,
-      attempt: attempt,
-      module: module,
-      target: target
-    }
+    {execution_external_id(run_ext, step_num, attempt), module, target}
   end
 
   defp resolve_asset(db, asset_id) do
@@ -3811,51 +3757,42 @@ defmodule Coflux.Orchestration.Server do
       {:fragment, format, blob_key, size, metadata} ->
         {:fragment, format, blob_key, size, metadata}
 
-      {:execution_ref, ref_id} ->
-        metadata = resolve_execution_ref(db, ref_id)
-        {:execution, metadata.execution_external_id, metadata}
+      {:execution, run_ext, step_num, attempt} ->
+        ext_id = execution_external_id(run_ext, step_num, attempt)
 
-      {:asset, asset_id} ->
-        {external_asset_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
-        {:asset, external_asset_id, {name, total_count, total_size, entry}}
+        {module, target} =
+          case Runs.get_module_target(db, run_ext, step_num, attempt) do
+            {:ok, {m, t}} -> {m, t}
+            {:ok, nil} -> {nil, nil}
+          end
+
+        {:execution, ext_id, {module, target}}
+
+      {:asset, external_id} ->
+        {:ok, asset_id} = Assets.get_asset_id(db, external_id)
+        {^external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+        {:asset, external_id, {name, total_count, total_size, entry}}
     end)
   end
 
-  defp with_internal_ids(db, references) do
+  defp normalize_references(references) do
     Enum.map(references, fn
-      {:asset, external_id} ->
-        {:ok, id} = Assets.get_asset_id(db, external_id)
-        {:asset, id}
-
       {:execution, execution_external_id} ->
-        {:ok, run_ext_id, step_num, attempt} =
+        {:ok, run_ext, step_num, attempt} =
           parse_execution_external_id(execution_external_id)
 
-        {module, target} =
-          case Runs.get_execution_id(db, run_ext_id, step_num, attempt) do
-            {:ok, {id}} when not is_nil(id) ->
-              {:ok, {_, _, _, m, t}} = Runs.get_run_by_execution(db, id)
-              {m, t}
-
-            _ ->
-              {nil, nil}
-          end
-
-        {:ok, ref_id} =
-          Runs.get_or_create_execution_ref(db, run_ext_id, step_num, attempt, module, target)
-
-        {:execution_ref, ref_id}
+        {:execution, run_ext, step_num, attempt}
 
       ref ->
         ref
     end)
   end
 
-  defp convert_value_to_internal_ids(db, {:raw, data, refs}),
-    do: {:raw, data, with_internal_ids(db, refs)}
+  defp normalize_value({:raw, data, refs}),
+    do: {:raw, data, normalize_references(refs)}
 
-  defp convert_value_to_internal_ids(db, {:blob, key, size, refs}),
-    do: {:blob, key, size, with_internal_ids(db, refs)}
+  defp normalize_value({:blob, key, size, refs}),
+    do: {:blob, key, size, normalize_references(refs)}
 
   defp build_value(value, db) do
     case value do
@@ -3935,8 +3872,11 @@ defmodule Coflux.Orchestration.Server do
 
     result =
       case result do
-        {:value, value} -> {:value, convert_value_to_internal_ids(state.db, value)}
-        other -> other
+        {:value, value} ->
+          {:value, normalize_value(value)}
+
+        other ->
+          other
       end
 
     case Results.record_result(state.db, execution_id, result, created_by) do
@@ -4274,9 +4214,7 @@ defmodule Coflux.Orchestration.Server do
         end
 
       Enum.all?(references, fn
-        {:execution_ref, ref_id} ->
-          {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
-
+        {:execution, run_ext, step_num, attempt} ->
           case Runs.get_execution_id(db, run_ext, step_num, attempt) do
             {:ok, {execution_id}} when not is_nil(execution_id) ->
               case resolve_result(db, execution_id) do
@@ -4291,7 +4229,7 @@ defmodule Coflux.Orchestration.Server do
         {:fragment, _format, _blob_key, _size, _metadata} ->
           true
 
-        {:asset, _asset_id} ->
+        {:asset, _external_id} ->
           true
       end)
     end)

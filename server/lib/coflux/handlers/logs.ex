@@ -276,15 +276,9 @@ defmodule Coflux.Handlers.Logs do
 
   defp valid_reference?(%{
          "type" => "execution",
-         "executionId" => id,
-         "runId" => run_id,
-         "stepId" => step_id,
-         "attempt" => attempt
+         "executionId" => id
        })
-       when is_binary(id) and
-              is_binary(run_id) and
-              is_binary(step_id) and
-              is_integer(attempt),
+       when is_binary(id),
        do: true
 
   defp valid_reference?(%{
