@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import datetime as dt
+import fnmatch as fnmatch
 import json
 import tempfile
 from contextlib import contextmanager
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import protocol
+from .models import Asset, AssetEntry, AssetMetadata
+from .serialization import deserialize_argument, encode_value
 
 # Transfer threshold - values larger than this are passed via temp files
 # rather than inline in the stdio JSON protocol. This is separate from
@@ -56,8 +59,6 @@ class ExecutorContext:
         The worker then decides whether to upload to blob store based on its
         own threshold configuration.
         """
-        from .serialization import encode_value
-
         data, references = encode_value(value, self._write_temp_file)
         encoded = json.dumps(data, separators=(",", ":")).encode()
 
@@ -82,8 +83,11 @@ class ExecutorContext:
         retries: dict[str, Any] | None = None,
         recurrent: bool = False,
         requires: dict[str, list[str]] | None = None,
-    ) -> list[Any]:
-        """Submit a child execution and return its reference."""
+    ) -> dict[str, Any]:
+        """Submit a child execution and return its details.
+
+        Returns a dict with 'execution_id', 'module', and 'target' keys.
+        """
         # Use current group if not specified
         if group_id is None:
             group_id = _group_id.get()
@@ -102,47 +106,25 @@ class ExecutorContext:
             recurrent=recurrent,
             requires=requires,
         )
-        response = self._wait_response(request_id)
-        return response["reference"]
-
-    def resolve_reference(self, reference: list[Any]) -> dict[str, Any]:
-        """Resolve a reference to get its value."""
-        request_id = protocol.request_resolve_reference(
-            self.execution_id,
-            reference,
-        )
         return self._wait_response(request_id)
 
-    def persist_asset(
-        self,
-        paths: list[str],
-        metadata: dict[str, Any] | None = None,
-    ) -> list[Any]:
-        """Persist files as an asset and return the reference."""
-        request_id = protocol.request_persist_asset(
+    def resolve_execution(self, target_execution_id: str) -> Any:
+        """Resolve an execution by ID and deserialize the result."""
+        timeout = _timeout.get()
+        timeout_ms = int(timeout * 1000) if timeout is not None else None
+        request_id = protocol.request_resolve_reference(
             self.execution_id,
-            paths,
-            metadata,
+            target_execution_id,
+            timeout_ms=timeout_ms,
         )
-        response = self._wait_response(request_id)
-        return response["reference"]
+        value = self._wait_response(request_id)
+        return deserialize_argument(value)
 
-    def get_asset(self, reference: list[Any]) -> list[str]:
-        """Get paths for an asset."""
-        request_id = protocol.request_get_asset(
-            self.execution_id,
-            reference,
-        )
-        response = self._wait_response(request_id)
-        return response["paths"]
-
-    def get_asset_entries(self, asset_id: str) -> list:
+    def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
-        from .models import AssetEntry
-
         request_id = protocol.request_get_asset(
             self.execution_id,
-            ["asset", asset_id],
+            asset_id,
         )
         response = self._wait_response(request_id)
         entries = []
@@ -183,11 +165,8 @@ class ExecutorContext:
         Returns:
             The created Asset object.
         """
-        import fnmatch as fnmatch_module
-        from .models import Asset, AssetEntry, AssetMetadata
-
         base_dir = (at or self._working_dir).resolve()
-        matcher = fnmatch_module.fnmatch if match else None
+        matcher = fnmatch.fnmatch if match else None
         paths_to_upload: list[tuple[str, Path]] = []
         # Pre-resolved entries referencing existing blobs: {path: (blob_key, size, metadata)}
         resolved_entries: dict[str, tuple[str, int, dict]] = {}
@@ -197,7 +176,7 @@ class ExecutorContext:
 
         if entries is None and match:
             for file_path in base_dir.rglob("*"):
-                if file_path.is_file() and fnmatch_module.fnmatch(
+                if file_path.is_file() and fnmatch.fnmatch(
                     str(file_path.relative_to(base_dir)), match
                 ):
                     rel_path = str(file_path.relative_to(base_dir))
@@ -276,16 +255,11 @@ class ExecutorContext:
         )
         return Asset(asset_id, metadata)
 
-    def suspend(self) -> None:
-        """Suspend the current execution."""
-        request_id = protocol.request_suspend(self.execution_id)
-        self._wait_response(request_id)
-
-    def cancel_execution(self, target_reference: list[Any]) -> None:
+    def cancel_execution(self, target_execution_id: str) -> None:
         """Cancel another execution."""
         request_id = protocol.request_cancel_execution(
             self.execution_id,
-            target_reference,
+            target_execution_id,
         )
         self._wait_response(request_id)
 
@@ -400,20 +374,3 @@ class ExecutorContext:
             else:
                 # Unexpected message during wait
                 raise RuntimeError(f"Unexpected message while waiting for response: {msg}")
-
-
-# Current execution context (thread-local would be needed for concurrency)
-_current_context: ExecutorContext | None = None
-
-
-def get_context() -> ExecutorContext:
-    """Get the current execution context."""
-    if _current_context is None:
-        raise RuntimeError("Not in an execution context")
-    return _current_context
-
-
-def set_context(ctx: ExecutorContext | None) -> None:
-    """Set the current execution context."""
-    global _current_context
-    _current_context = ctx

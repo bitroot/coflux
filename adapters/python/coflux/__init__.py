@@ -10,9 +10,9 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from .context import get_context
-from .decorators import task, workflow, stub, Target, Execution, Retries
-from .models import Asset, AssetEntry, AssetMetadata, ExecutionMetadata
+from .decorators import task, workflow, stub, Target, Retries
+from .models import Asset, AssetEntry, AssetMetadata, Execution
+from .state import get_context
 
 __version__ = "0.1.0"
 
@@ -28,7 +28,6 @@ __all__ = [
     "Asset",
     "AssetEntry",
     "AssetMetadata",
-    "ExecutionMetadata",
     # Context functions
     "group",
     "suspense",

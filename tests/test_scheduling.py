@@ -78,13 +78,12 @@ def test_wait_for(worker):
         ref_a = conn0.submit_task(wf_eid, "test.producer", [])
 
         # Submit consumer with wait_for=[0] and execution reference in arg
-        exec_id = ref_a[1]  # ["execution", id, ...]
         consumer_args = [
             {
                 "type": "inline",
                 "format": "json",
                 "value": None,
-                "references": [["execution", exec_id]],
+                "references": [["execution", ref_a]],
             }
         ]
         ref_b = conn0.submit_task(wf_eid, "test.consumer", consumer_args, wait_for=[0])
@@ -142,13 +141,13 @@ def test_wait_for_multiple_dependencies(worker):
                 "type": "inline",
                 "format": "json",
                 "value": None,
-                "references": [["execution", ref_a[1]]],
+                "references": [["execution", ref_a]],
             },
             {
                 "type": "inline",
                 "format": "json",
                 "value": None,
-                "references": [["execution", ref_b[1]]],
+                "references": [["execution", ref_b]],
             },
         ]
         ref_c = conn0.submit_task(

@@ -542,7 +542,7 @@ func (w *Worker) sendHeartbeat(ctx context.Context) {
 
 // ExecutionHandler implementation
 
-func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) ([]any, error) {
+func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error) {
 	// Convert arguments back to server format
 	module, name := splitTarget(params.Target)
 	args, err := w.convertArgumentsToServer(params.Arguments)
@@ -637,12 +637,16 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		return nil, err
 	}
 
-	// Parse reference from result
 	// Server returns: [execution_id, module, target]
-	if serverRef, ok := result.([]any); ok && len(serverRef) >= 3 {
-		return []any{"execution", serverRef[0], serverRef[1], serverRef[2]}, nil
+	serverRef, ok := result.([]any)
+	if !ok || len(serverRef) < 3 {
+		return nil, fmt.Errorf("unexpected submit result: %v", result)
 	}
-	return nil, fmt.Errorf("unexpected submit result: %v", result)
+	return map[string]any{
+		"execution_id": serverRef[0],
+		"module":       serverRef[1],
+		"target":       serverRef[2],
+	}, nil
 }
 
 func (w *Worker) convertArgumentsToServer(args []adapter.Argument) ([]any, error) {
@@ -691,24 +695,12 @@ func (w *Worker) processReferences(refs [][]any) ([]any, error) {
 	return result, nil
 }
 
-func (w *Worker) ResolveReference(ctx context.Context, executionID string, reference []any) (*adapter.Value, error) {
-	if len(reference) < 2 {
-		return nil, fmt.Errorf("invalid reference")
-	}
-
-	refType := getString(reference[0])
-	if refType != "execution" {
-		return nil, fmt.Errorf("unsupported reference type: %s", refType)
-	}
-
-	refID := getString(reference[1])
-
-	// Python params: (target_execution_id, parent_execution_id, timeout_ms)
+func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.Value, error) {
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
 	}
-	result, err := conn.Request(ctx, "get_result", refID, executionID, nil)
+	result, err := conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs)
 	if err != nil {
 		return nil, err
 	}
@@ -830,13 +822,7 @@ func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []s
 	return nil, fmt.Errorf("unexpected result type: %T", result)
 }
 
-func (w *Worker) GetAsset(ctx context.Context, executionID string, reference []any) (map[string]any, error) {
-	if len(reference) < 2 {
-		return nil, fmt.Errorf("invalid asset reference")
-	}
-
-	assetID := getString(reference[1])
-
+func (w *Worker) GetAsset(ctx context.Context, executionID string, assetID string) (map[string]any, error) {
 	// Python params: (asset_id, execution_id)
 	conn, err := w.requireConn()
 	if err != nil {
@@ -889,17 +875,12 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) CancelExecution(ctx context.Context, executionID string, targetReference []any) error {
-	if len(targetReference) < 2 {
-		return fmt.Errorf("invalid target reference")
-	}
+func (w *Worker) CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	targetID := getString(targetReference[1])
-	// Python params: (target_execution_id,)
-	return conn.Notify("cancel", targetID)
+	return conn.Notify("cancel", targetExecutionID)
 }
 
 func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string][]any) error {

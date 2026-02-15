@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from .decorators import Execution
+from .models import Asset, AssetMetadata, Execution
 
 # Try to import pydantic
 try:
@@ -54,8 +54,6 @@ def encode_value(
         Tuple of (data, references) where data is JSON-serializable and
         references is a list of reference arrays.
     """
-    from .models import Asset
-
     references: list[list[Any]] = []
 
     def _encode(v: Any) -> Any:
@@ -81,8 +79,7 @@ def encode_value(
         elif isinstance(v, tuple):
             return {"type": "tuple", "items": [_encode(x) for x in v]}
         elif isinstance(v, Execution):
-            m = v.metadata
-            references.append(["execution", v.id, m.module if m else None, m.target if m else None])
+            references.append(["execution", v.id, v.module, v.target])
             return {"type": "ref", "index": len(references) - 1}
         elif isinstance(v, Asset):
             m = v.metadata
@@ -123,7 +120,7 @@ def encode_value(
     return data, references
 
 
-def serialize_result(value: Any) -> dict[str, Any] | None:
+def serialize_result(value: Any) -> dict[str, Any]:
     """Serialize a result value to the protocol format.
 
     Uses the custom JSON value encoding (dict/set/tuple types, fragment refs
@@ -133,11 +130,8 @@ def serialize_result(value: Any) -> dict[str, Any] | None:
         value: The Python value to serialize.
 
     Returns:
-        Serialized value dict or None if value is None.
+        Serialized value dict.
     """
-    if value is None:
-        return None
-
     data, references = encode_value(value)
     encoded = json.dumps(data, separators=(",", ":")).encode()
 
@@ -170,8 +164,6 @@ def decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
     Returns:
         Native Python value.
     """
-    from .models import Asset, AssetMetadata
-
     refs = references or []
 
     def _decode(v: Any) -> Any:
@@ -227,7 +219,7 @@ def decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                     return json.load(f)
             return None
         elif ref_type == "execution":
-            return Execution(ref)
+            return Execution(ref[1], ref[2], ref[3])
         elif ref_type == "asset":
             asset_id = ref[1]
             metadata = None

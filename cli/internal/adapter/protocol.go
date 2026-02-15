@@ -173,8 +173,9 @@ type SubmitExecutionResult struct {
 
 // ResolveReferenceParams for resolve_reference request
 type ResolveReferenceParams struct {
-	ExecutionID string `json:"execution_id"`
-	Reference   []any  `json:"reference"`
+	ExecutionID       string `json:"execution_id"`
+	TargetExecutionID string `json:"target_execution_id"`
+	TimeoutMs         *int64 `json:"timeout_ms,omitempty"`
 }
 
 // PersistAssetParams for persist_asset request
@@ -193,7 +194,7 @@ type PersistAssetResult struct {
 // GetAssetParams for get_asset request
 type GetAssetParams struct {
 	ExecutionID string `json:"execution_id"`
-	Reference   []any  `json:"reference"`
+	AssetID     string `json:"asset_id"`
 }
 
 // GetAssetResult is the response to get_asset
@@ -209,8 +210,8 @@ type SuspendParams struct {
 
 // CancelExecutionParams for cancel_execution request
 type CancelExecutionParams struct {
-	ExecutionID     string `json:"execution_id"`
-	TargetReference []any  `json:"target_reference"`
+	ExecutionID       string `json:"execution_id"`
+	TargetExecutionID string `json:"target_execution_id"`
 }
 
 // RegisterGroupParams for register_group notification

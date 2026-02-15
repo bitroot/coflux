@@ -78,11 +78,11 @@ def submit_execution_request(
     return {"id": request_id, "method": "submit_execution", "params": params}
 
 
-def resolve_reference_request(request_id, execution_id, reference):
+def resolve_reference_request(request_id, execution_id, target_execution_id):
     return {
         "id": request_id,
         "method": "resolve_reference",
-        "params": {"execution_id": execution_id, "reference": reference},
+        "params": {"execution_id": execution_id, "target_execution_id": target_execution_id},
     }
 
 
@@ -127,13 +127,13 @@ def json_args(*values):
     return [{"type": "inline", "format": "json", "value": v} for v in values]
 
 
-def cancel_execution_request(request_id, execution_id, target_reference):
+def cancel_execution_request(request_id, execution_id, target_execution_id):
     return {
         "id": request_id,
         "method": "cancel_execution",
         "params": {
             "execution_id": execution_id,
-            "target_reference": target_reference,
+            "target_execution_id": target_execution_id,
         },
     }
 
@@ -155,13 +155,13 @@ def persist_asset_request(request_id, execution_id, paths, metadata=None):
     return {"id": request_id, "method": "persist_asset", "params": params}
 
 
-def get_asset_request(request_id, execution_id, reference):
+def get_asset_request(request_id, execution_id, asset_id):
     return {
         "id": request_id,
         "method": "get_asset",
         "params": {
             "execution_id": execution_id,
-            "reference": reference,
+            "asset_id": asset_id,
         },
     }
 

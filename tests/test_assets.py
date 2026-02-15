@@ -38,9 +38,8 @@ def test_persist_and_get_asset(worker):
             [tmp_path],
             metadata={"name": "my_asset"},
         )
-        assert "reference" in asset_result
-        asset_ref = asset_result["reference"]
-        assert asset_ref[0] == "asset"
+        assert "asset_id" in asset_result
+        asset_id = asset_result["asset_id"]
 
         conn1.complete(prod_eid, value="produced")
         assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
@@ -50,7 +49,7 @@ def test_persist_and_get_asset(worker):
         cons_eid, _, _ = conn1.recv_execute()
 
         # Retrieve the asset (response is {"entries": {path: [blob_key, size, metadata]}})
-        result = conn1.get_asset(cons_eid, asset_ref)
+        result = conn1.get_asset(cons_eid, asset_id)
         assert "entries" in result
         entries = result["entries"]
         assert isinstance(entries, dict)
@@ -103,8 +102,7 @@ def test_asset_inspect_and_download(worker, tmp_path):
             [src_path],
             metadata={"name": "cli_test_asset"},
         )
-        asset_ref = asset_result["reference"]
-        asset_id = str(asset_ref[1])
+        asset_id = asset_result["asset_id"]
 
         conn1.complete(prod_eid, value="done")
         assert conn0.resolve(wf_eid, ref_prod)["value"] == "done"

@@ -367,9 +367,8 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
             assert result["type"] == "value"
             assert result["value"]["data"] == "done"
 
-            # Extract child step_id from reference: ["execution", "{run_id}:{step}:{attempt}"]
-            child_exec_id = child_ref[1]  # e.g. "abc:1:1"
-            parts = child_exec_id.rsplit(":", 2)
+            # child_ref is the execution ID string, e.g. "abc:1:1"
+            parts = child_ref.rsplit(":", 2)
             child_step_id = f"{parts[0]}:{parts[1]}"  # "abc:1"
 
             # Rotate epoch — both parent and child runs now in old epoch
@@ -654,8 +653,8 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             asset_result = conn1.persist_asset(
                 prod_eid, [asset_file], metadata={"name": "epoch_asset"},
             )
-            assert "reference" in asset_result
-            asset_ref = asset_result["reference"]
+            assert "asset_id" in asset_result
+            asset_id = asset_result["asset_id"]
 
             conn1.complete(prod_eid, value="produced")
             assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
@@ -665,7 +664,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             cons_eid, _, _ = conn1.recv_execute()
 
             # Consumer retrieves the asset — capture original entries
-            original_asset = conn1.get_asset(cons_eid, asset_ref)
+            original_asset = conn1.get_asset(cons_eid, asset_id)
             assert "entries" in original_asset
             original_entries = original_asset["entries"]
             assert len(original_entries) > 0
@@ -683,9 +682,8 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert result["type"] == "value"
             assert result["value"]["data"] == "done"
 
-            # Extract consumer step_id for rerun
-            cons_exec_id = ref_cons[1]  # e.g. "abc:3:1"
-            parts = cons_exec_id.rsplit(":", 2)
+            # ref_cons is the execution ID string, e.g. "abc:3:1"
+            parts = ref_cons.rsplit(":", 2)
             cons_step_id = f"{parts[0]}:{parts[1]}"
 
             # Rotate epoch — run with asset is now in old epoch
@@ -701,7 +699,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert target == "test.consumer"
 
             # The old asset reference should still resolve after copy
-            rerun_asset = conn.get_asset(rerun_eid, asset_ref)
+            rerun_asset = conn.get_asset(rerun_eid, asset_id)
             assert "entries" in rerun_asset
             rerun_entries = rerun_asset["entries"]
             assert len(rerun_entries) > 0

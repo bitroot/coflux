@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import typing as t
 from pathlib import Path
+from .state import get_context
+
+
+T = t.TypeVar("T")
 
 
 class AssetEntry(t.NamedTuple):
@@ -24,8 +29,6 @@ class AssetEntry(t.NamedTuple):
         Returns:
             Path to the restored file.
         """
-        from .context import get_context
-
         ctx = get_context()
         base_path = Path(at).resolve() if at else Path.cwd()
         target = base_path / self.path
@@ -64,8 +67,6 @@ class Asset:
     @functools.cached_property
     def entries(self) -> list[AssetEntry]:
         """Get all entries in this asset."""
-        from .context import get_context
-
         ctx = get_context()
         return ctx.get_asset_entries(self._id)
 
@@ -95,19 +96,38 @@ class Asset:
         Returns:
             Mapping of entry paths to restored file paths.
         """
-        import fnmatch
-
         entries = self.entries
         if match:
             entries = [e for e in entries if fnmatch.fnmatch(e.path, match)]
         return {e.path: e.restore(at=at) for e in entries}
 
 
-class ExecutionMetadata(t.NamedTuple):
-    """Metadata for an execution reference."""
+class Execution(t.Generic[T]):
+    """A handle to a submitted execution that can be awaited for its result."""
 
-    run_id: str | None = None
-    step_id: str | None = None
-    attempt: int | None = None
-    module: str | None = None
-    target: str | None = None
+    def __init__(self, execution_id: str, module: str, target: str):
+        self._execution_id = execution_id
+        self._module = module
+        self._target = target
+
+    @property
+    def id(self) -> str:
+        return self._execution_id
+
+    @property
+    def module(self) -> str:
+        return self._module
+
+    @property
+    def target(self) -> str:
+        return self._target
+
+    def result(self) -> T:
+        """Wait for and return the execution result."""
+        ctx = get_context()
+        return ctx.resolve_execution(self._execution_id)
+
+    def cancel(self) -> None:
+        """Cancel this execution."""
+        ctx = get_context()
+        ctx.cancel_execution(self._execution_id)

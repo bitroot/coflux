@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from . import protocol
-from .context import ExecutorContext, set_context
+from .context import ExecutorContext
+from .state import set_context
 from .output import capture_output
 from .serialization import deserialize_argument, serialize_result
 

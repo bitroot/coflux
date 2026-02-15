@@ -190,16 +190,17 @@ def request_submit_execution(
 
 def request_resolve_reference(
     execution_id: str,
-    reference: list[Any],
+    target_execution_id: str,
+    timeout_ms: int | None = None,
 ) -> int:
     """Request to resolve a reference (get result of another execution)."""
-    return get_protocol().send_request(
-        "resolve_reference",
-        {
-            "execution_id": execution_id,
-            "reference": reference,
-        },
-    )
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "target_execution_id": target_execution_id,
+    }
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    return get_protocol().send_request("resolve_reference", params)
 
 
 def request_persist_asset(
@@ -234,14 +235,14 @@ def request_persist_asset(
 
 def request_get_asset(
     execution_id: str,
-    reference: list[Any],
+    asset_id: str,
 ) -> int:
     """Request to get an asset."""
     return get_protocol().send_request(
         "get_asset",
         {
             "execution_id": execution_id,
-            "reference": reference,
+            "asset_id": asset_id,
         },
     )
 
@@ -289,14 +290,14 @@ def request_suspend(execution_id: str, execute_after: int | None = None) -> int:
 
 def request_cancel_execution(
     execution_id: str,
-    target_reference: list[Any],
+    target_execution_id: str,
 ) -> int:
     """Request to cancel another execution."""
     return get_protocol().send_request(
         "cancel_execution",
         {
             "execution_id": execution_id,
-            "target_reference": target_reference,
+            "target_execution_id": target_execution_id,
         },
     )
 
