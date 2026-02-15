@@ -76,6 +76,8 @@ CREATE TABLE workspace_manifests (
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_workspace_manifests_ws_module ON workspace_manifests(workspace_id, module, created_at);
+
 CREATE TABLE workspace_states (
   workspace_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: archived
@@ -83,6 +85,8 @@ CREATE TABLE workspace_states (
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_workspace_states_ws ON workspace_states(workspace_id, created_at);
 
 CREATE TABLE workspace_names (
   workspace_id INTEGER NOT NULL,
@@ -92,6 +96,8 @@ CREATE TABLE workspace_names (
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_workspace_names_ws ON workspace_names(workspace_id, created_at);
+
 CREATE TABLE workspace_bases (
   workspace_id INTEGER NOT NULL,
   base_workspace_id INTEGER,
@@ -100,6 +106,8 @@ CREATE TABLE workspace_bases (
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (base_workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_workspace_bases_ws ON workspace_bases(workspace_id, created_at);
 
 CREATE TABLE launchers (
   id INTEGER PRIMARY KEY,
@@ -136,6 +144,7 @@ CREATE TABLE pools (
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_pools_external_id ON pools(external_id);
+CREATE INDEX idx_pools_workspace_name ON pools(workspace_id, name, created_at);
 
 CREATE TABLE workers (
   id INTEGER PRIMARY KEY,
@@ -168,6 +177,8 @@ CREATE TABLE worker_states (
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
+CREATE INDEX idx_worker_states_worker ON worker_states(worker_id, created_at);
+
 CREATE TABLE worker_stops (
   id INTEGER PRIMARY KEY,
   worker_id INTEGER NOT NULL,
@@ -176,6 +187,8 @@ CREATE TABLE worker_stops (
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
+
+CREATE INDEX idx_worker_stops_worker ON worker_stops(worker_id, created_at);
 
 CREATE TABLE worker_stop_results (
   worker_stop_id INTEGER PRIMARY KEY,
@@ -272,6 +285,10 @@ WHERE
   parent_id IS NULL;
 
 CREATE INDEX steps_cache_key ON steps (cache_key);
+CREATE INDEX idx_steps_run_id ON steps(run_id, number);
+CREATE INDEX idx_steps_parent_id ON steps(parent_id);
+CREATE INDEX idx_steps_module_target ON steps(module, target, type);
+CREATE INDEX idx_steps_memo_key ON steps(memo_key);
 
 CREATE TABLE step_arguments (
   step_id INTEGER NOT NULL,
@@ -294,6 +311,8 @@ CREATE TABLE executions (
   FOREIGN KEY (step_id) REFERENCES steps ON DELETE CASCADE,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_executions_workspace_id ON executions(workspace_id);
 
 CREATE TABLE assets (
   id INTEGER PRIMARY KEY,
@@ -382,6 +401,8 @@ CREATE TABLE heartbeats (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_heartbeats_execution_id ON heartbeats(execution_id);
 
 CREATE TABLE blobs (
   id INTEGER PRIMARY KEY,
@@ -515,6 +536,9 @@ CREATE TABLE results (
     END
   )
 ) STRICT;
+
+CREATE INDEX idx_results_successor_id ON results(successor_id);
+CREATE INDEX idx_results_successor_ref_id ON results(successor_ref_id);
 
 CREATE TABLE message_templates (
   id INTEGER PRIMARY KEY,
