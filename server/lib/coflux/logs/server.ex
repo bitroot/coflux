@@ -298,17 +298,21 @@ defmodule Coflux.Logs.Server do
   end
 
   defp do_rotate(state) do
-    {:ok, new_epochs, old_epoch_id} = Epoch.rotate(state.epochs)
-    now = System.os_time(:millisecond)
-    log_index = Index.add_partition(state.log_index, old_epoch_id, now)
+    epoch_id = Epoch.next_epoch_id(state.epochs)
+
+    # Write placeholder entry to index first (null value)
+    log_index = Index.add_partition(state.log_index, epoch_id)
     :ok = Index.save(state.project_id, log_index)
+
+    # Now rotate
+    {:ok, new_epochs} = Epoch.rotate(state.epochs, epoch_id)
 
     %{
       state
       | epochs: new_epochs,
         log_index: log_index,
         template_cache: %{},
-        index_queue: state.index_queue ++ [old_epoch_id]
+        index_queue: state.index_queue ++ [epoch_id]
     }
     |> maybe_start_index_build()
   end
@@ -316,8 +320,7 @@ defmodule Coflux.Logs.Server do
   ## Private Functions — Bloom Filter Building
 
   defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    project_id = state.project_id
-    path = Path.join(Epoch.epochs_dir(project_id, "logs"), "#{epoch_id}.sqlite")
+    path = Epoch.archive_path(state.epochs, epoch_id)
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
@@ -481,8 +484,7 @@ defmodule Coflux.Logs.Server do
 
       true ->
         # Indexed archived partition — open for read
-        dir = Epoch.epochs_dir(state.project_id, "logs")
-        path = Path.join(dir, "#{epoch_id}.sqlite")
+        path = Epoch.archive_path(state.epochs, epoch_id)
         {:ok, db} = Sqlite3.open(path)
         {db, true}
     end

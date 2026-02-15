@@ -108,7 +108,6 @@ defmodule Coflux.Orchestration.Server do
     archived_epoch_ids = EpochIndex.all_epoch_ids(epoch_index)
 
     case Epoch.open(project_id, "orchestration",
-           dir: "epochs",
            unindexed_epoch_ids: unindexed_epoch_ids,
            archived_epoch_ids: archived_epoch_ids
          ) do
@@ -2976,26 +2975,25 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp do_rotate_epoch(state) do
-    {:ok, new_epochs, old_epoch_id} = Epoch.rotate(state.epochs)
+    epoch_id = Epoch.next_epoch_id(state.epochs)
+
+    # Write placeholder entry to index first (null value)
+    epoch_index = EpochIndex.add_epoch(state.epoch_index, epoch_id)
+    :ok = EpochIndex.save(state.project_id, epoch_index)
+
+    # Now rotate
+    {:ok, new_epochs} = Epoch.rotate(state.epochs, epoch_id)
     new_db = Epoch.active_db(new_epochs)
 
     # Get the old DB from the unindexed list (it was just appended)
-    {^old_epoch_id, old_db} = List.last(new_epochs.unindexed)
+    {^epoch_id, old_db} = List.last(new_epochs.unindexed)
     id_mappings = EpochCopy.copy_config(old_db, new_db)
-
-    # Write placeholder entry to EpochIndex (nil blooms — built in background)
-    now = System.os_time(:millisecond)
-
-    epoch_index =
-      EpochIndex.add_epoch(state.epoch_index, old_epoch_id, now, nil, nil)
-
-    :ok = EpochIndex.save(state.project_id, epoch_index)
 
     state
     |> Map.put(:epochs, new_epochs)
     |> Map.put(:db, new_db)
     |> Map.put(:epoch_index, epoch_index)
-    |> Map.update!(:index_queue, &(&1 ++ [old_epoch_id]))
+    |> Map.update!(:index_queue, &(&1 ++ [epoch_id]))
     |> remap_config_ids(id_mappings)
     |> copy_in_flight_runs()
     |> maybe_start_index_build()
@@ -3041,8 +3039,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    project_id = state.project_id
-    path = Path.join(Epoch.epochs_dir(project_id), "#{epoch_id}.sqlite")
+    path = Epoch.archive_path(state.epochs, epoch_id)
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
@@ -3245,7 +3242,7 @@ defmodule Coflux.Orchestration.Server do
       indexed_epoch_ids =
         if state.epoch_index do
           state.epoch_index.entries
-          |> Enum.filter(& &1.run_bloom)
+          |> Enum.filter(& &1.runs)
           |> Enum.map(& &1.epoch_id)
         else
           []
@@ -3320,7 +3317,7 @@ defmodule Coflux.Orchestration.Server do
          workspace_external_id,
          limit
        ) do
-    path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
+    path = Epoch.archive_path(state.epochs, epoch_id)
 
     case Exqlite.Sqlite3.open(path) do
       {:ok, db} ->
@@ -3717,7 +3714,7 @@ defmodule Coflux.Orchestration.Server do
           end
 
         Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
-          path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
+          path = Epoch.archive_path(state.epochs, epoch_id)
 
           case Exqlite.Sqlite3.open(path) do
             {:ok, archive_db} ->

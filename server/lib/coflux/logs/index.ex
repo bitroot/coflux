@@ -2,10 +2,12 @@ defmodule Coflux.Logs.Index do
   @moduledoc """
   Index file for efficient cross-partition log lookups using Bloom filters.
 
-  Stored at: data_dir/projects/{project_id}/logs/index.bin
+  Stored at: data_dir/projects/{project_id}/logs/index.json
 
   Each entry contains a Bloom filter for run IDs, allowing quick elimination
   of partitions that definitely don't contain logs for a target run.
+
+  Unindexed entries (awaiting Bloom filter build) have a `null` JSON value.
   """
 
   alias Coflux.Store.Bloom
@@ -14,10 +16,8 @@ defmodule Coflux.Logs.Index do
   defstruct entries: []
 
   defmodule Entry do
-    defstruct epoch_id: nil, created_at: nil, run_bloom: nil
+    defstruct epoch_id: nil, runs: nil
   end
-
-  @version 1
 
   @doc """
   Load the log index from disk. Returns an empty index if the file doesn't exist.
@@ -26,12 +26,8 @@ defmodule Coflux.Logs.Index do
     path = index_path(project_id)
 
     case File.read(path) do
-      {:ok, <<@version, data::binary>>} ->
+      {:ok, data} ->
         {:ok, deserialize(data)}
-
-      {:ok, _} ->
-        # Unknown version — start fresh
-        {:ok, %__MODULE__{entries: []}}
 
       {:error, :enoent} ->
         {:ok, %__MODULE__{entries: []}}
@@ -44,26 +40,26 @@ defmodule Coflux.Logs.Index do
   def save(project_id, %__MODULE__{} = index) do
     path = index_path(project_id)
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, <<@version, serialize(index)::binary>>)
+    File.write!(path, serialize(index))
     :ok
   end
 
   @doc """
-  Add a new partition entry with nil bloom (unindexed).
+  Add a new partition entry with null Bloom filter (unindexed).
   """
-  def add_partition(%__MODULE__{} = index, epoch_id, created_at) do
-    entry = %Entry{epoch_id: epoch_id, created_at: created_at, run_bloom: nil}
+  def add_partition(%__MODULE__{} = index, epoch_id) do
+    entry = %Entry{epoch_id: epoch_id}
     %{index | entries: [entry | index.entries]}
   end
 
   @doc """
-  Replace nil bloom with a real one for a given epoch_id.
+  Replace nil Bloom filter with a real one for a given epoch_id.
   """
-  def update_bloom(%__MODULE__{} = index, epoch_id, run_bloom) do
+  def update_bloom(%__MODULE__{} = index, epoch_id, runs) do
     entries =
       Enum.map(index.entries, fn entry ->
         if entry.epoch_id == epoch_id do
-          %{entry | run_bloom: run_bloom}
+          %{entry | runs: runs}
         else
           entry
         end
@@ -73,11 +69,11 @@ defmodule Coflux.Logs.Index do
   end
 
   @doc """
-  Returns epoch_ids of entries where bloom is nil (not yet indexed).
+  Returns epoch_ids of entries where Bloom filter is nil (not yet indexed).
   """
   def unindexed_epoch_ids(%__MODULE__{} = index) do
     index.entries
-    |> Enum.filter(fn entry -> entry.run_bloom == nil end)
+    |> Enum.filter(fn entry -> entry.runs == nil end)
     |> Enum.map(& &1.epoch_id)
   end
 
@@ -93,15 +89,15 @@ defmodule Coflux.Logs.Index do
   Returns epoch_ids in reverse chronological order (newest first).
 
   Options:
-  - `:from` - unix ms timestamp; skip partitions created before this time
+  - `:from` - unix ms timestamp; skip partitions archived before this date
   """
   def find_partitions_for_run(%__MODULE__{} = index, run_id, opts \\ []) do
     from = Keyword.get(opts, :from)
 
     index.entries
     |> Enum.filter(fn entry ->
-      after_from? = is_nil(from) or is_nil(entry.created_at) or entry.created_at >= from
-      bloom_match? = is_nil(entry.run_bloom) or Bloom.member?(entry.run_bloom, run_id)
+      after_from? = is_nil(from) or not archived_before?(entry.epoch_id, from)
+      bloom_match? = is_nil(entry.runs) or Bloom.member?(entry.runs, run_id)
       after_from? and bloom_match?
     end)
     |> Enum.map(& &1.epoch_id)
@@ -121,55 +117,69 @@ defmodule Coflux.Logs.Index do
     Enum.reduce(run_ids, bloom, fn {id}, b -> Bloom.add(b, id) end)
   end
 
-  # Serialization format:
-  # <<entry_count::32, entries::binary>>
-  # Each entry: <<epoch_id_len::16, epoch_id::binary, created_at::64,
-  #               run_bloom_len::32, run_bloom::binary>>
-  defp serialize(%__MODULE__{entries: entries}) do
-    entry_data =
-      Enum.map(entries, fn entry ->
-        run_bloom_bin =
-          if entry.run_bloom do
-            Bloom.serialize(entry.run_bloom)
-          else
-            <<>>
-          end
-
-        <<
-          byte_size(entry.epoch_id)::unsigned-16,
-          entry.epoch_id::binary,
-          entry.created_at || 0::signed-64,
-          byte_size(run_bloom_bin)::unsigned-32,
-          run_bloom_bin::binary
-        >>
-      end)
-
-    <<length(entries)::unsigned-32, IO.iodata_to_binary(entry_data)::binary>>
+  # Returns true if the epoch was definitely archived before the given timestamp.
+  # Parses the date from the epoch_id (YYYYMMDD_XXXX format) and compares at
+  # day granularity. Conservative: a partition archived on the same day as `from`
+  # is included (not skipped).
+  defp archived_before?(epoch_id, from_ms) do
+    case epoch_id_date(epoch_id) do
+      nil -> false
+      date ->
+        from_date = from_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_date()
+        Date.compare(date, from_date) == :lt
+    end
   end
 
-  defp deserialize(<<entry_count::unsigned-32, rest::binary>>) do
-    {entries, <<>>} =
-      Enum.reduce(1..entry_count//1, {[], rest}, fn _, {entries, data} ->
-        <<epoch_id_len::unsigned-16, epoch_id::binary-size(epoch_id_len), created_at::signed-64,
-          run_bloom_len::unsigned-32, run_bloom_bin::binary-size(run_bloom_len),
-          rest::binary>> = data
+  defp epoch_id_date(epoch_id) do
+    case String.split(epoch_id, "_") do
+      [date_str, _counter] ->
+        case Date.from_iso8601(date_str, :basic) do
+          {:ok, date} -> date
+          _ -> nil
+        end
 
-        run_bloom = if run_bloom_len > 0, do: Bloom.deserialize(run_bloom_bin)
+      _ ->
+        nil
+    end
+  end
 
-        entry = %Entry{
-          epoch_id: epoch_id,
-          created_at: if(created_at == 0, do: nil, else: created_at),
-          run_bloom: run_bloom
-        }
+  defp serialize(%__MODULE__{entries: entries}) do
+    map =
+      Map.new(entries, fn entry ->
+        value =
+          if entry.runs do
+            %{"runs" => Base.encode64(Bloom.serialize(entry.runs))}
+          else
+            nil
+          end
 
-        {[entry | entries], rest}
+        {entry.epoch_id, value}
       end)
 
-    %__MODULE__{entries: Enum.reverse(entries)}
+    Jason.encode!(map)
+  end
+
+  defp deserialize(data) do
+    map = Jason.decode!(data)
+
+    entries =
+      map
+      |> Enum.map(fn {epoch_id, value} ->
+        runs =
+          case value do
+            nil -> nil
+            %{"runs" => b64} -> Bloom.deserialize(Base.decode64!(b64))
+          end
+
+        %Entry{epoch_id: epoch_id, runs: runs}
+      end)
+      |> Enum.sort_by(& &1.epoch_id, :desc)
+
+    %__MODULE__{entries: entries}
   end
 
   defp index_path(project_id) do
-    ["projects", project_id, "logs", "index.bin"]
+    ["projects", project_id, "logs", "index.json"]
     |> Path.join()
     |> Utils.data_path()
   end

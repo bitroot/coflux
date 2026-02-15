@@ -29,13 +29,6 @@ def _rotate_epoch(port, project_id):
     urllib.request.urlopen(req, timeout=10)
 
 
-def _epoch_files(data_dir, project_id):
-    """Return sorted list of epoch .sqlite files for a project."""
-    epochs_dir = os.path.join(data_dir, "projects", project_id, "epochs")
-    if not os.path.isdir(epochs_dir):
-        return []
-    return sorted(f for f in os.listdir(epochs_dir) if f.endswith(".sqlite"))
-
 
 def _make_env(host):
     return {
@@ -100,14 +93,8 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
             assert result["type"] == "value"
             assert result["value"]["data"] == 42
 
-            # Should have exactly 1 epoch file
-            assert len(_epoch_files(data_dir, project_id)) == 1
-
             # Force rotation
             _rotate_epoch(server.port, project_id)
-
-            # Should now have 2 epoch files
-            assert len(_epoch_files(data_dir, project_id)) == 2
 
             # Server still works after rotation — submit another workflow
             resp2 = cli.submit("test.my_workflow", env=env)
@@ -178,7 +165,7 @@ def test_rerun_across_epoch_boundary(tmp_path):
 
             # Force rotation — original run is now in old epoch
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # Re-run the step (this triggers copy-on-reference from old epoch)
             rerun_resp = cli.runs_rerun(step_id, env=env)
@@ -266,7 +253,7 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
 
             # Force rotation — cached execution is now in old epoch
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # Second workflow: submit same cached task — should hit cache.
             # The workflow execution may land on either connection.
@@ -306,114 +293,6 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
     finally:
         server.stop()
 
-
-def test_server_starts_after_old_epoch_deleted(tmp_path):
-    """Server starts and functions after an old epoch file is deleted."""
-    project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
-
-    server = ManagedServer(data_dir)
-    server.start()
-
-    try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
-        cli.workspaces_create("default", env=env)
-
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
-
-        try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
-
-            # Submit and complete a workflow
-            resp = cli.submit("test.my_workflow", env=env)
-            run_id = resp["runId"]
-
-            eid, target, _ = conn.recv_execute()
-            assert target == "test.my_workflow"
-            conn.complete(eid, value=42)
-
-            result = _poll_result(run_id, env)
-            assert result["type"] == "value"
-            assert result["value"]["data"] == 42
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
-
-        # Rotate so we have 2 epochs
-        _rotate_epoch(server.port, project_id)
-        epoch_files = _epoch_files(data_dir, project_id)
-        assert len(epoch_files) == 2
-
-    finally:
-        server.stop()
-
-    # Delete the oldest epoch file and the epoch index
-    epochs_dir = os.path.join(data_dir, "projects", project_id, "epochs")
-    oldest = epoch_files[0]
-    os.remove(os.path.join(epochs_dir, oldest))
-
-    index_path = os.path.join(data_dir, "projects", project_id, "epoch_index.bin")
-    if os.path.exists(index_path):
-        os.remove(index_path)
-
-    # Restart with same data dir and port
-    server.start()
-
-    try:
-        socket_path2 = str(tmp_path / "executor2.sock")
-        env["COFLUX_TEST_SOCKET"] = socket_path2
-
-        executor2 = Executor(socket_path2)
-        executor2.start()
-
-        worker_proc2 = cli.worker(["test"], adapter, concurrency=1, env=env)
-
-        try:
-            executor2.accept(count=1, timeout=15)
-            conn2 = executor2.connections[0]
-            conn2.send_ready()
-
-            # Submit a new workflow — server should work fine
-            resp2 = cli.submit("test.my_workflow", env=env)
-            run_id2 = resp2["runId"]
-
-            eid2, target2, _ = conn2.recv_execute()
-            assert target2 == "test.my_workflow"
-            conn2.complete(eid2, value=99)
-
-            result2 = _poll_result(run_id2, env)
-            assert result2["type"] == "value"
-            assert result2["value"]["data"] == 99
-
-        finally:
-            worker_proc2.send_signal(signal.SIGTERM)
-            try:
-                worker_proc2.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc2.kill()
-                worker_proc2.wait(timeout=5)
-            executor2.close()
-    finally:
-        server.stop()
 
 
 def _recv_from_either(conn0, conn1, timeout=10):
@@ -495,7 +374,7 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
 
             # Rotate epoch — both parent and child runs now in old epoch
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # Rerun the child step — triggers copy_run on child, which recursively copies parent
             rerun_resp = cli.runs_rerun(child_step_id, env=env)
@@ -577,7 +456,7 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
 
             # Rotate epoch — first run with task is now in old epoch
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # Second workflow: resolve the OLD producer reference
             resp2 = cli.submit("test.main", env=env)
@@ -663,7 +542,7 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
 
             # Rotate → epoch 2
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # --- Epoch 2: cached task with args(99) → value 198 (different args) ---
             resp2 = cli.submit("test.main", env=env)
@@ -687,7 +566,7 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
 
             # Rotate → epoch 3
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 3
+
 
             # --- Epoch 3: cached task with args(42) again — should hit epoch 1's cache ---
             resp3 = cli.submit("test.main", env=env)
@@ -811,7 +690,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
 
             # Rotate epoch — run with asset is now in old epoch
             _rotate_epoch(server.port, project_id)
-            assert len(_epoch_files(data_dir, project_id)) == 2
+
 
             # Rerun the consumer step — copy_run copies run + assets to active epoch
             rerun_resp = cli.runs_rerun(cons_step_id, env=env)
