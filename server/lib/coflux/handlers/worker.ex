@@ -155,9 +155,6 @@ defmodule Coflux.Handlers.Worker do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
                 execution_external_id,
-                metadata.run_id,
-                metadata.step_id,
-                metadata.attempt,
                 metadata.module,
                 metadata.target
               ]
@@ -489,16 +486,8 @@ defmodule Coflux.Handlers.Worker do
       {:fragment, format, blob_key, size, metadata} ->
         ["fragment", format, blob_key, size, metadata]
 
-      {:execution, execution_external_id, metadata} ->
-        [
-          "execution",
-          execution_external_id,
-          metadata.run_id,
-          metadata.step_id,
-          metadata.attempt,
-          metadata.module,
-          metadata.target
-        ]
+      {:execution, execution_external_id, {module, target}} ->
+        ["execution", execution_external_id, module, target]
 
       {:asset, external_id, {name, total_count, total_size, _entry}} ->
         ["asset", external_id, name, total_count, total_size]

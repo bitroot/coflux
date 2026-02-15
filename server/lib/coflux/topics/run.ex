@@ -278,14 +278,18 @@ defmodule Coflux.Topics.Run do
             message: message,
             frames: build_frames(frames)
           },
-          retry: if(retry, do: retry.attempt)
+          retry: if(retry, do: execution_attempt(retry))
         }
 
       {:value, value} ->
         %{type: "value", createdBy: created_by, value: build_value(value)}
 
       {:abandoned, retry} ->
-        %{type: "abandoned", createdBy: created_by, retry: if(retry, do: retry.attempt)}
+        %{
+          type: "abandoned",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
 
       :cancelled ->
         %{type: "cancelled", createdBy: created_by}
@@ -294,7 +298,7 @@ defmodule Coflux.Topics.Run do
         %{
           type: "suspended",
           createdBy: created_by,
-          successor: if(successor, do: successor.attempt)
+          successor: if(successor, do: execution_attempt(successor))
         }
 
       {:deferred, execution, result} ->
@@ -324,6 +328,10 @@ defmodule Coflux.Topics.Run do
       nil ->
         nil
     end
+  end
+
+  defp execution_attempt({ext_id, _module, _target}) do
+    ext_id |> String.split(":") |> List.last() |> String.to_integer()
   end
 
   defp build_child({step_number, attempt, group_id}, external_run_id) do

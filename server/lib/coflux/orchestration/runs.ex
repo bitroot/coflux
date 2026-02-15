@@ -144,7 +144,14 @@ defmodule Coflux.Orchestration.Runs do
     # TODO: check that 'type' is :workflow?
 
     with_transaction(db, fn ->
-      {:ok, run_id, external_run_id} = insert_run(db, parent_id, idempotency_key, now, created_by)
+      parent_ref_id =
+        if parent_id do
+          {:ok, ref_id} = create_execution_ref_for(db, parent_id)
+          ref_id
+        end
+
+      {:ok, run_id, external_run_id} =
+        insert_run(db, parent_ref_id, idempotency_key, now, created_by)
 
       {:ok, schedule} =
         do_schedule_step(
@@ -215,11 +222,11 @@ defmodule Coflux.Orchestration.Runs do
                 Enum.flat_map(metadata, fn {key, value} -> [key, Jason.encode!(value)] end)
               )
 
-            {:execution, execution_id} ->
-              [2, Integer.to_string(execution_id)]
+            {:execution, run_ext, step_num, attempt} ->
+              [2, "#{run_ext}:#{step_num}:#{attempt}"]
 
-            {:asset, asset_id} ->
-              [3, Integer.to_string(asset_id)]
+            {:asset, external_id} ->
+              [3, external_id]
           end)
       ]
 
@@ -395,7 +402,7 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ids, created_by \\ nil) do
+  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ref_ids, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
       # TODO: cancel pending executions for step?
@@ -408,8 +415,8 @@ defmodule Coflux.Orchestration.Runs do
         insert_many(
           db,
           :result_dependencies,
-          {:execution_id, :dependency_id, :created_at},
-          Enum.map(dependency_ids, &{execution_id, &1, now})
+          {:execution_id, :dependency_ref_id, :created_at},
+          Enum.map(dependency_ref_ids, &{execution_id, &1, now})
         )
 
       {:ok, execution_id, attempt, now}
@@ -449,14 +456,14 @@ defmodule Coflux.Orchestration.Runs do
     end)
   end
 
-  def record_result_dependency(db, execution_id, dependency_id) do
+  def record_result_dependency(db, execution_id, dependency_ref_id) do
     with_transaction(db, fn ->
       insert_one(
         db,
         :result_dependencies,
         %{
           execution_id: execution_id,
-          dependency_id: dependency_id,
+          dependency_ref_id: dependency_ref_id,
           created_at: current_timestamp()
         },
         on_conflict: "DO NOTHING"
@@ -597,7 +604,7 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_target_runs(db, module, target, type, workspace_id, limit \\ 50) do
+  def get_target_runs(db, module, target, type, workspace_id, limit) do
     query(
       db,
       """
@@ -621,7 +628,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -638,7 +645,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_id, r.idempotency_key, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -745,7 +752,7 @@ defmodule Coflux.Orchestration.Runs do
     case query(
            db,
            """
-           SELECT d.execution_id, d.dependency_id
+           SELECT d.execution_id, d.dependency_ref_id
            FROM result_dependencies AS d
            INNER JOIN executions AS e ON e.id = d.execution_id
            INNER JOIN steps AS s ON s.id = e.step_id
@@ -864,7 +871,7 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT dependency_id
+      SELECT dependency_ref_id
       FROM result_dependencies
       WHERE execution_id = ?1
       """,
@@ -920,6 +927,20 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def find_cached_execution(db, workspace_ids, step_id, cache_key, recorded_after) do
+    step_clause =
+      if step_id do
+        "AND s.id <> ?#{length(workspace_ids) + 3}"
+      else
+        ""
+      end
+
+    params =
+      if step_id do
+        workspace_ids ++ [{:blob, cache_key}, recorded_after, step_id]
+      else
+        workspace_ids ++ [{:blob, cache_key}, recorded_after]
+      end
+
     case query(
            db,
            """
@@ -931,11 +952,11 @@ defmodule Coflux.Orchestration.Runs do
              e.workspace_id IN (#{build_placeholders(length(workspace_ids))})
              AND s.cache_key = ?#{length(workspace_ids) + 1}
              AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?#{length(workspace_ids) + 2}))
-             AND s.id <> ?#{length(workspace_ids) + 3}
+             #{step_clause}
            ORDER BY e.created_at DESC
            LIMIT 1
            """,
-           List.to_tuple(workspace_ids ++ [{:blob, cache_key}, recorded_after, step_id])
+           List.to_tuple(params)
          ) do
       {:ok, [{execution_id}]} ->
         {:ok, execution_id}
@@ -946,31 +967,58 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_result_successors(db, execution_id) do
-    query(
-      db,
-      """
-      WITH RECURSIVE successors AS (
-        SELECT ?1 AS execution_id
-        UNION
-        SELECT r.execution_id
+    # First, find successors via the successor_id chain (same-run, internal)
+    {:ok, rows1} =
+      query(
+        db,
+        """
+        WITH RECURSIVE successors AS (
+          SELECT ?1 AS execution_id
+          UNION
+          SELECT r.execution_id
+          FROM successors AS ss
+          INNER JOIN results AS r ON r.successor_id = ss.execution_id
+        )
+        SELECT run.external_id, ss.execution_id
         FROM successors AS ss
-        INNER JOIN results AS r ON r.successor_id = ss.execution_id
+        INNER JOIN executions AS e ON e.id = ss.execution_id
+        INNER JOIN steps AS s ON s.id = e.step_id
+        INNER JOIN runs AS run ON run.id = s.run_id
+        """,
+        {execution_id}
       )
-      SELECT s.run_id, ss.execution_id
-      FROM successors AS ss
-      INNER JOIN executions AS e ON e.id = ss.execution_id
-      INNER JOIN steps AS s ON s.id = e.step_id
-      """,
-      {execution_id}
-    )
+
+    # Also find predecessors that reference this execution via successor_ref_id.
+    # This only searches the active epoch, which is sufficient because
+    # successor_ref_id results are always written to the active epoch (either
+    # during runtime cache hits or epoch copy), and in-flight runs are copied
+    # forward during rotation.
+    {:ok, {run_ext, step_num, attempt}} = get_execution_key(db, execution_id)
+
+    {:ok, rows2} =
+      query(
+        db,
+        """
+        SELECT run2.external_id, r.execution_id
+        FROM results AS r
+        INNER JOIN execution_refs AS ref ON r.successor_ref_id = ref.id
+        INNER JOIN executions AS e ON e.id = r.execution_id
+        INNER JOIN steps AS s ON s.id = e.step_id
+        INNER JOIN runs AS run2 ON run2.id = s.run_id
+        WHERE ref.run_external_id = ?1 AND ref.step_number = ?2 AND ref.attempt = ?3
+        """,
+        {run_ext, step_num, attempt}
+      )
+
+    {:ok, rows1 ++ rows2}
   end
 
-  defp insert_run(db, parent_id, idempotency_key, created_at, created_by) do
+  defp insert_run(db, parent_ref_id, idempotency_key, created_at, created_by) do
     case generate_external_id(db, :runs, 2, "R") do
       {:ok, external_id} ->
         case insert_one(db, :runs, %{
                external_id: external_id,
-               parent_id: parent_id,
+               parent_ref_id: parent_ref_id,
                idempotency_key: idempotency_key,
                created_at: created_at,
                created_by: created_by
@@ -1137,6 +1185,75 @@ defmodule Coflux.Orchestration.Runs do
       """,
       {run_external_id, step_number, attempt}
     )
+  end
+
+  # Execution ref helpers
+
+  def get_or_create_execution_ref(db, run_external_id, step_number, attempt, module, target) do
+    {:ok, _} =
+      insert_one(
+        db,
+        :execution_refs,
+        %{
+          run_external_id: run_external_id,
+          step_number: step_number,
+          attempt: attempt,
+          module: module,
+          target: target
+        },
+        on_conflict: "DO NOTHING"
+      )
+
+    case query_one(
+           db,
+           """
+           SELECT id
+           FROM execution_refs
+           WHERE run_external_id = ?1 AND step_number = ?2 AND attempt = ?3
+           """,
+           {run_external_id, step_number, attempt}
+         ) do
+      {:ok, {id}} -> {:ok, id}
+    end
+  end
+
+  def get_module_target(db, run_external_id, step_number, attempt) do
+    query_one(
+      db,
+      """
+      SELECT s.module, s.target
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = s.run_id
+      WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+      """,
+      {run_external_id, step_number, attempt}
+    )
+  end
+
+  def get_execution_ref(db, ref_id) do
+    case query_one(
+           db,
+           "SELECT run_external_id, step_number, attempt, module, target FROM execution_refs WHERE id = ?1",
+           {ref_id}
+         ) do
+      {:ok, {run_external_id, step_number, attempt, module, target}} ->
+        {:ok, {run_external_id, step_number, attempt, module, target}}
+
+      {:ok, nil} ->
+        {:error, :not_found}
+    end
+  end
+
+  def create_execution_ref_for(db, execution_id) do
+    case get_execution_key(db, execution_id) do
+      {:ok, {run_external_id, step_number, attempt}} ->
+        {:ok, {_, _, _, module, target}} = get_run_by_execution(db, execution_id)
+        get_or_create_execution_ref(db, run_external_id, step_number, attempt, module, target)
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+    end
   end
 
   defp current_timestamp() do

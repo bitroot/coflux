@@ -29,11 +29,12 @@ defmodule Coflux.TopicUtils do
           metadata: metadata
         }
 
-      {:execution, execution_external_id, execution} ->
+      {:execution, execution_external_id, {module, target}} ->
         %{
           type: "execution",
           executionId: execution_external_id,
-          execution: build_execution(execution)
+          module: module,
+          target: target
         }
 
       {:asset, asset_id, asset} ->
@@ -63,14 +64,11 @@ defmodule Coflux.TopicUtils do
     }
   end
 
-  def build_execution(execution) do
+  def build_execution({ext_id, module, target}) do
     %{
-      runId: execution.run_id,
-      stepId: execution.step_id,
-      stepNumber: execution.step_number,
-      attempt: execution.attempt,
-      module: execution.module,
-      target: execution.target
+      executionId: ext_id,
+      module: module,
+      target: target
     }
   end
 

@@ -85,10 +85,9 @@ func formatReference(ref any) string {
 	typ, _ := r["type"].(string)
 	switch typ {
 	case "execution":
-		exec, _ := r["execution"].(map[string]any)
-		if exec != nil {
-			module, _ := exec["module"].(string)
-			target, _ := exec["target"].(string)
+		module, _ := r["module"].(string)
+		target, _ := r["target"].(string)
+		if module != "" || target != "" {
 			return fmt.Sprintf("<step %s.%s>", module, target)
 		}
 		return "<step>"

@@ -261,14 +261,24 @@ class Execution(t.Generic[T]):
     def metadata(self):
         """Get execution metadata from the reference."""
         from .models import ExecutionMetadata
-        # Reference format: ["execution", id, run_id, step_id, attempt, module, target]
-        if len(self._reference) >= 7:
+        # Reference format: ["execution", id, module, target]
+        if len(self._reference) >= 4:
+            execution_id = str(self._reference[1])
+            parts = execution_id.split(":")
+            if len(parts) == 3:
+                run_id = parts[0]
+                step_id = f"{parts[0]}:{parts[1]}"
+                attempt = int(parts[2])
+            else:
+                run_id = None
+                step_id = None
+                attempt = None
             return ExecutionMetadata(
-                run_id=self._reference[2],
-                step_id=self._reference[3],
-                attempt=self._reference[4],
-                module=self._reference[5],
-                target=self._reference[6],
+                run_id=run_id,
+                step_id=step_id,
+                attempt=attempt,
+                module=self._reference[2],
+                target=self._reference[3],
             )
         return None
 
@@ -360,28 +370,22 @@ class Target(t.Generic[P, T]):
 
         ctx = get_context()
 
-        # Serialize arguments, detecting Execution objects for wait_for
+        # Serialize arguments
         serialized_args = []
-        execution_indices: set[int] = set()
         for i, arg in enumerate(args):
             if isinstance(arg, Execution):
-                # Serialize as null with execution reference
                 ref = ["execution", arg.id]
                 if arg.metadata:
                     ref.extend([
-                        arg.metadata.run_id,
-                        arg.metadata.step_id,
-                        arg.metadata.attempt,
                         arg.metadata.module,
                         arg.metadata.target,
                     ])
                 serialized_args.append({
                     "type": "inline",
                     "format": "json",
-                    "value": None,
+                    "value": {"type": "ref", "index": 0},
                     "references": [ref],
                 })
-                execution_indices.add(i)
             else:
                 result = serialize_result(arg)
                 if result is None:
@@ -389,9 +393,8 @@ class Target(t.Generic[P, T]):
                 else:
                     serialized_args.append(result)
 
-        # Combine detected execution indices with declared wait_for
-        wait_for = execution_indices | self._definition.wait_for
-        wait_for_val = sorted(wait_for) if wait_for else None
+        # Use only the declared wait_for from the decorator
+        wait_for_val = sorted(self._definition.wait_for) if self._definition.wait_for else None
 
         # Build full target name
         full_target = f"{self._module}.{self._name}"

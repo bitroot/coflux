@@ -64,21 +64,11 @@ type ExecuteRequestParams struct {
 	ExecutionID string     `json:"execution_id"`
 	Target      string     `json:"target"`
 	Arguments   []Argument `json:"arguments"`
+	WorkingDir  string     `json:"working_dir,omitempty"`
 }
 
-// Argument represents a serialized argument value
-type Argument struct {
-	Type   string `json:"type"`   // "inline" or "file"
-	Format string `json:"format"` // serialization format (e.g., "json", "pickle", "parquet", "pydantic")
-	// For inline type
-	Value any `json:"value,omitempty"`
-	// For file type
-	Path string `json:"path,omitempty"`
-	// Optional metadata (e.g., model class name for pydantic)
-	Metadata map[string]any `json:"metadata,omitempty"`
-	// References (e.g., execution, asset, fragment)
-	References [][]any `json:"references,omitempty"`
-}
+// Argument is the same structure as Value (used for arguments to distinguish context)
+type Argument = Value
 
 // Response is sent from CLI to executor in response to a request
 type Response struct {
@@ -112,11 +102,12 @@ type ExecutionResultParams struct {
 
 // Value represents a serialized value
 type Value struct {
-	Type     string         `json:"type"`   // "inline" or "file"
-	Format   string         `json:"format"` // serialization format
-	Value    any            `json:"value,omitempty"`
-	Path     string         `json:"path,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	Type       string         `json:"type"`   // "inline" or "file"
+	Format     string         `json:"format"` // serialization format
+	Value      any            `json:"value,omitempty"`
+	Path       string         `json:"path,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	References [][]any        `json:"references,omitempty"`
 }
 
 // ExecutionErrorMessage is sent when execution fails
@@ -188,9 +179,10 @@ type ResolveReferenceParams struct {
 
 // PersistAssetParams for persist_asset request
 type PersistAssetParams struct {
-	ExecutionID string         `json:"execution_id"`
-	Paths       []string       `json:"paths"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
+	ExecutionID string           `json:"execution_id"`
+	Paths       []string         `json:"paths,omitempty"`
+	Metadata    map[string]any   `json:"metadata,omitempty"`
+	Entries     map[string][]any `json:"entries,omitempty"` // Pre-resolved entries: {path: [blob_key, size, metadata]}
 }
 
 // PersistAssetResult is the response to persist_asset

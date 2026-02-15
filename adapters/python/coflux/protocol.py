@@ -204,16 +204,31 @@ def request_resolve_reference(
 
 def request_persist_asset(
     execution_id: str,
-    paths: list[str],
+    paths: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    entries: dict[str, tuple[str, int, dict[str, Any]]] | None = None,
 ) -> int:
-    """Request to persist an asset."""
+    """Request to persist an asset.
+
+    Args:
+        execution_id: The execution this asset belongs to.
+        paths: Local file paths to upload and include.
+        metadata: Asset-level metadata (e.g. name).
+        entries: Pre-resolved entries referencing existing blobs.
+            Each value is (blob_key, size, entry_metadata).
+    """
     params: dict[str, Any] = {
         "execution_id": execution_id,
-        "paths": paths,
     }
+    if paths:
+        params["paths"] = paths
     if metadata:
         params["metadata"] = metadata
+    if entries:
+        params["entries"] = {
+            path: [blob_key, size, entry_metadata]
+            for path, (blob_key, size, entry_metadata) in entries.items()
+        }
     return get_protocol().send_request("persist_asset", params)
 
 

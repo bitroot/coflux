@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Server message types (server -> client)
@@ -147,9 +149,6 @@ type Reference struct {
 	Type ReferenceType
 	// For execution references
 	ExecutionID string
-	RunID       string
-	StepID      string
-	Attempt     int
 	Module      string
 	Target      string
 	// For asset references
@@ -162,6 +161,19 @@ type Reference struct {
 	BlobKey    string
 	Size       int64
 	Metadata   map[string]any
+}
+
+// ParseExecutionID parses an execution external ID ("runId:stepNum:attempt")
+// into its component parts.
+func ParseExecutionID(executionID string) (runID string, stepID string, attempt int) {
+	parts := strings.SplitN(executionID, ":", 3)
+	if len(parts) == 3 {
+		runID = parts[0]
+		stepID = parts[0] + ":" + parts[1]
+		a, _ := strconv.Atoi(parts[2])
+		attempt = a
+	}
+	return
 }
 
 // ParseValue parses a value from server format
@@ -242,19 +254,15 @@ func ParseReference(data []any) (*Reference, error) {
 
 	switch typeStr {
 	case "execution":
-		// ["execution", execution_id, run_id, step_id, attempt, module, target]
-		if len(data) < 7 {
+		// ["execution", execution_id, module, target]
+		if len(data) < 4 {
 			return nil, fmt.Errorf("invalid execution reference")
 		}
-		attempt, _ := data[4].(float64)
 		return &Reference{
 			Type:        RefTypeExecution,
 			ExecutionID: getString(data[1]),
-			RunID:       getString(data[2]),
-			StepID:      getString(data[3]),
-			Attempt:     int(attempt),
-			Module:      getString(data[5]),
-			Target:      getString(data[6]),
+			Module:      getString(data[2]),
+			Target:      getString(data[3]),
 		}, nil
 
 	case "asset":

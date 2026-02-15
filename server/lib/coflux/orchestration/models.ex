@@ -5,7 +5,7 @@ defmodule Coflux.Orchestration.Models do
     defstruct [
       :id,
       :external_id,
-      :parent_id,
+      :parent_ref_id,
       :idempotency_key,
       :created_at,
       :created_by

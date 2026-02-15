@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/bitroot/coflux/cli/internal/adapter"
@@ -17,7 +18,7 @@ type ExecutionHandler interface {
 	// ResolveReference resolves a reference to get its value
 	ResolveReference(ctx context.Context, executionID string, reference []any) (*adapter.Value, error)
 	// PersistAsset persists files as an asset
-	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any) (map[string]any, error)
+	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
 	GetAsset(ctx context.Context, executionID string, reference []any) (map[string]any, error)
 	// DownloadBlob downloads a blob to a local file
@@ -132,7 +133,24 @@ func (p *Pool) Execute(ctx context.Context, executionID, target string, argument
 }
 
 func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID, target string, arguments []adapter.Argument) {
+	// Create a temporary directory for this execution
+	workingDir, err := os.MkdirTemp("", "coflux-exec-*")
+	if err != nil {
+		p.logger.Error("failed to create temp dir for execution", "error", err, "execution_id", executionID)
+		p.handler.ReportError(ctx, executionID, "internal", fmt.Sprintf("failed to create temp dir: %s", err.Error()), "")
+		p.mu.Lock()
+		pe.busy = false
+		shutdown := p.shutdown
+		p.mu.Unlock()
+		if !shutdown {
+			p.available <- pe
+		}
+		return
+	}
+
 	defer func() {
+		os.RemoveAll(workingDir)
+
 		p.mu.Lock()
 		pe.busy = false
 		shutdown := p.shutdown
@@ -146,7 +164,7 @@ func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID
 	logger := p.logger.With("executor", pe.index, "execution_id", executionID, "target", target)
 
 	// Send execute command
-	if err := pe.executor.SendExecute(executionID, target, arguments); err != nil {
+	if err := pe.executor.SendExecute(executionID, target, arguments, workingDir); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
 		return
@@ -291,7 +309,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata)
+		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata, req.Entries)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "persist_error", Message: err.Error()}
 		} else {
