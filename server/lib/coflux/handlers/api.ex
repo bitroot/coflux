@@ -787,6 +787,11 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "POST", ["rotate_logs"], project_id, _access) do
+    :ok = Coflux.Logs.Server.rotate(project_id)
+    :cowboy_req.reply(204, req)
+  end
+
   defp handle(req, _method, _path, _project, _access) do
     json_error_response(req, "not_found", status: 404)
   end

@@ -6,7 +6,7 @@ defmodule Coflux.Store.Epoch do
   - **indexed**: closed, opened on demand (tracked in EpochIndex)
 
   Epoch files live at:
-    data_dir/projects/{project_id}/epochs/YYYYMMDD_XXXX.sqlite
+    data_dir/projects/{project_id}/{dir}/YYYYMMDD_XXXX.sqlite
 
   Where YYYYMMDD is the UTC date and XXXX is a zero-padded per-date counter.
   """
@@ -17,17 +17,24 @@ defmodule Coflux.Store.Epoch do
 
   defstruct project_id: nil,
             name: nil,
+            dir: nil,
             active_db: nil,
             active_epoch_id: nil,
             unindexed: []
 
   @doc """
   Open the epoch store for a project. If no epochs exist, creates the first one.
-  `unindexed_epoch_ids` specifies which archived epochs should be kept open (not yet indexed).
+
+  Options:
+  - `:dir` - subdirectory under the project for epoch files (default: same as `name`)
+  - `:unindexed_epoch_ids` - which archived epochs should be kept open (default: `[]`)
+
   Returns {:ok, epoch_state}.
   """
-  def open(project_id, name, unindexed_epoch_ids \\ []) do
-    epochs_dir = epochs_dir(project_id)
+  def open(project_id, name, opts \\ []) do
+    dir = Keyword.get(opts, :dir, name)
+    unindexed_epoch_ids = Keyword.get(opts, :unindexed_epoch_ids, [])
+    epochs_dir = epochs_dir(project_id, dir)
     File.mkdir_p!(epochs_dir)
 
     epoch_files =
@@ -48,6 +55,7 @@ defmodule Coflux.Store.Epoch do
          %__MODULE__{
            project_id: project_id,
            name: name,
+           dir: dir,
            active_db: db,
            active_epoch_id: epoch_id,
            unindexed: []
@@ -83,6 +91,7 @@ defmodule Coflux.Store.Epoch do
          %__MODULE__{
            project_id: project_id,
            name: name,
+           dir: dir,
            active_db: active_db,
            active_epoch_id: active_epoch_id,
            unindexed: unindexed
@@ -96,7 +105,7 @@ defmodule Coflux.Store.Epoch do
   Returns {:ok, new_epoch_state, old_epoch_id}.
   """
   def rotate(%__MODULE__{} = epoch_state) do
-    epochs_dir = epochs_dir(epoch_state.project_id)
+    epochs_dir = epochs_dir(epoch_state.project_id, epoch_state.dir)
     new_epoch_id = generate_epoch_id(epochs_dir)
     new_path = Path.join(epochs_dir, "#{new_epoch_id}.sqlite")
 
@@ -145,7 +154,7 @@ defmodule Coflux.Store.Epoch do
   Get the file size of the active epoch database in bytes.
   """
   def active_db_size(%__MODULE__{} = epoch_state) do
-    epochs_dir = epochs_dir(epoch_state.project_id)
+    epochs_dir = epochs_dir(epoch_state.project_id, epoch_state.dir)
     path = Path.join(epochs_dir, "#{epoch_state.active_epoch_id}.sqlite")
 
     case File.stat(path) do
@@ -169,10 +178,17 @@ defmodule Coflux.Store.Epoch do
   end
 
   @doc """
-  Returns the epochs directory path for a project.
+  Returns the epochs directory path for a project (default: "epochs" subdirectory).
   """
   def epochs_dir(project_id) do
-    ["projects", project_id, "epochs"]
+    epochs_dir(project_id, "epochs")
+  end
+
+  @doc """
+  Returns the directory path for a project's epoch files under the given subdirectory.
+  """
+  def epochs_dir(project_id, dir) do
+    ["projects", project_id, dir]
     |> Path.join()
     |> Utils.data_path()
   end

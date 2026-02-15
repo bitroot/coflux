@@ -140,7 +140,10 @@ defmodule Coflux.Orchestration.Server do
     # Determine which epochs need open DB handles (unindexed = nil blooms)
     unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(epoch_index)
 
-    case Epoch.open(project_id, "orchestration", unindexed_epoch_ids) do
+    case Epoch.open(project_id, "orchestration",
+           dir: "epochs",
+           unindexed_epoch_ids: unindexed_epoch_ids
+         ) do
       {:ok, epochs} ->
         db = Epoch.active_db(epochs)
 
