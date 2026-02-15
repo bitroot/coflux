@@ -82,6 +82,13 @@ defmodule Coflux.Logs.Index do
   end
 
   @doc """
+  Returns all archived epoch IDs tracked by the index.
+  """
+  def all_epoch_ids(%__MODULE__{} = index) do
+    Enum.map(index.entries, & &1.epoch_id)
+  end
+
+  @doc """
   Find partition epoch_ids that may contain logs for the given run_id.
   Returns epoch_ids in reverse chronological order (newest first).
 

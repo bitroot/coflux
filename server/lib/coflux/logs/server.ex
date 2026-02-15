@@ -123,8 +123,12 @@ defmodule Coflux.Logs.Server do
   def init(project_id) do
     {:ok, log_index} = Index.load(project_id)
     unindexed_epoch_ids = Index.unindexed_epoch_ids(log_index)
+    archived_epoch_ids = Index.all_epoch_ids(log_index)
 
-    case Epoch.open(project_id, "logs", unindexed_epoch_ids: unindexed_epoch_ids) do
+    case Epoch.open(project_id, "logs",
+           unindexed_epoch_ids: unindexed_epoch_ids,
+           archived_epoch_ids: archived_epoch_ids
+         ) do
       {:ok, epochs} ->
         state = %State{
           project_id: project_id,

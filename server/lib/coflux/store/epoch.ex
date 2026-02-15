@@ -9,6 +9,9 @@ defmodule Coflux.Store.Epoch do
   `logs.sqlite`). Archived (immutable) files use date-based `YYYYMMDD_XXXX.sqlite`
   naming. This makes the active file easy to target with streaming backup tools
   (e.g. Litestream) and emphasises the mutable vs immutable distinction.
+
+  All archived epoch IDs are tracked via the index file — no filesystem listing
+  is needed. The index is the source of truth for which archived partitions exist.
   """
 
   alias Coflux.Store.Migrations
@@ -20,60 +23,45 @@ defmodule Coflux.Store.Epoch do
             dir: nil,
             active_db: nil,
             active_epoch_id: nil,
-            unindexed: []
+            unindexed: [],
+            archived_ids: []
 
   @doc """
   Open the epoch store for a project. If no active file exists, creates one.
 
-  The active file is `{dir}/{name}.sqlite`. Archived files matching
-  `YYYYMMDD_XXXX.sqlite` are treated as immutable.
-
-  If no active file exists but archived files do (migration from the old
-  naming scheme where all files were date-based), the latest dated file
-  is promoted to the active name.
+  The active file is `{dir}/{name}.sqlite`. Archived files use date-based
+  `YYYYMMDD_XXXX.sqlite` naming and are identified by the index, not by
+  filesystem listing.
 
   Options:
   - `:dir` - subdirectory under the project for epoch files (default: same as `name`)
   - `:unindexed_epoch_ids` - which archived epochs should be kept open (default: `[]`)
+  - `:archived_epoch_ids` - all known archived epoch IDs from the index (default: `[]`)
 
   Returns {:ok, epoch_state}.
   """
   def open(project_id, name, opts \\ []) do
     dir = Keyword.get(opts, :dir, name)
     unindexed_epoch_ids = Keyword.get(opts, :unindexed_epoch_ids, [])
+    archived_epoch_ids = Keyword.get(opts, :archived_epoch_ids, [])
     dir_path = epochs_dir(project_id, dir)
     File.mkdir_p!(dir_path)
 
     active_path = Path.join(dir_path, "#{name}.sqlite")
-    archived_files = list_archived_files(dir_path)
-
-    # Migration: if no active file but dated files exist,
-    # promote the latest dated file to active
-    archived_files =
-      if not File.exists?(active_path) and archived_files != [] do
-        latest = List.last(archived_files)
-        :ok = File.rename(Path.join(dir_path, latest), active_path)
-        Enum.drop(archived_files, -1)
-      else
-        archived_files
-      end
-
     {:ok, active_db} = Sqlite3.open(active_path)
     :ok = Migrations.run(active_db, name)
 
-    # Open DB handles for unindexed archived epochs
-    unindexed_set = MapSet.new(unindexed_epoch_ids)
-
+    # Open DB handles for unindexed archived epochs (by known ID, no listing)
     unindexed =
-      archived_files
-      |> Enum.filter(fn file ->
-        epoch_id = Path.basename(file, ".sqlite")
-        MapSet.member?(unindexed_set, epoch_id)
-      end)
-      |> Enum.map(fn file ->
-        epoch_id = Path.basename(file, ".sqlite")
-        {:ok, db} = Sqlite3.open(Path.join(dir_path, file))
-        {epoch_id, db}
+      Enum.flat_map(unindexed_epoch_ids, fn epoch_id ->
+        path = Path.join(dir_path, "#{epoch_id}.sqlite")
+
+        if File.exists?(path) do
+          {:ok, db} = Sqlite3.open(path)
+          [{epoch_id, db}]
+        else
+          []
+        end
       end)
 
     {:ok,
@@ -83,7 +71,8 @@ defmodule Coflux.Store.Epoch do
        dir: dir,
        active_db: active_db,
        active_epoch_id: name,
-       unindexed: unindexed
+       unindexed: unindexed,
+       archived_ids: archived_epoch_ids
      }}
   end
 
@@ -94,11 +83,13 @@ defmodule Coflux.Store.Epoch do
   (`YYYYMMDD_XXXX.sqlite`) and a fresh active file is created. The old DB
   handle remains valid (Linux fd semantics) and moves to the unindexed list.
 
+  The archive ID is derived from existing known IDs (no filesystem listing).
+
   Returns {:ok, new_epoch_state, archive_epoch_id}.
   """
   def rotate(%__MODULE__{} = epoch_state) do
     dir_path = epochs_dir(epoch_state.project_id, epoch_state.dir)
-    archive_epoch_id = generate_epoch_id(dir_path)
+    archive_epoch_id = generate_epoch_id(epoch_state.archived_ids)
 
     active_path = Path.join(dir_path, "#{epoch_state.name}.sqlite")
     archive_path = Path.join(dir_path, "#{archive_epoch_id}.sqlite")
@@ -115,7 +106,8 @@ defmodule Coflux.Store.Epoch do
     new_state = %{
       epoch_state
       | active_db: new_db,
-        unindexed: epoch_state.unindexed ++ [{archive_epoch_id, old_db}]
+        unindexed: epoch_state.unindexed ++ [{archive_epoch_id, old_db}],
+        archived_ids: epoch_state.archived_ids ++ [archive_epoch_id]
     }
 
     {:ok, new_state, archive_epoch_id}
@@ -191,33 +183,23 @@ defmodule Coflux.Store.Epoch do
 
   # Private helpers
 
-  @archive_pattern ~r/^\d{8}_\d{4}\.sqlite$/
-
-  defp list_archived_files(dir_path) do
-    dir_path
-    |> File.ls!()
-    |> Enum.filter(&Regex.match?(@archive_pattern, &1))
-    |> Enum.sort()
-  end
-
-  defp generate_epoch_id(dir_path) do
+  defp generate_epoch_id(existing_ids) do
     date = Date.utc_today() |> Date.to_iso8601(:basic)
 
-    existing =
-      dir_path
-      |> File.ls!()
+    counters =
+      existing_ids
       |> Enum.filter(&String.starts_with?(&1, date))
-      |> Enum.map(fn filename ->
-        case String.split(Path.basename(filename, ".sqlite"), "_") do
+      |> Enum.map(fn id ->
+        case String.split(id, "_") do
           [^date, counter] -> String.to_integer(counter)
           _ -> 0
         end
       end)
 
     next_counter =
-      case existing do
+      case counters do
         [] -> 1
-        counters -> Enum.max(counters) + 1
+        cs -> Enum.max(cs) + 1
       end
 
     "#{date}_#{String.pad_leading(Integer.to_string(next_counter), 4, "0")}"

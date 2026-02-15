@@ -85,6 +85,13 @@ defmodule Coflux.Store.EpochIndex do
   end
 
   @doc """
+  Returns all archived epoch IDs tracked by the index.
+  """
+  def all_epoch_ids(%__MODULE__{} = index) do
+    Enum.map(index.entries, & &1.epoch_id)
+  end
+
+  @doc """
   Find epoch IDs that may contain a run with the given external ID.
   Returns epoch IDs in reverse chronological order (newest first).
   """

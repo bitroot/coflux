@@ -104,45 +104,13 @@ defmodule Coflux.Orchestration.Server do
 
   def init(project_id) do
     {:ok, epoch_index} = EpochIndex.load(project_id)
-
-    # Crash recovery: scan for archived epoch files not in the index at all
-    # (crash between rotate and writing placeholder)
-    epochs_dir = Epoch.epochs_dir(project_id)
-    File.mkdir_p!(epochs_dir)
-
-    epoch_files =
-      epochs_dir
-      |> File.ls!()
-      |> Enum.filter(&String.ends_with?(&1, ".sqlite"))
-      |> Enum.sort()
-
-    archived_files = Enum.drop(epoch_files, -1)
-    indexed_epoch_ids = MapSet.new(epoch_index.entries, & &1.epoch_id)
-
-    epoch_index =
-      Enum.reduce(archived_files, epoch_index, fn file, idx ->
-        epoch_id = Path.basename(file, ".sqlite")
-
-        if MapSet.member?(indexed_epoch_ids, epoch_id) do
-          idx
-        else
-          # Add placeholder with nil blooms
-          now = System.os_time(:millisecond)
-          EpochIndex.add_epoch(idx, epoch_id, now, nil, nil)
-        end
-      end)
-
-    # Save if we added any placeholders
-    if length(epoch_index.entries) != MapSet.size(indexed_epoch_ids) do
-      :ok = EpochIndex.save(project_id, epoch_index)
-    end
-
-    # Determine which epochs need open DB handles (unindexed = nil blooms)
     unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(epoch_index)
+    archived_epoch_ids = EpochIndex.all_epoch_ids(epoch_index)
 
     case Epoch.open(project_id, "orchestration",
            dir: "epochs",
-           unindexed_epoch_ids: unindexed_epoch_ids
+           unindexed_epoch_ids: unindexed_epoch_ids,
+           archived_epoch_ids: archived_epoch_ids
          ) do
       {:ok, epochs} ->
         db = Epoch.active_db(epochs)
