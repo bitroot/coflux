@@ -65,12 +65,15 @@ defmodule Coflux.Orchestration.Epoch do
   Returns ID remapping for the copied data.
   """
   def copy_run(source_db, target_db, run_external_id) do
-    with_transaction(target_db, fn ->
-      {:ok, remap, _visited} =
-        do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+    remap =
+      with_transaction(target_db, fn ->
+        {:ok, remap, _visited} =
+          do_copy_run(source_db, target_db, run_external_id, MapSet.new())
 
-      remap
-    end)
+        remap
+      end)
+
+    {:ok, remap}
   end
 
   defp do_copy_run(source_db, target_db, run_external_id, visited) do

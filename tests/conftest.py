@@ -213,7 +213,14 @@ def worker(server, project_id, tmp_path):
                     self.handle_one()
                     run_result = self.result(resp["runId"])
                     if run_result["type"] == "value":
-                        return {"value": run_result["value"]["data"]}
+                        value = run_result["value"]
+                        if value["type"] == "raw":
+                            return {"value": value["data"]}
+                        elif value["type"] == "blob":
+                            blob_file = str(tmp_path / f"blob-{value['key'][:16]}")
+                            self.get_blob(value["key"], blob_file)
+                            with open(blob_file) as f:
+                                return {"value": json.load(f)}
                     elif run_result["type"] == "error":
                         err = run_result["error"]
                         return {

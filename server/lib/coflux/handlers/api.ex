@@ -567,6 +567,9 @@ defmodule Coflux.Handlers.Api do
           {:error, :invalid} ->
             json_error_response(req, "bad_request", details: %{"stepId" => "invalid"})
 
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+
           {:error, :workspace_invalid} ->
             json_error_response(req, "not_found", status: 404)
         end
