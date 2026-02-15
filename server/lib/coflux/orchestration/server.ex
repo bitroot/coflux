@@ -405,6 +405,15 @@ defmodule Coflux.Orchestration.Server do
       case Workspaces.update_workspace(state.db, workspace_id, updates, access[:principal_id]) do
         {:ok, workspace} ->
           original_name = state.workspaces[workspace_id].name
+          workspace = Map.put(workspace, :external_id, workspace_external_id)
+
+          base_external_id =
+            if workspace.base_id do
+              case Map.fetch(state.workspaces, workspace.base_id) do
+                {:ok, base} -> base.external_id
+                :error -> nil
+              end
+            end
 
           state =
             state
@@ -417,7 +426,12 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               :workspaces,
               {:workspace, workspace_id,
-               Map.take(workspace, [:name, :base_id, :base_external_id, :state, :external_id])}
+               %{
+                 name: workspace.name,
+                 base_external_id: base_external_id,
+                 state: workspace.state,
+                 external_id: workspace.external_id
+               }}
             )
             |> flush_notifications()
 
