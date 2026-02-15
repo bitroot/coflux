@@ -285,7 +285,11 @@ defmodule Coflux.Topics.Run do
         %{type: "value", createdBy: created_by, value: build_value(value)}
 
       {:abandoned, retry} ->
-        %{type: "abandoned", createdBy: created_by, retry: if(retry, do: execution_attempt(retry))}
+        %{
+          type: "abandoned",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
 
       :cancelled ->
         %{type: "cancelled", createdBy: created_by}

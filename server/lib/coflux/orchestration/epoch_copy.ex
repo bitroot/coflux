@@ -3,6 +3,8 @@ defmodule Coflux.Orchestration.EpochCopy do
   Copies data between epoch databases during rotation and copy-on-reference.
   """
 
+  alias Coflux.Orchestration.Runs
+
   import Coflux.Store
 
   @doc """
@@ -64,7 +66,10 @@ defmodule Coflux.Orchestration.EpochCopy do
   """
   def copy_run(source_db, target_db, run_external_id) do
     with_transaction(target_db, fn ->
-      do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+      {:ok, remap, _visited} =
+        do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+
+      remap
     end)
   end
 
@@ -176,11 +181,12 @@ defmodule Coflux.Orchestration.EpochCopy do
                   Enum.each(args, fn {position, value_id} ->
                     new_value_id = ensure_value(source_db, target_db, value_id)
 
-                    insert_one(target_db, :step_arguments, %{
-                      step_id: new_step_id,
-                      position: position,
-                      value_id: new_value_id
-                    })
+                    {:ok, _} =
+                      insert_one(target_db, :step_arguments, %{
+                        step_id: new_step_id,
+                        position: position,
+                        value_id: new_value_id
+                      })
                   end)
 
                   # Copy executions for this step
@@ -229,11 +235,12 @@ defmodule Coflux.Orchestration.EpochCopy do
 
                     # Session may no longer exist (expired and not copied during rotation)
                     if new_session_id do
-                      insert_one(target_db, :assignments, %{
-                        execution_id: new_exec_id,
-                        session_id: new_session_id,
-                        created_at: assign_created_at
-                      })
+                      {:ok, _} =
+                        insert_one(target_db, :assignments, %{
+                          execution_id: new_exec_id,
+                          session_id: new_session_id,
+                          created_at: assign_created_at
+                        })
                     end
 
                   {:ok, nil} ->
@@ -277,16 +284,17 @@ defmodule Coflux.Orchestration.EpochCopy do
                           true -> nil
                         end
 
-                      insert_one(target_db, :results, %{
-                        execution_id: new_exec_id,
-                        type: type,
-                        error_id: new_error_id,
-                        value_id: new_value_id,
-                        successor_id: new_successor_id,
-                        successor_ref_id: new_successor_ref_id,
-                        created_at: result_created_at,
-                        created_by: ensure_principal(source_db, target_db, result_created_by)
-                      })
+                      {:ok, _} =
+                        insert_one(target_db, :results, %{
+                          execution_id: new_exec_id,
+                          type: type,
+                          error_id: new_error_id,
+                          value_id: new_value_id,
+                          successor_id: new_successor_id,
+                          successor_ref_id: new_successor_ref_id,
+                          created_at: result_created_at,
+                          created_by: ensure_principal(source_db, target_db, result_created_by)
+                        })
 
                       visited
 
@@ -313,129 +321,27 @@ defmodule Coflux.Orchestration.EpochCopy do
                 new_parent = Map.fetch!(execution_ids, old_parent)
                 new_child = Map.fetch!(execution_ids, old_child)
 
-                insert_one(
-                  target_db,
-                  :children,
-                  %{
-                    parent_id: new_parent,
-                    child_id: new_child,
-                    group_id: group_id,
-                    created_at: child_created_at
-                  },
-                  on_conflict: "DO NOTHING"
-                )
-              end)
-
-              # Copy groups
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                {:ok, groups} =
-                  query(
-                    source_db,
-                    "SELECT group_id, name FROM groups WHERE execution_id = ?1",
-                    {old_exec_id}
-                  )
-
-                Enum.each(groups, fn {group_id, name} ->
+                {:ok, _} =
                   insert_one(
                     target_db,
-                    :groups,
-                    %{execution_id: new_exec_id, group_id: group_id, name: name},
-                    on_conflict: "DO NOTHING"
-                  )
-                end)
-              end)
-
-              # Copy heartbeats
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                {:ok, heartbeats} =
-                  query(
-                    source_db,
-                    "SELECT status, created_at FROM heartbeats WHERE execution_id = ?1",
-                    {old_exec_id}
-                  )
-
-                Enum.each(heartbeats, fn {status, hb_created_at} ->
-                  insert_one(target_db, :heartbeats, %{
-                    execution_id: new_exec_id,
-                    status: status,
-                    created_at: hb_created_at
-                  })
-                end)
-              end)
-
-              # Copy result_dependencies — uses execution_refs
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                {:ok, deps} =
-                  query(
-                    source_db,
-                    "SELECT dependency_ref_id, created_at FROM result_dependencies WHERE execution_id = ?1",
-                    {old_exec_id}
-                  )
-
-                Enum.each(deps, fn {old_dep_ref_id, dep_created_at} ->
-                  new_dep_ref_id = ensure_execution_ref(source_db, target_db, old_dep_ref_id)
-
-                  insert_one(
-                    target_db,
-                    :result_dependencies,
+                    :children,
                     %{
-                      execution_id: new_exec_id,
-                      dependency_ref_id: new_dep_ref_id,
-                      created_at: dep_created_at
+                      parent_id: new_parent,
+                      child_id: new_child,
+                      group_id: group_id,
+                      created_at: child_created_at
                     },
                     on_conflict: "DO NOTHING"
                   )
-                end)
               end)
 
-              # Copy execution_assets
+              # Copy per-execution data in a single pass
               Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                {:ok, assets} =
-                  query(
-                    source_db,
-                    "SELECT asset_id, created_at FROM execution_assets WHERE execution_id = ?1",
-                    {old_exec_id}
-                  )
-
-                Enum.each(assets, fn {asset_id, asset_created_at} ->
-                  new_asset_id = ensure_asset(source_db, target_db, asset_id)
-
-                  insert_one(
-                    target_db,
-                    :execution_assets,
-                    %{
-                      execution_id: new_exec_id,
-                      asset_id: new_asset_id,
-                      created_at: asset_created_at
-                    },
-                    on_conflict: "DO NOTHING"
-                  )
-                end)
-              end)
-
-              # Copy asset_dependencies
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                {:ok, asset_deps} =
-                  query(
-                    source_db,
-                    "SELECT asset_id, created_at FROM asset_dependencies WHERE execution_id = ?1",
-                    {old_exec_id}
-                  )
-
-                Enum.each(asset_deps, fn {asset_id, ad_created_at} ->
-                  new_asset_id = ensure_asset(source_db, target_db, asset_id)
-
-                  insert_one(
-                    target_db,
-                    :asset_dependencies,
-                    %{
-                      execution_id: new_exec_id,
-                      asset_id: new_asset_id,
-                      created_at: ad_created_at
-                    },
-                    on_conflict: "DO NOTHING"
-                  )
-                end)
+                copy_execution_groups(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_heartbeats(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_result_deps(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_assets(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_asset_deps(source_db, target_db, old_exec_id, new_exec_id)
               end)
 
               {:ok,
@@ -449,7 +355,105 @@ defmodule Coflux.Orchestration.EpochCopy do
     end
   end
 
-  # Private helpers
+  # Per-execution copy helpers
+
+  defp copy_execution_groups(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, groups} =
+      query(source_db, "SELECT group_id, name FROM groups WHERE execution_id = ?1", {old_exec_id})
+
+    Enum.each(groups, fn {group_id, name} ->
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :groups,
+          %{execution_id: new_exec_id, group_id: group_id, name: name},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_heartbeats(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, heartbeats} =
+      query(
+        source_db,
+        "SELECT status, created_at FROM heartbeats WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(heartbeats, fn {status, created_at} ->
+      {:ok, _} =
+        insert_one(target_db, :heartbeats, %{
+          execution_id: new_exec_id,
+          status: status,
+          created_at: created_at
+        })
+    end)
+  end
+
+  defp copy_execution_result_deps(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, deps} =
+      query(
+        source_db,
+        "SELECT dependency_ref_id, created_at FROM result_dependencies WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(deps, fn {old_dep_ref_id, created_at} ->
+      new_dep_ref_id = ensure_execution_ref(source_db, target_db, old_dep_ref_id)
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :result_dependencies,
+          %{execution_id: new_exec_id, dependency_ref_id: new_dep_ref_id, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_assets(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, assets} =
+      query(
+        source_db,
+        "SELECT asset_id, created_at FROM execution_assets WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(assets, fn {asset_id, created_at} ->
+      new_asset_id = ensure_asset(source_db, target_db, asset_id)
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :execution_assets,
+          %{execution_id: new_exec_id, asset_id: new_asset_id, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_asset_deps(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, asset_deps} =
+      query(
+        source_db,
+        "SELECT asset_id, created_at FROM asset_dependencies WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(asset_deps, fn {asset_id, created_at} ->
+      new_asset_id = ensure_asset(source_db, target_db, asset_id)
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :asset_dependencies,
+          %{execution_id: new_exec_id, asset_id: new_asset_id, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  # Private helpers — config copy
 
   defp copy_workspaces(old_db, new_db) do
     {:ok, rows} = query(old_db, "SELECT id, external_id FROM workspaces")
@@ -477,12 +481,13 @@ defmodule Coflux.Orchestration.EpochCopy do
           :ok
 
         {:ok, {name, created_at, created_by}} ->
-          insert_one(new_db, :workspace_names, %{
-            workspace_id: new_ws_id,
-            name: name,
-            created_at: created_at,
-            created_by: ensure_principal(old_db, new_db, created_by)
-          })
+          {:ok, _} =
+            insert_one(new_db, :workspace_names, %{
+              workspace_id: new_ws_id,
+              name: name,
+              created_at: created_at,
+              created_by: ensure_principal(old_db, new_db, created_by)
+            })
       end
     end)
   end
@@ -504,12 +509,13 @@ defmodule Coflux.Orchestration.EpochCopy do
           :ok
 
         {:ok, {state, created_at, created_by}} ->
-          insert_one(new_db, :workspace_states, %{
-            workspace_id: new_ws_id,
-            state: state,
-            created_at: created_at,
-            created_by: ensure_principal(old_db, new_db, created_by)
-          })
+          {:ok, _} =
+            insert_one(new_db, :workspace_states, %{
+              workspace_id: new_ws_id,
+              state: state,
+              created_at: created_at,
+              created_by: ensure_principal(old_db, new_db, created_by)
+            })
       end
     end)
   end
@@ -531,19 +537,32 @@ defmodule Coflux.Orchestration.EpochCopy do
           :ok
 
         {:ok, {base_ws_id, created_at, created_by}} ->
-          new_base_ws_id = if base_ws_id, do: Map.get(workspace_ids, base_ws_id)
+          new_base_ws_id = if base_ws_id, do: Map.fetch!(workspace_ids, base_ws_id)
 
-          insert_one(new_db, :workspace_bases, %{
-            workspace_id: new_ws_id,
-            base_workspace_id: new_base_ws_id,
-            created_at: created_at,
-            created_by: ensure_principal(old_db, new_db, created_by)
-          })
+          {:ok, _} =
+            insert_one(new_db, :workspace_bases, %{
+              workspace_id: new_ws_id,
+              base_workspace_id: new_base_ws_id,
+              created_at: created_at,
+              created_by: ensure_principal(old_db, new_db, created_by)
+            })
       end
     end)
   end
 
   defp copy_pools(old_db, new_db, workspace_ids) do
+    old_ws_ids = Map.keys(workspace_ids)
+
+    if old_ws_ids == [] do
+      %{}
+    else
+      copy_pools_query(old_db, new_db, workspace_ids, old_ws_ids)
+    end
+  end
+
+  defp copy_pools_query(old_db, new_db, workspace_ids, old_ws_ids) do
+    placeholders = Enum.map_join(1..length(old_ws_ids), ", ", &"?#{&1}")
+
     {:ok, rows} =
       query(
         old_db,
@@ -552,12 +571,14 @@ defmodule Coflux.Orchestration.EpochCopy do
           pool_definition_id, created_at, created_by
         FROM pools
         WHERE pool_definition_id IS NOT NULL
-        """
+          AND workspace_id IN (#{placeholders})
+        """,
+        List.to_tuple(old_ws_ids)
       )
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, name, old_pd_id, created_at, created_by},
                               acc ->
-      new_ws_id = Map.get(workspace_ids, old_ws_id, old_ws_id)
+      new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
       new_pd_id = ensure_pool_definition(old_db, new_db, old_pd_id)
 
       {:ok, new_id} =
@@ -585,7 +606,7 @@ defmodule Coflux.Orchestration.EpochCopy do
       """)
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_pool_id, created_at}, acc ->
-      new_pool_id = Map.get(pool_ids, old_pool_id, old_pool_id)
+      new_pool_id = Map.fetch!(pool_ids, old_pool_id)
 
       {:ok, new_id} =
         insert_one(new_db, :workers, %{
@@ -601,12 +622,13 @@ defmodule Coflux.Orchestration.EpochCopy do
              {old_id}
            ) do
         {:ok, {data, error, lr_created_at}} ->
-          insert_one(new_db, :worker_launch_results, %{
-            worker_id: new_id,
-            data: if(data, do: {:blob, data}),
-            error: error,
-            created_at: lr_created_at
-          })
+          {:ok, _} =
+            insert_one(new_db, :worker_launch_results, %{
+              worker_id: new_id,
+              data: if(data, do: {:blob, data}),
+              error: error,
+              created_at: lr_created_at
+            })
 
         {:ok, nil} ->
           :ok
@@ -624,12 +646,13 @@ defmodule Coflux.Orchestration.EpochCopy do
              {old_id}
            ) do
         {:ok, {state, created_at, created_by}} ->
-          insert_one(new_db, :worker_states, %{
-            worker_id: new_id,
-            state: state,
-            created_at: created_at,
-            created_by: ensure_principal(old_db, new_db, created_by)
-          })
+          {:ok, _} =
+            insert_one(new_db, :worker_states, %{
+              worker_id: new_id,
+              state: state,
+              created_at: created_at,
+              created_by: ensure_principal(old_db, new_db, created_by)
+            })
 
         {:ok, nil} ->
           :ok
@@ -653,8 +676,8 @@ defmodule Coflux.Orchestration.EpochCopy do
                                concurrency, activation_timeout, reconnection_timeout, secret_hash,
                                created_at, created_by},
                               acc ->
-      new_ws_id = Map.get(workspace_ids, old_ws_id, old_ws_id)
-      new_worker_id = if old_worker_id, do: Map.get(worker_ids, old_worker_id)
+      new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
+      new_worker_id = if old_worker_id, do: Map.fetch!(worker_ids, old_worker_id)
       new_tag_set_id = ensure_tag_set(old_db, new_db, old_tag_set_id)
       new_created_by = ensure_principal(old_db, new_db, created_by)
 
@@ -684,7 +707,8 @@ defmodule Coflux.Orchestration.EpochCopy do
              {old_id}
            ) do
         {:ok, {created_at}} ->
-          insert_one(new_db, :session_activations, %{session_id: new_id, created_at: created_at})
+          {:ok, _} =
+            insert_one(new_db, :session_activations, %{session_id: new_id, created_at: created_at})
 
         {:ok, nil} ->
           :ok
@@ -715,13 +739,14 @@ defmodule Coflux.Orchestration.EpochCopy do
       Enum.each(rows, fn {module, old_manifest_id, created_at, created_by} ->
         new_manifest_id = ensure_manifest(old_db, new_db, old_manifest_id)
 
-        insert_one(new_db, :workspace_manifests, %{
-          workspace_id: new_ws_id,
-          module: module,
-          manifest_id: new_manifest_id,
-          created_at: created_at,
-          created_by: ensure_principal(old_db, new_db, created_by)
-        })
+        {:ok, _} =
+          insert_one(new_db, :workspace_manifests, %{
+            workspace_id: new_ws_id,
+            module: module,
+            manifest_id: new_manifest_id,
+            created_at: created_at,
+            created_by: ensure_principal(old_db, new_db, created_by)
+          })
       end)
     end)
   end
@@ -765,18 +790,19 @@ defmodule Coflux.Orchestration.EpochCopy do
             if execution_ref_id,
               do: ensure_execution_ref(source_db, target_db, execution_ref_id)
 
-          insert_one(
-            target_db,
-            :value_references,
-            %{
-              value_id: new_id,
-              position: position,
-              fragment_id: new_fragment_id,
-              execution_ref_id: new_execution_ref_id,
-              asset_id: new_asset_id
-            },
-            on_conflict: "DO NOTHING"
-          )
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :value_references,
+              %{
+                value_id: new_id,
+                position: position,
+                fragment_id: new_fragment_id,
+                execution_ref_id: new_execution_ref_id,
+                asset_id: new_asset_id
+              },
+              on_conflict: "DO NOTHING"
+            )
         end)
 
         new_id
@@ -829,12 +855,13 @@ defmodule Coflux.Orchestration.EpochCopy do
           )
 
         Enum.each(metadata, fn {key, value} ->
-          insert_one(
-            target_db,
-            :fragment_metadata,
-            %{fragment_id: new_id, key: key, value: value},
-            on_conflict: "DO NOTHING"
-          )
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :fragment_metadata,
+              %{fragment_id: new_id, key: key, value: value},
+              on_conflict: "DO NOTHING"
+            )
         end)
 
         new_id
@@ -862,12 +889,13 @@ defmodule Coflux.Orchestration.EpochCopy do
           )
 
         Enum.each(frames, fn {depth, file, line, name, code} ->
-          insert_one(
-            target_db,
-            :error_frames,
-            %{error_id: new_id, depth: depth, file: file, line: line, name: name, code: code},
-            on_conflict: "DO NOTHING"
-          )
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :error_frames,
+              %{error_id: new_id, depth: depth, file: file, line: line, name: name, code: code},
+              on_conflict: "DO NOTHING"
+            )
         end)
 
         new_id
@@ -918,12 +946,13 @@ defmodule Coflux.Orchestration.EpochCopy do
               )
 
             Enum.each(metadata, fn {key, value} ->
-              insert_one(
-                target_db,
-                :asset_entry_metadata,
-                %{asset_entry_id: new_entry_id, key: key, value: value},
-                on_conflict: "DO NOTHING"
-              )
+              {:ok, _} =
+                insert_one(
+                  target_db,
+                  :asset_entry_metadata,
+                  %{asset_entry_id: new_entry_id, key: key, value: value},
+                  on_conflict: "DO NOTHING"
+                )
             end)
           end
         end)
@@ -1058,11 +1087,12 @@ defmodule Coflux.Orchestration.EpochCopy do
           query(source_db, "SELECT key, value FROM tag_set_items WHERE tag_set_id = ?1", {old_id})
 
         Enum.each(items, fn {key, value} ->
-          insert_one(target_db, :tag_set_items, %{
-            tag_set_id: new_id,
-            key: key,
-            value: value
-          })
+          {:ok, _} =
+            insert_one(target_db, :tag_set_items, %{
+              tag_set_id: new_id,
+              key: key,
+              value: value
+            })
         end)
 
         new_id
@@ -1088,13 +1118,14 @@ defmodule Coflux.Orchestration.EpochCopy do
           )
 
         Enum.each(items, fn {position, name, default_, annotation} ->
-          insert_one(target_db, :parameter_set_items, %{
-            parameter_set_id: new_id,
-            position: position,
-            name: name,
-            default_: default_,
-            annotation: annotation
-          })
+          {:ok, _} =
+            insert_one(target_db, :parameter_set_items, %{
+              parameter_set_id: new_id,
+              position: position,
+              name: name,
+              default_: default_,
+              annotation: annotation
+            })
         end)
 
         new_id
@@ -1177,21 +1208,22 @@ defmodule Coflux.Orchestration.EpochCopy do
         Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay,
                                  retry_limit, retry_delay_min, retry_delay_max, recurrent,
                                  rts_id} ->
-          insert_one(target_db, :workflows, %{
-            manifest_id: new_id,
-            name: name,
-            parameter_set_id: ensure_parameter_set(source_db, target_db, ps_id),
-            instruction_id: ensure_instruction(source_db, target_db, instr_id),
-            wait_for: wait_for,
-            cache_config_id: ensure_cache_config(source_db, target_db, cc_id),
-            defer_params: defer_params,
-            delay: delay,
-            retry_limit: retry_limit,
-            retry_delay_min: retry_delay_min,
-            retry_delay_max: retry_delay_max,
-            recurrent: recurrent,
-            requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id)
-          })
+          {:ok, _} =
+            insert_one(target_db, :workflows, %{
+              manifest_id: new_id,
+              name: name,
+              parameter_set_id: ensure_parameter_set(source_db, target_db, ps_id),
+              instruction_id: ensure_instruction(source_db, target_db, instr_id),
+              wait_for: wait_for,
+              cache_config_id: ensure_cache_config(source_db, target_db, cc_id),
+              defer_params: defer_params,
+              delay: delay,
+              retry_limit: retry_limit,
+              retry_delay_min: retry_delay_min,
+              retry_delay_max: retry_delay_max,
+              recurrent: recurrent,
+              requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id)
+            })
         end)
 
         new_id
@@ -1251,10 +1283,11 @@ defmodule Coflux.Orchestration.EpochCopy do
           )
 
         Enum.each(modules, fn {pattern} ->
-          insert_one(target_db, :pool_definition_modules, %{
-            pool_definition_id: new_id,
-            pattern: pattern
-          })
+          {:ok, _} =
+            insert_one(target_db, :pool_definition_modules, %{
+              pool_definition_id: new_id,
+              pattern: pattern
+            })
         end)
 
         new_id
@@ -1285,7 +1318,10 @@ defmodule Coflux.Orchestration.EpochCopy do
         {old_ref_id}
       )
 
-    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
+    {:ok, ref_id} =
+      Runs.get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
+
+    ref_id
   end
 
   # Create an execution_ref in target_db from an internal execution_id in source_db.
@@ -1303,30 +1339,8 @@ defmodule Coflux.Orchestration.EpochCopy do
         {execution_id}
       )
 
-    get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
-  end
-
-  defp get_or_create_execution_ref(db, run_ext_id, step_num, attempt, module, target) do
-    {:ok, _} =
-      insert_one(
-        db,
-        :execution_refs,
-        %{
-          run_external_id: run_ext_id,
-          step_number: step_num,
-          attempt: attempt,
-          module: module,
-          target: target
-        },
-        on_conflict: "DO NOTHING"
-      )
-
-    {:ok, {ref_id}} =
-      query_one(
-        db,
-        "SELECT id FROM execution_refs WHERE run_external_id = ?1 AND step_number = ?2 AND attempt = ?3",
-        {run_ext_id, step_num, attempt}
-      )
+    {:ok, ref_id} =
+      Runs.get_or_create_execution_ref(target_db, run_ext_id, step_num, attempt, module, target)
 
     ref_id
   end

@@ -15,8 +15,8 @@ defmodule Coflux.Logs.Server do
 
   require Logger
 
-  alias Coflux.Logs.{Index, Store}
-  alias Coflux.Store.Epoch
+  alias Coflux.Logs.Store
+  alias Coflux.Store.{Bloom, Epoch, EpochIndex}
   alias Exqlite.Sqlite3
 
   @flush_interval_ms 500
@@ -121,9 +121,10 @@ defmodule Coflux.Logs.Server do
 
   @impl true
   def init(project_id) do
-    {:ok, log_index} = Index.load(project_id)
-    unindexed_epoch_ids = Index.unindexed_epoch_ids(log_index)
-    archived_epoch_ids = Index.all_epoch_ids(log_index)
+    index_path = ["projects", project_id, "logs", "index.json"]
+    {:ok, log_index} = EpochIndex.load(index_path, ["runs"])
+    unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(log_index)
+    archived_epoch_ids = EpochIndex.all_epoch_ids(log_index)
 
     case Epoch.open(project_id, "logs",
            unindexed_epoch_ids: unindexed_epoch_ids,
@@ -215,8 +216,8 @@ defmodule Coflux.Logs.Server do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
 
-    log_index = Index.update_bloom(state.log_index, epoch_id, run_bloom)
-    :ok = Index.save(state.project_id, log_index)
+    log_index = EpochIndex.update_filters(state.log_index, epoch_id, %{"runs" => run_bloom})
+    :ok = EpochIndex.save(log_index)
     epochs = Epoch.promote_to_indexed(state.epochs, epoch_id)
 
     state =
@@ -301,11 +302,11 @@ defmodule Coflux.Logs.Server do
     epoch_id = Epoch.next_epoch_id(state.epochs)
 
     # Write placeholder entry to index first (null value)
-    log_index = Index.add_partition(state.log_index, epoch_id)
-    :ok = Index.save(state.project_id, log_index)
+    log_index = EpochIndex.add_epoch(state.log_index, epoch_id)
+    :ok = EpochIndex.save(log_index)
 
     # Now rotate
-    {:ok, new_epochs} = Epoch.rotate(state.epochs, epoch_id)
+    {:ok, new_epochs, _old_db} = Epoch.rotate(state.epochs, epoch_id)
 
     %{
       state
@@ -327,7 +328,7 @@ defmodule Coflux.Logs.Server do
         {:ok, db} = Sqlite3.open(path)
 
         try do
-          Index.build_bloom_for_partition(db)
+          build_bloom_for_partition(db)
         after
           Sqlite3.close(db)
         end
@@ -337,6 +338,47 @@ defmodule Coflux.Logs.Server do
   end
 
   defp maybe_start_index_build(state), do: state
+
+  defp build_bloom_for_partition(db) do
+    import Coflux.Store
+
+    {:ok, [{count}]} = query(db, "SELECT COUNT(DISTINCT run_id) FROM messages")
+    bloom = Bloom.new(max(100, count))
+
+    {:ok, run_ids} = query(db, "SELECT DISTINCT run_id FROM messages")
+
+    Enum.reduce(run_ids, bloom, fn {id}, b -> Bloom.add(b, id) end)
+  end
+
+  # Returns true if the epoch was definitely archived before the given timestamp.
+  # Parses the date from the epoch_id (YYYYMMDD_XXXX format) and compares at
+  # day granularity. Conservative: a partition archived on the same day as `from`
+  # is included (not skipped).
+  defp archived_before?(_epoch_id, nil), do: false
+
+  defp archived_before?(epoch_id, from_ms) do
+    case epoch_id_date(epoch_id) do
+      nil ->
+        false
+
+      date ->
+        from_date = from_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_date()
+        Date.compare(date, from_date) == :lt
+    end
+  end
+
+  defp epoch_id_date(epoch_id) do
+    case String.split(epoch_id, "_") do
+      [date_str, _counter] ->
+        case Date.from_iso8601(date_str, :basic) do
+          {:ok, date} -> date
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   ## Private Functions — Cross-Partition Query
 
@@ -349,45 +391,45 @@ defmodule Coflux.Logs.Server do
     # Parse cursor to determine starting partition
     {cursor_epoch_id, cursor_timestamp, cursor_id} = parse_cross_cursor(after_cursor)
 
+    # If cursor is in the active partition, skip archives entirely
+    skip_archives? = cursor_epoch_id == :active
+
     # Get candidate archived partition epoch_ids from index
     # (includes unindexed partitions with nil bloom — can't filter them out)
     archived_candidates =
-      Index.find_partitions_for_run(state.log_index, run_id, from: from)
-      |> Enum.sort()
+      if skip_archives? do
+        []
+      else
+        candidates =
+          state.log_index
+          |> EpochIndex.find_epochs("runs", run_id)
+          |> Enum.reject(&archived_before?(&1, from))
+          |> Enum.sort()
 
-    active_epoch_id = state.epochs.active_epoch_id
-
-    # Build ordered list: archived (chronological) + active
-    all_candidate_ids = archived_candidates ++ [active_epoch_id]
-
-    # Skip partitions before cursor's partition
-    candidate_ids = filter_by_cursor(all_candidate_ids, cursor_epoch_id, active_epoch_id)
+        # Drop partitions before the cursor's partition
+        if cursor_epoch_id do
+          Enum.drop_while(candidates, &(&1 != cursor_epoch_id))
+        else
+          candidates
+        end
+      end
 
     # Build map of unindexed (open) DB handles
     unindexed_map = Map.new(state.epochs.unindexed)
 
-    # Query each partition in order, collecting results up to limit
-    {entries, _remaining} =
-      Enum.reduce_while(candidate_ids, {[], limit}, fn epoch_id, {acc, remaining} ->
+    # Query archived partitions in chronological order
+    {entries, remaining} =
+      Enum.reduce_while(archived_candidates, {[], limit}, fn epoch_id, {acc, remaining} ->
         if remaining <= 0 do
           {:halt, {acc, 0}}
         else
-          # Build opts for this partition
           partition_opts =
             opts
             |> Keyword.put(:limit, remaining)
             |> Keyword.delete(:from)
-            |> apply_partition_cursor(
-              epoch_id,
-              cursor_epoch_id,
-              cursor_timestamp,
-              cursor_id,
-              active_epoch_id
-            )
+            |> maybe_apply_cursor(epoch_id == cursor_epoch_id, cursor_timestamp, cursor_id)
 
-          # Get or open DB handle
-          {db, close_after?} =
-            get_partition_db(state, epoch_id, unindexed_map, active_epoch_id)
+          {db, close_after?} = get_archived_db(state, epoch_id, unindexed_map)
 
           result =
             try do
@@ -405,8 +447,25 @@ defmodule Coflux.Logs.Server do
         end
       end)
 
+    # Query active partition if capacity remains
+    {entries, _remaining} =
+      if remaining > 0 do
+        active_opts =
+          opts
+          |> Keyword.put(:limit, remaining)
+          |> Keyword.delete(:from)
+          |> maybe_apply_cursor(skip_archives?, cursor_timestamp, cursor_id)
+
+        db = Epoch.active_db(state.epochs)
+        {:ok, active_entries, _cursor} = Store.query_logs(db, active_opts)
+        tagged = Enum.map(active_entries, &Map.put(&1, :_epoch_id, :active))
+        {entries ++ tagged, remaining - length(active_entries)}
+      else
+        {entries, remaining}
+      end
+
     # Build cursor from last entry
-    cursor = build_cross_cursor(List.last(entries), active_epoch_id)
+    cursor = build_cross_cursor(List.last(entries))
 
     # Strip internal tag before returning
     entries = Enum.map(entries, &Map.delete(&1, :_epoch_id))
@@ -418,17 +477,21 @@ defmodule Coflux.Logs.Server do
 
   defp parse_cross_cursor(cursor) when is_binary(cursor) do
     case String.split(cursor, ":") do
-      # New format: "epoch_id:timestamp:id" or ":timestamp:id"
+      # Format: "epoch_id:timestamp:id" or ":timestamp:id" (active)
       [epoch_id, timestamp_str, id_str] ->
         case {Integer.parse(timestamp_str), Integer.parse(id_str)} do
-          {{timestamp, ""}, {id, ""}} -> {epoch_id, timestamp, id}
-          _ -> {nil, nil, nil}
+          {{timestamp, ""}, {id, ""}} ->
+            partition = if epoch_id == "", do: :active, else: epoch_id
+            {partition, timestamp, id}
+
+          _ ->
+            {nil, nil, nil}
         end
 
       # Old format: "timestamp:id" — treat as active partition cursor
       [timestamp_str, id_str] ->
         case {Integer.parse(timestamp_str), Integer.parse(id_str)} do
-          {{timestamp, ""}, {id, ""}} -> {"", timestamp, id}
+          {{timestamp, ""}, {id, ""}} -> {:active, timestamp, id}
           _ -> {nil, nil, nil}
         end
 
@@ -437,63 +500,30 @@ defmodule Coflux.Logs.Server do
     end
   end
 
-  defp filter_by_cursor(all_ids, nil, _active_epoch_id), do: all_ids
-
-  defp filter_by_cursor(all_ids, "", _active_epoch_id) do
-    # Active-partition cursor — only query active (last in list)
-    case List.last(all_ids) do
-      nil -> []
-      last -> [last]
-    end
+  defp maybe_apply_cursor(opts, true, timestamp, id) when not is_nil(timestamp) do
+    Keyword.put(opts, :after, "#{timestamp}:#{id}")
   end
 
-  defp filter_by_cursor(all_ids, cursor_epoch_id, _active_epoch_id) do
-    # Drop all partitions before the cursor's partition
-    Enum.drop_while(all_ids, &(&1 != cursor_epoch_id))
+  defp maybe_apply_cursor(opts, _, _, _) do
+    Keyword.delete(opts, :after)
   end
 
-  defp apply_partition_cursor(
-         opts,
-         epoch_id,
-         cursor_epoch_id,
-         cursor_ts,
-         cursor_id,
-         active_epoch_id
-       ) do
-    is_cursor_partition =
-      cond do
-        is_nil(cursor_epoch_id) -> false
-        cursor_epoch_id == "" -> epoch_id == active_epoch_id
-        true -> epoch_id == cursor_epoch_id
-      end
+  defp get_archived_db(state, epoch_id, unindexed_map) do
+    case Map.fetch(unindexed_map, epoch_id) do
+      {:ok, db} ->
+        {db, false}
 
-    if is_cursor_partition and cursor_ts != nil do
-      Keyword.put(opts, :after, "#{cursor_ts}:#{cursor_id}")
-    else
-      Keyword.delete(opts, :after)
-    end
-  end
-
-  defp get_partition_db(state, epoch_id, unindexed_map, active_epoch_id) do
-    cond do
-      epoch_id == active_epoch_id ->
-        {Epoch.active_db(state.epochs), false}
-
-      Map.has_key?(unindexed_map, epoch_id) ->
-        {Map.fetch!(unindexed_map, epoch_id), false}
-
-      true ->
-        # Indexed archived partition — open for read
+      :error ->
         path = Epoch.archive_path(state.epochs, epoch_id)
         {:ok, db} = Sqlite3.open(path)
         {db, true}
     end
   end
 
-  defp build_cross_cursor(nil, _active_epoch_id), do: nil
+  defp build_cross_cursor(nil), do: nil
 
-  defp build_cross_cursor(entry, active_epoch_id) do
-    epoch_prefix = if entry._epoch_id == active_epoch_id, do: "", else: entry._epoch_id
+  defp build_cross_cursor(entry) do
+    epoch_prefix = if entry._epoch_id == :active, do: "", else: entry._epoch_id
     "#{epoch_prefix}:#{entry.timestamp}:#{entry.id}"
   end
 

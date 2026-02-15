@@ -2,7 +2,7 @@ defmodule Coflux.Orchestration.Server do
   use GenServer, restart: :transient
   require Logger
 
-  alias Coflux.Store.{Epoch, EpochIndex}
+  alias Coflux.Store.{Bloom, Epoch, EpochIndex}
   alias Coflux.MapUtils
 
   alias Coflux.Orchestration.{
@@ -103,7 +103,8 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def init(project_id) do
-    {:ok, epoch_index} = EpochIndex.load(project_id)
+    index_path = ["projects", project_id, "orchestration", "index.json"]
+    {:ok, epoch_index} = EpochIndex.load(index_path, ["runs", "cache_keys"])
     unindexed_epoch_ids = EpochIndex.unindexed_epoch_ids(epoch_index)
     archived_epoch_ids = EpochIndex.all_epoch_ids(epoch_index)
 
@@ -1364,7 +1365,8 @@ defmodule Coflux.Orchestration.Server do
                 Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
               # TODO: only resolve if there are listeners to notify
-              {dep_ext_id, _module, _target} = dependency =
+              {dep_ext_id, _module, _target} =
+                dependency =
                 resolve_execution_ref(state.db, dep_ref_id)
 
               notify_listeners(
@@ -2418,8 +2420,13 @@ defmodule Coflux.Orchestration.Server do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
 
-    epoch_index = EpochIndex.update_blooms(state.epoch_index, epoch_id, run_bloom, cache_bloom)
-    :ok = EpochIndex.save(state.project_id, epoch_index)
+    epoch_index =
+      EpochIndex.update_filters(state.epoch_index, epoch_id, %{
+        "runs" => run_bloom,
+        "cache_keys" => cache_bloom
+      })
+
+    :ok = EpochIndex.save(epoch_index)
     epochs = Epoch.promote_to_indexed(state.epochs, epoch_id)
 
     state =
@@ -2500,7 +2507,9 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def terminate(_reason, state) do
-    Epoch.close(state.epochs)
+    if state.epochs do
+      Epoch.close(state.epochs)
+    end
   end
 
   # Private helper functions
@@ -2978,14 +2987,12 @@ defmodule Coflux.Orchestration.Server do
 
     # Write placeholder entry to index first (null value)
     epoch_index = EpochIndex.add_epoch(state.epoch_index, epoch_id)
-    :ok = EpochIndex.save(state.project_id, epoch_index)
+    :ok = EpochIndex.save(epoch_index)
 
     # Now rotate
-    {:ok, new_epochs} = Epoch.rotate(state.epochs, epoch_id)
+    {:ok, new_epochs, old_db} = Epoch.rotate(state.epochs, epoch_id)
     new_db = Epoch.active_db(new_epochs)
 
-    # Get the old DB from the unindexed list (it was just appended)
-    {^epoch_id, old_db} = List.last(new_epochs.unindexed)
     id_mappings = EpochCopy.copy_config(old_db, new_db)
 
     state
@@ -3017,21 +3024,15 @@ defmodule Coflux.Orchestration.Server do
 
     # Copy each run from archives into the active epoch
     Enum.each(run_ext_ids, fn run_ext_id ->
-      find_and_copy_run_from_archives(state, run_ext_id)
+      {:ok, _remap} = find_and_copy_run_from_archives(state, run_ext_id)
     end)
 
     # Repopulate execution_ids cache from the new active DB
     execution_ids =
-      Enum.reduce(in_flight_ext_ids, %{}, fn ext_id, acc ->
+      Map.new(in_flight_ext_ids, fn ext_id ->
         {:ok, run_ext_id, step_num, attempt} = parse_execution_external_id(ext_id)
-
-        case Runs.get_execution_id(state.db, run_ext_id, step_num, attempt) do
-          {:ok, {id}} when not is_nil(id) ->
-            Map.put(acc, ext_id, id)
-
-          _ ->
-            acc
-        end
+        {:ok, {id}} = Runs.get_execution_id(state.db, run_ext_id, step_num, attempt)
+        {ext_id, id}
       end)
 
     %{state | execution_ids: execution_ids}
@@ -3045,7 +3046,7 @@ defmodule Coflux.Orchestration.Server do
         {:ok, db} = Exqlite.Sqlite3.open(path)
 
         try do
-          EpochIndex.build_blooms_for_epoch(db)
+          build_blooms_for_epoch(db)
         after
           Exqlite.Sqlite3.close(db)
         end
@@ -3056,6 +3057,32 @@ defmodule Coflux.Orchestration.Server do
 
   defp maybe_start_index_build(state), do: state
 
+  defp build_blooms_for_epoch(db) do
+    import Coflux.Store
+
+    {:ok, [{run_count}]} = query(db, "SELECT COUNT(*) FROM runs")
+    runs = Bloom.new(max(100, run_count))
+    {:ok, run_rows} = query(db, "SELECT external_id FROM runs")
+
+    runs =
+      Enum.reduce(run_rows, runs, fn {ext_id}, bloom -> Bloom.add(bloom, ext_id) end)
+
+    {:ok, [{cache_count}]} =
+      query(db, "SELECT COUNT(DISTINCT cache_key) FROM steps WHERE cache_key IS NOT NULL")
+
+    cache_keys = Bloom.new(max(100, cache_count))
+
+    {:ok, cache_rows} =
+      query(db, "SELECT DISTINCT cache_key FROM steps WHERE cache_key IS NOT NULL")
+
+    cache_keys =
+      Enum.reduce(cache_rows, cache_keys, fn {key}, bloom ->
+        Bloom.add(bloom, key)
+      end)
+
+    {runs, cache_keys}
+  end
+
   defp remap_config_ids(state, %{} = mappings) do
     ws_map = Map.get(mappings, :workspace_ids, %{})
     session_map = Map.get(mappings, :session_ids, %{})
@@ -3065,11 +3092,11 @@ defmodule Coflux.Orchestration.Server do
     # Remap workspaces: rekey map, update base_id values
     workspaces =
       Map.new(state.workspaces, fn {old_id, workspace} ->
-        new_id = Map.get(ws_map, old_id, old_id)
+        new_id = Map.fetch!(ws_map, old_id)
 
         new_base_id =
           if workspace.base_id,
-            do: Map.get(ws_map, workspace.base_id, workspace.base_id),
+            do: Map.fetch!(ws_map, workspace.base_id),
             else: nil
 
         {new_id, %{workspace | base_id: new_base_id}}
@@ -3078,23 +3105,23 @@ defmodule Coflux.Orchestration.Server do
     # Remap workspace_names: values are workspace IDs
     workspace_names =
       Map.new(state.workspace_names, fn {name, old_id} ->
-        {name, Map.get(ws_map, old_id, old_id)}
+        {name, Map.fetch!(ws_map, old_id)}
       end)
 
     # Remap workspace_external_ids: values are workspace IDs
     workspace_external_ids =
       Map.new(state.workspace_external_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.get(ws_map, old_id, old_id)}
+        {ext_id, Map.fetch!(ws_map, old_id)}
       end)
 
     # Remap pools: rekey by new workspace_id, pool values contain pool_definition_id etc.
     pools =
       Map.new(state.pools, fn {old_ws_id, ws_pools} ->
-        new_ws_id = Map.get(ws_map, old_ws_id, old_ws_id)
-        # Pool values within each workspace map contain internal IDs that may need remapping
+        new_ws_id = Map.fetch!(ws_map, old_ws_id)
+
         new_ws_pools =
           Map.new(ws_pools, fn {pool_name, pool} ->
-            new_pool = %{pool | id: Map.get(pool_map, pool.id, pool.id)}
+            new_pool = %{pool | id: Map.fetch!(pool_map, pool.id)}
             {pool_name, new_pool}
           end)
 
@@ -3104,15 +3131,15 @@ defmodule Coflux.Orchestration.Server do
     # Remap workers: rekey map, update pool_id, workspace_id, session_id
     workers =
       Map.new(state.workers, fn {old_id, worker} ->
-        new_id = Map.get(worker_map, old_id, old_id)
+        new_id = Map.fetch!(worker_map, old_id)
 
         new_worker = %{
           worker
-          | pool_id: Map.get(pool_map, worker.pool_id, worker.pool_id),
-            workspace_id: Map.get(ws_map, worker.workspace_id, worker.workspace_id),
+          | pool_id: Map.fetch!(pool_map, worker.pool_id),
+            workspace_id: Map.fetch!(ws_map, worker.workspace_id),
             session_id:
               if(worker.session_id,
-                do: Map.get(session_map, worker.session_id, worker.session_id),
+                do: Map.fetch!(session_map, worker.session_id),
                 else: nil
               )
         }
@@ -3123,20 +3150,20 @@ defmodule Coflux.Orchestration.Server do
     # Remap worker_external_ids: values are worker IDs
     worker_external_ids =
       Map.new(state.worker_external_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.get(worker_map, old_id, old_id)}
+        {ext_id, Map.fetch!(worker_map, old_id)}
       end)
 
     # Remap sessions: rekey map, update workspace_id, worker_id
     sessions =
       Map.new(state.sessions, fn {old_id, session} ->
-        new_id = Map.get(session_map, old_id, old_id)
+        new_id = Map.fetch!(session_map, old_id)
 
         new_session = %{
           session
-          | workspace_id: Map.get(ws_map, session.workspace_id, session.workspace_id),
+          | workspace_id: Map.fetch!(ws_map, session.workspace_id),
             worker_id:
               if(session.worker_id,
-                do: Map.get(worker_map, session.worker_id, session.worker_id),
+                do: Map.fetch!(worker_map, session.worker_id),
                 else: nil
               )
         }
@@ -3147,19 +3174,19 @@ defmodule Coflux.Orchestration.Server do
     # Remap session_ids: values are session IDs
     session_ids =
       Map.new(state.session_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.get(session_map, old_id, old_id)}
+        {ext_id, Map.fetch!(session_map, old_id)}
       end)
 
     # Remap session_expiries: rekey by new session_id
     session_expiries =
       Map.new(state.session_expiries, fn {old_id, expiry} ->
-        {Map.get(session_map, old_id, old_id), expiry}
+        {Map.fetch!(session_map, old_id), expiry}
       end)
 
     # Remap connections: values contain session_id
     connections =
       Map.new(state.connections, fn {ref, {pid, old_session_id}} ->
-        {ref, {pid, Map.get(session_map, old_session_id, old_session_id)}}
+        {ref, {pid, Map.fetch!(session_map, old_session_id)}}
       end)
 
     # Remap targets: session_ids in MapSets
@@ -3169,7 +3196,7 @@ defmodule Coflux.Orchestration.Server do
           Map.new(module_targets, fn {target_name, target} ->
             new_session_ids =
               MapSet.new(target.session_ids, fn old_sid ->
-                Map.get(session_map, old_sid, old_sid)
+                Map.fetch!(session_map, old_sid)
               end)
 
             {target_name, %{target | session_ids: new_session_ids}}
@@ -3239,13 +3266,7 @@ defmodule Coflux.Orchestration.Server do
         |> Map.new()
 
       indexed_epoch_ids =
-        if state.epoch_index do
-          state.epoch_index.entries
-          |> Enum.filter(& &1.runs)
-          |> Enum.map(& &1.epoch_id)
-        else
-          []
-        end
+        EpochIndex.indexed_epoch_ids(state.epoch_index, "runs")
 
       # Merge unindexed + indexed epoch IDs, sort newest first, take depth limit
       all_epoch_ids =
@@ -3354,13 +3375,13 @@ defmodule Coflux.Orchestration.Server do
   defp find_and_build_run_data(state, external_run_id) do
     case Runs.get_run_by_external_id(state.db, external_run_id) do
       {:ok, run} when not is_nil(run) ->
-        build_run_data(state, state.db, run)
+        build_run_data(state.db, run)
 
       {:ok, nil} ->
         query_fn = fn archive_db ->
           case Runs.get_run_by_external_id(archive_db, external_run_id) do
             {:ok, run} when not is_nil(run) ->
-              {:found, build_run_data(state, archive_db, run)}
+              {:found, build_run_data(archive_db, run)}
 
             {:ok, nil} ->
               :not_found
@@ -3368,7 +3389,7 @@ defmodule Coflux.Orchestration.Server do
         end
 
         bloom_fn = fn epoch_index ->
-          EpochIndex.find_epochs_for_run(epoch_index, external_run_id)
+          EpochIndex.find_epochs(epoch_index, "runs", external_run_id)
         end
 
         case search_archived_epochs(state, query_fn, bloom_fn) do
@@ -3378,7 +3399,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp build_run_data(state, db, run) do
+  defp build_run_data(db, run) do
     parent =
       if run.parent_ref_id do
         resolve_execution_ref(db, run.parent_ref_id)
@@ -3467,7 +3488,8 @@ defmodule Coflux.Orchestration.Server do
                {:ok, {r, s, a}} = Runs.get_execution_key(db, execution_id)
                exec_external_id = execution_external_id(r, s, a)
 
-               workspace_external_id = state.workspaces[workspace_id].external_id
+               {:ok, workspace_external_id} =
+                 Workspaces.get_workspace_external_id(db, workspace_id)
 
                {result, completed_at, result_created_by} = Map.fetch!(results, execution_id)
 
@@ -3491,7 +3513,8 @@ defmodule Coflux.Orchestration.Server do
                  run_dependencies
                  |> Map.get(execution_id, [])
                  |> Map.new(fn dependency_ref_id ->
-                   {ext_id, _module, _target} = execution =
+                   {ext_id, _module, _target} =
+                     execution =
                      resolve_execution_ref(db, dependency_ref_id)
 
                    {ext_id, execution}
@@ -3544,7 +3567,7 @@ defmodule Coflux.Orchestration.Server do
              {run_external_id}
            ) do
         {:ok, {_id}} ->
-          {:ok, remap, _visited} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
+          {:ok, remap} = EpochCopy.copy_run(archive_db, state.db, run_external_id)
           {:found, {:ok, remap}}
 
         {:ok, nil} ->
@@ -3553,7 +3576,7 @@ defmodule Coflux.Orchestration.Server do
     end
 
     bloom_fn = fn epoch_index ->
-      EpochIndex.find_epochs_for_run(epoch_index, run_external_id)
+      EpochIndex.find_epochs(epoch_index, "runs", run_external_id)
     end
 
     case search_archived_epochs(state, query_fn, bloom_fn) do
@@ -3639,7 +3662,7 @@ defmodule Coflux.Orchestration.Server do
 
         bloom_fn = fn epoch_index ->
           if is_binary(cache_key) do
-            EpochIndex.find_epochs_for_cache_key(epoch_index, cache_key)
+            EpochIndex.find_epochs(epoch_index, "cache_keys", cache_key)
           else
             []
           end
@@ -3673,12 +3696,11 @@ defmodule Coflux.Orchestration.Server do
 
       :not_found ->
         # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
+        unindexed_ids = MapSet.new(unindexed, fn {id, _db} -> id end)
+
         candidate_epoch_ids =
-          if state.epoch_index do
-            bloom_fn.(state.epoch_index)
-          else
-            []
-          end
+          bloom_fn.(state.epoch_index)
+          |> Enum.reject(&MapSet.member?(unindexed_ids, &1))
 
         Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
           path = Epoch.archive_path(state.epochs, epoch_id)
@@ -4251,7 +4273,9 @@ defmodule Coflux.Orchestration.Server do
               end
 
             _ ->
-              # Execution not in current epoch — cannot check
+              # Execution not in current epoch. In-flight runs are copied to the
+              # active epoch during rotation, so this should only be reachable for
+              # completed runs whose results are already resolved.
               false
           end
         end)

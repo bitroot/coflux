@@ -988,7 +988,11 @@ defmodule Coflux.Orchestration.Runs do
         {execution_id}
       )
 
-    # Also find predecessors that reference this execution via successor_ref_id
+    # Also find predecessors that reference this execution via successor_ref_id.
+    # This only searches the active epoch, which is sufficient because
+    # successor_ref_id results are always written to the active epoch (either
+    # during runtime cache hits or epoch copy), and in-flight runs are copied
+    # forward during rotation.
     {:ok, {run_ext, step_num, attempt}} = get_execution_key(db, execution_id)
 
     {:ok, rows2} =

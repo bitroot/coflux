@@ -2,156 +2,128 @@ defmodule Coflux.Store.EpochIndex do
   @moduledoc """
   Index file for efficient cross-epoch lookups using Bloom filters.
 
-  Stored at: data_dir/projects/{project_id}/orchestration/index.json
+  Each entry is an `{epoch_id, filters}` tuple where `filters` is a map of
+  `%{field_name => Bloom.t() | nil}`. An entry with nil filters is unindexed
+  (awaiting background build).
 
-  Each entry contains Bloom filters for run external IDs and cache keys,
-  allowing quick elimination of epochs that definitely don't contain a target.
-
-  Unindexed entries (awaiting Bloom filter build) have a `null` JSON value.
+  Stored as JSON: `{epoch_id: {field: base64_bloom, ...} | null, ...}`.
   """
 
   alias Coflux.Store.Bloom
   alias Coflux.Utils
 
-  defstruct entries: []
-
-  defmodule Entry do
-    defstruct epoch_id: nil,
-              runs: nil,
-              cache_keys: nil
-  end
+  defstruct path: nil, fields: [], entries: []
 
   @doc """
-  Load the epoch index from disk. Returns an empty index if the file doesn't exist.
-  """
-  def load(project_id) do
-    path = index_path(project_id)
+  Load an epoch index from disk. Returns an empty index if the file doesn't exist.
 
-    case File.read(path) do
+  - `path` — relative path segments under the data dir (e.g. `["projects", id, "orchestration", "index.json"]`)
+  - `fields` — list of field name strings (e.g. `["runs", "cache_keys"]`)
+  """
+  def load(path, fields) do
+    full_path = resolve_path(path)
+
+    case File.read(full_path) do
       {:ok, data} ->
-        {:ok, deserialize(data)}
+        {:ok, %{deserialize(data) | path: path, fields: fields}}
 
       {:error, :enoent} ->
-        {:ok, %__MODULE__{entries: []}}
+        {:ok, %__MODULE__{path: path, fields: fields, entries: []}}
     end
   end
 
   @doc """
   Save the epoch index to disk.
   """
-  def save(project_id, %__MODULE__{} = index) do
-    path = index_path(project_id)
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, serialize(index))
+  def save(%__MODULE__{} = index) do
+    full_path = resolve_path(index.path)
+    File.mkdir_p!(Path.dirname(full_path))
+    File.write!(full_path, serialize(index))
     :ok
   end
 
   @doc """
-  Add a new epoch entry to the index with null Bloom filters (unindexed).
+  Add a new epoch entry with nil filters (unindexed).
   """
   def add_epoch(%__MODULE__{} = index, epoch_id) do
-    entry = %Entry{epoch_id: epoch_id}
-    %{index | entries: [entry | index.entries]}
+    filters = Map.new(index.fields, &{&1, nil})
+    %{index | entries: [{epoch_id, filters} | index.entries]}
   end
 
   @doc """
-  Replace nil Bloom filters with real ones for a given epoch_id entry.
+  Replace nil filters with real ones for a given epoch_id.
+
+  `filters` is a map of `%{field_name => Bloom.t()}`.
   """
-  def update_blooms(%__MODULE__{} = index, epoch_id, runs, cache_keys) do
+  def update_filters(%__MODULE__{} = index, epoch_id, filters) when is_map(filters) do
     entries =
-      Enum.map(index.entries, fn entry ->
-        if entry.epoch_id == epoch_id do
-          %{entry | runs: runs, cache_keys: cache_keys}
-        else
-          entry
-        end
+      Enum.map(index.entries, fn
+        {^epoch_id, _} -> {epoch_id, filters}
+        entry -> entry
       end)
 
     %{index | entries: entries}
   end
 
   @doc """
-  Returns epoch_ids of entries where Bloom filters are nil (not yet indexed).
+  Returns epoch_ids of entries where any filter is nil (not yet indexed).
   """
   def unindexed_epoch_ids(%__MODULE__{} = index) do
     index.entries
-    |> Enum.filter(fn entry -> entry.runs == nil end)
-    |> Enum.map(& &1.epoch_id)
+    |> Enum.filter(fn {_epoch_id, filters} ->
+      Enum.any?(filters, fn {_field, value} -> value == nil end)
+    end)
+    |> Enum.map(&elem(&1, 0))
   end
 
   @doc """
   Returns all archived epoch IDs tracked by the index.
   """
   def all_epoch_ids(%__MODULE__{} = index) do
-    Enum.map(index.entries, & &1.epoch_id)
+    Enum.map(index.entries, &elem(&1, 0))
   end
 
   @doc """
-  Find epoch IDs that may contain a run with the given external ID.
-  Returns epoch IDs in reverse chronological order (newest first).
+  Returns epoch IDs where the named field has a non-nil filter (fully indexed).
   """
-  def find_epochs_for_run(%__MODULE__{} = index, run_external_id) do
+  def indexed_epoch_ids(%__MODULE__{} = index, field) do
     index.entries
-    |> Enum.filter(fn entry ->
-      entry.runs != nil and Bloom.member?(entry.runs, run_external_id)
-    end)
-    |> Enum.map(& &1.epoch_id)
+    |> Enum.filter(fn {_epoch_id, filters} -> Map.get(filters, field) != nil end)
+    |> Enum.map(&elem(&1, 0))
   end
 
   @doc """
-  Find epoch IDs that may contain a cached execution with the given cache key.
+  Find epoch IDs where the given key may be present in the named field.
   Returns epoch IDs in reverse chronological order (newest first).
+
+  Entries with a nil filter for the field are included (can't be ruled out).
   """
-  def find_epochs_for_cache_key(%__MODULE__{} = index, cache_key) do
+  def find_epochs(%__MODULE__{} = index, field, key) do
     index.entries
-    |> Enum.filter(fn entry ->
-      entry.cache_keys != nil and Bloom.member?(entry.cache_keys, cache_key)
+    |> Enum.filter(fn {_epoch_id, filters} ->
+      case Map.get(filters, field) do
+        nil -> true
+        bloom -> Bloom.member?(bloom, key)
+      end
     end)
-    |> Enum.map(& &1.epoch_id)
+    |> Enum.map(&elem(&1, 0))
   end
 
-  @doc """
-  Build Bloom filters for an epoch database by scanning its runs and cache keys.
-  """
-  def build_blooms_for_epoch(db) do
-    import Coflux.Store
-
-    # Count runs for sizing
-    {:ok, [{run_count}]} = query(db, "SELECT COUNT(*) FROM runs")
-    runs = Bloom.new(max(100, run_count))
-
-    {:ok, run_rows} = query(db, "SELECT external_id FROM runs")
-    runs = Enum.reduce(run_rows, runs, fn {ext_id}, bloom -> Bloom.add(bloom, ext_id) end)
-
-    # Count cache keys for sizing
-    {:ok, [{cache_count}]} =
-      query(db, "SELECT COUNT(DISTINCT cache_key) FROM steps WHERE cache_key IS NOT NULL")
-
-    cache_keys = Bloom.new(max(100, cache_count))
-
-    {:ok, cache_rows} =
-      query(db, "SELECT DISTINCT cache_key FROM steps WHERE cache_key IS NOT NULL")
-
-    cache_keys =
-      Enum.reduce(cache_rows, cache_keys, fn {key}, bloom -> Bloom.add(bloom, key) end)
-
-    {runs, cache_keys}
-  end
+  # Serialization
 
   defp serialize(%__MODULE__{entries: entries}) do
     map =
-      Map.new(entries, fn entry ->
+      Map.new(entries, fn {epoch_id, filters} ->
         value =
-          if entry.runs && entry.cache_keys do
-            %{
-              "runs" => Base.encode64(Bloom.serialize(entry.runs)),
-              "cache_keys" => Base.encode64(Bloom.serialize(entry.cache_keys))
-            }
+          if Enum.all?(filters, fn {_f, v} -> v != nil end) do
+            Map.new(filters, fn {field, bloom} ->
+              {field, Base.encode64(Bloom.serialize(bloom))}
+            end)
           else
             nil
           end
 
-        {entry.epoch_id, value}
+        {epoch_id, value}
       end)
 
     Jason.encode!(map)
@@ -163,21 +135,15 @@ defmodule Coflux.Store.EpochIndex do
     entries =
       map
       |> Enum.map(fn {epoch_id, value} ->
-        {runs, cache_keys} =
+        filters =
           case value do
-            nil ->
-              {nil, nil}
-
-            %{} ->
-              {
-                value |> Map.get("runs") |> decode_bloom(),
-                value |> Map.get("cache_keys") |> decode_bloom()
-              }
+            nil -> %{}
+            %{} -> Map.new(value, fn {field, b64} -> {field, decode_bloom(b64)} end)
           end
 
-        %Entry{epoch_id: epoch_id, runs: runs, cache_keys: cache_keys}
+        {epoch_id, filters}
       end)
-      |> Enum.sort_by(& &1.epoch_id, :desc)
+      |> Enum.sort_by(&elem(&1, 0), :desc)
 
     %__MODULE__{entries: entries}
   end
@@ -185,8 +151,8 @@ defmodule Coflux.Store.EpochIndex do
   defp decode_bloom(nil), do: nil
   defp decode_bloom(b64), do: Bloom.deserialize(Base.decode64!(b64))
 
-  defp index_path(project_id) do
-    ["projects", project_id, "orchestration", "index.json"]
+  defp resolve_path(segments) do
+    segments
     |> Path.join()
     |> Utils.data_path()
   end

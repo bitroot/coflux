@@ -20,7 +20,6 @@ defmodule Coflux.Store.Epoch do
   defstruct project_id: nil,
             name: nil,
             active_db: nil,
-            active_epoch_id: nil,
             unindexed: [],
             archived_ids: []
 
@@ -67,7 +66,6 @@ defmodule Coflux.Store.Epoch do
        project_id: project_id,
        name: name,
        active_db: active_db,
-       active_epoch_id: name,
        unindexed: unindexed,
        archived_ids: archived_epoch_ids
      }}
@@ -90,7 +88,7 @@ defmodule Coflux.Store.Epoch do
   active file is created. The old DB handle remains valid (Linux fd
   semantics) and moves to the unindexed list.
 
-  Returns {:ok, new_epoch_state}.
+  Returns {:ok, new_epoch_state, old_db}.
   """
   def rotate(%__MODULE__{} = state, epoch_id) do
     active = active_path(state.project_id, state.name)
@@ -112,7 +110,7 @@ defmodule Coflux.Store.Epoch do
         archived_ids: state.archived_ids ++ [epoch_id]
     }
 
-    {:ok, new_state}
+    {:ok, new_state, old_db}
   end
 
   @doc """

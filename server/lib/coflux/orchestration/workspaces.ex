@@ -10,6 +10,13 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
+  def get_workspace_external_id(db, id) do
+    case query_one(db, "SELECT external_id FROM workspaces WHERE id = ?1", {id}) do
+      {:ok, {external_id}} -> {:ok, external_id}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
   def get_all_workspaces(db) do
     case query(
            db,
