@@ -3,6 +3,13 @@ defmodule Coflux.Orchestration.Workspaces do
 
   import Coflux.Store
 
+  def get_workspace_id(db, external_id) do
+    case query_one(db, "SELECT id FROM workspaces WHERE external_id = ?1", {external_id}) do
+      {:ok, {id}} -> {:ok, id}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
   def get_all_workspaces(db) do
     case query(
            db,

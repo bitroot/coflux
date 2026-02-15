@@ -1711,7 +1711,14 @@ defmodule Coflux.Orchestration.Server do
              else: {:ok, nil}
            ) do
       runs =
-        get_target_runs_across_epochs(state, module, target_name, :workflow, workspace_id, max_runs)
+        get_target_runs_across_epochs(
+          state,
+          module,
+          target_name,
+          :workflow,
+          workspace_id,
+          max_runs
+        )
 
       {:ok, ref, state} =
         add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
@@ -3257,6 +3264,8 @@ defmodule Coflux.Orchestration.Server do
       Runs.get_target_runs(state.db, module, target_name, type, workspace_id, limit)
 
     if length(runs) < limit do
+      workspace_external_id = workspace_external_id(state, workspace_id)
+
       unindexed_map =
         state.epochs
         |> Epoch.unindexed_dbs()
@@ -3299,7 +3308,7 @@ defmodule Coflux.Orchestration.Server do
             module,
             target_name,
             type,
-            workspace_id,
+            workspace_external_id,
             remaining
           )
 
@@ -3325,11 +3334,10 @@ defmodule Coflux.Orchestration.Server do
          module,
          target_name,
          type,
-         workspace_id,
+         workspace_external_id,
          limit
        ) do
-    {:ok, runs} = Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
-    runs
+    do_query_archive_target_runs(db, module, target_name, type, workspace_external_id, limit)
   end
 
   defp query_archive_target_runs(
@@ -3338,7 +3346,7 @@ defmodule Coflux.Orchestration.Server do
          module,
          target_name,
          type,
-         workspace_id,
+         workspace_external_id,
          limit
        ) do
     path = Path.join(Epoch.epochs_dir(state.project_id), "#{epoch_id}.sqlite")
@@ -3346,13 +3354,32 @@ defmodule Coflux.Orchestration.Server do
     case Exqlite.Sqlite3.open(path) do
       {:ok, db} ->
         try do
-          {:ok, runs} = Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
-          runs
+          do_query_archive_target_runs(
+            db,
+            module,
+            target_name,
+            type,
+            workspace_external_id,
+            limit
+          )
         after
           Exqlite.Sqlite3.close(db)
         end
 
       {:error, _} ->
+        []
+    end
+  end
+
+  defp do_query_archive_target_runs(db, module, target_name, type, workspace_external_id, limit) do
+    case Workspaces.get_workspace_id(db, workspace_external_id) do
+      {:ok, workspace_id} when not is_nil(workspace_id) ->
+        {:ok, runs} =
+          Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
+
+        runs
+
+      {:ok, nil} ->
         []
     end
   end
@@ -3590,7 +3617,12 @@ defmodule Coflux.Orchestration.Server do
 
         query_fn = fn archive_db ->
           archive_workspace_ids =
-            Runs.resolve_workspace_ids(archive_db, workspace_external_ids)
+            Enum.flat_map(workspace_external_ids, fn ext_id ->
+              case Workspaces.get_workspace_id(archive_db, ext_id) do
+                {:ok, id} when not is_nil(id) -> [id]
+                {:ok, nil} -> []
+              end
+            end)
 
           if archive_workspace_ids == [] do
             :not_found

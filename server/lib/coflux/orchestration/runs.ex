@@ -977,15 +977,6 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def resolve_workspace_ids(db, workspace_external_ids) do
-    Enum.flat_map(workspace_external_ids, fn external_id ->
-      case query(db, "SELECT id FROM workspaces WHERE external_id = ?1", {external_id}) do
-        {:ok, [{id}]} -> [id]
-        {:ok, []} -> []
-      end
-    end)
-  end
-
   def get_result_successors(db, execution_id) do
     # First, find successors via the successor_id chain (same-run, internal)
     {:ok, rows1} =
