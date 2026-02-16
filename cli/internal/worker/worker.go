@@ -423,7 +423,10 @@ func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 		}
 
 		// Convert to adapter argument
-		adapterRefs := refsToAdapter(value.References)
+		adapterRefs, err := w.refsToAdapter(value.References)
+		if err != nil {
+			return nil, fmt.Errorf("argument %d: %w", i, err)
+		}
 		switch value.Type {
 		case api.ValueTypeRaw:
 			result[i] = adapter.Argument{
@@ -438,17 +441,7 @@ func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 			if err != nil {
 				return nil, fmt.Errorf("argument %d: failed to download blob: %w", i, err)
 			}
-			// Determine format from references or default to pickle
-			format := "pickle"
-			if len(value.References) > 0 {
-				// Check for fragment reference with format
-				for _, ref := range value.References {
-					if ref.Type == api.RefTypeFragment {
-						format = ref.Serializer
-						break
-					}
-				}
-			}
+			format := "json"
 			result[i] = adapter.Argument{
 				Type:       "file",
 				Format:     format,
@@ -460,22 +453,27 @@ func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 	return result, nil
 }
 
-func refsToAdapter(refs []api.Reference) [][]any {
+func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
 	if len(refs) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make([][]any, len(refs))
 	for i, ref := range refs {
 		switch ref.Type {
 		case api.RefTypeExecution:
-			result[i] = []any{"execution", ref.ExecutionID, ref.RunID, ref.StepID, ref.Attempt, ref.Module, ref.Target}
+			result[i] = []any{"execution", ref.ExecutionID, ref.Module, ref.Target}
 		case api.RefTypeAsset:
 			result[i] = []any{"asset", ref.AssetID, ref.Name, ref.TotalCount, ref.TotalSize}
 		case api.RefTypeFragment:
-			result[i] = []any{"fragment", ref.Serializer, ref.BlobKey, ref.Size, ref.Metadata}
+			// Download fragment blob to local file so the adapter can deserialize it
+			path, err := w.blobs.Download(ref.BlobKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to download fragment blob: %w", err)
+			}
+			result[i] = []any{"fragment", ref.Serializer, path, ref.Size, ref.Metadata}
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (w *Worker) handleAbort(params []any) error {
@@ -544,7 +542,7 @@ func (w *Worker) sendHeartbeat(ctx context.Context) {
 
 // ExecutionHandler implementation
 
-func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) ([]any, error) {
+func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error) {
 	// Convert arguments back to server format
 	module, name := splitTarget(params.Target)
 	args, err := w.convertArgumentsToServer(params.Arguments)
@@ -639,64 +637,70 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		return nil, err
 	}
 
-	// Parse reference from result
-	// Server returns: [execution_id, run_id, step_id, attempt, module, target]
-	// Adapter expects: ["execution", execution_id, run_id, step_id, attempt, module, target]
-	if serverRef, ok := result.([]any); ok {
-		ref := make([]any, len(serverRef)+1)
-		ref[0] = "execution"
-		copy(ref[1:], serverRef)
-		return ref, nil
+	// Server returns: [execution_id, module, target]
+	serverRef, ok := result.([]any)
+	if !ok || len(serverRef) < 3 {
+		return nil, fmt.Errorf("unexpected submit result: %v", result)
 	}
-	return nil, fmt.Errorf("unexpected submit result type: %T", result)
+	return map[string]any{
+		"execution_id": serverRef[0],
+		"module":       serverRef[1],
+		"target":       serverRef[2],
+	}, nil
 }
 
 func (w *Worker) convertArgumentsToServer(args []adapter.Argument) ([]any, error) {
 	result := make([]any, len(args))
-	for i, arg := range args {
-		refs := make([]any, len(arg.References))
-		for j, ref := range arg.References {
-			refs[j] = ref
+	for i := range args {
+		v, err := w.convertValueToServerFormat(&args[i])
+		if err != nil {
+			return nil, err
 		}
-		switch arg.Type {
-		case "inline":
-			result[i] = []any{"raw", arg.Value, refs}
-		case "file":
-			// Upload blob
-			key, err := w.blobs.Upload(arg.Path)
-			if err != nil {
-				return nil, fmt.Errorf("failed to upload blob: %w", err)
-			}
-			// Get file size
-			info, _ := os.Stat(arg.Path)
-			size := int64(0)
-			if info != nil {
-				size = info.Size()
-			}
-			result[i] = []any{"blob", key, size, refs}
-		}
+		result[i] = v
 	}
 	return result, nil
 }
 
-func (w *Worker) ResolveReference(ctx context.Context, executionID string, reference []any) (*adapter.Value, error) {
-	if len(reference) < 2 {
-		return nil, fmt.Errorf("invalid reference")
+// processReferences uploads fragment file blobs and converts references to server format.
+// Fragment references from the adapter contain file paths that need to be uploaded;
+// execution and asset references are passed through as-is.
+func (w *Worker) processReferences(refs [][]any) ([]any, error) {
+	if len(refs) == 0 {
+		return []any{}, nil
 	}
-
-	refType := getString(reference[0])
-	if refType != "execution" {
-		return nil, fmt.Errorf("unsupported reference type: %s", refType)
+	result := make([]any, len(refs))
+	for i, ref := range refs {
+		if len(ref) >= 1 {
+			refType, _ := ref[0].(string)
+			if refType == "fragment" && len(ref) >= 5 {
+				// Fragment: ["fragment", serializer, file_path, size, metadata]
+				// Upload the file and replace path with blob key
+				filePath, _ := ref[2].(string)
+				if filePath != "" {
+					key, err := w.blobs.Upload(filePath)
+					if err != nil {
+						return nil, fmt.Errorf("failed to upload fragment blob: %w", err)
+					}
+					// Replace file path with blob key
+					uploaded := make([]any, len(ref))
+					copy(uploaded, ref)
+					uploaded[2] = key
+					result[i] = uploaded
+					continue
+				}
+			}
+		}
+		result[i] = ref
 	}
+	return result, nil
+}
 
-	refID := getString(reference[1])
-
-	// Python params: (target_execution_id, parent_execution_id, timeout_ms)
+func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.Value, error) {
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
 	}
-	result, err := conn.Request(ctx, "get_result", refID, executionID, nil)
+	result, err := conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs)
 	if err != nil {
 		return nil, err
 	}
@@ -717,13 +721,18 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, refer
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse value: %w", err)
 			}
+			adapterRefs, err := w.refsToAdapter(value.References)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert references: %w", err)
+			}
 			// Convert to adapter value
 			switch value.Type {
 			case api.ValueTypeRaw:
 				return &adapter.Value{
-					Type:   "inline",
-					Format: "json",
-					Value:  value.Content,
+					Type:       "inline",
+					Format:     "json",
+					Value:      value.Content,
+					References: adapterRefs,
 				}, nil
 			case api.ValueTypeBlob:
 				path, err := w.blobs.Download(value.Key)
@@ -731,9 +740,10 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, refer
 					return nil, err
 				}
 				return &adapter.Value{
-					Type:   "file",
-					Format: "pickle",
-					Path:   path,
+					Type:       "file",
+					Format:     "json",
+					Path:       path,
+					References: adapterRefs,
 				}, nil
 			default:
 				return nil, fmt.Errorf("unknown value type: %s", value.Type)
@@ -750,10 +760,17 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, refer
 	return nil, fmt.Errorf("unexpected result format: %T", result)
 }
 
-func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any) (map[string]any, error) {
+func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error) {
 	// Upload each file and create entries
-	// Python format: {path: (blob_key, size, metadata)}
+	// Server format: {path: [blob_key, size, metadata]}
 	entries := make(map[string][]any)
+
+	// Add pre-resolved entries (existing blob references)
+	for path, entry := range preResolved {
+		entries[path] = entry
+	}
+
+	// Upload local files
 	for _, path := range paths {
 		key, err := w.blobs.Upload(path)
 		if err != nil {
@@ -805,13 +822,7 @@ func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []s
 	return nil, fmt.Errorf("unexpected result type: %T", result)
 }
 
-func (w *Worker) GetAsset(ctx context.Context, executionID string, reference []any) (map[string]any, error) {
-	if len(reference) < 2 {
-		return nil, fmt.Errorf("invalid asset reference")
-	}
-
-	assetID := getString(reference[1])
-
+func (w *Worker) GetAsset(ctx context.Context, executionID string, assetID string) (map[string]any, error) {
 	// Python params: (asset_id, execution_id)
 	conn, err := w.requireConn()
 	if err != nil {
@@ -864,17 +875,12 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) CancelExecution(ctx context.Context, executionID string, targetReference []any) error {
-	if len(targetReference) < 2 {
-		return fmt.Errorf("invalid target reference")
-	}
+func (w *Worker) CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	targetID := getString(targetReference[1])
-	// Python params: (target_execution_id,)
-	return conn.Notify("cancel", targetID)
+	return conn.Notify("cancel", targetExecutionID)
 }
 
 func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string][]any) error {
@@ -1035,10 +1041,17 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 				size := getInt(refSlice[3])
 				metadata := refSlice[4]
 
+				// Ensure metadata is a map (frontend expects it)
+				metadataMap, ok := metadata.(map[string]any)
+				if !ok {
+					metadataMap = map[string]any{}
+				}
+
 				// Read the fragment file
 				data, err := os.ReadFile(path)
 				if err != nil {
 					w.logger.Error("failed to read fragment file", "path", path, "error", err)
+					result[i] = map[string]any{"type": "fragment", "format": serializer, "blobKey": "", "size": size, "metadata": metadataMap}
 					continue
 				}
 				// Clean up temp file
@@ -1048,13 +1061,8 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 				key, err := w.blobs.UploadData(data)
 				if err != nil {
 					w.logger.Error("failed to upload fragment blob", "error", err)
+					result[i] = map[string]any{"type": "fragment", "format": serializer, "blobKey": "", "size": size, "metadata": metadataMap}
 					continue
-				}
-
-				// Ensure metadata is a map (frontend expects it)
-				metadataMap, ok := metadata.(map[string]any)
-				if !ok {
-					metadataMap = map[string]any{}
 				}
 
 				// Return reference as map with server-expected keys
@@ -1068,16 +1076,13 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 			}
 
 		case "execution":
-			// Execution reference: ["execution", id, run_id, step_id, attempt, module, target]
-			if len(refSlice) >= 7 {
+			// Execution reference: ["execution", id, module, target]
+			if len(refSlice) >= 4 {
 				result[i] = map[string]any{
 					"type":        "execution",
-					"executionId": refSlice[1],
-					"runId":       refSlice[2],
-					"stepId":      refSlice[3],
-					"attempt":     refSlice[4],
-					"module":      refSlice[5],
-					"target":      refSlice[6],
+					"executionId": getString(refSlice[1]),
+					"module":      refSlice[2],
+					"target":      refSlice[3],
 				}
 			}
 
@@ -1086,7 +1091,7 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 			if len(refSlice) >= 5 {
 				result[i] = map[string]any{
 					"type":       "asset",
-					"assetId":    refSlice[1],
+					"assetId":    getString(refSlice[1]),
 					"name":       refSlice[2],
 					"totalCount": refSlice[3],
 					"totalSize":  refSlice[4],
@@ -1094,20 +1099,11 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 			}
 
 		default:
-			// Unknown reference type - skip
 			result[i] = ref
 		}
 	}
 
-	// Filter out nil entries
-	filtered := make([]any, 0, len(result))
-	for _, r := range result {
-		if r != nil {
-			filtered = append(filtered, r)
-		}
-	}
-
-	return filtered, nil
+	return result, nil
 }
 
 func getSlice(v any) []any {
@@ -1131,7 +1127,7 @@ func getInt(v any) int {
 
 func (w *Worker) ReportResult(ctx context.Context, executionID string, result *adapter.Value) error {
 	// Convert result to server format eagerly (blob uploads happen here, outside lock)
-	serverValue, err := w.convertResultToServerFormat(result)
+	serverValue, err := w.convertValueToServerFormat(result)
 	if err != nil {
 		return err
 	}
@@ -1179,26 +1175,42 @@ func (w *Worker) ReportError(ctx context.Context, executionID string, errorType,
 	return nil
 }
 
-// convertResultToServerFormat converts an adapter result to server wire format.
-// This may upload blobs, so it should be called outside of any lock.
-func (w *Worker) convertResultToServerFormat(result *adapter.Value) (any, error) {
-	if result == nil {
+// convertValueToServerFormat converts an adapter value to server wire format.
+// Applies blob threshold and uploads fragment references. Should be called outside of any lock.
+func (w *Worker) convertValueToServerFormat(v *adapter.Value) (any, error) {
+	if v == nil {
 		return []any{"raw", nil, []any{}}, nil
 	}
-	switch result.Type {
+	refs, err := w.processReferences(v.References)
+	if err != nil {
+		return nil, err
+	}
+	switch v.Type {
 	case "inline":
-		return []any{"raw", result.Value, []any{}}, nil
-	case "file":
-		key, err := w.blobs.Upload(result.Path)
+		// Check blob threshold - encode to JSON to measure size
+		encoded, err := json.Marshal(v.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to upload result: %w", err)
+			return nil, fmt.Errorf("failed to encode value: %w", err)
 		}
-		info, _ := os.Stat(result.Path)
+		if len(encoded) > w.cfg.Blobs.Threshold {
+			key, err := w.blobs.UploadData(encoded)
+			if err != nil {
+				return nil, fmt.Errorf("failed to upload blob: %w", err)
+			}
+			return []any{"blob", key, len(encoded), refs}, nil
+		}
+		return []any{"raw", v.Value, refs}, nil
+	case "file":
+		key, err := w.blobs.Upload(v.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload blob: %w", err)
+		}
+		info, _ := os.Stat(v.Path)
 		size := int64(0)
 		if info != nil {
 			size = info.Size()
 		}
-		return []any{"blob", key, size, []any{}}, nil
+		return []any{"blob", key, size, refs}, nil
 	default:
 		return []any{"raw", nil, []any{}}, nil
 	}

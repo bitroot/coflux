@@ -112,6 +112,7 @@ defmodule Coflux.Handlers.Logs do
     execution_id = get_query_param(qs, "execution")
     workspace_ids = parse_string_list(get_query_param(qs, "workspaces"))
     after_cursor = get_query_param(qs, "after")
+    from = parse_integer_param(get_query_param(qs, "from"))
 
     cond do
       is_nil(run_id) ->
@@ -120,7 +121,7 @@ defmodule Coflux.Handlers.Logs do
 
       String.contains?(accept, "text/event-stream") ->
         # SSE mode - subscribe and stream
-        handle_sse(req, opts, project_id, run_id, execution_id, workspace_ids)
+        handle_sse(req, opts, project_id, run_id, execution_id, workspace_ids, from)
 
       true ->
         # JSON mode - query and return
@@ -128,7 +129,8 @@ defmodule Coflux.Handlers.Logs do
           run_id: run_id,
           execution_id: execution_id,
           workspace_ids: workspace_ids,
-          after: after_cursor
+          after: after_cursor,
+          from: from
         ]
 
         case Logs.Server.query_logs(project_id, query_opts) do
@@ -152,13 +154,14 @@ defmodule Coflux.Handlers.Logs do
 
   ## SSE Handling
 
-  defp handle_sse(req, opts, project_id, run_id, execution_id, workspace_ids) do
+  defp handle_sse(req, opts, project_id, run_id, execution_id, workspace_ids, from) do
     subscribe_opts =
       []
       |> then(fn o -> if execution_id, do: [{:execution_id, execution_id} | o], else: o end)
       |> then(fn o ->
         if workspace_ids != [], do: [{:workspace_ids, workspace_ids} | o], else: o
       end)
+      |> then(fn o -> if from, do: [{:from, from} | o], else: o end)
 
     case Logs.Server.subscribe(project_id, run_id, self(), subscribe_opts) do
       {:ok, ref, initial_entries} ->
@@ -243,6 +246,15 @@ defmodule Coflux.Handlers.Logs do
     String.split(value, ",")
   end
 
+  defp parse_integer_param(nil), do: nil
+
+  defp parse_integer_param(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      _ -> nil
+    end
+  end
+
   # Validation functions - check structure but pass through as-is
 
   defp valid_values?(values) when is_map(values) do
@@ -264,15 +276,9 @@ defmodule Coflux.Handlers.Logs do
 
   defp valid_reference?(%{
          "type" => "execution",
-         "executionId" => id,
-         "runId" => run_id,
-         "stepId" => step_id,
-         "attempt" => attempt
+         "executionId" => id
        })
-       when is_binary(id) and
-              is_binary(run_id) and
-              is_binary(step_id) and
-              is_integer(attempt),
+       when is_binary(id),
        do: true
 
   defp valid_reference?(%{

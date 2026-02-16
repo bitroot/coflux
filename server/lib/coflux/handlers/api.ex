@@ -567,6 +567,9 @@ defmodule Coflux.Handlers.Api do
           {:error, :invalid} ->
             json_error_response(req, "bad_request", details: %{"stepId" => "invalid"})
 
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+
           {:error, :workspace_invalid} ->
             json_error_response(req, "not_found", status: 404)
         end
@@ -779,6 +782,17 @@ defmodule Coflux.Handlers.Api do
       {:error, errors, req} ->
         json_error_response(req, "bad_request", details: errors)
     end
+  end
+
+  defp handle(req, "POST", ["rotate_epoch"], project_id, _access) do
+    case Orchestration.rotate_epoch(project_id) do
+      :ok -> :cowboy_req.reply(204, req)
+    end
+  end
+
+  defp handle(req, "POST", ["rotate_logs"], project_id, _access) do
+    :ok = Coflux.Logs.Server.rotate(project_id)
+    :cowboy_req.reply(204, req)
   end
 
   defp handle(req, _method, _path, _project, _access) do

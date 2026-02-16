@@ -76,6 +76,8 @@ CREATE TABLE workspace_manifests (
   FOREIGN KEY (manifest_id) REFERENCES manifests ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_workspace_manifests_ws_module ON workspace_manifests(workspace_id, module, created_at);
+
 CREATE TABLE workspace_states (
   workspace_id INTEGER NOT NULL,
   state INTEGER NOT NULL, -- 0: active, 1: paused, 2: archived
@@ -83,6 +85,8 @@ CREATE TABLE workspace_states (
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_workspace_states_ws ON workspace_states(workspace_id, created_at);
 
 CREATE TABLE workspace_names (
   workspace_id INTEGER NOT NULL,
@@ -92,6 +96,8 @@ CREATE TABLE workspace_names (
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_workspace_names_ws ON workspace_names(workspace_id, created_at);
+
 CREATE TABLE workspace_bases (
   workspace_id INTEGER NOT NULL,
   base_workspace_id INTEGER,
@@ -100,6 +106,8 @@ CREATE TABLE workspace_bases (
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (base_workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_workspace_bases_ws ON workspace_bases(workspace_id, created_at);
 
 CREATE TABLE launchers (
   id INTEGER PRIMARY KEY,
@@ -136,6 +144,7 @@ CREATE TABLE pools (
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_pools_external_id ON pools(external_id);
+CREATE INDEX idx_pools_workspace_name ON pools(workspace_id, name, created_at);
 
 CREATE TABLE workers (
   id INTEGER PRIMARY KEY,
@@ -168,6 +177,8 @@ CREATE TABLE worker_states (
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
 
+CREATE INDEX idx_worker_states_worker ON worker_states(worker_id, created_at);
+
 CREATE TABLE worker_stops (
   id INTEGER PRIMARY KEY,
   worker_id INTEGER NOT NULL,
@@ -176,6 +187,8 @@ CREATE TABLE worker_stops (
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (worker_id) REFERENCES workers
 ) STRICT;
+
+CREATE INDEX idx_worker_stops_worker ON worker_stops(worker_id, created_at);
 
 CREATE TABLE worker_stop_results (
   worker_stop_id INTEGER PRIMARY KEY,
@@ -220,14 +233,24 @@ CREATE TABLE session_expirations (
   FOREIGN KEY (session_id) REFERENCES sessions ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE execution_refs (
+  id INTEGER PRIMARY KEY,
+  run_external_id TEXT NOT NULL,
+  step_number INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  module TEXT,
+  target TEXT,
+  UNIQUE(run_external_id, step_number, attempt)
+) STRICT;
+
 CREATE TABLE runs (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
-  parent_id INTEGER,
+  parent_ref_id INTEGER,
   idempotency_key TEXT UNIQUE,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
-  FOREIGN KEY (parent_id) REFERENCES executions ON DELETE SET NULL
+  FOREIGN KEY (parent_ref_id) REFERENCES execution_refs ON DELETE SET NULL
 ) STRICT;
 
 CREATE TABLE steps (
@@ -262,6 +285,10 @@ WHERE
   parent_id IS NULL;
 
 CREATE INDEX steps_cache_key ON steps (cache_key);
+CREATE INDEX idx_steps_run_id ON steps(run_id, number);
+CREATE INDEX idx_steps_parent_id ON steps(parent_id);
+CREATE INDEX idx_steps_module_target ON steps(module, target, type);
+CREATE INDEX idx_steps_memo_key ON steps(memo_key);
 
 CREATE TABLE step_arguments (
   step_id INTEGER NOT NULL,
@@ -284,6 +311,8 @@ CREATE TABLE executions (
   FOREIGN KEY (step_id) REFERENCES steps ON DELETE CASCADE,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_executions_workspace_id ON executions(workspace_id);
 
 CREATE TABLE assets (
   id INTEGER PRIMARY KEY,
@@ -349,11 +378,11 @@ CREATE TABLE assignments (
 
 CREATE TABLE result_dependencies (
   execution_id INTEGER NOT NULL,
-  dependency_id INTEGER NOT NULL,
+  dependency_ref_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (execution_id, dependency_id),
+  PRIMARY KEY (execution_id, dependency_ref_id),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
-  FOREIGN KEY (dependency_id) REFERENCES executions ON DELETE RESTRICT
+  FOREIGN KEY (dependency_ref_id) REFERENCES execution_refs ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE asset_dependencies (
@@ -372,6 +401,8 @@ CREATE TABLE heartbeats (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_heartbeats_execution_id ON heartbeats(execution_id);
 
 CREATE TABLE blobs (
   id INTEGER PRIMARY KEY,
@@ -411,15 +442,15 @@ CREATE TABLE value_references (
   value_id INTEGER NOT NULL,
   position INTEGER NOT NULL,
   fragment_id INTEGER,
-  execution_id INTEGER,
+  execution_ref_id INTEGER,
   asset_id INTEGER,
   PRIMARY KEY (value_id, position),
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE CASCADE,
   FOREIGN KEY (fragment_id) REFERENCES fragments ON DELETE RESTRICT,
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE RESTRICT,
+  FOREIGN KEY (execution_ref_id) REFERENCES execution_refs ON DELETE RESTRICT,
   FOREIGN KEY (asset_id) REFERENCES assets ON DELETE RESTRICT,
   CHECK (
-    (fragment_id IS NOT NULL) + (execution_id IS NOT NULL) + (asset_id IS NOT NULL) = 1
+    (fragment_id IS NOT NULL) + (execution_ref_id IS NOT NULL) + (asset_id IS NOT NULL) = 1
   )
 ) STRICT;
 
@@ -447,85 +478,67 @@ CREATE TABLE results (
   error_id INTEGER,
   value_id INTEGER,
   successor_id INTEGER,
+  successor_ref_id INTEGER,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
   FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT,
   FOREIGN KEY (successor_id) REFERENCES executions ON DELETE RESTRICT,
+  FOREIGN KEY (successor_ref_id) REFERENCES execution_refs ON DELETE RESTRICT,
   CHECK (
     CASE type
       WHEN 0 THEN error_id
       AND NOT value_id
+      AND NOT successor_ref_id
       WHEN 1 THEN value_id
       AND NOT (
         successor_id
         OR error_id
+        OR successor_ref_id
       )
       WHEN 2 THEN NOT (
         error_id
         OR value_id
+        OR successor_ref_id
       )
       WHEN 3 THEN NOT (
         error_id
         OR successor_id
         OR value_id
+        OR successor_ref_id
       )
-      WHEN 4 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      -- Types 4 (deferred), 5 (cached), 7 (spawned):
+      -- Either successor_id is set (in-flight, no ref, no value)
+      -- Or successor_ref_id + value_id are set (resolved, no successor_id)
+      WHEN 4 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
-      WHEN 5 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      WHEN 5 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
       WHEN 6 THEN successor_id
       AND NOT (
         error_id
         OR value_id
+        OR successor_ref_id
       )
-      WHEN 7 THEN successor_id
-      AND NOT (
-        error_id
-        OR value_id
+      WHEN 7 THEN NOT error_id
+      AND (
+        (successor_id AND NOT successor_ref_id AND NOT value_id)
+        OR (successor_ref_id AND value_id AND NOT successor_id)
       )
       ELSE FALSE
     END
   )
 ) STRICT;
 
-CREATE TABLE message_templates (
-  id INTEGER PRIMARY KEY,
-  template TEXT NOT NULL UNIQUE
-) STRICT;
-
-CREATE TABLE messages (
-  id INTEGER PRIMARY KEY,
-  execution_id INTEGER NOT NULL,
-  timestamp INTEGER NOT NULL,
-  level INTEGER NOT NULL,
-  template_id INTEGER,
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
-  FOREIGN KEY (template_id) REFERENCES message_templates ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE message_labels (
-  id INTEGER PRIMARY KEY,
-  label TEXT NOT NULL UNIQUE
-) STRICT;
-
-CREATE TABLE message_values (
-  message_id INTEGER NOT NULL,
-  label_id INTEGER NOT NULL,
-  value_id INTEGER NOT NULL,
-  PRIMARY KEY (message_id, label_id),
-  FOREIGN KEY (message_id) REFERENCES messages ON DELETE CASCADE,
-  FOREIGN KEY (label_id) REFERENCES message_labels ON DELETE RESTRICT,
-  FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
-) STRICT;
+CREATE INDEX idx_results_successor_id ON results(successor_id);
+CREATE INDEX idx_results_successor_ref_id ON results(successor_ref_id);
 
 -- Principal and token tracking
 

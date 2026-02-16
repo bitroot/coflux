@@ -176,8 +176,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_sessions, workspace_id, pid})
   end
 
-  def subscribe_workflow(project_id, module, target, workspace_id, pid) do
-    call_server(project_id, {:subscribe_workflow, module, target, workspace_id, pid})
+  def subscribe_workflow(project_id, module, target, workspace_id, max_runs, pid) do
+    call_server(project_id, {:subscribe_workflow, module, target, workspace_id, max_runs, pid})
   end
 
   def subscribe_run(project_id, run_id, pid) do
@@ -186,6 +186,10 @@ defmodule Coflux.Orchestration do
 
   def subscribe_targets(project_id, workspace_id, pid) do
     call_server(project_id, {:subscribe_targets, workspace_id, pid})
+  end
+
+  def rotate_epoch(project_id) do
+    call_server(project_id, :rotate_epoch)
   end
 
   def unsubscribe(project_id, ref) do

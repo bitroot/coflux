@@ -14,8 +14,12 @@ import json
 import re
 import typing as t
 
-T = t.TypeVar("T")
+from .models import Execution
+from .serialization import serialize_result
+from .state import get_context
+
 P = t.ParamSpec("P")
+T = t.TypeVar("T")
 
 # Type definitions
 TargetType = t.Literal["workflow", "task"]
@@ -234,60 +238,6 @@ def _parse_requires(
     return {k: _parse_require(v) for k, v in requires.items()} if requires else None
 
 
-class Execution(t.Generic[T]):
-    """A handle to a submitted execution that can be awaited for its result."""
-
-    def __init__(self, reference: list[t.Any], target: "Target | None" = None):
-        self._reference = reference
-        self._target = target
-
-    def __reduce__(self):
-        """Support pickling by only serializing the reference (not the target)."""
-        return (Execution, (self._reference,))
-
-    @property
-    def reference(self) -> list[t.Any]:
-        return self._reference
-
-    @property
-    def id(self) -> str:
-        """Get the execution ID from the reference."""
-        # Reference format: ["execution", id, ...]
-        if len(self._reference) >= 2:
-            return str(self._reference[1])
-        return ""
-
-    @property
-    def metadata(self):
-        """Get execution metadata from the reference."""
-        from .models import ExecutionMetadata
-        # Reference format: ["execution", id, run_id, step_id, attempt, module, target]
-        if len(self._reference) >= 7:
-            return ExecutionMetadata(
-                run_id=self._reference[2],
-                step_id=self._reference[3],
-                attempt=self._reference[4],
-                module=self._reference[5],
-                target=self._reference[6],
-            )
-        return None
-
-    def result(self) -> T:
-        """Wait for and return the execution result."""
-        from .context import get_context
-        ctx = get_context()
-        value = ctx.resolve_reference(self._reference)
-        # Deserialize the result
-        from .serialization import deserialize_argument
-        return deserialize_argument(value)
-
-    def cancel(self) -> None:
-        """Cancel this execution."""
-        from .context import get_context
-        ctx = get_context()
-        ctx.cancel_execution(self._reference)
-
-
 class Target(t.Generic[P, T]):
     """Wrapper for a decorated task or workflow function."""
 
@@ -352,46 +302,16 @@ class Target(t.Generic[P, T]):
 
     def submit(self, *args: P.args, **kwargs: P.kwargs) -> Execution[T]:
         """Submit this target for execution and return a handle."""
-        from .context import get_context
-        from .serialization import serialize_result
-
         if kwargs:
             raise ValueError("Keyword arguments not yet supported")
 
         ctx = get_context()
 
-        # Serialize arguments, detecting Execution objects for wait_for
-        serialized_args = []
-        execution_indices: set[int] = set()
-        for i, arg in enumerate(args):
-            if isinstance(arg, Execution):
-                # Serialize as null with execution reference
-                ref = ["execution", arg.id]
-                if arg.metadata:
-                    ref.extend([
-                        arg.metadata.run_id,
-                        arg.metadata.step_id,
-                        arg.metadata.attempt,
-                        arg.metadata.module,
-                        arg.metadata.target,
-                    ])
-                serialized_args.append({
-                    "type": "inline",
-                    "format": "json",
-                    "value": None,
-                    "references": [ref],
-                })
-                execution_indices.add(i)
-            else:
-                result = serialize_result(arg)
-                if result is None:
-                    serialized_args.append({"type": "inline", "format": "json", "value": None})
-                else:
-                    serialized_args.append(result)
+        # Serialize arguments
+        serialized_args = [serialize_result(arg) for arg in args]
 
-        # Combine detected execution indices with declared wait_for
-        wait_for = execution_indices | self._definition.wait_for
-        wait_for_val = sorted(wait_for) if wait_for else None
+        # Use only the declared wait_for from the decorator
+        wait_for_val = sorted(self._definition.wait_for) if self._definition.wait_for else None
 
         # Build full target name
         full_target = f"{self._module}.{self._name}"
@@ -416,15 +336,15 @@ class Target(t.Generic[P, T]):
         if self._definition.retries:
             retries_dict = {
                 "limit": self._definition.retries.limit,
-                "delay_min_ms": int(self._definition.retries.delay_min * 1000) if self._definition.retries.delay_min else None,
-                "delay_max_ms": int(self._definition.retries.delay_max * 1000) if self._definition.retries.delay_max else None,
+                "delay_min_ms": self._definition.retries.delay_min or None,
+                "delay_max_ms": self._definition.retries.delay_max or None,
             }
 
         # Get memo value (bool or list of indices)
         memo_val = self._definition.memo if self._definition.memo else None
 
         # Submit via context with all target definition fields
-        reference = ctx.submit_execution(
+        result = ctx.submit_execution(
             full_target,
             serialized_args,
             type=self._definition.type,
@@ -437,11 +357,10 @@ class Target(t.Generic[P, T]):
             recurrent=self._definition.recurrent,
             requires=self._definition.requires,
         )
-        return Execution(reference, self)
+        return Execution(result["execution_id"], result["module"], result["target"])
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         """Call the target - submits if in execution context, else runs directly."""
-        from .context import get_context
         try:
             # If we're in an execution context, submit and wait for result
             get_context()

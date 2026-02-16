@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/bitroot/coflux/cli/internal/adapter"
@@ -13,13 +14,13 @@ import (
 // ExecutionHandler is called when an executor needs to interact with the server
 type ExecutionHandler interface {
 	// SubmitExecution submits a child execution
-	SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) ([]any, error)
+	SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error)
 	// ResolveReference resolves a reference to get its value
-	ResolveReference(ctx context.Context, executionID string, reference []any) (*adapter.Value, error)
+	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.Value, error)
 	// PersistAsset persists files as an asset
-	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any) (map[string]any, error)
+	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
-	GetAsset(ctx context.Context, executionID string, reference []any) (map[string]any, error)
+	GetAsset(ctx context.Context, executionID string, assetID string) (map[string]any, error)
 	// DownloadBlob downloads a blob to a local file
 	DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string) error
 	// UploadBlob uploads a local file as a blob
@@ -27,7 +28,7 @@ type ExecutionHandler interface {
 	// Suspend suspends an execution
 	Suspend(ctx context.Context, executionID string, executeAfter *int64) error
 	// CancelExecution cancels another execution
-	CancelExecution(ctx context.Context, executionID string, targetReference []any) error
+	CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error
 	// RegisterGroup registers a group for organizing child executions
 	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
@@ -132,7 +133,24 @@ func (p *Pool) Execute(ctx context.Context, executionID, target string, argument
 }
 
 func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID, target string, arguments []adapter.Argument) {
+	// Create a temporary directory for this execution
+	workingDir, err := os.MkdirTemp("", "coflux-exec-*")
+	if err != nil {
+		p.logger.Error("failed to create temp dir for execution", "error", err, "execution_id", executionID)
+		p.handler.ReportError(ctx, executionID, "internal", fmt.Sprintf("failed to create temp dir: %s", err.Error()), "")
+		p.mu.Lock()
+		pe.busy = false
+		shutdown := p.shutdown
+		p.mu.Unlock()
+		if !shutdown {
+			p.available <- pe
+		}
+		return
+	}
+
 	defer func() {
+		os.RemoveAll(workingDir)
+
 		p.mu.Lock()
 		pe.busy = false
 		shutdown := p.shutdown
@@ -146,7 +164,7 @@ func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID
 	logger := p.logger.With("executor", pe.index, "execution_id", executionID, "target", target)
 
 	// Send execute command
-	if err := pe.executor.SendExecute(executionID, target, arguments); err != nil {
+	if err := pe.executor.SendExecute(executionID, target, arguments, workingDir); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
 		return
@@ -265,11 +283,11 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		ref, err := p.handler.SubmitExecution(ctx, &req)
+		submitResult, err := p.handler.SubmitExecution(ctx, &req)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "submit_error", Message: err.Error()}
 		} else {
-			result = map[string]any{"reference": ref}
+			result = submitResult
 		}
 
 	case "resolve_reference":
@@ -278,7 +296,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		value, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.Reference)
+		value, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "resolve_error", Message: err.Error()}
 		} else {
@@ -291,7 +309,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata)
+		assetResult, err := p.handler.PersistAsset(ctx, req.ExecutionID, req.Paths, req.Metadata, req.Entries)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "persist_error", Message: err.Error()}
 		} else {
@@ -304,7 +322,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		entries, err := p.handler.GetAsset(ctx, req.ExecutionID, req.Reference)
+		entries, err := p.handler.GetAsset(ctx, req.ExecutionID, req.AssetID)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "get_asset_error", Message: err.Error()}
 		} else {
@@ -354,7 +372,7 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		if err := p.handler.CancelExecution(ctx, req.ExecutionID, req.TargetReference); err != nil {
+		if err := p.handler.CancelExecution(ctx, req.ExecutionID, req.TargetExecutionID); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "cancel_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}

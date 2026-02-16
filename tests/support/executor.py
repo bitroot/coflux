@@ -66,7 +66,7 @@ class ExecutorConnection:
         return resp
 
     def submit_task(self, execution_id, target, arguments, **kwargs):
-        """Submit a child task execution and return the reference."""
+        """Submit a child task execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
@@ -75,10 +75,10 @@ class ExecutorConnection:
             **kwargs,
         )
         resp = self._request(msg)
-        return resp["result"]["reference"]
+        return resp["result"]["execution_id"]
 
     def submit_workflow(self, execution_id, target, arguments, **kwargs):
-        """Submit a child workflow execution and return the reference."""
+        """Submit a child workflow execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
@@ -88,17 +88,17 @@ class ExecutorConnection:
             **kwargs,
         )
         resp = self._request(msg)
-        return resp["result"]["reference"]
+        return resp["result"]["execution_id"]
 
-    def resolve(self, execution_id, reference):
+    def resolve(self, execution_id, target_execution_id):
         """Resolve a reference and return the result dict (or error dict)."""
-        msg = protocol.resolve_reference_request(None, execution_id, reference)
+        msg = protocol.resolve_reference_request(None, execution_id, target_execution_id)
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
-    def cancel(self, execution_id, reference):
+    def cancel(self, execution_id, target_execution_id):
         """Cancel a child execution."""
-        msg = protocol.cancel_execution_request(None, execution_id, reference)
+        msg = protocol.cancel_execution_request(None, execution_id, target_execution_id)
         return self._request(msg)
 
     def suspend(self, execution_id, execute_after=None):
@@ -112,9 +112,9 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
-    def get_asset(self, execution_id, reference):
-        """Get asset entries by reference."""
-        msg = protocol.get_asset_request(None, execution_id, reference)
+    def get_asset(self, execution_id, asset_id):
+        """Get asset entries by asset ID."""
+        msg = protocol.get_asset_request(None, execution_id, asset_id)
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 

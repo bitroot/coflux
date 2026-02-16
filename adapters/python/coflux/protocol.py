@@ -190,43 +190,59 @@ def request_submit_execution(
 
 def request_resolve_reference(
     execution_id: str,
-    reference: list[Any],
+    target_execution_id: str,
+    timeout_ms: int | None = None,
 ) -> int:
     """Request to resolve a reference (get result of another execution)."""
-    return get_protocol().send_request(
-        "resolve_reference",
-        {
-            "execution_id": execution_id,
-            "reference": reference,
-        },
-    )
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "target_execution_id": target_execution_id,
+    }
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    return get_protocol().send_request("resolve_reference", params)
 
 
 def request_persist_asset(
     execution_id: str,
-    paths: list[str],
+    paths: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    entries: dict[str, tuple[str, int, dict[str, Any]]] | None = None,
 ) -> int:
-    """Request to persist an asset."""
+    """Request to persist an asset.
+
+    Args:
+        execution_id: The execution this asset belongs to.
+        paths: Local file paths to upload and include.
+        metadata: Asset-level metadata (e.g. name).
+        entries: Pre-resolved entries referencing existing blobs.
+            Each value is (blob_key, size, entry_metadata).
+    """
     params: dict[str, Any] = {
         "execution_id": execution_id,
-        "paths": paths,
     }
+    if paths:
+        params["paths"] = paths
     if metadata:
         params["metadata"] = metadata
+    if entries:
+        params["entries"] = {
+            path: [blob_key, size, entry_metadata]
+            for path, (blob_key, size, entry_metadata) in entries.items()
+        }
     return get_protocol().send_request("persist_asset", params)
 
 
 def request_get_asset(
     execution_id: str,
-    reference: list[Any],
+    asset_id: str,
 ) -> int:
     """Request to get an asset."""
     return get_protocol().send_request(
         "get_asset",
         {
             "execution_id": execution_id,
-            "reference": reference,
+            "asset_id": asset_id,
         },
     )
 
@@ -274,14 +290,14 @@ def request_suspend(execution_id: str, execute_after: int | None = None) -> int:
 
 def request_cancel_execution(
     execution_id: str,
-    target_reference: list[Any],
+    target_execution_id: str,
 ) -> int:
     """Request to cancel another execution."""
     return get_protocol().send_request(
         "cancel_execution",
         {
             "execution_id": execution_id,
-            "target_reference": target_reference,
+            "target_execution_id": target_execution_id,
         },
     )
 

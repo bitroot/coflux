@@ -3,6 +3,20 @@ defmodule Coflux.Orchestration.Workspaces do
 
   import Coflux.Store
 
+  def get_workspace_id(db, external_id) do
+    case query_one(db, "SELECT id FROM workspaces WHERE external_id = ?1", {external_id}) do
+      {:ok, {id}} -> {:ok, id}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
+  def get_workspace_external_id(db, id) do
+    case query_one(db, "SELECT external_id FROM workspaces WHERE id = ?1", {id}) do
+      {:ok, {external_id}} -> {:ok, external_id}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
   def get_all_workspaces(db) do
     case query(
            db,
@@ -421,12 +435,32 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp hash_pool_definition(launcher_id, provides_tag_set_id, modules) do
+  defp hash_pool_definition(db, launcher_id, provides_tag_set_id, modules) do
+    launcher_hash =
+      if launcher_id do
+        {:ok, {hash}} =
+          query_one!(db, "SELECT hash FROM launchers WHERE id = ?1", {launcher_id})
+
+        hash
+      else
+        <<0>>
+      end
+
+    tag_set_hash =
+      if provides_tag_set_id do
+        {:ok, {hash}} =
+          query_one!(db, "SELECT hash FROM tag_sets WHERE id = ?1", {provides_tag_set_id})
+
+        hash
+      else
+        <<0>>
+      end
+
     data =
       Enum.intersperse(
         [
-          Integer.to_string(launcher_id || 0),
-          Integer.to_string(provides_tag_set_id || 0),
+          launcher_hash,
+          tag_set_hash,
           Enum.join(Enum.sort(modules), "\n")
         ],
         0
@@ -454,7 +488,7 @@ defmodule Coflux.Orchestration.Workspaces do
         end
       end
 
-    hash = hash_pool_definition(launcher_id, provides_tag_set_id, modules)
+    hash = hash_pool_definition(db, launcher_id, provides_tag_set_id, modules)
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->

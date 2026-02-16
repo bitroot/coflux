@@ -10,9 +10,9 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from .context import get_context
-from .decorators import task, workflow, stub, Target, Execution, Retries
-from .models import Asset, AssetEntry, AssetMetadata, ExecutionMetadata
+from .decorators import task, workflow, stub, Target, Retries
+from .models import Asset, AssetEntry, AssetMetadata, Execution
+from .state import get_context
 
 __version__ = "0.1.0"
 
@@ -28,7 +28,6 @@ __all__ = [
     "Asset",
     "AssetEntry",
     "AssetMetadata",
-    "ExecutionMetadata",
     # Context functions
     "group",
     "suspense",
@@ -142,21 +141,30 @@ def log_error(template: str | None = None, **kwargs) -> None:
 
 
 def asset(
-    entries: str | Path | list[str | Path] | None = None,
+    entries: (
+        str
+        | Path
+        | list[str | Path]
+        | Asset
+        | dict[str, str | Path | Asset | AssetEntry]
+        | None
+    ) = None,
     *,
     at: Path | None = None,
     match: str | None = None,
     name: str | None = None,
 ) -> Asset:
-    """Create and persist an asset from files.
+    """Create and persist an asset from files or existing asset entries.
 
     Assets are collections of files that can be passed between executions
     and persisted for later retrieval.
 
     Args:
-        entries: File path(s) to include. Can be:
+        entries: What to include. Can be:
             - A single file path (str or Path)
             - A list of file paths
+            - An Asset (re-reference all its entries)
+            - A dict mapping paths to file paths, Assets, or AssetEntries
             - None (use with `match` to find files by pattern)
         at: Base directory for relative paths and pattern matching.
         match: Glob pattern to match files (e.g., "*.csv", "**/*.json").
@@ -175,7 +183,7 @@ def asset(
         # Pattern matching
         asset(match="*.json", at=Path("./output"))
 
-        # Named asset
-        asset("results.parquet", name="training_results")
+        # Compose from existing asset entries
+        asset({f"{i}.jpg": e.result()["photo.jpg"] for i, e in enumerate(photos)})
     """
     return get_context().create_asset(entries, at=at, match=match, name=name)
