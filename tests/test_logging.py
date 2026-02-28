@@ -211,7 +211,7 @@ def test_log_with_values(worker):
 
 
 def test_log_display_format(worker):
-    """CLI text output shows labels and interpolated values."""
+    """Log entries preserve template and values."""
     targets = [workflow("test.log_display")]
 
     with worker(targets) as ctx:
@@ -237,13 +237,12 @@ def test_log_display_format(worker):
 
         assert ctx.result(run_id)["value"]["data"] == "done"
 
-        # Fetch logs in text mode (not --json, 1 message sent)
-        output = ctx.logs(run_id, json_output=False, min_entries=1)
-
-        # Should contain the label for the execution
-        assert "test.log_display" in output
-        # Should contain the interpolated value
-        assert "count is 7" in output
+        data = ctx.logs(run_id, min_entries=1)
+        logs = data["logs"]
+        assert len(logs) == 1
+        entry = logs[0]
+        assert entry["template"] == "count is {n}"
+        assert entry["values"]["n"]["data"] == 7
 
 
 # Helpers for log partitioning tests
