@@ -15,6 +15,7 @@ var runsCmd = &cobra.Command{
 }
 
 func init() {
+	runsInspectCmd.Flags().BoolVar(&inspectNoWait, "no-wait", false, "Return current snapshot immediately without waiting")
 	runsCmd.AddCommand(runsInspectCmd)
 	runsCmd.AddCommand(runsResultCmd)
 	runsCmd.AddCommand(runsRerunCmd)
@@ -26,15 +27,17 @@ var runsInspectCmd = &cobra.Command{
 	Short: "Inspect a run",
 	Long: `Inspect a run.
 
-Displays the target, status, and execution counts of a workflow run.
+By default, waits for the run to complete (same as submit).
+Use --no-wait to return the current snapshot immediately.
 
 Example:
   coflux runs inspect abc123
-  coflux runs inspect --json abc123`,
+  coflux runs inspect --no-wait --json abc123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsInspect,
 }
 
+var inspectNoWait bool
 var rerunNoWait bool
 
 var runsRerunCmd = &cobra.Command{
@@ -125,6 +128,15 @@ func findRootStep(data map[string]any) (step map[string]any, exec map[string]any
 
 func runRunsInspect(cmd *cobra.Command, args []string) error {
 	runID := args[0]
+
+	// --no-wait: return current snapshot immediately
+	if inspectNoWait {
+		data, _, err := captureRunTopic(cmd, runID)
+		if err != nil {
+			return err
+		}
+		return outputJSON(data)
+	}
 
 	workspace, err := requireWorkspace()
 	if err != nil {

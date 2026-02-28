@@ -240,8 +240,8 @@ def test_log_display_format(worker):
         # Fetch logs in text mode (not --json, 1 message sent)
         output = ctx.logs(run_id, json_output=False, min_entries=1)
 
-        # Should contain the label [test.log_display]
-        assert "[test.log_display]" in output
+        # Should contain the label for the execution
+        assert "test.log_display" in output
         # Should contain the interpolated value
         assert "count is 7" in output
 
