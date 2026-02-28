@@ -187,7 +187,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	return w.runWithReconnect(ctx, targets)
 }
 
-// resolveWorkspaceID resolves a workspace name to its external ID
+// resolveWorkspaceID resolves a workspace name to its external ID, creating the workspace if needed
 func (w *Worker) resolveWorkspaceID(ctx context.Context) (string, error) {
 	workspaces, err := w.client.GetWorkspaces(ctx)
 	if err != nil {
@@ -199,7 +199,11 @@ func (w *Worker) resolveWorkspaceID(ctx context.Context) (string, error) {
 			return id, nil
 		}
 	}
-	return "", fmt.Errorf("workspace not found: %s", w.cfg.Workspace)
+	id, err := w.client.CreateWorkspace(ctx, w.cfg.Workspace, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create workspace: %w", err)
+	}
+	return id, nil
 }
 
 // runWithReconnect runs the WebSocket connection with automatic reconnection

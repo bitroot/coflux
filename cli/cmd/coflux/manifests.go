@@ -145,7 +145,7 @@ func runManifestsRegister(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	workspaceID, err := ensureWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
 	}
