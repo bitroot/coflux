@@ -13,8 +13,13 @@ def _coflux(*args, json_output=False, env=None, timeout=30):
     return subprocess.run(cmd, capture_output=True, text=True, env=env, check=True, timeout=timeout)
 
 
-def submit(target, *arguments, env=None):
-    result = _coflux("submit", "--no-wait", target, *arguments, json_output=True, env=env)
+def submit(target, *arguments, idempotency_key=None, env=None):
+    args = ["submit", "--no-wait"]
+    if idempotency_key:
+        args.extend(["--idempotency-key", idempotency_key])
+    args.append(target)
+    args.extend(arguments)
+    result = _coflux(*args, json_output=True, env=env)
     return json.loads(result.stdout)
 
 

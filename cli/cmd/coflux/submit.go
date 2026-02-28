@@ -9,6 +9,7 @@ import (
 )
 
 var submitNoWait bool
+var submitIdempotencyKey string
 
 var submitCmd = &cobra.Command{
 	Use:   "submit <target> [arguments...]",
@@ -35,6 +36,7 @@ Example:
 
 func init() {
 	submitCmd.Flags().BoolVar(&submitNoWait, "no-wait", false, "Submit and exit immediately without waiting")
+	submitCmd.Flags().StringVar(&submitIdempotencyKey, "idempotency-key", "", "Idempotency key for deduplication")
 }
 
 func runSubmit(cmd *cobra.Command, args []string) error {
@@ -95,6 +97,9 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	}
 	if requires, ok := workflow["requires"]; ok {
 		options["requires"] = requires
+	}
+	if submitIdempotencyKey != "" {
+		options["idempotencyKey"] = submitIdempotencyKey
 	}
 
 	result, err := client.SubmitWorkflow(cmd.Context(), workspaceID, module, targetName, submitArgs, options)

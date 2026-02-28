@@ -382,3 +382,20 @@ def test_blob_argument_round_trip(worker):
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+
+def test_idempotency_same_key_returns_same_run(worker):
+    """Submitting with the same idempotency key returns the existing run."""
+    targets = [workflow("test.my_workflow")]
+
+    with worker(targets) as ctx:
+        resp1 = ctx.submit("test.my_workflow", idempotency_key="key-1")
+        run_id1 = resp1["runId"]
+
+        resp2 = ctx.submit("test.my_workflow", idempotency_key="key-1")
+        run_id2 = resp2["runId"]
+
+        assert run_id1 == run_id2
+
+        # Only one execution should be dispatched
+        ctx.handle_one()

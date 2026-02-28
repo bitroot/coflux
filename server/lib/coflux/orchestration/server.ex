@@ -27,6 +27,7 @@ defmodule Coflux.Orchestration.Server do
   @worker_idle_timeout_ms 5_000
   @rotation_check_interval_ms 60_000
   @rotation_size_threshold_bytes 100 * 1024 * 1024
+  @idempotency_ttl_ms 24 * 60 * 60 * 1000
 
   defmodule State do
     defstruct project_id: nil,
@@ -104,7 +105,7 @@ defmodule Coflux.Orchestration.Server do
 
   def init(project_id) do
     index_path = ["projects", project_id, "orchestration", "index.json"]
-    {:ok, epoch_index} = Index.load(index_path, ["runs", "cache_keys"])
+    {:ok, epoch_index} = Index.load(index_path, ["runs", "cache_keys", "idempotency_keys"])
     unindexed_epoch_ids = Index.unindexed_epoch_ids(epoch_index)
     archived_epoch_ids = Index.all_epoch_ids(epoch_index)
 
@@ -913,23 +914,41 @@ defmodule Coflux.Orchestration.Server do
 
     case require_workspace(state, workspace_external_id, access) do
       {:ok, workspace_id, _} ->
-        {:ok, external_run_id, step_number, _execution_id, state} =
-          schedule_run(
-            state,
-            module,
-            target_name,
-            type,
-            arguments,
-            workspace_id,
-            Keyword.put(opts, :created_by, access[:principal_id])
-          )
+        client_key = Keyword.get(opts, :idempotency_key)
+        ws_ext_id = workspace_external_id(state, workspace_id)
 
-        execution_external_id = execution_external_id(external_run_id, step_number, 1)
+        case maybe_find_idempotent_run(state, client_key, ws_ext_id) do
+          {:hit, ext_run_id, step_number, attempt} ->
+            execution_external_id = execution_external_id(ext_run_id, step_number, attempt)
+            {:reply, {:ok, ext_run_id, step_number, execution_external_id}, state}
 
-        send(self(), :tick)
-        state = flush_notifications(state)
+          :miss ->
+            opts =
+              if client_key do
+                hashed = Runs.build_idempotency_key(ws_ext_id, client_key)
+                Keyword.put(opts, :idempotency_key, hashed)
+              else
+                opts
+              end
 
-        {:reply, {:ok, external_run_id, step_number, execution_external_id}, state}
+            {:ok, external_run_id, step_number, _execution_id, state} =
+              schedule_run(
+                state,
+                module,
+                target_name,
+                type,
+                arguments,
+                workspace_id,
+                Keyword.put(opts, :created_by, access[:principal_id])
+              )
+
+            execution_external_id = execution_external_id(external_run_id, step_number, 1)
+
+            send(self(), :tick)
+            state = flush_notifications(state)
+
+            {:reply, {:ok, external_run_id, step_number, execution_external_id}, state}
+        end
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -2429,7 +2448,7 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
-  def handle_info({task_ref, {run_bloom, cache_bloom}}, state)
+  def handle_info({task_ref, {run_bloom, cache_bloom, idempotency_bloom}}, state)
       when task_ref == state.index_task do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
@@ -2437,7 +2456,8 @@ defmodule Coflux.Orchestration.Server do
     epoch_index =
       Index.update_filters(state.epoch_index, epoch_id, %{
         "runs" => run_bloom,
-        "cache_keys" => cache_bloom
+        "cache_keys" => cache_bloom,
+        "idempotency_keys" => idempotency_bloom
       })
 
     :ok = Index.save(epoch_index)
@@ -3000,7 +3020,7 @@ defmodule Coflux.Orchestration.Server do
     epoch_id = Epochs.next_epoch_id(state.epochs)
 
     # Write placeholder entry to index first (null value)
-    epoch_index = Index.add_epoch(state.epoch_index, epoch_id)
+    epoch_index = Index.add_epoch(state.epoch_index, epoch_id, System.os_time(:millisecond))
     :ok = Index.save(epoch_index)
 
     # Now rotate
@@ -3072,29 +3092,19 @@ defmodule Coflux.Orchestration.Server do
   defp maybe_start_index_build(state), do: state
 
   defp build_blooms_for_epoch(db) do
-    import Coflux.Store
+    {:ok, run_ids} = Runs.get_all_run_external_ids(db)
+    runs = Bloom.new(max(100, length(run_ids)))
+    runs = Enum.reduce(run_ids, runs, &Bloom.add(&2, &1))
 
-    {:ok, [{run_count}]} = query(db, "SELECT COUNT(*) FROM runs")
-    runs = Bloom.new(max(100, run_count))
-    {:ok, run_rows} = query(db, "SELECT external_id FROM runs")
+    {:ok, cache_keys_list} = Runs.get_all_cache_keys(db)
+    cache_keys = Bloom.new(max(100, length(cache_keys_list)))
+    cache_keys = Enum.reduce(cache_keys_list, cache_keys, &Bloom.add(&2, &1))
 
-    runs =
-      Enum.reduce(run_rows, runs, fn {ext_id}, bloom -> Bloom.add(bloom, ext_id) end)
+    {:ok, idemp_keys_list} = Runs.get_all_idempotency_keys(db)
+    idempotency_keys = Bloom.new(max(100, length(idemp_keys_list)))
+    idempotency_keys = Enum.reduce(idemp_keys_list, idempotency_keys, &Bloom.add(&2, &1))
 
-    {:ok, [{cache_count}]} =
-      query(db, "SELECT COUNT(DISTINCT cache_key) FROM steps WHERE cache_key IS NOT NULL")
-
-    cache_keys = Bloom.new(max(100, cache_count))
-
-    {:ok, cache_rows} =
-      query(db, "SELECT DISTINCT cache_key FROM steps WHERE cache_key IS NOT NULL")
-
-    cache_keys =
-      Enum.reduce(cache_rows, cache_keys, fn {key}, bloom ->
-        Bloom.add(bloom, key)
-      end)
-
-    {runs, cache_keys}
+    {runs, cache_keys, idempotency_keys}
   end
 
   defp remap_config_ids(state, %{} = mappings) do
@@ -3573,19 +3583,47 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp maybe_find_idempotent_run(_state, nil, _ws_ext_id), do: :miss
+
+  defp maybe_find_idempotent_run(state, client_key, ws_ext_id) do
+    hashed_key = Runs.build_idempotency_key(ws_ext_id, client_key)
+    created_after = System.os_time(:millisecond) - @idempotency_ttl_ms
+
+    # Tier 0: Check active epoch
+    case Runs.find_run_by_idempotency_key(state.db, hashed_key, created_after) do
+      {:ok, {ext_run_id, step_number, attempt}} ->
+        {:hit, ext_run_id, step_number, attempt}
+
+      {:ok, nil} ->
+        # Search archived epochs
+        query_fn = fn archive_db ->
+          case Runs.find_run_by_idempotency_key(archive_db, hashed_key, created_after) do
+            {:ok, {ext_run_id, step_number, attempt}} ->
+              {:found, {:hit, ext_run_id, step_number, attempt}}
+
+            {:ok, nil} ->
+              :not_found
+          end
+        end
+
+        bloom_fn = fn epoch_index ->
+          Index.find_epochs(epoch_index, "idempotency_keys", hashed_key, created_after)
+        end
+
+        case search_archived_epochs(state, query_fn, bloom_fn) do
+          {:found, result} -> result
+          :not_found -> :miss
+        end
+    end
+  end
+
   defp find_and_copy_run_from_archives(state, run_external_id) do
     query_fn = fn archive_db ->
-      case Coflux.Store.query_one(
-             archive_db,
-             "SELECT id FROM runs WHERE external_id = ?1",
-             {run_external_id}
-           ) do
-        {:ok, {_id}} ->
-          {:ok, remap} = Epoch.copy_run(archive_db, state.db, run_external_id)
-          {:found, {:ok, remap}}
-
-        {:ok, nil} ->
-          :not_found
+      if Runs.run_exists?(archive_db, run_external_id) do
+        {:ok, remap} = Epoch.copy_run(archive_db, state.db, run_external_id)
+        {:found, {:ok, remap}}
+      else
+        :not_found
       end
     end
 

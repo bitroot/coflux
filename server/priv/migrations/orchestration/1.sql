@@ -247,11 +247,13 @@ CREATE TABLE runs (
   id INTEGER PRIMARY KEY,
   external_id TEXT NOT NULL UNIQUE,
   parent_ref_id INTEGER,
-  idempotency_key TEXT UNIQUE,
+  idempotency_key BLOB,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (parent_ref_id) REFERENCES execution_refs ON DELETE SET NULL
 ) STRICT;
+
+CREATE INDEX runs_idempotency_key ON runs(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE steps (
   id INTEGER PRIMARY KEY,

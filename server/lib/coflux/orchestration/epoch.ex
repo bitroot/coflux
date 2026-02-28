@@ -112,7 +112,7 @@ defmodule Coflux.Orchestration.Epoch do
                 insert_one(target_db, :runs, %{
                   external_id: ext_id,
                   parent_ref_id: new_parent_ref_id,
-                  idempotency_key: idempotency_key,
+                  idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                   created_at: created_at,
                   created_by: ensure_principal(source_db, target_db, created_by)
                 })

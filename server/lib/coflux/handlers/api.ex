@@ -477,7 +477,8 @@ defmodule Coflux.Handlers.Api do
              delay: {"delay", &parse_integer(&1, optional: true)},
              retries: {"retries", &parse_retries/1},
              recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
-             requires: {"requires", &parse_tag_set/1}
+             requires: {"requires", &parse_tag_set/1},
+             idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)}
            }
          ) do
       {:ok, arguments, req} ->
@@ -495,7 +496,8 @@ defmodule Coflux.Handlers.Api do
                delay: arguments[:delay] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
-               requires: arguments[:requires]
+               requires: arguments[:requires],
+               idempotency_key: arguments[:idempotency_key]
              ) do
           {:ok, run_id, step_number, execution_external_id} ->
             json_response(req, %{
