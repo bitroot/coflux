@@ -4437,30 +4437,46 @@ defmodule Coflux.Orchestration.Server do
 
   # abort_execution now takes an external execution ID
   defp abort_execution(state, execution_ext_id) do
-    # Clean up waiting map entries where this execution is the waiter
-    state =
+    # Clean up waiting map entries where this execution is the waiter,
+    # and collect pending request IDs so we can send responses
+    {state, pending_request_ids} =
       Enum.reduce(
         state.waiting,
-        state,
-        fn {for_ext_id, execution_waiting}, state ->
-          execution_waiting =
-            Enum.reject(execution_waiting, fn {from_ext_id, _, _} ->
+        {state, []},
+        fn {for_ext_id, execution_waiting}, {state, pending} ->
+          {removed, remaining} =
+            Enum.split_with(execution_waiting, fn {from_ext_id, _, _} ->
               from_ext_id == execution_ext_id
             end)
 
-          Map.update!(state, :waiting, fn waiting ->
-            if Enum.any?(execution_waiting) do
-              Map.put(waiting, for_ext_id, execution_waiting)
-            else
-              Map.delete(waiting, for_ext_id)
-            end
-          end)
+          pending =
+            Enum.reduce(removed, pending, fn {_, request_id, _}, acc ->
+              if request_id, do: [request_id | acc], else: acc
+            end)
+
+          state =
+            Map.update!(state, :waiting, fn waiting ->
+              if Enum.any?(remaining) do
+                Map.put(waiting, for_ext_id, remaining)
+              else
+                Map.delete(waiting, for_ext_id)
+              end
+            end)
+
+          {state, pending}
         end
       )
 
     # find_session_for_execution now takes external ID
     case find_session_for_execution(state, execution_ext_id) do
       {:ok, session_id} ->
+        # Send responses for any pending get_result requests so the worker
+        # doesn't hang waiting for a reply that will never come
+        state =
+          Enum.reduce(pending_request_ids, state, fn request_id, state ->
+            send_session(state, session_id, {:result, request_id, :suspended})
+          end)
+
         send_session(state, session_id, {:abort, execution_ext_id})
 
       :error ->
