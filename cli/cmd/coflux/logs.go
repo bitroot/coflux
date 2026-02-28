@@ -361,4 +361,3 @@ func logLevelIcon(level int) string {
 		return "•"
 	}
 }
-
