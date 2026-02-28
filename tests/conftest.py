@@ -105,9 +105,9 @@ def worker(server, project_id, tmp_path):
                     """Handle one execution on the specified connection."""
                     executor.connections[conn_index].run_one(handler)
 
-                def submit(self, target, *arguments):
+                def submit(self, target, *arguments, idempotency_key=None):
                     """Submit a workflow and return the parsed JSON response."""
-                    return cli.submit(target, *arguments, env=env)
+                    return cli.submit(target, *arguments, idempotency_key=idempotency_key, env=env)
 
                 def result(self, run_id, timeout=10):
                     """Poll for a run result."""

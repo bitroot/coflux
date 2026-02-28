@@ -2,11 +2,12 @@ defmodule Coflux.Store.Index do
   @moduledoc """
   Index file for efficient cross-epoch lookups using Bloom filters.
 
-  Each entry is an `{epoch_id, filters}` tuple where `filters` is a map of
+  Each entry is an `{epoch_id, filters, created_at}` tuple where `filters` is a map of
   `%{field_name => Bloom.t() | nil}`. An entry with nil filters is unindexed
-  (awaiting background build).
+  (awaiting background build). `created_at` is the millisecond timestamp when the
+  epoch was rotated.
 
-  Stored as JSON: `{epoch_id: {field: base64_bloom, ...} | null, ...}`.
+  Stored as JSON: `{epoch_id: [filters_or_null, created_at], ...}`.
   """
 
   alias Coflux.Store.Bloom
@@ -44,10 +45,11 @@ defmodule Coflux.Store.Index do
 
   @doc """
   Add a new epoch entry with nil filters (unindexed).
+  `created_at` is the millisecond timestamp when the epoch was rotated.
   """
-  def add_epoch(%__MODULE__{} = index, epoch_id) do
+  def add_epoch(%__MODULE__{} = index, epoch_id, created_at) do
     filters = Map.new(index.fields, &{&1, nil})
-    %{index | entries: [{epoch_id, filters} | index.entries]}
+    %{index | entries: [{epoch_id, filters, created_at} | index.entries]}
   end
 
   @doc """
@@ -58,7 +60,7 @@ defmodule Coflux.Store.Index do
   def update_filters(%__MODULE__{} = index, epoch_id, filters) when is_map(filters) do
     entries =
       Enum.map(index.entries, fn
-        {^epoch_id, _} -> {epoch_id, filters}
+        {^epoch_id, _, created_at} -> {epoch_id, filters, created_at}
         entry -> entry
       end)
 
@@ -70,7 +72,7 @@ defmodule Coflux.Store.Index do
   """
   def unindexed_epoch_ids(%__MODULE__{} = index) do
     index.entries
-    |> Enum.filter(fn {_epoch_id, filters} ->
+    |> Enum.filter(fn {_epoch_id, filters, _created_at} ->
       Enum.any?(filters, fn {_field, value} -> value == nil end)
     end)
     |> Enum.map(&elem(&1, 0))
@@ -88,7 +90,7 @@ defmodule Coflux.Store.Index do
   """
   def indexed_epoch_ids(%__MODULE__{} = index, field) do
     index.entries
-    |> Enum.filter(fn {_epoch_id, filters} -> Map.get(filters, field) != nil end)
+    |> Enum.filter(fn {_epoch_id, filters, _created_at} -> Map.get(filters, field) != nil end)
     |> Enum.map(&elem(&1, 0))
   end
 
@@ -100,7 +102,7 @@ defmodule Coflux.Store.Index do
   """
   def find_epochs(%__MODULE__{} = index, field, key) do
     index.entries
-    |> Enum.filter(fn {_epoch_id, filters} ->
+    |> Enum.filter(fn {_epoch_id, filters, _created_at} ->
       case Map.get(filters, field) do
         nil -> true
         bloom -> Bloom.member?(bloom, key)
@@ -109,12 +111,28 @@ defmodule Coflux.Store.Index do
     |> Enum.map(&elem(&1, 0))
   end
 
+  @doc """
+  Like `find_epochs/3` but also filters by epoch creation time.
+  Epochs with a `created_at` older than `min_created_at` are skipped.
+  """
+  def find_epochs(%__MODULE__{} = index, field, key, min_created_at) do
+    index.entries
+    |> Enum.filter(fn {_epoch_id, filters, created_at} ->
+      created_at >= min_created_at &&
+        case Map.get(filters, field) do
+          nil -> true
+          bloom -> Bloom.member?(bloom, key)
+        end
+    end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
   # Serialization
 
   defp serialize(%__MODULE__{entries: entries}) do
     map =
-      Map.new(entries, fn {epoch_id, filters} ->
-        value =
+      Map.new(entries, fn {epoch_id, filters, created_at} ->
+        filters_value =
           if Enum.all?(filters, fn {_f, v} -> v != nil end) do
             Map.new(filters, fn {field, bloom} ->
               {field, Base.encode64(Bloom.serialize(bloom))}
@@ -123,7 +141,7 @@ defmodule Coflux.Store.Index do
             nil
           end
 
-        {epoch_id, value}
+        {epoch_id, [filters_value, created_at]}
       end)
 
     Jason.encode!(map)
@@ -134,14 +152,14 @@ defmodule Coflux.Store.Index do
 
     entries =
       map
-      |> Enum.map(fn {epoch_id, value} ->
+      |> Enum.map(fn {epoch_id, [filters_value, created_at]} ->
         filters =
-          case value do
+          case filters_value do
             nil -> %{}
-            %{} -> Map.new(value, fn {field, b64} -> {field, decode_bloom(b64)} end)
+            %{} -> Map.new(filters_value, fn {field, b64} -> {field, decode_bloom(b64)} end)
           end
 
-        {epoch_id, filters}
+        {epoch_id, filters, created_at}
       end)
       |> Enum.sort_by(&elem(&1, 0), :desc)
 

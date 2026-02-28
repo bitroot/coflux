@@ -302,7 +302,7 @@ defmodule Coflux.Logs.Server do
     epoch_id = Epochs.next_epoch_id(state.epochs)
 
     # Write placeholder entry to index first (null value)
-    log_index = Index.add_epoch(state.log_index, epoch_id)
+    log_index = Index.add_epoch(state.log_index, epoch_id, System.os_time(:millisecond))
     :ok = Index.save(log_index)
 
     # Now rotate

@@ -237,6 +237,24 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  def build_idempotency_key(workspace_external_id, client_key) do
+    :crypto.hash(:sha256, [workspace_external_id, <<0>>, client_key])
+  end
+
+  def find_run_by_idempotency_key(db, hashed_key, created_after) do
+    query_one(
+      db,
+      """
+      SELECT r.external_id, s.number, e.attempt
+      FROM runs AS r
+      INNER JOIN steps AS s ON s.run_id = r.id AND s.parent_id IS NULL
+      INNER JOIN executions AS e ON e.step_id = s.id AND e.attempt = 1
+      WHERE r.idempotency_key = ?1 AND r.created_at >= ?2
+      """,
+      {{:blob, hashed_key}, created_after}
+    )
+  end
+
   defp build_key(params, arguments, namespace, version \\ nil) do
     params =
       if params == true,
@@ -1019,7 +1037,7 @@ defmodule Coflux.Orchestration.Runs do
         case insert_one(db, :runs, %{
                external_id: external_id,
                parent_ref_id: parent_ref_id,
-               idempotency_key: idempotency_key,
+               idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                created_at: created_at,
                created_by: created_by
              }) do
@@ -1253,6 +1271,34 @@ defmodule Coflux.Orchestration.Runs do
 
       {:error, :not_found} ->
         {:error, :not_found}
+    end
+  end
+
+  def get_all_run_external_ids(db) do
+    case query(db, "SELECT external_id FROM runs") do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn {ext_id} -> ext_id end)}
+    end
+  end
+
+  def get_all_cache_keys(db) do
+    case query(db, "SELECT DISTINCT cache_key FROM steps WHERE cache_key IS NOT NULL") do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn {key} -> key end)}
+    end
+  end
+
+  def get_all_idempotency_keys(db) do
+    case query(
+           db,
+           "SELECT DISTINCT idempotency_key FROM runs WHERE idempotency_key IS NOT NULL"
+         ) do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn {key} -> key end)}
+    end
+  end
+
+  def run_exists?(db, external_id) do
+    case query_one(db, "SELECT 1 FROM runs WHERE external_id = ?1 LIMIT 1", {external_id}) do
+      {:ok, {_}} -> true
+      {:ok, nil} -> false
     end
   end
 

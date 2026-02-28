@@ -721,3 +721,65 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             executor.close()
     finally:
         server.stop()
+
+
+def test_idempotency_across_epoch_boundary(tmp_path):
+    """Idempotency key is found in archived epoch after rotation."""
+    project_id = f"test-{uuid.uuid4().hex[:12]}"
+    targets = [workflow("test.my_workflow")]
+    manifest_json = json.dumps(manifest(targets))
+    socket_path = str(tmp_path / "executor.sock")
+    data_dir = str(tmp_path / "data")
+
+    server = ManagedServer(data_dir)
+    server.start()
+
+    try:
+        env = _make_env(f"{project_id}.localhost:{server.port}")
+        env["COFLUX_TEST_MANIFEST"] = manifest_json
+        env["COFLUX_TEST_SOCKET"] = socket_path
+        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
+
+        cli.workspaces_create("default", env=env)
+
+        executor = Executor(socket_path)
+        executor.start()
+
+        adapter = f"python3,{ADAPTER_SCRIPT}"
+        worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
+
+        try:
+            executor.accept(count=1, timeout=15)
+            conn = executor.connections[0]
+            conn.send_ready()
+
+            # Submit with idempotency key and complete
+            resp1 = cli.submit("test.my_workflow", idempotency_key="epoch-key", env=env)
+            run_id1 = resp1["runId"]
+
+            eid, target, _ = conn.recv_execute()
+            assert target == "test.my_workflow"
+            conn.complete(eid, value=42)
+
+            result = _poll_result(run_id1, env)
+            assert result["type"] == "value"
+
+            # Force epoch rotation
+            _rotate_epoch(server.port, project_id)
+
+            # Submit again with the same idempotency key — should return existing run
+            resp2 = cli.submit("test.my_workflow", idempotency_key="epoch-key", env=env)
+            run_id2 = resp2["runId"]
+
+            assert run_id1 == run_id2
+
+        finally:
+            worker_proc.send_signal(signal.SIGTERM)
+            try:
+                worker_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                worker_proc.kill()
+                worker_proc.wait(timeout=5)
+            executor.close()
+    finally:
+        server.stop()
