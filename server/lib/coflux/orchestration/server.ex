@@ -28,6 +28,7 @@ defmodule Coflux.Orchestration.Server do
   @rotation_check_interval_ms 60_000
   @rotation_size_threshold_bytes 100 * 1024 * 1024
   @idempotency_ttl_ms 24 * 60 * 60 * 1000
+  @idle_timeout_ms 30_000
 
   defmodule State do
     defstruct project_id: nil,
@@ -36,6 +37,7 @@ defmodule Coflux.Orchestration.Server do
               tick_timer: nil,
               suspend_timer: nil,
               expiry_timer: nil,
+              idle_timer: nil,
 
               # id -> %{name, base_id, state}
               workspaces: %{},
@@ -305,6 +307,9 @@ defmodule Coflux.Orchestration.Server do
     # Kick off background Bloom filter builds for any unindexed epochs
     state = maybe_start_index_build(state)
 
+    # Schedule idle shutdown if no sessions or listeners yet
+    state = maybe_schedule_idle_shutdown(state)
+
     {:noreply, state}
   end
 
@@ -539,6 +544,7 @@ defmodule Coflux.Orchestration.Server do
               |> put_in([Access.key(:workspaces), workspace_id, Access.key(:state)], :archived)
               |> notify_listeners(:workspaces, {:state, workspace_external_id, :archived})
               |> flush_notifications()
+              |> maybe_schedule_idle_shutdown()
 
             {:reply, :ok, state}
 
@@ -791,6 +797,7 @@ defmodule Coflux.Orchestration.Server do
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
             |> schedule_session_expiry(session_id, activation_timeout)
+            |> maybe_schedule_idle_shutdown()
 
           {:reply, {:ok, token}, state}
       end
@@ -1793,7 +1800,12 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_cast({:unsubscribe, ref}, state) do
     Process.demonitor(ref, [:flush])
-    state = remove_listener(state, ref)
+
+    state =
+      state
+      |> remove_listener(ref)
+      |> maybe_schedule_idle_shutdown()
+
     {:noreply, state}
   end
 
@@ -1822,8 +1834,25 @@ defmodule Coflux.Orchestration.Server do
       state
       |> reschedule_expiry_timer()
       |> flush_notifications()
+      |> maybe_schedule_idle_shutdown()
 
     {:noreply, state}
+  end
+
+  def handle_info({:idle_shutdown, ref}, state) do
+    case state.idle_timer do
+      {_timer, ^ref} ->
+        if Enum.empty?(state.sessions) and Enum.empty?(state.listeners) do
+          Logger.info("shutting down idle orchestration server for project #{state.project_id}")
+          {:stop, :normal, state}
+        else
+          {:noreply, %{state | idle_timer: nil}}
+        end
+
+      _ ->
+        # Stale timer message, ignore
+        {:noreply, state}
+    end
   end
 
   def handle_info(:check_rotation, state) do
@@ -2177,6 +2206,7 @@ defmodule Coflux.Orchestration.Server do
                 |> put_in([Access.key(:sessions), session_id], session)
                 |> put_in([Access.key(:session_ids), external_id], session_id)
                 |> schedule_session_expiry(session_id, activation_timeout)
+                |> maybe_schedule_idle_shutdown()
                 |> call_launcher(
                   pool.launcher,
                   :launch,
@@ -2519,7 +2549,11 @@ defmodule Coflux.Orchestration.Server do
         {:noreply, state}
 
       Map.has_key?(state.listeners, ref) ->
-        state = remove_listener(state, ref)
+        state =
+          state
+          |> remove_listener(ref)
+          |> maybe_schedule_idle_shutdown()
+
         {:noreply, state}
 
       Map.has_key?(state.launcher_tasks, ref) ->
@@ -2541,6 +2575,11 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def terminate(_reason, state) do
+    if state.idle_timer do
+      {timer, _ref} = state.idle_timer
+      Process.cancel_timer(timer)
+    end
+
     if state.epochs do
       Epochs.close(state.epochs)
     end
@@ -4202,6 +4241,7 @@ defmodule Coflux.Orchestration.Server do
       state
       |> put_in([Access.key(:listeners), ref], topic)
       |> put_in([Access.key(:topics), Access.key(topic, %{}), ref], pid)
+      |> maybe_schedule_idle_shutdown()
 
     {:ok, ref, state}
   end
@@ -4603,6 +4643,25 @@ defmodule Coflux.Orchestration.Server do
         delay = max(0, next_expiry - System.os_time(:millisecond))
         timer = Process.send_after(self(), :expire_sessions, delay)
         %{state | expiry_timer: timer}
+    end
+  end
+
+  defp maybe_schedule_idle_shutdown(state) do
+    idle? = Enum.empty?(state.sessions) and Enum.empty?(state.listeners)
+
+    cond do
+      idle? and is_nil(state.idle_timer) ->
+        ref = make_ref()
+        timer = Process.send_after(self(), {:idle_shutdown, ref}, @idle_timeout_ms)
+        %{state | idle_timer: {timer, ref}}
+
+      not idle? and not is_nil(state.idle_timer) ->
+        {timer, _ref} = state.idle_timer
+        Process.cancel_timer(timer)
+        %{state | idle_timer: nil}
+
+      true ->
+        state
     end
   end
 end
