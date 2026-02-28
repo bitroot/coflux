@@ -2,7 +2,9 @@ defmodule Coflux.JwksStore do
   @moduledoc """
   GenServer that fetches and caches JWKS from Studio.
 
-  Refreshes keys every hour or on cache miss.
+  Keys are fetched lazily on first access and refreshed reactively:
+  - On cache miss (handles key rotation)
+  - When stale (>1 hour since last refresh, handles key revocation)
   """
 
   use GenServer
@@ -29,18 +31,34 @@ defmodule Coflux.JwksStore do
   Returns `{:ok, key}` or `{:error, reason}`.
   """
   def get_key(kid) do
+    {refreshed, refresh_result} =
+      if stale?() do
+        {true, GenServer.call(__MODULE__, :refresh)}
+      else
+        {false, :ok}
+      end
+
     case :ets.lookup(@table_name, kid) do
       [{^kid, key}] ->
         {:ok, key}
 
-      [] ->
-        # Try refreshing keys
-        GenServer.call(__MODULE__, :refresh)
+      [] when not refreshed ->
+        case GenServer.call(__MODULE__, :refresh) do
+          :ok ->
+            case :ets.lookup(@table_name, kid) do
+              [{^kid, key}] -> {:ok, key}
+              [] -> {:error, :key_not_found}
+            end
 
-        case :ets.lookup(@table_name, kid) do
-          [{^kid, key}] -> {:ok, key}
-          [] -> {:error, :key_not_found}
+          {:error, _} ->
+            {:error, :jwks_unavailable}
         end
+
+      [] when refresh_result != :ok ->
+        {:error, :jwks_unavailable}
+
+      [] ->
+        {:error, :key_not_found}
     end
   end
 
@@ -48,51 +66,64 @@ defmodule Coflux.JwksStore do
 
   @impl true
   def init(_opts) do
-    # Create ETS table for storing keys
     :ets.new(@table_name, [:named_table, :set, :public, read_concurrency: true])
-
-    # Fetch keys immediately
-    send(self(), :refresh)
-
-    # Schedule periodic refresh
-    schedule_refresh()
-
     {:ok, %{}}
   end
 
   @impl true
-  def handle_info(:refresh, state) do
-    fetch_and_store_keys()
-    schedule_refresh()
-    {:noreply, state}
-  end
-
-  @impl true
   def handle_call(:refresh, _from, state) do
-    fetch_and_store_keys()
-    {:reply, :ok, state}
+    result = fetch_and_replace_keys()
+    {:reply, result, state}
   end
 
   # Private functions
 
-  defp schedule_refresh do
-    Process.send_after(self(), :refresh, @refresh_interval)
+  defp stale? do
+    case :ets.lookup(@table_name, :last_refreshed) do
+      [{:last_refreshed, ts}] ->
+        System.monotonic_time(:millisecond) - ts > @refresh_interval
+
+      [] ->
+        true
+    end
   end
 
-  defp fetch_and_store_keys do
+  defp fetch_and_replace_keys do
     studio_url = Config.studio_url()
     jwks_url = "#{studio_url}/.well-known/jwks.json"
 
-    with {:ok, %Req.Response{status: 200, body: %{"keys" => keys}}} when is_list(keys) <-
-           Req.get(jwks_url) do
-      Enum.each(keys, fn
-        %{"kid" => kid} = jwk ->
-          jose_jwk = JOSE.JWK.from_map(jwk)
-          :ets.insert(@table_name, {kid, jose_jwk})
+    case Req.get(jwks_url, retry: false) do
+      {:ok, %Req.Response{status: 200, body: %{"keys" => keys}}} when is_list(keys) ->
+        new_entries =
+          for %{"kid" => kid} = jwk <- keys do
+            {kid, JOSE.JWK.from_map(jwk)}
+          end
 
-        _ ->
-          :ok
-      end)
+        new_kids = MapSet.new(new_entries, fn {kid, _} -> kid end)
+
+        old_kids =
+          :ets.tab2list(@table_name)
+          |> Enum.filter(fn {kid, _} -> is_binary(kid) end)
+          |> MapSet.new(fn {kid, _} -> kid end)
+
+        # Insert new/updated keys first (continuous availability)
+        :ets.insert(
+          @table_name,
+          [{:last_refreshed, System.monotonic_time(:millisecond)} | new_entries]
+        )
+
+        # Then remove revoked keys
+        old_kids
+        |> MapSet.difference(new_kids)
+        |> Enum.each(&:ets.delete(@table_name, &1))
+
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:unexpected_status, status}}
+
+      {:error, exception} ->
+        {:error, exception}
     end
   end
 end
