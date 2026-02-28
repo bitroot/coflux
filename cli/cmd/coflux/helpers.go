@@ -51,6 +51,15 @@ func requireWorkspace() (string, error) {
 	return ws, nil
 }
 
+// ensureWorkspaceID resolves a workspace name to its external ID, creating the workspace if needed
+func ensureWorkspaceID(ctx context.Context, client *api.Client, name string) (string, error) {
+	id, err := resolveWorkspaceID(ctx, client, name)
+	if err == nil {
+		return id, nil
+	}
+	return client.CreateWorkspace(ctx, name, nil)
+}
+
 // resolveWorkspaceID resolves a workspace name to its external ID
 func resolveWorkspaceID(ctx context.Context, client *api.Client, name string) (string, error) {
 	workspaces, err := client.GetWorkspaces(ctx)

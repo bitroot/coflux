@@ -99,7 +99,7 @@ func runWorkspacesCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := client.CreateWorkspace(cmd.Context(), name, baseID); err != nil {
+	if _, err := client.CreateWorkspace(cmd.Context(), name, baseID); err != nil {
 		return err
 	}
 

@@ -135,15 +135,21 @@ func (c *Client) GetWorkspaces(ctx context.Context) (map[string]map[string]any, 
 	return result, nil
 }
 
-// CreateWorkspace creates a new workspace
-func (c *Client) CreateWorkspace(ctx context.Context, name string, baseID *string) error {
+// CreateWorkspace creates a new workspace, returning its external ID
+func (c *Client) CreateWorkspace(ctx context.Context, name string, baseID *string) (string, error) {
 	body := map[string]any{
 		"name": name,
 	}
 	if baseID != nil {
 		body["baseId"] = *baseID
 	}
-	return c.post(ctx, "/api/create_workspace", body, nil)
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := c.post(ctx, "/api/create_workspace", body, &result); err != nil {
+		return "", err
+	}
+	return result.ID, nil
 }
 
 // UpdateWorkspace updates a workspace
