@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var runsCmd = &cobra.Command{
@@ -12,6 +15,7 @@ var runsCmd = &cobra.Command{
 }
 
 func init() {
+	runsInspectCmd.Flags().BoolVar(&inspectNoWait, "no-wait", false, "Return current snapshot immediately without waiting")
 	runsCmd.AddCommand(runsInspectCmd)
 	runsCmd.AddCommand(runsResultCmd)
 	runsCmd.AddCommand(runsRerunCmd)
@@ -23,14 +27,18 @@ var runsInspectCmd = &cobra.Command{
 	Short: "Inspect a run",
 	Long: `Inspect a run.
 
-Displays the target, status, and execution counts of a workflow run.
+By default, waits for the run to complete (same as submit).
+Use --no-wait to return the current snapshot immediately.
 
 Example:
   coflux runs inspect abc123
-  coflux runs inspect --json abc123`,
+  coflux runs inspect --no-wait --json abc123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsInspect,
 }
+
+var inspectNoWait bool
+var rerunNoWait bool
 
 var runsRerunCmd = &cobra.Command{
 	Use:   "rerun <step-id>",
@@ -40,11 +48,19 @@ var runsRerunCmd = &cobra.Command{
 Creates a new execution attempt for the specified step.
 The step ID has the format <run-id>:<step-number> (e.g., "RwD6:3").
 
+By default, waits for the run to complete (same as submit).
+Use --no-wait to re-run and exit immediately.
+
 Example:
   coflux runs rerun RwD6:3
+  coflux runs rerun --no-wait RwD6:3
   coflux runs rerun --json RwD6:3`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsRerun,
+}
+
+func init() {
+	runsRerunCmd.Flags().BoolVar(&rerunNoWait, "no-wait", false, "Re-run and exit immediately without waiting")
 }
 
 var runsResultCmd = &cobra.Command{
@@ -113,77 +129,70 @@ func findRootStep(data map[string]any) (step map[string]any, exec map[string]any
 func runRunsInspect(cmd *cobra.Command, args []string) error {
 	runID := args[0]
 
-	data, _, err := captureRunTopic(cmd, runID)
+	// --no-wait: return current snapshot immediately
+	if inspectNoWait {
+		data, _, err := captureRunTopic(cmd, runID)
+		if err != nil {
+			return err
+		}
+		return outputJSON(data)
+	}
+
+	workspace, err := requireWorkspace()
 	if err != nil {
 		return err
 	}
 
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	token, err := resolveToken()
+	if err != nil {
+		return fmt.Errorf("failed to resolve token: %w", err)
+	}
+
+	// --json: wait for root step, print full run snapshot as JSON
 	if getJSON() {
-		return outputJSON(data)
-	}
-
-	rootStep, rootExec := findRootStep(data)
-
-	// Target
-	if rootStep != nil {
-		module, _ := rootStep["module"].(string)
-		target, _ := rootStep["target"].(string)
-		if module != "" {
-			fmt.Printf("Target: %s.%s\n", module, target)
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		if err != nil {
+			return err
 		}
-	}
-
-	// Created
-	if createdAt, ok := data["createdAt"].(float64); ok && createdAt > 0 {
-		fmt.Printf("Created: %s\n", formatTimestamp(int64(createdAt/1000)))
-	}
-
-	// Status
-	if rootExec != nil {
-		result, _ := rootExec["result"].(map[string]any)
-		var status string
-		if result == nil {
-			if rootExec["assignedAt"] != nil {
-				status = "running"
-			} else {
-				status = "pending"
-			}
-		} else {
-			resultType, _ := result["type"].(string)
-			switch resultType {
-			case "value":
-				status = "completed"
-			case "error":
-				status = "error"
-			case "cancelled":
-				status = "cancelled"
-			case "abandoned":
-				status = "abandoned"
-			case "suspended":
-				status = "suspended"
-			default:
-				status = resultType
-			}
+		if runData != nil {
+			outputJSON(runData)
 		}
-		if status != "" {
-			fmt.Printf("Status: %s\n", status)
+		if exitCode != 0 {
+			os.Exit(exitCode)
 		}
+		return nil
 	}
 
-	// Executions count
-	steps, _ := data["steps"].(map[string]any)
-	stepCount := len(steps)
-	executionCount := 0
-	for _, stepData := range steps {
-		s, ok := stepData.(map[string]any)
-		if !ok {
-			continue
+	// TTY: live tree display, wait for all steps
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		if err != nil {
+			return err
 		}
-		execs, _ := s["executions"].(map[string]any)
-		executionCount += len(execs)
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return nil
 	}
-	fmt.Printf("Executions: %d (%d steps)\n", executionCount, stepCount)
 
+	// Non-TTY: wait for root step silently
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 	return nil
 }
 
@@ -311,6 +320,13 @@ func runRunsCancel(cmd *cobra.Command, args []string) error {
 func runRunsRerun(cmd *cobra.Command, args []string) error {
 	stepID := args[0]
 
+	// Extract run ID from step ID (format: "runID:stepNumber")
+	idx := strings.Index(stepID, ":")
+	if idx < 0 {
+		return fmt.Errorf("invalid step ID format: expected 'run-id:step-number', got '%s'", stepID)
+	}
+	runID := stepID[:idx]
+
 	workspace, err := requireWorkspace()
 	if err != nil {
 		return err
@@ -331,10 +347,55 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to rerun step: %w", err)
 	}
 
-	if getJSON() {
-		return outputJSON(result)
+	// --no-wait: print result and exit immediately
+	if rerunNoWait {
+		if getJSON() {
+			return outputJSON(result)
+		}
+		fmt.Printf("Step re-run (execution: %s, attempt: %d).\n", result.ExecutionID, result.Attempt)
+		return nil
 	}
 
-	fmt.Printf("Step re-run (execution: %s, attempt: %d).\n", result.ExecutionID, result.Attempt)
+	token, err := resolveToken()
+	if err != nil {
+		return fmt.Errorf("failed to resolve token: %w", err)
+	}
+
+	// --json: wait for root step, print full run snapshot as JSON
+	if getJSON() {
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		if err != nil {
+			return err
+		}
+		if runData != nil {
+			outputJSON(runData)
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return nil
+	}
+
+	// TTY: live tree display, wait for all steps
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		if err != nil {
+			return err
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return nil
+	}
+
+	// Non-TTY: print execution info, wait for root step silently
+	fmt.Printf("%s:%d\n", result.ExecutionID, result.Attempt)
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 	return nil
 }

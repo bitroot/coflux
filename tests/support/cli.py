@@ -5,16 +5,16 @@ import subprocess
 _COFLUX_BIN = os.environ.get("COFLUX_BIN", "coflux")
 
 
-def _coflux(*args, json_output=False, env=None):
+def _coflux(*args, json_output=False, env=None, timeout=30):
     cmd = [_COFLUX_BIN]
     if json_output:
         cmd.append("--json")
     cmd.extend(args)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=True, timeout=timeout)
 
 
 def submit(target, *arguments, env=None):
-    result = _coflux("submit", target, *arguments, json_output=True, env=env)
+    result = _coflux("submit", "--no-wait", target, *arguments, json_output=True, env=env)
     return json.loads(result.stdout)
 
 
@@ -24,12 +24,12 @@ def runs_result(run_id, env=None):
 
 
 def runs_inspect(run_id, env=None):
-    result = _coflux("runs", "inspect", run_id, json_output=True, env=env)
+    result = _coflux("runs", "inspect", "--no-wait", run_id, json_output=True, env=env)
     return json.loads(result.stdout)
 
 
 def runs_rerun(step_id, env=None):
-    result = _coflux("runs", "rerun", step_id, json_output=True, env=env)
+    result = _coflux("runs", "rerun", "--no-wait", step_id, json_output=True, env=env)
     return json.loads(result.stdout)
 
 
