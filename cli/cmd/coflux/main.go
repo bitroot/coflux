@@ -96,8 +96,12 @@ func initConfig(cmd *cobra.Command, args []string) error {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
-	// Read config file
-	viper.SetConfigFile(cfgFile)
+	// Read config file (env var overrides default, flag overrides both)
+	configPath := cfgFile
+	if envConfig := os.Getenv("COFLUX_CONFIG"); envConfig != "" && !cmd.Flags().Changed("config") {
+		configPath = envConfig
+	}
+	viper.SetConfigFile(configPath)
 	viper.SetConfigType("toml")
 
 	if err := viper.ReadInConfig(); err != nil {
