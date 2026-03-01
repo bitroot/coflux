@@ -29,10 +29,10 @@ defmodule Coflux.Auth do
   ## Studio Authentication (JWT)
 
   Validates JWTs issued by Coflux Studio. The JWT audience claim contains
-  "{namespace}:{host}" where namespace is the team's external ID.
+  "{team_id}:{host}" where team_id is the team's external ID.
 
-  Studio auth is enabled when COFLUX_NAMESPACES is set:
-  - COFLUX_NAMESPACES=team_id1,team_id2 (comma-separated list of allowed namespaces)
+  Studio auth is enabled when COFLUX_STUDIO_TEAMS is set:
+  - COFLUX_STUDIO_TEAMS=team_id1,team_id2 (comma-separated list of allowed teams)
   - COFLUX_STUDIO_URL=https://studio.coflux.com (default, for JWKS)
 
   ## Authentication Flow
@@ -90,7 +90,7 @@ defmodule Coflux.Auth do
     cond do
       is_jwt?(token) ->
         # JWT format - try Studio auth
-        if Config.namespaces() do
+        if Config.studio_teams() do
           check_jwt(token, project_id, host)
         else
           {:error, :unauthorized}
@@ -120,14 +120,14 @@ defmodule Coflux.Auth do
   end
 
   @doc """
-  Parses the audience claim from a JWT to extract namespace and host.
+  Parses the audience claim from a JWT to extract team ID and host.
 
-  Returns `{:ok, {namespace, host}}` or `{:error, reason}`.
+  Returns `{:ok, {team_id, host}}` or `{:error, reason}`.
   """
   def parse_audience(audience) when is_binary(audience) do
     case String.split(audience, ":", parts: 2) do
-      [namespace, host] when namespace != "" and host != "" ->
-        {:ok, {namespace, host}}
+      [team_id, host] when team_id != "" and host != "" ->
+        {:ok, {team_id, host}}
 
       _ ->
         {:error, :invalid_audience_format}
@@ -254,8 +254,8 @@ defmodule Coflux.Auth do
 
   defp check_jwt(token, project_id, host) do
     with {:ok, {_header, claims}} <- decode_and_verify_jwt(token),
-         {:ok, {namespace, jwt_host}} <- parse_audience(claims["aud"]),
-         :ok <- validate_namespace(namespace),
+         {:ok, {team_id, jwt_host}} <- parse_audience(claims["aud"]),
+         :ok <- validate_team(team_id),
          :ok <- validate_host(jwt_host, host) do
       workspaces = claims["workspaces"] || ["*"]
       external_id = claims["sub"]
@@ -319,17 +319,17 @@ defmodule Coflux.Auth do
     end
   end
 
-  defp validate_namespace(namespace) do
-    case Config.namespaces() do
+  defp validate_team(team_id) do
+    case Config.studio_teams() do
       nil ->
-        # No namespace restriction
+        # No team restriction
         :ok
 
-      namespaces ->
-        if MapSet.member?(namespaces, namespace) do
+      teams ->
+        if MapSet.member?(teams, team_id) do
           :ok
         else
-          {:error, :namespace_not_allowed}
+          {:error, :team_not_allowed}
         end
     end
   end
