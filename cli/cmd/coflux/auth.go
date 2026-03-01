@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 
@@ -27,20 +28,24 @@ var logoutCmd = &cobra.Command{
 }
 
 var (
-	loginHost      string
 	loginNoBrowser bool
 )
 
 func init() {
-	loginCmd.Flags().StringVar(&loginHost, "host", "https://studio.coflux.com", "Studio URL for authentication")
 	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "Don't open a browser automatically")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
 	fmt.Println("Starting authentication with Coflux Studio...")
 
+	// Resolve Studio URL
+	url := os.Getenv("COFLUX_STUDIO_URL")
+	if url == "" {
+		url = studioURL
+	}
+
 	// Start device flow
-	start, err := auth.StartDeviceFlow(loginHost)
+	start, err := auth.StartDeviceFlow(url)
 	if err != nil {
 		return fmt.Errorf("failed to start authentication: %w", err)
 	}
@@ -60,7 +65,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	// Poll for token
 	interval := max(start.Interval, 5)
-	result, err := auth.PollForToken(start.DeviceCode, loginHost, interval, start.ExpiresIn)
+	result, err := auth.PollForToken(start.DeviceCode, url, interval, start.ExpiresIn)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
