@@ -79,6 +79,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	if err := auth.SaveCredentials(creds); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
+	_ = auth.ClearTokenCache()
 
 	fmt.Printf("\nAuthentication successful!")
 	if result.UserEmail != "" {
