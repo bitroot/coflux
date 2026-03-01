@@ -14,8 +14,8 @@ import (
 
 var (
 	ErrDeviceFlowExpired = errors.New("device code has expired")
-	ErrNoToken           = errors.New("no Studio session token available")
-	ErrTokenInvalid      = errors.New("studio session token is invalid or expired")
+	ErrNoToken           = errors.New("not logged in to Studio")
+	ErrTokenInvalid      = errors.New("Studio session is invalid or expired")
 )
 
 // DeviceFlowStart is the response from starting device flow

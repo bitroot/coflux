@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -27,7 +28,11 @@ func resolveToken() (string, error) {
 		if url == "" {
 			url = studioURL
 		}
-		return auth.GetProjectToken(team, getHost(), url, 60)
+		token, err := auth.GetProjectToken(team, getHost(), url, 60)
+		if errors.Is(err, auth.ErrNoToken) || errors.Is(err, auth.ErrTokenInvalid) {
+			return "", fmt.Errorf("%s (run 'coflux login' to authenticate)", err)
+		}
+		return token, err
 	}
 
 	return "", nil
