@@ -128,10 +128,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		existingWorkspace = w
 	}
 	var existingAdapter []string
-	if a, ok := existingConfig["adapter"].([]any); ok {
-		for _, v := range a {
-			if s, ok := v.(string); ok {
-				existingAdapter = append(existingAdapter, s)
+	if w, ok := existingConfig["worker"].(map[string]any); ok {
+		if a, ok := w["adapter"].([]any); ok {
+			for _, v := range a {
+				if s, ok := v.(string); ok {
+					existingAdapter = append(existingAdapter, s)
+				}
 			}
 		}
 	}
@@ -228,7 +230,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(adapterCmd) == 0 {
-		fmt.Println("Warning: No adapter configured. You'll need to add 'adapter' to coflux.toml before running 'coflux worker'.")
+		fmt.Println("Warning: No adapter configured. You'll need to add 'worker.adapter' to coflux.toml before running 'coflux worker'.")
 	}
 
 	// Update config
@@ -238,7 +240,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	existingConfig["server"].(map[string]any)["host"] = host
 	existingConfig["workspace"] = workspace
 	if len(adapterCmd) > 0 {
-		existingConfig["adapter"] = adapterCmd
+		if existingConfig["worker"] == nil {
+			existingConfig["worker"] = make(map[string]any)
+		}
+		existingConfig["worker"].(map[string]any)["adapter"] = adapterCmd
 	}
 
 	// Write config

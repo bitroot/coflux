@@ -36,6 +36,7 @@ const (
 type Worker struct {
 	cfg     *config.Config
 	adapter adapter.Adapter
+	session string
 	logger  *slog.Logger
 
 	client      *api.Client
@@ -64,13 +65,14 @@ type executionState struct {
 }
 
 // New creates a new worker
-func New(cfg *config.Config, adp adapter.Adapter, logger *slog.Logger) *Worker {
+func New(cfg *config.Config, adp adapter.Adapter, session string, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Worker{
 		cfg:        cfg,
 		adapter:    adp,
+		session:    session,
 		logger:     logger,
 		executions: make(map[string]*executionState),
 	}
@@ -135,15 +137,16 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 
 	// Create or use existing session
 	var sessionID string
-	if w.cfg.Session != "" {
+	if w.session != "" {
 		// Use pre-existing session (for pool-launched workers)
-		sessionID = w.cfg.Session
+		sessionID = w.session
 		w.logger.Info("using existing session", "session_id", sessionID)
 	} else {
 		// Create new session
 		w.logger.Info("creating session", "workspace", w.cfg.Workspace)
+		provides := config.ParseProvides(w.cfg.Worker.Provides)
 		var err error
-		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, w.cfg.Provides, w.cfg.Concurrency)
+		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, w.cfg.Worker.Concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
@@ -170,7 +173,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	defer func() { _ = w.logs.Close() }()
 
 	// Determine pool size (default to CPU count + 4)
-	poolSize := w.cfg.Concurrency
+	poolSize := w.cfg.Worker.Concurrency
 	if poolSize <= 0 {
 		poolSize = runtime.NumCPU() + 4
 	}

@@ -86,13 +86,13 @@ func discoverTargets(cmd *cobra.Command, modules []string) (*adapter.DiscoveryMa
 	}
 
 	if len(manifestsAdapter) > 0 {
-		cfg.Adapter = manifestsAdapter
+		cfg.Worker.Adapter = manifestsAdapter
 	}
-	if len(cfg.Adapter) == 0 {
-		return nil, fmt.Errorf("no adapter configured; use --adapter or add 'adapter' to coflux.toml")
+	if len(cfg.Worker.Adapter) == 0 {
+		return nil, fmt.Errorf("no adapter configured; use --adapter or add 'worker.adapter' to coflux.toml")
 	}
 
-	cmdAdapter := adapter.NewCommandAdapter(cfg.Adapter)
+	cmdAdapter := adapter.NewCommandAdapter(cfg.Worker.Adapter)
 	manifest, err := cmdAdapter.Discover(cmd.Context(), modules)
 	if err != nil {
 		return nil, fmt.Errorf("discovery failed: %w", err)

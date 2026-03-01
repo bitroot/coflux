@@ -46,7 +46,7 @@ func init() {
 	// Priority: defaults < config file < env vars < flags
 	viper.SetDefault("server.host", "localhost:7777")
 	viper.SetDefault("workspace", "default")
-	viper.SetDefault("concurrency", min(runtime.NumCPU()+4, 32))
+	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
 	viper.SetDefault("logs.store.batch_size", 100)
 	viper.SetDefault("logs.store.flush_interval", 0.5)

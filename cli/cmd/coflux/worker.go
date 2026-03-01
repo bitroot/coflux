@@ -48,14 +48,14 @@ func init() {
 	workerCmd.Flags().BoolVar(&workerDev, "dev", false, "Enable development mode (implies --watch and --register)")
 	workerCmd.Flags().IntVar(&workerConcurrency, "concurrency", 0, "Number of concurrent executors (default: CPU count + 4)")
 	workerCmd.Flags().StringVar(&workerSession, "session", "", "Session ID (for pool-launched workers)")
-	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu=A100,H100 --provides region=us-east-1)")
+	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu:A100,gpu:H100,region:eu)")
 	workerCmd.Flags().StringSliceVar(&workerAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
 }
 
 func runWorker(cmd *cobra.Command, args []string) error {
 	// Override concurrency if specified via flag
 	if workerConcurrency > 0 {
-		viper.Set("concurrency", workerConcurrency)
+		viper.Set("worker.concurrency", workerConcurrency)
 	}
 
 	// Load config from viper (merges defaults, config file, env vars, flags)
@@ -64,28 +64,15 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Override session if specified via flag
+	// Resolve session: flag overrides env var (read via viper)
+	session := viper.GetString("session")
 	if workerSession != "" {
-		cfg.Session = workerSession
+		session = workerSession
 	}
 
-	// Merge provides from flag with config
+	// Append provides from flag to config
 	if len(workerProvides) > 0 {
-		if cfg.Provides == nil {
-			cfg.Provides = make(map[string][]string)
-		}
-		for _, p := range workerProvides {
-			// Parse "key=value1,value2" format
-			parts := strings.SplitN(p, "=", 2)
-			if len(parts) == 2 {
-				key := parts[0]
-				values := strings.Split(parts[1], ",")
-				cfg.Provides[key] = values
-			} else {
-				// If no =, treat as boolean flag "key=true"
-				cfg.Provides[p] = []string{"true"}
-			}
-		}
+		cfg.Worker.Provides = append(cfg.Worker.Provides, workerProvides...)
 	}
 
 	// Resolve token (may involve auth flow)
@@ -99,22 +86,22 @@ func runWorker(cmd *cobra.Command, args []string) error {
 
 	// Override adapter if specified via flag
 	if len(workerAdapter) > 0 {
-		cfg.Adapter = workerAdapter
+		cfg.Worker.Adapter = workerAdapter
 	}
 
 	// Check adapter is configured
-	if len(cfg.Adapter) == 0 {
-		return fmt.Errorf("no adapter configured; run 'coflux setup' or add 'adapter' to coflux.toml")
+	if len(cfg.Worker.Adapter) == 0 {
+		return fmt.Errorf("no adapter configured; run 'coflux setup' or add 'worker.adapter' to coflux.toml")
 	}
 
 	// Setup logging
 	logger := getLogger()
 
 	// Create adapter from config
-	cmdAdapter := adapter.NewCommandAdapter(cfg.Adapter)
+	cmdAdapter := adapter.NewCommandAdapter(cfg.Worker.Adapter)
 
 	// Create worker
-	w := worker.New(cfg, cmdAdapter, logger)
+	w := worker.New(cfg, cmdAdapter, session, logger)
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -140,14 +127,14 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	}
 
 	if shouldWatch {
-		return runWorkerWithWatch(ctx, cfg, cmdAdapter, modules, shouldRegister, logger, sigCh)
+		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger, sigCh)
 	}
 
 	// Run worker
 	logger.Info("starting worker",
 		"workspace", cfg.Workspace,
 		"host", cfg.Server.Host,
-		"concurrency", cfg.Concurrency,
+		"concurrency", cfg.Worker.Concurrency,
 		"register", shouldRegister,
 	)
 
@@ -169,6 +156,7 @@ func runWorkerWithWatch(
 	ctx context.Context,
 	cfg *config.Config,
 	cmdAdapter *adapter.CommandAdapter,
+	session string,
 	modules []string,
 	shouldRegister bool,
 	logger *slog.Logger,
@@ -197,11 +185,11 @@ func runWorkerWithWatch(
 
 		// Start worker in goroutine
 		go func() {
-			w := worker.New(cfg, cmdAdapter, logger)
+			w := worker.New(cfg, cmdAdapter, session, logger)
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,
 				"host", cfg.Server.Host,
-				"concurrency", cfg.Concurrency,
+				"concurrency", cfg.Worker.Concurrency,
 				"register", shouldRegister,
 			)
 			workerDone <- w.Run(runCtx, modules, shouldRegister)
