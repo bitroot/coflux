@@ -125,10 +125,16 @@ func GetStudioToken() (string, error) {
 }
 
 // StartDeviceFlow initiates the device flow authentication
-func StartDeviceFlow(studioURL string) (*DeviceFlowStart, error) {
+func StartDeviceFlow(studioURL, name string) (*DeviceFlowStart, error) {
 	url := studioURL + "/api/auth/device"
 
-	resp, err := http.Post(url, "application/json", nil)
+	body := map[string]string{"name": name}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
 	}

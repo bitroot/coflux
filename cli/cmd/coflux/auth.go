@@ -44,8 +44,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		url = studioURL
 	}
 
+	// Get hostname for device name
+	hostname, _ := os.Hostname()
+
 	// Start device flow
-	start, err := auth.StartDeviceFlow(url)
+	start, err := auth.StartDeviceFlow(url, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to start authentication: %w", err)
 	}
