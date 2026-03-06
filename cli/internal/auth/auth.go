@@ -14,8 +14,8 @@ import (
 
 var (
 	ErrDeviceFlowExpired = errors.New("device code has expired")
-	ErrNoToken           = errors.New("no Studio session token available")
-	ErrTokenInvalid      = errors.New("studio session token is invalid or expired")
+	ErrNoToken           = errors.New("not logged in to Studio")
+	ErrTokenInvalid      = errors.New("Studio session is invalid or expired")
 )
 
 // DeviceFlowStart is the response from starting device flow
@@ -125,10 +125,16 @@ func GetStudioToken() (string, error) {
 }
 
 // StartDeviceFlow initiates the device flow authentication
-func StartDeviceFlow(studioURL string) (*DeviceFlowStart, error) {
+func StartDeviceFlow(studioURL, name string) (*DeviceFlowStart, error) {
 	url := studioURL + "/api/auth/device"
 
-	resp, err := http.Post(url, "application/json", nil)
+	body := map[string]string{"name": name}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
 	}

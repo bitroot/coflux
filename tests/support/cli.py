@@ -104,6 +104,6 @@ def worker(modules, adapter, concurrency=1, provides=None, env=None):
            "--concurrency", str(concurrency)]
     if provides:
         for key, values in provides.items():
-            cmd.extend(["--provides", f"{key}={','.join(values)}"])
+            cmd.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
     cmd.extend(modules)
     return subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -17,8 +17,8 @@ defmodule Coflux.JwksStore do
   # Client API
 
   def start_link(opts \\ []) do
-    # Only start when Studio auth is enabled (namespaces configured)
-    if Config.namespaces() do
+    # Only start when Studio auth is enabled (teams configured)
+    if Config.studio_teams() do
       GenServer.start_link(__MODULE__, opts, name: __MODULE__)
     else
       :ignore

@@ -1,18 +1,16 @@
 package config
 
+import "strings"
+
 // Config represents the coflux.toml configuration file.
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
 type Config struct {
-	Workspace   string              `mapstructure:"workspace"`
-	Team        string              `mapstructure:"team"`
-	Adapter     []string            `mapstructure:"adapter"`
-	Concurrency int                 `mapstructure:"concurrency"`
-	Session     string              `mapstructure:"session"` // Pre-existing session ID (for pool-launched workers)
-	Server      ServerConfig        `mapstructure:"server"`
-	Provides    map[string][]string `mapstructure:"provides"`
-	Serializers []SerializerConfig  `mapstructure:"serializers"`
-	Blobs       BlobsConfig         `mapstructure:"blobs"`
-	Logs        LogsConfig          `mapstructure:"logs"`
+	Workspace string       `mapstructure:"workspace"`
+	Team      string       `mapstructure:"team"`
+	Server    ServerConfig `mapstructure:"server"`
+	Worker    WorkerConfig `mapstructure:"worker"`
+	Blobs     BlobsConfig  `mapstructure:"blobs"`
+	Logs      LogsConfig   `mapstructure:"logs"`
 }
 
 // ServerConfig holds server connection settings
@@ -22,11 +20,26 @@ type ServerConfig struct {
 	Secure *bool  `mapstructure:"secure"`
 }
 
-// SerializerConfig holds serializer configuration
-type SerializerConfig struct {
-	Type   string `mapstructure:"type"`
-	Module string `mapstructure:"module"`
-	Class  string `mapstructure:"class"`
+// WorkerConfig holds worker-specific settings
+type WorkerConfig struct {
+	Adapter     []string `mapstructure:"adapter"`
+	Concurrency int      `mapstructure:"concurrency"`
+	Provides    []string `mapstructure:"provides"`
+}
+
+// ParseProvides converts a flat provides list (e.g., ["gpu:A100", "gpu:H100", "region:eu"])
+// into a grouped map (e.g., {"gpu": ["A100", "H100"], "region": ["eu"]}).
+// Strings without ":" are treated as boolean tags with value "true".
+func ParseProvides(provides []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, p := range provides {
+		if key, value, ok := strings.Cut(p, ":"); ok {
+			result[key] = append(result[key], value)
+		} else {
+			result[p] = append(result[p], "true")
+		}
+	}
+	return result
 }
 
 // BlobsConfig holds blob storage configuration

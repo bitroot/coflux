@@ -24,7 +24,7 @@ defmodule Coflux.Config do
 
   - **Super token**: Set `COFLUX_SUPER_TOKEN_HASH` (SHA-256 hex) for a single token with full access
   - **Database tokens**: Tokens stored in the project database (created via API)
-  - **Studio auth (JWT)**: Enabled if `COFLUX_NAMESPACES` is set
+  - **Studio auth (JWT)**: Enabled if `COFLUX_STUDIO_TEAMS` is set
 
   Multiple auth methods can be enabled simultaneously. The auth method is determined
   by token format: JWTs (containing dots) use Studio auth, other tokens check
@@ -35,7 +35,7 @@ defmodule Coflux.Config do
   - **COFLUX_SUPER_TOKEN_HASH**: SHA-256 hex hash of a super token with full access
   - **COFLUX_SECRET**: Server secret for signing API tokens. Required for API token
     support. Should be a long random string, kept consistent across restarts.
-  - **COFLUX_NAMESPACES**: Comma-separated list of team IDs allowed for Studio auth
+  - **COFLUX_STUDIO_TEAMS**: Comma-separated list of team IDs allowed for Studio auth
   - **COFLUX_STUDIO_URL**: Studio URL for JWKS (default: https://studio.coflux.com)
   """
 
@@ -48,7 +48,7 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
     :persistent_term.put(:coflux_require_auth, parse_require_auth())
-    :persistent_term.put(:coflux_namespaces, parse_namespaces())
+    :persistent_term.put(:coflux_studio_teams, parse_studio_teams())
     :persistent_term.put(:coflux_studio_url, parse_studio_url())
     :persistent_term.put(:coflux_super_token_hash, parse_super_token())
     :persistent_term.put(:coflux_secret, parse_secret())
@@ -98,12 +98,12 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the list of allowed namespace (team) IDs for studio auth mode.
+  Returns the set of allowed team IDs for Studio auth.
 
-  Returns nil if no namespaces are configured (allows any namespace).
+  Returns nil if not configured (Studio auth disabled).
   """
-  def namespaces do
-    :persistent_term.get(:coflux_namespaces)
+  def studio_teams do
+    :persistent_term.get(:coflux_studio_teams)
   end
 
   @doc """
@@ -160,8 +160,8 @@ defmodule Coflux.Config do
     end
   end
 
-  defp parse_namespaces do
-    case System.get_env("COFLUX_NAMESPACES") do
+  defp parse_studio_teams do
+    case System.get_env("COFLUX_STUDIO_TEAMS") do
       nil ->
         nil
 

@@ -46,7 +46,7 @@ func init() {
 	// Priority: defaults < config file < env vars < flags
 	viper.SetDefault("server.host", "localhost:7777")
 	viper.SetDefault("workspace", "default")
-	viper.SetDefault("concurrency", min(runtime.NumCPU()+4, 32))
+	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
 	viper.SetDefault("logs.store.batch_size", 100)
 	viper.SetDefault("logs.store.flush_interval", 0.5)
@@ -69,25 +69,35 @@ func init() {
 	viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
 	viper.BindPFlag("json", rootCmd.PersistentFlags().Lookup("json"))
 
+	// Command groups
+	rootCmd.AddGroup(
+		&cobra.Group{ID: "core", Title: "Core Commands:"},
+		&cobra.Group{ID: "auth", Title: "Auth Commands:"},
+		&cobra.Group{ID: "management", Title: "Management Commands:"},
+	)
+
 	// Core commands
-	rootCmd.AddCommand(workerCmd)
-	rootCmd.AddCommand(submitCmd)
-	rootCmd.AddCommand(runsCmd)
-	rootCmd.AddCommand(setupCmd)
-	rootCmd.AddCommand(serverCmd)
+	workerCmd.GroupID = "core"
+	submitCmd.GroupID = "core"
+	runsCmd.GroupID = "core"
+	setupCmd.GroupID = "core"
+	serverCmd.GroupID = "core"
+	rootCmd.AddCommand(workerCmd, submitCmd, runsCmd, setupCmd, serverCmd)
 
 	// Auth commands
-	rootCmd.AddCommand(loginCmd)
-	rootCmd.AddCommand(logoutCmd)
+	loginCmd.GroupID = "auth"
+	logoutCmd.GroupID = "auth"
+	rootCmd.AddCommand(loginCmd, logoutCmd)
 
 	// Management commands
-	rootCmd.AddCommand(workspacesCmd)
-	rootCmd.AddCommand(manifestsCmd)
-	rootCmd.AddCommand(poolsCmd)
-	rootCmd.AddCommand(tokensCmd)
-	rootCmd.AddCommand(assetsCmd)
-	rootCmd.AddCommand(blobsCmd)
-	rootCmd.AddCommand(logsCmd)
+	workspacesCmd.GroupID = "management"
+	manifestsCmd.GroupID = "management"
+	poolsCmd.GroupID = "management"
+	tokensCmd.GroupID = "management"
+	assetsCmd.GroupID = "management"
+	blobsCmd.GroupID = "management"
+	logsCmd.GroupID = "management"
+	rootCmd.AddCommand(workspacesCmd, manifestsCmd, poolsCmd, tokensCmd, assetsCmd, blobsCmd, logsCmd)
 }
 
 func initConfig(cmd *cobra.Command, args []string) error {
