@@ -15,7 +15,7 @@ import re
 import typing as t
 
 from .models import Execution
-from .serialization import serialize_result
+from .serialization import serialize_value
 from .state import get_context
 
 P = t.ParamSpec("P")
@@ -308,7 +308,7 @@ class Target(t.Generic[P, T]):
         ctx = get_context()
 
         # Serialize arguments
-        serialized_args = [serialize_result(arg) for arg in args]
+        serialized_args = [serialize_value(arg) for arg in args]
 
         # Use only the declared wait_for from the decorator
         wait_for_val = sorted(self._definition.wait_for) if self._definition.wait_for else None
@@ -360,14 +360,8 @@ class Target(t.Generic[P, T]):
         return Execution(result["execution_id"], result["module"], result["target"])
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
-        """Call the target - submits if in execution context, else runs directly."""
-        try:
-            # If we're in an execution context, submit and wait for result
-            get_context()
-            return self.submit(*args, **kwargs).result()
-        except RuntimeError:
-            # Not in execution context, run directly
-            return self._fn(*args, **kwargs)
+        """Call the target - submits for execution and waits for the result."""
+        return self.submit(*args, **kwargs).result()
 
 
 def task(

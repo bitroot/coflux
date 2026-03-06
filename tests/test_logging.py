@@ -182,14 +182,14 @@ def test_log_with_values(worker):
 
         eid, _, _ = conn0.recv_execute()
 
-        # Send log with values (wire format: ["raw", data, refs])
+        # Send log with values (dict format matching adapter.Value)
         conn0.send(
             log_message(
                 eid,
                 "info",
                 "processing {data}",
                 values={
-                    "data": ["raw", {"id": 42}, []],
+                    "data": {"type": "inline", "format": "json", "value": {"id": 42}, "references": []},
                 },
             )
         )
@@ -228,7 +228,7 @@ def test_log_display_format(worker):
                 "info",
                 "count is {n}",
                 values={
-                    "n": ["raw", 7, []],
+                    "n": {"type": "inline", "format": "json", "value": 7, "references": []},
                 },
             )
         )

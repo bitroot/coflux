@@ -15,8 +15,8 @@ import (
 type ExecutionHandler interface {
 	// SubmitExecution submits a child execution
 	SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error)
-	// ResolveReference resolves a reference to get its value
-	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.Value, error)
+	// ResolveReference resolves a reference to get its result
+	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.ResolveResult, error)
 	// PersistAsset persists files as an asset
 	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
@@ -33,7 +33,7 @@ type ExecutionHandler interface {
 	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
 	// Template is the message template, values contains serialized values (each is ["raw", data, refs] or ["blob", key, size, refs])
-	RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string][]any) error
+	RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string]*adapter.Value) error
 	// ReportResult reports execution completion
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
@@ -245,10 +245,10 @@ func (p *Pool) handleExecutionError(ctx context.Context, pe *pooledExecutor, exe
 
 func (p *Pool) handleLog(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
 	var logMsg struct {
-		ExecutionID string           `json:"execution_id"`
-		Level       int              `json:"level"`
-		Template    *string          `json:"template"`
-		Values      map[string][]any `json:"values"`
+		ExecutionID string                    `json:"execution_id"`
+		Level       int                       `json:"level"`
+		Template    *string                   `json:"template"`
+		Values      map[string]*adapter.Value `json:"values"`
 	}
 	if err := json.Unmarshal(params, &logMsg); err != nil {
 		logger.Error("failed to parse log message", "error", err)
@@ -296,11 +296,24 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		value, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs)
+		resolved, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "resolve_error", Message: err.Error()}
 		} else {
-			result = value
+			switch resolved.Status {
+			case "value":
+				result = resolved.Value
+			case "error":
+				result = map[string]any{
+					"status":        "error",
+					"error_type":    resolved.ErrorType,
+					"error_message": resolved.ErrorMessage,
+				}
+			case "cancelled":
+				result = map[string]any{"status": "cancelled"}
+			case "suspended":
+				result = map[string]any{"status": "suspended"}
+			}
 		}
 
 	case "persist_asset":

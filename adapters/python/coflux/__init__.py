@@ -11,6 +11,7 @@ import datetime as dt
 from pathlib import Path
 
 from .decorators import task, workflow, stub, Target, Retries
+from .errors import ExecutionError
 from .models import Asset, AssetEntry, AssetMetadata, Execution
 from .state import get_context
 
@@ -24,6 +25,7 @@ __all__ = [
     # Classes
     "Target",
     "Execution",
+    "ExecutionError",
     "Retries",
     "Asset",
     "AssetEntry",

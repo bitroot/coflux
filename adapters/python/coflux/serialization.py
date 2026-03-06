@@ -35,7 +35,7 @@ def _write_temp_file(data: bytes) -> str:
     return path
 
 
-def encode_value(
+def _encode_value(
     value: Any,
     write_temp_file: Callable[[bytes], str] = _write_temp_file,
 ) -> tuple[Any, list[list[Any]]]:
@@ -120,7 +120,7 @@ def encode_value(
     return data, references
 
 
-def serialize_result(value: Any) -> dict[str, Any]:
+def serialize_value(value: Any) -> dict[str, Any]:
     """Serialize a result value to the protocol format.
 
     Uses the custom JSON value encoding (dict/set/tuple types, fragment refs
@@ -132,7 +132,7 @@ def serialize_result(value: Any) -> dict[str, Any]:
     Returns:
         Serialized value dict.
     """
-    data, references = encode_value(value)
+    data, references = _encode_value(value)
     encoded = json.dumps(data, separators=(",", ":")).encode()
 
     if len(encoded) > TRANSFER_THRESHOLD:
@@ -152,13 +152,13 @@ def serialize_result(value: Any) -> dict[str, Any]:
         }
 
 
-def decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
+def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
     """Decode custom JSON format back to Python types.
 
-    Reverses the encoding done by encode_value.
+    Reverses the encoding done by _encode_value.
 
     Args:
-        data: The encoded data (output of encode_value / JSON.parse of blob).
+        data: The encoded data (output of _encode_value / JSON.parse of blob).
         references: The references array accompanying the value.
 
     Returns:
@@ -235,8 +235,8 @@ def decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
     return _decode(data)
 
 
-def deserialize_argument(arg: dict[str, Any]) -> Any:
-    """Deserialize an argument from the protocol format.
+def deserialize_value(arg: dict[str, Any]) -> Any:
+    """Deserialize a value from the protocol format.
 
     Args:
         arg: Argument dict with type, format, and value/path.
@@ -254,7 +254,7 @@ def deserialize_argument(arg: dict[str, Any]) -> Any:
         value = arg.get("value")
         raw = _deserialize_value(value, format_name, metadata)
         if format_name == "json":
-            return decode_value(raw, references)
+            return _decode_value(raw, references)
         return raw
     elif arg_type == "file":
         path = arg.get("path")
@@ -262,7 +262,7 @@ def deserialize_argument(arg: dict[str, Any]) -> Any:
             raise ValueError("File argument missing path")
         raw = _deserialize_file(path, format_name, metadata)
         if format_name == "json":
-            return decode_value(raw, references)
+            return _decode_value(raw, references)
         return raw
     else:
         raise ValueError(f"Unknown argument type: {arg_type}")

@@ -13,7 +13,24 @@ from . import protocol
 from .context import ExecutorContext
 from .state import set_context
 from .output import capture_output
-from .serialization import deserialize_argument, serialize_result
+from .serialization import deserialize_value, serialize_value
+
+_COFLUX_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _format_filtered_traceback(exc: Exception) -> str:
+    """Format a traceback string with Coflux-internal frames removed."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    filtered = [
+        f for f in frames
+        if not os.path.abspath(f.filename).startswith(_COFLUX_PKG_DIR)
+    ]
+    if not filtered:
+        filtered = list(frames)
+    lines = ["Traceback (most recent call last):\n"]
+    lines.extend(traceback.format_list(filtered))
+    lines.extend(traceback.format_exception_only(type(exc), exc))
+    return "".join(lines)
 
 
 def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any]], working_dir: str | None = None) -> None:
@@ -36,7 +53,7 @@ def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any
             raise ValueError(f"Target not found: {target}")
 
         # Deserialize arguments
-        deserialized_args = [deserialize_argument(arg) for arg in arguments]
+        deserialized_args = [deserialize_value(arg) for arg in arguments]
 
         # Set up execution context
         set_context(ExecutorContext(execution_id, working_dir=Path(working_dir) if working_dir else None))
@@ -48,15 +65,16 @@ def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any
             result = fn(*deserialized_args)
 
         # Serialize and send result
-        result_value = serialize_result(result)
+        result_value = serialize_value(result)
         protocol.send_execution_result(execution_id, result_value)
 
     except Exception as e:
-        # Send error
-        tb = traceback.format_exc()
+        # Send error with real exception type and filtered traceback
+        error_type = f"{type(e).__module__}.{type(e).__qualname__}"
+        tb = _format_filtered_traceback(e)
         protocol.send_execution_error(
             execution_id,
-            error_type="exception",
+            error_type=error_type,
             message=str(e),
             traceback=tb,
         )
