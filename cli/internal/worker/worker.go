@@ -702,7 +702,7 @@ func (w *Worker) processReferences(refs [][]any) ([]any, error) {
 	return result, nil
 }
 
-func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.Value, error) {
+func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.ResolveResult, error) {
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -735,32 +735,49 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 			// Convert to adapter value
 			switch value.Type {
 			case api.ValueTypeRaw:
-				return &adapter.Value{
-					Type:       "inline",
-					Format:     "json",
-					Value:      value.Content,
-					References: adapterRefs,
+				return &adapter.ResolveResult{
+					Status: "value",
+					Value: &adapter.Value{
+						Type:       "inline",
+						Format:     "json",
+						Value:      value.Content,
+						References: adapterRefs,
+					},
 				}, nil
 			case api.ValueTypeBlob:
 				path, err := w.blobs.Download(value.Key)
 				if err != nil {
 					return nil, err
 				}
-				return &adapter.Value{
-					Type:       "file",
-					Format:     "json",
-					Path:       path,
-					References: adapterRefs,
+				return &adapter.ResolveResult{
+					Status: "value",
+					Value: &adapter.Value{
+						Type:       "file",
+						Format:     "json",
+						Path:       path,
+						References: adapterRefs,
+					},
 				}, nil
 			default:
 				return nil, fmt.Errorf("unknown value type: %s", value.Type)
 			}
 		case "error":
-			return nil, fmt.Errorf("execution failed")
+			var errType, errMsg string
+			if len(arr) >= 2 {
+				errType, _ = arr[1].(string)
+			}
+			if len(arr) >= 3 {
+				errMsg, _ = arr[2].(string)
+			}
+			return &adapter.ResolveResult{
+				Status:       "error",
+				ErrorType:    errType,
+				ErrorMessage: errMsg,
+			}, nil
 		case "cancelled":
-			return nil, fmt.Errorf("execution cancelled")
+			return &adapter.ResolveResult{Status: "cancelled"}, nil
 		case "suspended":
-			return nil, fmt.Errorf("execution suspended")
+			return &adapter.ResolveResult{Status: "suspended"}, nil
 		}
 	}
 
@@ -890,7 +907,7 @@ func (w *Worker) CancelExecution(ctx context.Context, executionID string, target
 	return conn.Notify("cancel", targetExecutionID)
 }
 
-func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string][]any) error {
+func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string]*adapter.Value) error {
 	// Get execution context
 	w.mu.RLock()
 	state, ok := w.executions[executionID]
@@ -902,12 +919,12 @@ func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, t
 		return nil
 	}
 
-	// Process values - convert file-based values to raw/blob format
+	// Process values - convert to server log format (maps with type/data/references)
 	var logValues map[string]any
 	if values != nil {
 		logValues = make(map[string]any, len(values))
 		for k, v := range values {
-			processed, err := w.processLogValue(v)
+			processed, err := w.convertValueToLogFormat(v)
 			if err != nil {
 				w.logger.Error("failed to process log value", "key", k, "error", err)
 				// Fall back to raw empty value (map format for server)
@@ -932,65 +949,49 @@ func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, t
 	return w.logs.Log(entry)
 }
 
-// processLogValue converts executor log values to server format.
-// Input formats:
-//   - ["raw", data, refs] - inline data from executor
-//   - ["file", path, size, refs] - data in temp file from executor
+// convertValueToLogFormat converts an adapter value to the log server format.
+// This is the log equivalent of convertValueToServerFormat — same input format
+// (adapter.Value) but outputs maps instead of tuples for the log HTTP API.
 //
 // Output formats (maps for server API):
 //   - {"type": "raw", "data": ..., "references": [...]}
 //   - {"type": "blob", "key": ..., "size": ..., "references": [...]}
-func (w *Worker) processLogValue(value []any) (map[string]any, error) {
-	if len(value) < 3 {
+func (w *Worker) convertValueToLogFormat(v *adapter.Value) (map[string]any, error) {
+	if v == nil {
 		return map[string]any{"type": "raw", "references": []any{}}, nil
 	}
 
-	valueType := getString(value[0])
-	var data []byte
-	var refs []any
-
-	switch valueType {
-	case "raw":
-		// Inline data - may need to convert to blob if over threshold
-		refs = getSlice(value[2])
-		// Data is already JSON-decoded, re-encode to check size
-		encoded, err := json.Marshal(value[1])
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode raw value: %w", err)
-		}
-		data = encoded
-
-	case "file":
-		// Data is in a temp file - read and clean up
-		if len(value) < 4 {
-			return map[string]any{"type": "raw", "references": []any{}}, nil
-		}
-		path := getString(value[1])
-		refs = getSlice(value[3])
-
-		var err error
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read log value file %s: %w", path, err)
-		}
-		// Clean up temp file
-		_ = os.Remove(path)
-
-	default:
-		// Unknown type, return as raw with null data
-		return map[string]any{"type": "raw", "references": []any{}}, nil
+	// Convert [][]any to []any for processLogReferences
+	var rawRefs []any
+	for _, ref := range v.References {
+		rawRefs = append(rawRefs, any(ref))
 	}
-
-	// Process fragment references - read files and upload to blob store
-	processedRefs, err := w.processLogReferences(refs)
+	processedRefs, err := w.processLogReferences(rawRefs)
 	if err != nil {
 		w.logger.Error("failed to process log references", "error", err)
-		processedRefs = []any{} // Fall back to empty refs
+		processedRefs = []any{}
+	}
+
+	var data []byte
+	switch v.Type {
+	case "inline":
+		encoded, err := json.Marshal(v.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode value: %w", err)
+		}
+		data = encoded
+	case "file":
+		data, err = os.ReadFile(v.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read log value file %s: %w", v.Path, err)
+		}
+		_ = os.Remove(v.Path)
+	default:
+		return map[string]any{"type": "raw", "references": []any{}}, nil
 	}
 
 	// Apply blob threshold
 	if len(data) > w.cfg.Blobs.Threshold {
-		// Upload to blob store
 		key, err := w.blobs.UploadData(data)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload log value blob: %w", err)
@@ -1003,10 +1004,8 @@ func (w *Worker) processLogValue(value []any) (map[string]any, error) {
 		}, nil
 	}
 
-	// Return as inline - need to decode the JSON data back to any
 	var decoded any
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		// If it can't be decoded, return as raw bytes (shouldn't happen)
 		return nil, fmt.Errorf("failed to decode log value: %w", err)
 	}
 	return map[string]any{

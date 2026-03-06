@@ -5,20 +5,14 @@ from __future__ import annotations
 import contextvars
 import datetime as dt
 import fnmatch as fnmatch
-import json
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from . import protocol
+from .errors import create_execution_error
 from .models import Asset, AssetEntry, AssetMetadata
-from .serialization import deserialize_argument, encode_value
-
-# Transfer threshold - values larger than this are passed via temp files
-# rather than inline in the stdio JSON protocol. This is separate from
-# the blob store threshold (which is configured in the worker).
-TRANSFER_THRESHOLD = 64 * 1024  # 64KB
+from .serialization import deserialize_value, serialize_value
 
 # Context variable for group tracking
 _group_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
@@ -38,36 +32,6 @@ class ExecutorContext:
         self._pending_requests: dict[int, Any] = {}
         self._groups: list[str | None] = []
         self._working_dir = working_dir or Path.cwd()
-
-    def _write_temp_file(self, data: bytes) -> str:
-        """Write data to a temp file and return the path.
-
-        The caller (worker) is responsible for cleaning up the file after reading.
-        """
-        fd, path = tempfile.mkstemp(prefix="coflux_log_")
-        with open(fd, "wb") as f:
-            f.write(data)
-        return path
-
-    def _serialize_log_value(self, value: Any) -> tuple[Any, ...]:
-        """Serialize a value for logging.
-
-        Returns:
-            Tuple of ("raw", data, references) or ("file", path, size, references)
-
-        The executor uses temp files for large data transfer to the worker.
-        The worker then decides whether to upload to blob store based on its
-        own threshold configuration.
-        """
-        data, references = encode_value(value, self._write_temp_file)
-        encoded = json.dumps(data, separators=(",", ":")).encode()
-
-        if len(encoded) > TRANSFER_THRESHOLD:
-            # Write to temp file for large data
-            path = self._write_temp_file(encoded)
-            return ("file", path, len(encoded), references)
-        else:
-            return ("raw", data, references)
 
     def submit_execution(
         self,
@@ -118,7 +82,12 @@ class ExecutorContext:
             timeout_ms=timeout_ms,
         )
         value = self._wait_response(request_id)
-        return deserialize_argument(value)
+        if value.get("status") == "error":
+            raise create_execution_error(
+                value.get("error_type", ""),
+                value.get("error_message", ""),
+            )
+        return deserialize_value(value)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
@@ -291,9 +260,9 @@ class ExecutorContext:
             return
 
         # Serialize each value
-        serialized_values: dict[str, list[Any]] = {}
+        serialized_values: dict[str, Any] = {}
         for key, value in kwargs.items():
-            serialized_values[key] = list(self._serialize_log_value(value))
+            serialized_values[key] = serialize_value(value)
 
         protocol.send_log(
             self.execution_id,
@@ -355,8 +324,17 @@ class ExecutorContext:
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
 
+    def _parse_response(self, msg: dict) -> Any:
+        """Extract the result from a response message, raising on error."""
+        if "error" in msg and msg["error"]:
+            error = msg["error"]
+            raise RuntimeError(f"{error['code']}: {error['message']}")
+        return msg.get("result", {})
+
     def _wait_response(self, request_id: int) -> Any:
         """Wait for a response to a request."""
+        if request_id in self._pending_requests:
+            return self._parse_response(self._pending_requests.pop(request_id))
         while True:
             msg = protocol.receive_message()
             if msg is None:
@@ -365,10 +343,7 @@ class ExecutorContext:
             # Check if this is a response
             if "id" in msg:
                 if msg["id"] == request_id:
-                    if "error" in msg and msg["error"]:
-                        error = msg["error"]
-                        raise RuntimeError(f"{error['code']}: {error['message']}")
-                    return msg.get("result", {})
+                    return self._parse_response(msg)
                 # Store other responses for later
                 self._pending_requests[msg["id"]] = msg
             else:

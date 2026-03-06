@@ -131,7 +131,7 @@ def send_log(
         execution_id: The execution this log belongs to
         level: Log level as integer
         template: Optional message template with {placeholders}
-        values: Optional dict of serialized values (each is ["raw", data, refs] or ["blob", key, size, refs])
+        values: Optional dict of serialized values (each is a Value dict with type/format/value/references)
     """
     params: dict[str, Any] = {
         "execution_id": execution_id,

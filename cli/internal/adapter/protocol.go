@@ -83,6 +83,15 @@ type ErrorInfo struct {
 	Message string `json:"message"`
 }
 
+// ResolveResult represents the outcome of resolving a reference.
+// Status is one of "value", "error", "cancelled", or "suspended".
+type ResolveResult struct {
+	Status       string
+	Value        *Value // set when Status == "value"
+	ErrorType    string // set when Status == "error"
+	ErrorMessage string // set when Status == "error"
+}
+
 // ReadyMessage is sent by executor when it's ready for work
 type ReadyMessage struct {
 	Method string `json:"method"` // "ready"

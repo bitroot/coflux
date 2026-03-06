@@ -162,12 +162,63 @@ def test_task_error_propagation(worker):
         task_eid, _, _ = conn1.recv_execute()
         conn1.fail(task_eid, "RuntimeError", "task failed")
 
-        # Resolving a failed child returns an error response
+        # Resolving a failed child returns a successful response with error details
         result = conn0.resolve(wf_eid, ref)
-        assert result["code"] == "resolve_error"
+        assert result["status"] == "error"
+        assert result["error_type"] == "RuntimeError"
+        assert result["error_message"] == "task failed"
 
         conn0.complete(wf_eid, value="handled")
         assert ctx.result(run_id)["value"]["data"] == "handled"
+
+
+def test_error_type_preserved(worker):
+    """Fully qualified error type is preserved through the pipeline."""
+    targets = [workflow("test.failing")]
+
+    def handler(execution_id, target, arguments):
+        return execution_error(
+            execution_id,
+            error_type="builtins.ZeroDivisionError",
+            message="division by zero",
+        )
+
+    with worker(targets, handler) as ctx:
+        result = ctx.run("test.failing")
+        assert result == {
+            "error": {
+                "type": "builtins.ZeroDivisionError",
+                "message": "division by zero",
+            }
+        }
+
+
+def test_child_error_details_in_resolve(worker):
+    """Child error type and message are available when resolving a failed child."""
+    targets = [
+        workflow("test.parent"),
+        task("test.child"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test.parent")
+        run_id = resp["runId"]
+        conn0 = ctx.executor.connections[0]
+        conn1 = ctx.executor.connections[1]
+
+        parent_eid, _, _ = conn0.recv_execute()
+        ref = conn0.submit_task(parent_eid, "test.child", [])
+
+        child_eid, _, _ = conn1.recv_execute()
+        conn1.fail(child_eid, "builtins.ValueError", "invalid input")
+
+        result = conn0.resolve(parent_eid, ref)
+        assert result["status"] == "error"
+        assert result["error_type"] == "builtins.ValueError"
+        assert result["error_message"] == "invalid input"
+
+        conn0.complete(parent_eid, value="recovered")
+        assert ctx.result(run_id)["value"]["data"] == "recovered"
 
 
 def test_fan_out(worker):
