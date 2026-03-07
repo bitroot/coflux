@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Blobs do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Config, Utils}
+  alias Coflux.{Auth, Utils}
 
   def init(req, opts) do
     bindings = :cowboy_req.bindings(req)
@@ -13,12 +13,26 @@ defmodule Coflux.Handlers.Blobs do
         {:ok, req, opts}
 
       method ->
-        case check_store_token(req, Config.blobs_token_hash()) do
-          :ok ->
-            handle(req, method, bindings[:key], opts)
+        host = get_host(req)
 
+        with {:ok, project_id} <- resolve_project(host),
+             {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
+          handle(req, method, bindings[:key], opts)
+        else
           {:error, :unauthorized} ->
             req = json_error_response(req, "unauthorized", status: 401)
+            {:ok, req, opts}
+
+          {:error, :not_configured} ->
+            req = json_error_response(req, "not_configured", status: 500)
+            {:ok, req, opts}
+
+          {:error, :project_required} ->
+            req = json_error_response(req, "project_required", status: 400)
+            {:ok, req, opts}
+
+          {:error, :invalid_host} ->
+            req = json_error_response(req, "invalid_host", status: 400)
             {:ok, req, opts}
         end
     end

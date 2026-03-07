@@ -807,6 +807,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:verify_session, token}, _from, state) do
+    with {:ok, external_id, secret} <- Sessions.parse_token(token),
+         {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
+         session = Map.fetch!(state.sessions, session_id),
+         :ok <- verify_session_secret(secret, session.secret_hash) do
+      workspace = Map.fetch!(state.workspaces, session.workspace_id)
+      {:reply, {:ok, %{workspaces: [workspace.name], principal_id: nil}}, state}
+    else
+      _ -> {:reply, {:error, :session_invalid}, state}
+    end
+  end
+
   def handle_call({:resume_session, token, workspace_external_id, pid}, _from, state) do
     with {:ok, external_id, secret} <- Sessions.parse_token(token),
          {:ok, session_id} <- Map.fetch(state.session_ids, external_id),

@@ -11,7 +11,7 @@ defmodule Coflux.Handlers.Logs do
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Config, Logs}
+  alias Coflux.{Auth, Logs}
 
   def init(req, opts) do
     req = set_cors_headers(req)
@@ -39,7 +39,7 @@ defmodule Coflux.Handlers.Logs do
     host = get_host(req)
 
     with {:ok, project_id} <- resolve_project(host),
-         :ok <- check_store_token(req, Config.logs_token_hash()) do
+         {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
       handle_post_with_project(req, opts, project_id)
     else
       {:error, :unauthorized} ->
@@ -91,7 +91,7 @@ defmodule Coflux.Handlers.Logs do
     host = get_host(req)
 
     with {:ok, project_id} <- resolve_project(host),
-         :ok <- check_store_token(req, Config.logs_token_hash()) do
+         {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
       handle_get_with_project(req, opts, project_id)
     else
       {:error, :unauthorized} ->

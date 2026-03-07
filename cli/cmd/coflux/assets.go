@@ -174,7 +174,11 @@ func runAssetsDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create blob stores from config
-	stores, err := createBlobStoresFromViper()
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+	stores, err := createBlobStoresFromViper(token)
 	if err != nil {
 		return fmt.Errorf("failed to create blob stores: %w", err)
 	}
@@ -267,7 +271,7 @@ func copyFile(src, dst string) error {
 	return dstFile.Close()
 }
 
-func createBlobStoresFromViper() ([]blob.Store, error) {
+func createBlobStoresFromViper(token string) ([]blob.Store, error) {
 	var stores []blob.Store
 
 	// Parse store configs
@@ -282,7 +286,6 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 					if url == "" {
 						url = fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
 					}
-					token, _ := storeCfg["token"].(string)
 					stores = append(stores, blob.NewHTTPStore(url, token))
 				case "s3":
 					bucket, _ := storeCfg["bucket"].(string)
@@ -301,7 +304,7 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 	// Default to HTTP store at server
 	if len(stores) == 0 {
 		baseURL := fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
-		stores = append(stores, blob.NewHTTPStore(baseURL, ""))
+		stores = append(stores, blob.NewHTTPStore(baseURL, token))
 	}
 
 	return stores, nil

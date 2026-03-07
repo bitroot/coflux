@@ -52,8 +52,6 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_studio_url, parse_studio_url())
     :persistent_term.put(:coflux_super_token_hash, parse_super_token())
     :persistent_term.put(:coflux_secret, parse_secret())
-    :persistent_term.put(:coflux_logs_token_hash, get_env("COFLUX_LOGS_TOKEN_HASH"))
-    :persistent_term.put(:coflux_blobs_token_hash, get_env("COFLUX_BLOBS_TOKEN_HASH"))
     :ok
   end
 
@@ -134,34 +132,6 @@ defmodule Coflux.Config do
   """
   def secret do
     :persistent_term.get(:coflux_secret)
-  end
-
-  @doc """
-  Returns the logs store token hash, or nil if not configured.
-
-  When set via COFLUX_LOGS_TOKEN_HASH, the /logs endpoint requires a
-  matching Bearer token. When nil, the endpoint is unauthenticated.
-  """
-  def logs_token_hash do
-    :persistent_term.get(:coflux_logs_token_hash)
-  end
-
-  @doc """
-  Returns the blobs store token hash, or nil if not configured.
-
-  When set via COFLUX_BLOBS_TOKEN_HASH, the /blobs endpoint requires a
-  matching Bearer token. When nil, the endpoint is unauthenticated.
-  """
-  def blobs_token_hash do
-    :persistent_term.get(:coflux_blobs_token_hash)
-  end
-
-  defp get_env(name) do
-    case System.get_env(name) do
-      nil -> nil
-      "" -> nil
-      value -> value
-    end
   end
 
   defp parse_data_dir do

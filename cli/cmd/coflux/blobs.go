@@ -38,7 +38,11 @@ func runBlobsGet(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
 	// Create blob stores from config
-	stores, err := createBlobStoresFromViper()
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+	stores, err := createBlobStoresFromViper(token)
 	if err != nil {
 		return fmt.Errorf("failed to create blob stores: %w", err)
 	}

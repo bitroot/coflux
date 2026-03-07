@@ -1,5 +1,5 @@
 defmodule Coflux.Handlers.Utils do
-  alias Coflux.{Auth, Config}
+  alias Coflux.Config
 
   @doc """
   Resolves the project from the hostname.
@@ -75,28 +75,6 @@ defmodule Coflux.Handlers.Utils do
         case String.split(header, " ", parts: 2) do
           ["Bearer", token] -> String.trim(token)
           _ -> nil
-        end
-    end
-  end
-
-  @doc """
-  Checks a store-level Bearer token against an expected hash.
-
-  If `expected_hash` is nil, the store has no auth configured and access is allowed.
-  Otherwise, the request must carry a Bearer token whose SHA-256 hash matches.
-  """
-  def check_store_token(_req, nil), do: :ok
-
-  def check_store_token(req, expected_hash) do
-    case get_token(req) do
-      nil ->
-        {:error, :unauthorized}
-
-      token ->
-        if Auth.hash_token(token) == expected_hash do
-          :ok
-        else
-          {:error, :unauthorized}
         end
     end
   end
