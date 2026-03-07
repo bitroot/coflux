@@ -4339,25 +4339,46 @@ defmodule Coflux.Orchestration.Server do
           nil -> []
         end
 
-      Enum.all?(references, fn
-        {:execution, run_ext, step_num, attempt} ->
-          case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-            {:ok, {execution_id}} when not is_nil(execution_id) ->
+      all_references_ready?(db, references, MapSet.new())
+    end)
+  end
+
+  defp all_references_ready?(db, references, seen) do
+    Enum.all?(references, fn
+      {:execution, run_ext, step_num, attempt} ->
+        case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+          {:ok, {execution_id}} when not is_nil(execution_id) ->
+            if MapSet.member?(seen, execution_id) do
+              true
+            else
               case resolve_result(db, execution_id) do
-                {:ok, _} -> true
-                {:pending, _} -> false
+                {:ok, {:value, value}} ->
+                  inner_refs =
+                    case value do
+                      {:raw, _, refs} -> refs
+                      {:blob, _, _, refs} -> refs
+                      _ -> []
+                    end
+
+                  all_references_ready?(db, inner_refs, MapSet.put(seen, execution_id))
+
+                {:ok, _} ->
+                  true
+
+                {:pending, _} ->
+                  false
               end
+            end
 
-            _ ->
-              false
-          end
+          _ ->
+            false
+        end
 
-        {:fragment, _format, _blob_key, _size, _metadata} ->
-          true
+      {:fragment, _format, _blob_key, _size, _metadata} ->
+        true
 
-        {:asset, _external_id} ->
-          true
-      end)
+      {:asset, _external_id} ->
+        true
     end)
   end
 
