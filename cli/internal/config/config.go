@@ -54,7 +54,8 @@ type BlobsConfig struct {
 type BlobStoreConfig struct {
 	Type string `mapstructure:"type"`
 	// HTTP store fields
-	URL string `mapstructure:"url"`
+	URL   string  `mapstructure:"url"`
+	Token *string `mapstructure:"token"`
 	// S3 store fields
 	Bucket string `mapstructure:"bucket"`
 	Prefix string `mapstructure:"prefix"`
@@ -64,6 +65,7 @@ type BlobStoreConfig struct {
 // LogsConfig holds log storage configuration
 type LogsConfig struct {
 	Type          string  `mapstructure:"type"`
+	Token         *string `mapstructure:"token"`
 	URL           string  `mapstructure:"url"`
 	BatchSize     int     `mapstructure:"batch_size"`
 	FlushInterval float64 `mapstructure:"flush_interval"`

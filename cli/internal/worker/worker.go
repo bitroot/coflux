@@ -168,8 +168,12 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 
 	// Setup log store
 	logURL := w.cfg.HTTPURL() + "/logs"
+	logToken := w.sessionID
+	if w.cfg.Logs.Token != nil {
+		logToken = *w.cfg.Logs.Token
+	}
 	flushInterval := time.Duration(w.cfg.Logs.FlushInterval * float64(time.Second))
-	w.logs = logstore.NewHTTPStore(logURL, w.sessionID, w.cfg.Logs.BatchSize, flushInterval, w.logger)
+	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Logs.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
 
 	// Determine pool size (default to CPU count + 4)
@@ -351,7 +355,11 @@ func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig
 		if url == "" {
 			url = w.cfg.HTTPURL() + "/blobs"
 		}
-		return blob.NewHTTPStore(url, sessionToken), nil
+		token := sessionToken
+		if cfg.Token != nil {
+			token = *cfg.Token
+		}
+		return blob.NewHTTPStore(url, token), nil
 	case "s3":
 		return blob.NewS3Store(ctx, cfg.Bucket, cfg.Prefix, cfg.Region)
 	default:

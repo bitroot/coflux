@@ -286,7 +286,11 @@ func createBlobStoresFromViper(token string) ([]blob.Store, error) {
 					if url == "" {
 						url = fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
 					}
-					stores = append(stores, blob.NewHTTPStore(url, token))
+					storeToken := token
+					if t, ok := storeCfg["token"]; ok {
+						storeToken, _ = t.(string)
+					}
+					stores = append(stores, blob.NewHTTPStore(url, storeToken))
 				case "s3":
 					bucket, _ := storeCfg["bucket"].(string)
 					prefix, _ := storeCfg["prefix"].(string)
