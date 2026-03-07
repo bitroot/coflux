@@ -36,7 +36,7 @@ registering anything with the server.
 
 Examples:
   coflux manifests discover myapp.workflows myapp.tasks
-  coflux manifests discover --json myapp.workflows`,
+  coflux manifests discover -o json myapp.workflows`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runManifestsDiscover,
 }
@@ -114,7 +114,7 @@ func runManifestsDiscover(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(map[string]any{"targets": workflows})
 	}
 
@@ -207,7 +207,7 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get manifests: %w", err)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(manifests)
 	}
 

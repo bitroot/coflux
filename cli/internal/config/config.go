@@ -11,6 +11,8 @@ type Config struct {
 	Worker    WorkerConfig `mapstructure:"worker"`
 	Blobs     BlobsConfig  `mapstructure:"blobs"`
 	Logs      LogsConfig   `mapstructure:"logs"`
+	LogLevel  string       `mapstructure:"log_level"`
+	Output    string       `mapstructure:"output"`
 }
 
 // ServerConfig holds server connection settings
@@ -52,7 +54,8 @@ type BlobsConfig struct {
 type BlobStoreConfig struct {
 	Type string `mapstructure:"type"`
 	// HTTP store fields
-	URL string `mapstructure:"url"`
+	URL   string  `mapstructure:"url"`
+	Token *string `mapstructure:"token"`
 	// S3 store fields
 	Bucket string `mapstructure:"bucket"`
 	Prefix string `mapstructure:"prefix"`
@@ -61,12 +64,8 @@ type BlobStoreConfig struct {
 
 // LogsConfig holds log storage configuration
 type LogsConfig struct {
-	Store LogStoreConfig `mapstructure:"store"`
-}
-
-// LogStoreConfig represents a log store configuration
-type LogStoreConfig struct {
 	Type          string  `mapstructure:"type"`
+	Token         *string `mapstructure:"token"`
 	URL           string  `mapstructure:"url"`
 	BatchSize     int     `mapstructure:"batch_size"`
 	FlushInterval float64 `mapstructure:"flush_interval"`

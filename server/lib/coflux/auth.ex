@@ -100,6 +100,10 @@ defmodule Coflux.Auth do
         # Signed API token (cflx_...) - verify signature, then check database
         check_signed_token(token, project_id)
 
+      is_session_token?(token) ->
+        # Session token (external_id.secret) - verify against orchestration server
+        check_session_token(token, project_id)
+
       true ->
         # Other format - try super token, then legacy database tokens
         check_api_token(token, project_id)
@@ -117,6 +121,14 @@ defmodule Coflux.Auth do
   # Check if token is a signed API token (starts with cflx_)
   defp is_signed_token?(token) do
     String.starts_with?(token, "cflx_")
+  end
+
+  # Check if token is a session token (external_id.secret - exactly one dot)
+  defp is_session_token?(token) do
+    case String.split(token, ".", parts: 2) do
+      [external_id, secret] when external_id != "" and secret != "" -> true
+      _ -> false
+    end
   end
 
   @doc """
@@ -144,6 +156,13 @@ defmodule Coflux.Auth do
   end
 
   # Private functions
+
+  defp check_session_token(token, project_id) do
+    case Orchestration.verify_session(project_id, token) do
+      {:ok, access} -> {:ok, access}
+      {:error, _} -> {:error, :unauthorized}
+    end
+  end
 
   defp check_api_token(token, project_id) do
     # First check super token

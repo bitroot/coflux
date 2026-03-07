@@ -16,6 +16,7 @@ import (
 
 var (
 	logsFollow bool
+	logsFrom   int64
 )
 
 var logsCmd = &cobra.Command{
@@ -30,13 +31,14 @@ Examples:
   coflux logs abc123
   coflux logs abc123 --follow
   coflux logs abc123 SXw9K2p:1
-  coflux logs --json abc123`,
+  coflux logs -o json abc123`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runLogs,
 }
 
 func init() {
 	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "Stream logs in real-time")
+	logsCmd.Flags().Int64Var(&logsFrom, "from", 0, "Only include logs from partitions created after this timestamp (unix ms)")
 }
 
 // executionLabel holds the display info for a single execution in log output.
@@ -203,7 +205,15 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		params.Set("execution", executionID)
 	}
 
-	lc := logclient.NewClient(baseURL)
+	if logsFrom > 0 {
+		params.Set("from", fmt.Sprintf("%d", logsFrom))
+	}
+
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+	lc := logclient.NewClient(baseURL, token)
 
 	if logsFollow {
 		return runLogsFollow(cmd, lc, params, labelMap)
@@ -217,7 +227,7 @@ func runLogsQuery(cmd *cobra.Command, lc *logclient.Client, params url.Values, l
 		return fmt.Errorf("failed to fetch logs: %w", err)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(result)
 	}
 
@@ -233,7 +243,7 @@ func runLogsFollow(cmd *cobra.Command, lc *logclient.Client, params url.Values, 
 	color := term.IsTerminal(int(os.Stdout.Fd()))
 	state := logState{}
 	return lc.Stream(cmd.Context(), params, func(entries []logclient.LogEntry) error {
-		if getJSON() {
+		if isOutput("json") {
 			for _, entry := range entries {
 				data, err := json.Marshal(entry)
 				if err != nil {

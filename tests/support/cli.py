@@ -8,7 +8,7 @@ _COFLUX_BIN = os.environ.get("COFLUX_BIN", "coflux")
 def _coflux(*args, json_output=False, env=None, timeout=30):
     cmd = [_COFLUX_BIN]
     if json_output:
-        cmd.append("--json")
+        cmd.extend(["-o", "json"])
     cmd.extend(args)
     return subprocess.run(cmd, capture_output=True, text=True, env=env, check=True, timeout=timeout)
 
@@ -89,10 +89,12 @@ def blobs_get(key, output_path, env=None):
     _coflux("blobs", "get", key, "-o", output_path, env=env)
 
 
-def logs_get(run_id, step_attempt=None, env=None, json_output=True):
+def logs_get(run_id, step_attempt=None, from_ts=None, env=None, json_output=True):
     args = ["logs", run_id]
     if step_attempt:
         args.append(step_attempt)
+    if from_ts is not None:
+        args.extend(["--from", str(from_ts)])
     result = _coflux(*args, json_output=json_output, env=env)
     if json_output:
         return json.loads(result.stdout)

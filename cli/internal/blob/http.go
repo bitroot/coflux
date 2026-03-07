@@ -12,13 +12,15 @@ import (
 // HTTPStore implements Store using HTTP GET/PUT
 type HTTPStore struct {
 	baseURL string
+	token   string
 	client  *http.Client
 }
 
 // NewHTTPStore creates a new HTTP blob store
-func NewHTTPStore(baseURL string) *HTTPStore {
+func NewHTTPStore(baseURL string, token string) *HTTPStore {
 	return &HTTPStore{
 		baseURL: baseURL,
+		token:   token,
 		client:  &http.Client{},
 	}
 }
@@ -26,7 +28,14 @@ func NewHTTPStore(baseURL string) *HTTPStore {
 // Get retrieves a blob by key
 func (s *HTTPStore) Get(key string) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/%s", s.baseURL, key)
-	resp, err := s.client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +69,9 @@ func (s *HTTPStore) Put(reader io.Reader) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

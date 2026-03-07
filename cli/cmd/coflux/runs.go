@@ -32,7 +32,7 @@ Use --no-wait to return the current snapshot immediately.
 
 Example:
   coflux runs inspect abc123
-  coflux runs inspect --no-wait --json abc123`,
+  coflux runs inspect --no-wait -o json abc123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsInspect,
 }
@@ -54,7 +54,7 @@ Use --no-wait to re-run and exit immediately.
 Example:
   coflux runs rerun RwD6:3
   coflux runs rerun --no-wait RwD6:3
-  coflux runs rerun --json RwD6:3`,
+  coflux runs rerun -o json RwD6:3`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsRerun,
 }
@@ -158,8 +158,8 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve token: %w", err)
 	}
 
-	// --json: wait for root step, print full run snapshot as JSON
-	if getJSON() {
+	// -o json: wait for root step, print full run snapshot as JSON
+	if isOutput("json") {
 		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
 		if err != nil {
 			return err
@@ -214,7 +214,7 @@ func runRunsResult(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("run %s has no result yet", runID)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(result)
 	}
 
@@ -309,7 +309,7 @@ func runRunsCancel(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to cancel execution: %w", err)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(map[string]any{"cancelled": true})
 	}
 
@@ -349,7 +349,7 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 
 	// --no-wait: print result and exit immediately
 	if rerunNoWait {
-		if getJSON() {
+		if isOutput("json") {
 			return outputJSON(result)
 		}
 		fmt.Printf("Step re-run (execution: %s, attempt: %d).\n", result.ExecutionID, result.Attempt)
@@ -361,8 +361,8 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve token: %w", err)
 	}
 
-	// --json: wait for root step, print full run snapshot as JSON
-	if getJSON() {
+	// -o json: wait for root step, print full run snapshot as JSON
+	if isOutput("json") {
 		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
 		if err != nil {
 			return err

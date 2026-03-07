@@ -79,9 +79,9 @@ func resolveWorkspaceID(ctx context.Context, client *api.Client, name string) (s
 	return "", fmt.Errorf("workspace not found: %s", name)
 }
 
-// getJSON returns whether JSON output is requested
-func getJSON() bool {
-	return viper.GetBool("json")
+// isOutput returns whether the given output format is requested
+func isOutput(format string) bool {
+	return viper.GetString("output") == format
 }
 
 // outputJSON marshals v as indented JSON and prints it to stdout

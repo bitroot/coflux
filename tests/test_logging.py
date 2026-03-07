@@ -260,17 +260,6 @@ def _rotate_logs(port, project_id):
     urllib.request.urlopen(req, timeout=10)
 
 
-def _query_logs_http(port, project_id, run_id, after=None, from_ts=None):
-    """Query logs via HTTP JSON endpoint."""
-    params = f"run={run_id}"
-    if after:
-        params += f"&after={after}"
-    if from_ts is not None:
-        params += f"&from={from_ts}"
-    url = f"http://{project_id}.localhost:{port}/logs?{params}"
-    req = urllib.request.Request(url)
-    resp = urllib.request.urlopen(req, timeout=10)
-    return json.loads(resp.read())
 
 
 def test_logs_across_partition_boundary(worker, server):
@@ -388,15 +377,13 @@ def test_from_parameter_skips_old_partitions(worker, server):
         conn1.complete(eid_new, value="new_done")
         assert ctx.result(run_id_new)["value"]["data"] == "new_done"
 
-        # Query new run with from= parameter via HTTP
-        data = _query_logs_http(
-            server.port, ctx.project_id, run_id_new, from_ts=from_ts
-        )
+        # Query new run with from= parameter — should find new_message
+        data = ctx.logs(run_id_new, from_ts=from_ts, min_entries=1)
         templates = [l["template"] for l in data["logs"]]
         assert "new_message" in templates
 
         # Query old run without from= — should still work
-        data_old = _query_logs_http(server.port, ctx.project_id, run_id_old)
+        data_old = ctx.logs(run_id_old, min_entries=1)
         templates_old = [l["template"] for l in data_old["logs"]]
         assert "old_message" in templates_old
 
@@ -481,10 +468,5 @@ def test_pagination_across_partitions(worker, server):
             f"p1 messages should precede p2 messages: p1={p1_indices}, p2={p2_indices}"
         )
 
-        # Test pagination with limit via HTTP
-        # Fetch first page (limit=2)
-        url = f"http://{ctx.project_id}.localhost:{server.port}/logs?run={run_id}"
-        # Use the cursor from the response to paginate
-        data1 = _query_logs_http(server.port, ctx.project_id, run_id)
-        assert len(data1["logs"]) >= 6
-        assert data1["cursor"] is not None
+        # Verify cursor is present in JSON output
+        assert data["cursor"] is not None

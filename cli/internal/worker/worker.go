@@ -159,7 +159,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 
 	// Setup blob manager
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("coflux-%s", sessionID), "cache", "blobs")
-	stores := w.createBlobStores(ctx)
+	stores := w.createBlobStores(ctx, w.sessionID)
 	w.blobs = blob.NewManager(stores, cacheDir, w.cfg.Blobs.Threshold)
 	w.logger.Info("blob manager configured", "threshold", w.cfg.Blobs.Threshold, "cache_dir", cacheDir)
 	if err := w.blobs.EnsureCacheDir(); err != nil {
@@ -168,8 +168,12 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 
 	// Setup log store
 	logURL := w.cfg.HTTPURL() + "/logs"
-	flushInterval := time.Duration(w.cfg.Logs.Store.FlushInterval * float64(time.Second))
-	w.logs = logstore.NewHTTPStore(logURL, w.cfg.Logs.Store.BatchSize, flushInterval, w.logger)
+	logToken := w.sessionID
+	if w.cfg.Logs.Token != nil {
+		logToken = *w.cfg.Logs.Token
+	}
+	flushInterval := time.Duration(w.cfg.Logs.FlushInterval * float64(time.Second))
+	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Logs.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
 
 	// Determine pool size (default to CPU count + 4)
@@ -344,25 +348,38 @@ func splitTarget(fullName string) (module, name string) {
 	return "", fullName
 }
 
-func (w *Worker) createBlobStores(ctx context.Context) []blob.Store {
+func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig, sessionToken string) (blob.Store, error) {
+	switch cfg.Type {
+	case "http":
+		url := cfg.URL
+		if url == "" {
+			url = w.cfg.HTTPURL() + "/blobs"
+		}
+		token := sessionToken
+		if cfg.Token != nil {
+			token = *cfg.Token
+		}
+		return blob.NewHTTPStore(url, token), nil
+	case "s3":
+		return blob.NewS3Store(ctx, cfg.Bucket, cfg.Prefix, cfg.Region)
+	default:
+		return nil, fmt.Errorf("unknown blob store type: %s", cfg.Type)
+	}
+}
+
+func (w *Worker) createBlobStores(ctx context.Context, sessionToken string) []blob.Store {
 	var stores []blob.Store
 	for _, cfg := range w.cfg.Blobs.Stores {
-		switch cfg.Type {
-		case "http":
-			stores = append(stores, blob.NewHTTPStore(cfg.URL))
-		case "s3":
-			s3Store, err := blob.NewS3Store(ctx, cfg.Bucket, cfg.Prefix, cfg.Region)
-			if err != nil {
-				w.logger.Error("failed to create S3 store", "error", err)
-				continue
-			}
-			stores = append(stores, s3Store)
+		store, err := w.createBlobStore(ctx, cfg, sessionToken)
+		if err != nil {
+			w.logger.Error("failed to create blob store", "type", cfg.Type, "error", err)
+			continue
 		}
+		stores = append(stores, store)
 	}
 	// Default to HTTP store at server
 	if len(stores) == 0 {
-		baseURL := w.cfg.HTTPURL() + "/blobs"
-		stores = append(stores, blob.NewHTTPStore(baseURL))
+		stores = append(stores, blob.NewHTTPStore(w.cfg.HTTPURL()+"/blobs", sessionToken))
 	}
 	return stores
 }

@@ -13,6 +13,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:check_token, token_hash})
   end
 
+  def verify_session(project_id, token) do
+    call_server(project_id, {:verify_session, token})
+  end
+
   def create_token(project_id, name, principal_id, opts \\ []) do
     call_server(project_id, {:create_token, name, principal_id, opts})
   end

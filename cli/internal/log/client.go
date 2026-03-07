@@ -30,14 +30,16 @@ type QueryResult struct {
 // Client reads logs from the server's GET /logs endpoint
 type Client struct {
 	baseURL string
+	token   string
 	client  *http.Client
 }
 
 // NewClient creates a new log reader client.
 // baseURL should be the full URL to the /logs endpoint (e.g. "http://host:port/logs").
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL string, token string) *Client {
 	return &Client{
 		baseURL: baseURL,
+		token:   token,
 		client:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -51,6 +53,9 @@ func (c *Client) Query(ctx context.Context, params url.Values) (*QueryResult, er
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -79,6 +84,9 @@ func (c *Client) Stream(ctx context.Context, params url.Values, callback func([]
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	// Use a client without timeout for streaming
 	streamClient := &http.Client{}

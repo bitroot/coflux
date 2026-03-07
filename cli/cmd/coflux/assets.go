@@ -50,7 +50,7 @@ func runAssetsInspect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("asset '%s' not found", assetID)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(asset)
 	}
 
@@ -174,7 +174,11 @@ func runAssetsDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create blob stores from config
-	stores, err := createBlobStoresFromViper()
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+	stores, err := createBlobStoresFromViper(token)
 	if err != nil {
 		return fmt.Errorf("failed to create blob stores: %w", err)
 	}
@@ -267,19 +271,11 @@ func copyFile(src, dst string) error {
 	return dstFile.Close()
 }
 
-func createBlobStoresFromViper() ([]blob.Store, error) {
+func createBlobStoresFromViper(token string) ([]blob.Store, error) {
 	var stores []blob.Store
 
-	// Check for stores in config
-	storeConfigs := viper.Get("blobs.stores")
-	if storeConfigs == nil {
-		// Default to HTTP store at server
-		baseURL := fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
-		stores = append(stores, blob.NewHTTPStore(baseURL))
-		return stores, nil
-	}
-
 	// Parse store configs
+	storeConfigs := viper.Get("blobs.stores")
 	if storeList, ok := storeConfigs.([]any); ok {
 		for _, s := range storeList {
 			if storeCfg, ok := s.(map[string]any); ok {
@@ -287,7 +283,14 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 				switch storeType {
 				case "http":
 					url, _ := storeCfg["url"].(string)
-					stores = append(stores, blob.NewHTTPStore(url))
+					if url == "" {
+						url = fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
+					}
+					storeToken := token
+					if t, ok := storeCfg["token"]; ok {
+						storeToken, _ = t.(string)
+					}
+					stores = append(stores, blob.NewHTTPStore(url, storeToken))
 				case "s3":
 					bucket, _ := storeCfg["bucket"].(string)
 					prefix, _ := storeCfg["prefix"].(string)
@@ -302,10 +305,10 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 		}
 	}
 
+	// Default to HTTP store at server
 	if len(stores) == 0 {
-		// Default to HTTP store at server
 		baseURL := fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
-		stores = append(stores, blob.NewHTTPStore(baseURL))
+		stores = append(stores, blob.NewHTTPStore(baseURL, token))
 	}
 
 	return stores, nil

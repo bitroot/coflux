@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/config"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -48,8 +49,8 @@ func init() {
 	viper.SetDefault("workspace", "default")
 	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
-	viper.SetDefault("logs.store.batch_size", 100)
-	viper.SetDefault("logs.store.flush_interval", 0.5)
+	viper.SetDefault("logs.batch_size", 100)
+	viper.SetDefault("logs.flush_interval", 0.5)
 	viper.SetDefault("log_level", "warn")
 
 	// Global flags
@@ -59,7 +60,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("team", "t", "", "Team ID for Studio authentication")
 	rootCmd.PersistentFlags().StringP("workspace", "w", "", "Workspace name")
 	rootCmd.PersistentFlags().String("log-level", "", "Log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().Bool("json", false, "Output results as JSON")
+	rootCmd.PersistentFlags().StringP("output", "o", "", "Output format (json)")
 
 	// Bind flags to viper
 	viper.BindPFlag("server.host", rootCmd.PersistentFlags().Lookup("host"))
@@ -67,7 +68,7 @@ func init() {
 	viper.BindPFlag("team", rootCmd.PersistentFlags().Lookup("team"))
 	viper.BindPFlag("workspace", rootCmd.PersistentFlags().Lookup("workspace"))
 	viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
-	viper.BindPFlag("json", rootCmd.PersistentFlags().Lookup("json"))
+	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 
 	// Command groups
 	rootCmd.AddGroup(
@@ -130,7 +131,9 @@ func initConfig(cmd *cobra.Command, args []string) error {
 // loadConfig unmarshals viper config into a Config struct
 func loadConfig() (*config.Config, error) {
 	cfg := &config.Config{}
-	if err := viper.Unmarshal(cfg); err != nil {
+	if err := viper.Unmarshal(cfg, func(dc *mapstructure.DecoderConfig) {
+		dc.ErrorUnused = true
+	}); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
