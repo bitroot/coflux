@@ -50,7 +50,7 @@ func runAssetsInspect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("asset '%s' not found", assetID)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(asset)
 	}
 

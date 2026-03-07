@@ -31,7 +31,7 @@ Examples:
   coflux logs abc123
   coflux logs abc123 --follow
   coflux logs abc123 SXw9K2p:1
-  coflux logs --json abc123`,
+  coflux logs -o json abc123`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runLogs,
 }
@@ -218,7 +218,7 @@ func runLogsQuery(cmd *cobra.Command, lc *logclient.Client, params url.Values, l
 		return fmt.Errorf("failed to fetch logs: %w", err)
 	}
 
-	if getJSON() {
+	if isOutput("json") {
 		return outputJSON(result)
 	}
 
@@ -234,7 +234,7 @@ func runLogsFollow(cmd *cobra.Command, lc *logclient.Client, params url.Values, 
 	color := term.IsTerminal(int(os.Stdout.Fd()))
 	state := logState{}
 	return lc.Stream(cmd.Context(), params, func(entries []logclient.LogEntry) error {
-		if getJSON() {
+		if isOutput("json") {
 			for _, entry := range entries {
 				data, err := json.Marshal(entry)
 				if err != nil {

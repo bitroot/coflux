@@ -12,7 +12,7 @@ type Config struct {
 	Blobs     BlobsConfig  `mapstructure:"blobs"`
 	Logs      LogsConfig   `mapstructure:"logs"`
 	LogLevel  string       `mapstructure:"log_level"`
-	JSON      bool         `mapstructure:"json"`
+	Output    string       `mapstructure:"output"`
 }
 
 // ServerConfig holds server connection settings

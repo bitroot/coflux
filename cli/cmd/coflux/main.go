@@ -60,7 +60,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("team", "t", "", "Team ID for Studio authentication")
 	rootCmd.PersistentFlags().StringP("workspace", "w", "", "Workspace name")
 	rootCmd.PersistentFlags().String("log-level", "", "Log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().Bool("json", false, "Output results as JSON")
+	rootCmd.PersistentFlags().StringP("output", "o", "", "Output format (json)")
 
 	// Bind flags to viper
 	viper.BindPFlag("server.host", rootCmd.PersistentFlags().Lookup("host"))
@@ -68,7 +68,7 @@ func init() {
 	viper.BindPFlag("team", rootCmd.PersistentFlags().Lookup("team"))
 	viper.BindPFlag("workspace", rootCmd.PersistentFlags().Lookup("workspace"))
 	viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
-	viper.BindPFlag("json", rootCmd.PersistentFlags().Lookup("json"))
+	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 
 	// Command groups
 	rootCmd.AddGroup(

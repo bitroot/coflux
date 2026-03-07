@@ -21,7 +21,7 @@ Arguments are passed as JSON strings.
 
 By default, the command waits for the workflow to complete:
   - In a TTY: shows a live-updating tree of step statuses.
-  - With --json: waits for the root step, then prints the result as JSON.
+  - With -o json: waits for the root step, then prints the result as JSON.
   - In a non-TTY: prints the run ID and waits silently (exit code reflects result).
 
 Use --no-wait to submit and exit immediately without waiting.
@@ -29,7 +29,7 @@ Use --no-wait to submit and exit immediately without waiting.
 Example:
   coflux submit myapp.workflows.process_data '{"key": "value"}' '123'
   coflux submit --no-wait myapp.workflows.process_data '"arg"'
-  coflux submit --json myapp.workflows.process_data '"arg"'`,
+  coflux submit -o json myapp.workflows.process_data '"arg"'`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSubmit,
 }
@@ -109,7 +109,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// --no-wait: print run ID and exit immediately
 	if submitNoWait {
-		if getJSON() {
+		if isOutput("json") {
 			return outputJSON(result)
 		}
 		fmt.Printf("Workflow submitted (run: %s).\n", result.RunID)
@@ -121,8 +121,8 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve token: %w", err)
 	}
 
-	// --json: wait for root step, print full run snapshot as JSON
-	if getJSON() {
+	// -o json: wait for root step, print full run snapshot as JSON
+	if isOutput("json") {
 		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
 		if err != nil {
 			return err
