@@ -45,7 +45,6 @@ func ParseProvides(provides []string) map[string][]string {
 // BlobsConfig holds blob storage configuration
 type BlobsConfig struct {
 	Threshold int               `mapstructure:"threshold"`
-	Store     BlobStoreConfig   `mapstructure:"store"`
 	Stores    []BlobStoreConfig `mapstructure:"stores"`
 }
 
@@ -63,11 +62,6 @@ type BlobStoreConfig struct {
 
 // LogsConfig holds log storage configuration
 type LogsConfig struct {
-	Store LogStoreConfig `mapstructure:"store"`
-}
-
-// LogStoreConfig represents a log store configuration
-type LogStoreConfig struct {
 	Type          string  `mapstructure:"type"`
 	URL           string  `mapstructure:"url"`
 	Token         string  `mapstructure:"token"`

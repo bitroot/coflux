@@ -48,8 +48,8 @@ func init() {
 	viper.SetDefault("workspace", "default")
 	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
-	viper.SetDefault("logs.store.batch_size", 100)
-	viper.SetDefault("logs.store.flush_interval", 0.5)
+	viper.SetDefault("logs.batch_size", 100)
+	viper.SetDefault("logs.flush_interval", 0.5)
 	viper.SetDefault("log_level", "warn")
 
 	// Global flags

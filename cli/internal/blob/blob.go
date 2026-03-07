@@ -42,7 +42,10 @@ func NewManager(stores []Store, cacheDir string, threshold int) *Manager {
 func (m *Manager) Get(key string) (io.ReadCloser, error) {
 	for _, store := range m.stores {
 		reader, err := store.Get(key)
-		if err == nil && reader != nil {
+		if err != nil {
+			return nil, err
+		}
+		if reader != nil {
 			return reader, nil
 		}
 	}
@@ -84,7 +87,10 @@ func (m *Manager) Download(key string) (string, error) {
 	// Try each store
 	for _, store := range m.stores {
 		ok, err := store.Download(key, cachePath)
-		if err == nil && ok {
+		if err != nil {
+			return "", err
+		}
+		if ok {
 			return cachePath, nil
 		}
 	}
@@ -102,7 +108,10 @@ func (m *Manager) DownloadTo(key, targetPath string) error {
 	// Try each store
 	for _, store := range m.stores {
 		ok, err := store.Download(key, targetPath)
-		if err == nil && ok {
+		if err != nil {
+			return err
+		}
+		if ok {
 			return nil
 		}
 	}

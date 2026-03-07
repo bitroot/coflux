@@ -204,7 +204,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		params.Set("execution", executionID)
 	}
 
-	lc := logclient.NewClient(baseURL, viper.GetString("logs.store.token"))
+	lc := logclient.NewClient(baseURL, viper.GetString("logs.token"))
 
 	if logsFollow {
 		return runLogsFollow(cmd, lc, params, labelMap)
