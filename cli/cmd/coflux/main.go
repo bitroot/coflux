@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/config"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -130,7 +131,9 @@ func initConfig(cmd *cobra.Command, args []string) error {
 // loadConfig unmarshals viper config into a Config struct
 func loadConfig() (*config.Config, error) {
 	cfg := &config.Config{}
-	if err := viper.Unmarshal(cfg); err != nil {
+	if err := viper.Unmarshal(cfg, func(dc *mapstructure.DecoderConfig) {
+		dc.ErrorUnused = true
+	}); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 

@@ -11,6 +11,8 @@ type Config struct {
 	Worker    WorkerConfig `mapstructure:"worker"`
 	Blobs     BlobsConfig  `mapstructure:"blobs"`
 	Logs      LogsConfig   `mapstructure:"logs"`
+	LogLevel  string       `mapstructure:"log_level"`
+	JSON      bool         `mapstructure:"json"`
 }
 
 // ServerConfig holds server connection settings
