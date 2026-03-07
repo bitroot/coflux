@@ -11,6 +11,7 @@ import (
 
 	logclient "github.com/bitroot/coflux/cli/internal/log"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 )
 
@@ -203,7 +204,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		params.Set("execution", executionID)
 	}
 
-	lc := logclient.NewClient(baseURL)
+	lc := logclient.NewClient(baseURL, viper.GetString("logs.store.token"))
 
 	if logsFollow {
 		return runLogsFollow(cmd, lc, params, labelMap)

@@ -11,7 +11,7 @@ defmodule Coflux.Handlers.Logs do
 
   import Coflux.Handlers.Utils
 
-  alias Coflux.Logs
+  alias Coflux.{Config, Logs}
 
   def init(req, opts) do
     req = set_cors_headers(req)
@@ -38,9 +38,13 @@ defmodule Coflux.Handlers.Logs do
   defp handle_post(req, opts) do
     host = get_host(req)
 
-    case resolve_project(host) do
-      {:ok, project_id} ->
-        handle_post_with_project(req, opts, project_id)
+    with {:ok, project_id} <- resolve_project(host),
+         :ok <- check_store_token(req, Config.logs_token_hash()) do
+      handle_post_with_project(req, opts, project_id)
+    else
+      {:error, :unauthorized} ->
+        req = json_error_response(req, "unauthorized", status: 401)
+        {:ok, req, opts}
 
       {:error, :not_configured} ->
         req = json_error_response(req, "not_configured", status: 500)
@@ -86,9 +90,13 @@ defmodule Coflux.Handlers.Logs do
   defp handle_get(req, opts) do
     host = get_host(req)
 
-    case resolve_project(host) do
-      {:ok, project_id} ->
-        handle_get_with_project(req, opts, project_id)
+    with {:ok, project_id} <- resolve_project(host),
+         :ok <- check_store_token(req, Config.logs_token_hash()) do
+      handle_get_with_project(req, opts, project_id)
+    else
+      {:error, :unauthorized} ->
+        req = json_error_response(req, "unauthorized", status: 401)
+        {:ok, req, opts}
 
       {:error, :not_configured} ->
         req = json_error_response(req, "not_configured", status: 500)

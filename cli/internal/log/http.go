@@ -36,6 +36,7 @@ type Store interface {
 // HTTPStore implements Store using HTTP POST with batching
 type HTTPStore struct {
 	baseURL       string
+	token         string
 	client        *http.Client
 	batchSize     int
 	flushInterval time.Duration
@@ -50,12 +51,13 @@ type HTTPStore struct {
 }
 
 // NewHTTPStore creates a new HTTP log store
-func NewHTTPStore(baseURL string, batchSize int, flushInterval time.Duration, logger *slog.Logger) *HTTPStore {
+func NewHTTPStore(baseURL string, token string, batchSize int, flushInterval time.Duration, logger *slog.Logger) *HTTPStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &HTTPStore{
 		baseURL:       baseURL,
+		token:         token,
 		client:        &http.Client{Timeout: 30 * time.Second},
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
@@ -190,6 +192,9 @@ func (s *HTTPStore) send(entries []Entry) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

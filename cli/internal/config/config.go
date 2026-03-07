@@ -45,6 +45,7 @@ func ParseProvides(provides []string) map[string][]string {
 // BlobsConfig holds blob storage configuration
 type BlobsConfig struct {
 	Threshold int               `mapstructure:"threshold"`
+	Store     BlobStoreConfig   `mapstructure:"store"`
 	Stores    []BlobStoreConfig `mapstructure:"stores"`
 }
 
@@ -52,7 +53,8 @@ type BlobsConfig struct {
 type BlobStoreConfig struct {
 	Type string `mapstructure:"type"`
 	// HTTP store fields
-	URL string `mapstructure:"url"`
+	URL   string `mapstructure:"url"`
+	Token string `mapstructure:"token"`
 	// S3 store fields
 	Bucket string `mapstructure:"bucket"`
 	Prefix string `mapstructure:"prefix"`
@@ -68,6 +70,7 @@ type LogsConfig struct {
 type LogStoreConfig struct {
 	Type          string  `mapstructure:"type"`
 	URL           string  `mapstructure:"url"`
+	Token         string  `mapstructure:"token"`
 	BatchSize     int     `mapstructure:"batch_size"`
 	FlushInterval float64 `mapstructure:"flush_interval"`
 }

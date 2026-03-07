@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Blobs do
   import Coflux.Handlers.Utils
 
-  alias Coflux.Utils
+  alias Coflux.{Config, Utils}
 
   def init(req, opts) do
     bindings = :cowboy_req.bindings(req)
@@ -13,7 +13,14 @@ defmodule Coflux.Handlers.Blobs do
         {:ok, req, opts}
 
       method ->
-        handle(req, method, bindings[:key], opts)
+        case check_store_token(req, Config.blobs_token_hash()) do
+          :ok ->
+            handle(req, method, bindings[:key], opts)
+
+          {:error, :unauthorized} ->
+            req = json_error_response(req, "unauthorized", status: 401)
+            {:ok, req, opts}
+        end
     end
   end
 

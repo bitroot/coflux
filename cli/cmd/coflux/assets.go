@@ -275,7 +275,7 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 	if storeConfigs == nil {
 		// Default to HTTP store at server
 		baseURL := fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
-		stores = append(stores, blob.NewHTTPStore(baseURL))
+		stores = append(stores, blob.NewHTTPStore(baseURL, viper.GetString("blobs.store.token")))
 		return stores, nil
 	}
 
@@ -287,7 +287,8 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 				switch storeType {
 				case "http":
 					url, _ := storeCfg["url"].(string)
-					stores = append(stores, blob.NewHTTPStore(url))
+					token, _ := storeCfg["token"].(string)
+					stores = append(stores, blob.NewHTTPStore(url, token))
 				case "s3":
 					bucket, _ := storeCfg["bucket"].(string)
 					prefix, _ := storeCfg["prefix"].(string)
@@ -305,7 +306,7 @@ func createBlobStoresFromViper() ([]blob.Store, error) {
 	if len(stores) == 0 {
 		// Default to HTTP store at server
 		baseURL := fmt.Sprintf("%s://%s/blobs", map[bool]string{true: "https", false: "http"}[isSecure()], getHost())
-		stores = append(stores, blob.NewHTTPStore(baseURL))
+		stores = append(stores, blob.NewHTTPStore(baseURL, viper.GetString("blobs.store.token")))
 	}
 
 	return stores, nil
