@@ -180,6 +180,7 @@ def worker(server, project_id, tmp_path):
                     self,
                     run_id,
                     step_attempt=None,
+                    from_ts=None,
                     json_output=True,
                     min_entries=None,
                     timeout=5,
@@ -190,6 +191,7 @@ def worker(server, project_id, tmp_path):
                         data = cli.logs_get(
                             run_id,
                             step_attempt=step_attempt,
+                            from_ts=from_ts,
                             env=env,
                             json_output=json_output,
                         )

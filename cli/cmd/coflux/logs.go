@@ -16,6 +16,7 @@ import (
 
 var (
 	logsFollow bool
+	logsFrom   int64
 )
 
 var logsCmd = &cobra.Command{
@@ -37,6 +38,7 @@ Examples:
 
 func init() {
 	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "Stream logs in real-time")
+	logsCmd.Flags().Int64Var(&logsFrom, "from", 0, "Only include logs from partitions created after this timestamp (unix ms)")
 }
 
 // executionLabel holds the display info for a single execution in log output.
@@ -201,6 +203,10 @@ func runLogs(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		params.Set("execution", executionID)
+	}
+
+	if logsFrom > 0 {
+		params.Set("from", fmt.Sprintf("%d", logsFrom))
 	}
 
 	token, err := resolveToken()
