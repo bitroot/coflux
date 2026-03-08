@@ -384,12 +384,29 @@ defmodule Coflux.Orchestration.Server do
          {:ok, base_id} <- resolve_optional_workspace(state, base_external_id) do
       case Workspaces.create_workspace(state.db, name, base_id, access[:principal_id]) do
         {:ok, workspace_id, workspace} ->
+          base_external_id =
+            if workspace.base_id do
+              case Map.fetch(state.workspaces, workspace.base_id) do
+                {:ok, base} -> base.external_id
+                :error -> nil
+              end
+            end
+
           state =
             state
             |> put_in([Access.key(:workspaces), workspace_id], workspace)
             |> put_in([Access.key(:workspace_names), workspace.name], workspace_id)
             |> put_in([Access.key(:workspace_external_ids), workspace.external_id], workspace_id)
-            |> notify_listeners(:workspaces, {:workspace, workspace_id, workspace})
+            |> notify_listeners(
+              :workspaces,
+              {:workspace, workspace_id,
+               %{
+                 name: workspace.name,
+                 base_external_id: base_external_id,
+                 state: workspace.state,
+                 external_id: workspace.external_id
+               }}
+            )
             |> flush_notifications()
 
           {:reply, {:ok, workspace_id, workspace.external_id}, state}
