@@ -275,6 +275,11 @@ func loadBlobData(key string) (any, error) {
 }
 
 func printResult(result map[string]any) error {
+	color := term.IsTerminal(int(os.Stdout.Fd()))
+	fmtData := formatDataPlain
+	if color {
+		fmtData = formatData
+	}
 	resultType, _ := result["type"].(string)
 	switch resultType {
 	case "value":
@@ -286,7 +291,7 @@ func printResult(result map[string]any) error {
 		references, _ := value["references"].([]any)
 		switch valueType {
 		case "raw":
-			fmt.Println(formatData(value["data"], references))
+			fmt.Println(fmtData(value["data"], references))
 		case "blob":
 			key, _ := value["key"].(string)
 			blobData, err := loadBlobData(key)
@@ -294,7 +299,7 @@ func printResult(result map[string]any) error {
 				size, _ := value["size"].(float64)
 				fmt.Printf("<blob (%s)>\n", humanSize(int64(size)))
 			} else {
-				fmt.Println(formatData(blobData, references))
+				fmt.Println(fmtData(blobData, references))
 			}
 		}
 	case "error":
