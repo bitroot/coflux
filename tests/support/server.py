@@ -1,5 +1,6 @@
 """Managed Elixir server for integration tests."""
 
+import hashlib
 import os
 import socket
 import subprocess
@@ -30,12 +31,16 @@ def _wait_for_ready(port, timeout=15):
     raise TimeoutError(f"server not ready on port {port} within {timeout}s")
 
 
+SUPER_TOKEN = "test-super-token"
+
+
 class ManagedServer:
     """Start/stop a Coflux server for tests.
 
     Runs the Elixir server directly when the source is available,
     or via Docker when COFLUX_IMAGE is set (e.g. in CI).
-    Auth is disabled so tests don't need tokens.
+    Auth is disabled so tests don't need tokens for normal operations.
+    A super token is configured for management endpoints (rotate, etc.).
     """
 
     def __init__(self, data_dir, port=None):
@@ -59,6 +64,7 @@ class ManagedServer:
             "COFLUX_DATA_DIR": self.data_dir,
             "COFLUX_BASE_DOMAIN": "localhost",
             "COFLUX_REQUIRE_AUTH": "false",
+            "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
         }
         self._proc = subprocess.Popen(
             ["elixir", "-S", "mix", "run", "--no-halt"],
@@ -86,6 +92,8 @@ class ManagedServer:
                 "COFLUX_BASE_DOMAIN=localhost",
                 "-e",
                 "COFLUX_REQUIRE_AUTH=false",
+                "-e",
+                f"COFLUX_SUPER_TOKEN_HASH={hashlib.sha256(SUPER_TOKEN.encode()).hexdigest()}",
                 image,
             ],
             check=True,

@@ -1,4 +1,5 @@
 def _target(
+    module,
     name,
     type,
     parameters=None,
@@ -12,6 +13,7 @@ def _target(
     requires=None,
 ):
     target = {
+        "module": module,
         "name": name,
         "type": type,
         "parameters": [{"name": p} for p in (parameters or [])],
@@ -33,12 +35,12 @@ def _target(
     return target
 
 
-def workflow(name, parameters=None, **kwargs):
-    return _target(name, "workflow", parameters, **kwargs)
+def workflow(module, name, parameters=None, **kwargs):
+    return _target(module, name, "workflow", parameters, **kwargs)
 
 
-def task(name, parameters=None, **kwargs):
-    return _target(name, "task", parameters, **kwargs)
+def task(module, name, parameters=None, **kwargs):
+    return _target(module, name, "task", parameters, **kwargs)
 
 
 def manifest(targets):

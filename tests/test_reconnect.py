@@ -13,7 +13,7 @@ from support.server import ManagedServer
 def test_result_buffered_on_disconnect(server, tmp_path):
     """Result completed while disconnected is delivered after reconnect."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     # Direct host for CLI commands (submit, result) - bypasses proxy
     direct_host = f"{project_id}.localhost:{server.port}"
@@ -25,11 +25,11 @@ def test_result_buffered_on_disconnect(server, tmp_path):
         worker_host = f"{project_id}.localhost:{proxy.port}"
 
         with managed_worker(targets, worker_host, tmp_path) as executor:
-            resp = cli.submit("test.my_workflow", host=direct_host)
+            resp = cli.submit("test/my_workflow", host=direct_host)
             run_id = resp["runId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
 
             # Kill proxy connections — Go worker loses its WebSocket
             proxy.disconnect()
@@ -52,7 +52,7 @@ def test_result_buffered_on_disconnect(server, tmp_path):
 def test_error_buffered_on_disconnect(server, tmp_path):
     """Error reported while disconnected is delivered after reconnect."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     direct_host = f"{project_id}.localhost:{server.port}"
     cli.workspaces_create("default", host=direct_host)
@@ -62,11 +62,11 @@ def test_error_buffered_on_disconnect(server, tmp_path):
         worker_host = f"{project_id}.localhost:{proxy.port}"
 
         with managed_worker(targets, worker_host, tmp_path) as executor:
-            resp = cli.submit("test.my_workflow", host=direct_host)
+            resp = cli.submit("test/my_workflow", host=direct_host)
             run_id = resp["runId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
 
             proxy.disconnect()
             time.sleep(0.5)
@@ -84,7 +84,7 @@ def test_error_buffered_on_disconnect(server, tmp_path):
 def test_result_buffered_across_server_restart(tmp_path):
     """Result completed while server is down is delivered after server restart."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     server = ManagedServer(str(tmp_path / "data"))
     server.start()
@@ -94,11 +94,11 @@ def test_result_buffered_across_server_restart(tmp_path):
         cli.workspaces_create("default", host=host)
 
         with managed_worker(targets, host, tmp_path) as executor:
-            resp = cli.submit("test.my_workflow", host=host)
+            resp = cli.submit("test/my_workflow", host=host)
             run_id = resp["runId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
 
             # Kill server
             server.stop()

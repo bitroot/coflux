@@ -22,15 +22,15 @@ class WorkerContext:
 
     def handle_one(self):
         """Handle one execution."""
-        conn, eid, target, args = self.executor.next_execute()
-        response = self._handler(eid, target, args)
+        conn, eid, module, target, args = self.executor.next_execute()
+        response = self._handler(eid, module, target, args)
         if response is not None:
             conn.send(response)
 
-    def submit(self, target, *arguments, idempotency_key=None):
+    def submit(self, module, target, *arguments, idempotency_key=None):
         """Submit a workflow and return the parsed JSON response."""
         return cli.submit(
-            target,
+            f"{module}/{target}",
             *arguments,
             idempotency_key=idempotency_key,
             host=self.host,
@@ -138,13 +138,13 @@ class WorkerContext:
                     return data
             time.sleep(0.05)
 
-    def run(self, target, *arguments):
+    def run(self, module, target, *arguments):
         """Submit, handle one execution, and return the run result.
 
         Returns a dict with either {"value": <data>} or
         {"error": {"type": ..., "message": ...}}.
         """
-        resp = self.submit(target, *arguments)
+        resp = self.submit(module, target, *arguments)
         self.handle_one()
         run_result = self.result(resp["runId"])
         if run_result["type"] == "value":
@@ -214,7 +214,7 @@ def worker(server, project_id, tmp_path):
     ):
         nonlocal _worker_count
         if handler is None:
-            handler = lambda eid, target, args: None
+            handler = lambda eid, module, target, args: None
         _worker_count += 1
 
         host = f"{project_id}.localhost:{server.port}"

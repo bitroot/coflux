@@ -46,11 +46,11 @@ class ExecutorConnection:
             self.send(response)
 
     def recv_execute(self, **kwargs):
-        """Receive an execute message, return (execution_id, target, arguments)."""
+        """Receive an execute message, return (execution_id, module, target, arguments)."""
         msg = self.recv(**kwargs)
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         p = msg["params"]
-        return p["execution_id"], p["target"], p.get("arguments", [])
+        return p["execution_id"], p.get("module", ""), p["target"], p.get("arguments", [])
 
     def _request(self, msg):
         """Send a request message (with auto-assigned ID) and return the response."""
@@ -62,11 +62,12 @@ class ExecutorConnection:
         assert resp["id"] == rid
         return resp
 
-    def submit_task(self, execution_id, target, arguments, **kwargs):
+    def submit_task(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child task execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
+            module,
             target,
             arguments,
             **kwargs,
@@ -74,11 +75,12 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp["result"]["execution_id"]
 
-    def submit_workflow(self, execution_id, target, arguments, **kwargs):
+    def submit_workflow(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child workflow execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
+            module,
             target,
             arguments,
             type="workflow",
@@ -198,7 +200,7 @@ class Executor:
         Each execution gets its own connection with one-shot executors.
         Previously consumed or dead connections are skipped.
 
-        Returns (connection, execution_id, target, arguments).
+        Returns (connection, execution_id, module, target, arguments).
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -208,9 +210,9 @@ class Executor:
                 if idx in self._consumed:
                     continue
                 try:
-                    eid, target, args = conn.recv_execute(timeout=0.1)
+                    eid, module, target, args = conn.recv_execute(timeout=0.1)
                     self._consumed.add(idx)
-                    return conn, eid, target, args
+                    return conn, eid, module, target, args
                 except TimeoutError:
                     continue
                 except (ConnectionError, OSError):

@@ -9,21 +9,21 @@ from support.manifest import task, workflow
 def test_persist_and_get_asset(worker):
     """Executor persists a file as an asset, then retrieves it in another step."""
     targets = [
-        workflow("test.main"),
-        task("test.producer"),
-        task("test.consumer"),
+        workflow("test", "main"),
+        task("test", "producer"),
+        task("test", "consumer"),
     ]
 
     with worker(targets, concurrency=2) as ctx:
-        resp = ctx.submit("test.main")
+        resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _ = ctx.executor.next_execute()
+        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
 
         # Submit producer task
-        ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
+        ref_prod = conn0.submit_task(wf_eid, "test", "producer", [])
 
-        conn1, prod_eid, _, _ = ctx.executor.next_execute()
+        conn1, prod_eid, _, _, _ = ctx.executor.next_execute()
 
         # Create a temp file to persist as an asset
         fd, tmp_path = tempfile.mkstemp(suffix=".txt")
@@ -43,8 +43,8 @@ def test_persist_and_get_asset(worker):
         assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
 
         # Submit consumer task (fresh connection)
-        ref_cons = conn0.submit_task(wf_eid, "test.consumer", [])
-        conn2, cons_eid, _, _ = ctx.executor.next_execute()
+        ref_cons = conn0.submit_task(wf_eid, "test", "consumer", [])
+        conn2, cons_eid, _, _, _ = ctx.executor.next_execute()
 
         # Retrieve the asset (response is {"entries": {path: [blob_key, size, metadata]}})
         result = conn2.get_asset(cons_eid, asset_id)
@@ -74,19 +74,19 @@ def test_persist_and_get_asset(worker):
 def test_asset_inspect_and_download(worker, tmp_path):
     """CLI can inspect and download a persisted asset."""
     targets = [
-        workflow("test.main"),
-        task("test.producer"),
+        workflow("test", "main"),
+        task("test", "producer"),
     ]
 
     with worker(targets, concurrency=2) as ctx:
-        resp = ctx.submit("test.main")
+        resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _ = ctx.executor.next_execute()
+        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
 
         # Submit producer task
-        ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
-        conn1, prod_eid, _, _ = ctx.executor.next_execute()
+        ref_prod = conn0.submit_task(wf_eid, "test", "producer", [])
+        conn1, prod_eid, _, _, _ = ctx.executor.next_execute()
 
         # Create a temp file and persist as asset
         src_path = str(tmp_path / "data.txt")

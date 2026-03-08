@@ -7,7 +7,7 @@ import support.cli as cli
 from support.helpers import managed_worker, poll_result
 from support.manifest import task, workflow
 from support.protocol import json_args
-from support.server import ManagedServer
+from support.server import ManagedServer, SUPER_TOKEN
 
 
 def _rotate_epoch(port, project_id):
@@ -17,7 +17,10 @@ def _rotate_epoch(port, project_id):
         url,
         method="POST",
         data=b"{}",
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {SUPER_TOKEN}",
+        },
     )
     urllib.request.urlopen(req, timeout=10)
 
@@ -25,7 +28,7 @@ def _rotate_epoch(port, project_id):
 def test_epoch_rotation_creates_new_epoch(tmp_path):
     """Rotation creates a new epoch file and server remains functional."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     server = ManagedServer(str(tmp_path / "data"))
     server.start()
@@ -36,11 +39,11 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
 
         with managed_worker(targets, host, tmp_path) as executor:
             # Submit and complete a workflow
-            resp = cli.submit("test.my_workflow", host=host)
+            resp = cli.submit("test/my_workflow", host=host)
             run_id = resp["runId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
             conn.complete(eid, value=42)
 
             result = poll_result(run_id, host)
@@ -51,11 +54,11 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
             _rotate_epoch(server.port, project_id)
 
             # Server still works after rotation — submit another workflow
-            resp2 = cli.submit("test.my_workflow", host=host)
+            resp2 = cli.submit("test/my_workflow", host=host)
             run_id2 = resp2["runId"]
 
-            conn2, eid2, target2, _ = executor.next_execute()
-            assert target2 == "test.my_workflow"
+            conn2, eid2, _, target2, _ = executor.next_execute()
+            assert target2 == "my_workflow"
             conn2.complete(eid2, value=99)
 
             result2 = poll_result(run_id2, host)
@@ -68,7 +71,7 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
 def test_rerun_across_epoch_boundary(tmp_path):
     """Re-running a step whose data is in an old epoch works (copy-on-reference)."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     server = ManagedServer(str(tmp_path / "data"))
     server.start()
@@ -78,12 +81,12 @@ def test_rerun_across_epoch_boundary(tmp_path):
         cli.workspaces_create("default", host=host)
 
         with managed_worker(targets, host, tmp_path) as executor:
-            resp = cli.submit("test.my_workflow", host=host)
+            resp = cli.submit("test/my_workflow", host=host)
             run_id = resp["runId"]
             step_id = resp["stepId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
             conn.complete(eid, value=42)
 
             result = poll_result(run_id, host)
@@ -98,8 +101,8 @@ def test_rerun_across_epoch_boundary(tmp_path):
             assert rerun_resp["attempt"] == 2
 
             # Execute the re-run
-            conn2, eid2, target2, _ = executor.next_execute()
-            assert target2 == "test.my_workflow"
+            conn2, eid2, _, target2, _ = executor.next_execute()
+            assert target2 == "my_workflow"
             conn2.complete(eid2, value=99)
 
             result2 = poll_result(run_id, host)
@@ -113,8 +116,8 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
     """Cached task result from old epoch is found after rotation."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [
-        workflow("test.main"),
-        task("test.expensive", parameters=["x"]),
+        workflow("test", "main"),
+        task("test", "expensive", parameters=["x"]),
     ]
 
     server = ManagedServer(str(tmp_path / "data"))
@@ -126,19 +129,19 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
 
         with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
             # First workflow: execute a cached task
-            resp1 = cli.submit("test.main", host=host)
+            resp1 = cli.submit("test/main", host=host)
             run_id1 = resp1["runId"]
 
-            conn0, wf_eid1, _, _ = executor.next_execute()
+            conn0, wf_eid1, _, _, _ = executor.next_execute()
 
             ref1 = conn0.submit_task(
                 wf_eid1,
-                "test.expensive",
+                "test", "expensive",
                 json_args(42),
                 cache={"params": True},
             )
 
-            conn1, task_eid, _, _ = executor.next_execute()
+            conn1, task_eid, _, _, _ = executor.next_execute()
             conn1.complete(task_eid, value=84)
 
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
@@ -152,14 +155,14 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
             _rotate_epoch(server.port, project_id)
 
             # Second workflow: submit same cached task — should hit cache.
-            resp2 = cli.submit("test.main", host=host)
+            resp2 = cli.submit("test/main", host=host)
             run_id2 = resp2["runId"]
 
-            wf_conn, wf_eid2, _, _ = executor.next_execute(timeout=5)
+            wf_conn, wf_eid2, _, _, _ = executor.next_execute(timeout=5)
 
             ref2 = wf_conn.submit_task(
                 wf_eid2,
-                "test.expensive",
+                "test", "expensive",
                 json_args(42),
                 cache={"params": True},
             )
@@ -179,8 +182,8 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
     """Rerunning a child step copies its parent run from an old epoch (recursive copy)."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [
-        workflow("test.main"),
-        workflow("test.child"),
+        workflow("test", "main"),
+        workflow("test", "child"),
     ]
 
     server = ManagedServer(str(tmp_path / "data"))
@@ -192,17 +195,17 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
 
         with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
             # Submit parent workflow
-            resp = cli.submit("test.main", host=host)
+            resp = cli.submit("test/main", host=host)
             run_id = resp["runId"]
 
-            conn0, wf_eid, target, _ = executor.next_execute()
-            assert target == "test.main"
+            conn0, wf_eid, _, target, _ = executor.next_execute()
+            assert target == "main"
 
             # From parent, submit child workflow
-            child_ref = conn0.submit_workflow(wf_eid, "test.child", [])
+            child_ref = conn0.submit_workflow(wf_eid, "test", "child", [])
 
-            conn1, child_eid, target, _ = executor.next_execute()
-            assert target == "test.child"
+            conn1, child_eid, _, target, _ = executor.next_execute()
+            assert target == "child"
             conn1.complete(child_eid, value=42)
 
             # Parent resolves child reference
@@ -227,8 +230,8 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
 
             # Execute the rerun — the fact that the execution was dispatched means
             # copy_run succeeded (including recursive parent copy)
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.child"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "child"
             conn.complete(eid, value=99)
     finally:
         server.stop()
@@ -238,8 +241,8 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
     """Resolving an execution reference from an old epoch finds and copies the run."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [
-        workflow("test.main"),
-        task("test.producer", parameters=["x"]),
+        workflow("test", "main"),
+        task("test", "producer", parameters=["x"]),
     ]
 
     server = ManagedServer(str(tmp_path / "data"))
@@ -251,18 +254,18 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
 
         with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
             # First workflow: submit a task and capture the execution reference
-            resp1 = cli.submit("test.main", host=host)
+            resp1 = cli.submit("test/main", host=host)
             run_id1 = resp1["runId"]
 
-            conn0, wf_eid1, _, _ = executor.next_execute()
+            conn0, wf_eid1, _, _, _ = executor.next_execute()
 
             producer_ref = conn0.submit_task(
                 wf_eid1,
-                "test.producer",
+                "test", "producer",
                 json_args(42),
             )
 
-            conn1, task_eid, _, _ = executor.next_execute()
+            conn1, task_eid, _, _, _ = executor.next_execute()
             conn1.complete(task_eid, value=84)
 
             assert conn0.resolve(wf_eid1, producer_ref)["value"] == 84
@@ -276,11 +279,11 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
             _rotate_epoch(server.port, project_id)
 
             # Second workflow: resolve the OLD producer reference
-            resp2 = cli.submit("test.main", host=host)
+            resp2 = cli.submit("test/main", host=host)
             run_id2 = resp2["runId"]
 
-            conn, wf_eid2, target, _ = executor.next_execute()
-            assert target == "test.main"
+            conn, wf_eid2, _, target, _ = executor.next_execute()
+            assert target == "main"
 
             # Resolve the old execution reference — server must find it in archived epoch
             resolved = conn.resolve(wf_eid2, producer_ref)
@@ -298,8 +301,8 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
     """Cache lookup across 3 epochs finds the match in the oldest one via bloom filter."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [
-        workflow("test.main"),
-        task("test.expensive", parameters=["x"]),
+        workflow("test", "main"),
+        task("test", "expensive", parameters=["x"]),
     ]
 
     server = ManagedServer(str(tmp_path / "data"))
@@ -311,18 +314,18 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
 
         with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
             # --- Epoch 1: cached task with args(42) → value 84 ---
-            resp1 = cli.submit("test.main", host=host)
+            resp1 = cli.submit("test/main", host=host)
             run_id1 = resp1["runId"]
 
-            conn0, wf_eid1, _, _ = executor.next_execute()
+            conn0, wf_eid1, _, _, _ = executor.next_execute()
             ref1 = conn0.submit_task(
                 wf_eid1,
-                "test.expensive",
+                "test", "expensive",
                 json_args(42),
                 cache={"params": True},
             )
 
-            conn1, task_eid1, _, _ = executor.next_execute()
+            conn1, task_eid1, _, _, _ = executor.next_execute()
             conn1.complete(task_eid1, value=84)
 
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
@@ -334,19 +337,19 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
             _rotate_epoch(server.port, project_id)
 
             # --- Epoch 2: cached task with args(99) → value 198 (different args) ---
-            resp2 = cli.submit("test.main", host=host)
+            resp2 = cli.submit("test/main", host=host)
             run_id2 = resp2["runId"]
 
-            conn_wf2, wf_eid2, _, _ = executor.next_execute()
+            conn_wf2, wf_eid2, _, _, _ = executor.next_execute()
 
             ref2 = conn_wf2.submit_task(
                 wf_eid2,
-                "test.expensive",
+                "test", "expensive",
                 json_args(99),
                 cache={"params": True},
             )
 
-            conn_task2, task_eid2, _, _ = executor.next_execute()
+            conn_task2, task_eid2, _, _, _ = executor.next_execute()
             conn_task2.complete(task_eid2, value=198)
 
             assert conn_wf2.resolve(wf_eid2, ref2)["value"] == 198
@@ -358,14 +361,14 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
             _rotate_epoch(server.port, project_id)
 
             # --- Epoch 3: cached task with args(42) again — should hit epoch 1's cache ---
-            resp3 = cli.submit("test.main", host=host)
+            resp3 = cli.submit("test/main", host=host)
             run_id3 = resp3["runId"]
 
-            conn_wf3, wf_eid3, _, _ = executor.next_execute()
+            conn_wf3, wf_eid3, _, _, _ = executor.next_execute()
 
             ref3 = conn_wf3.submit_task(
                 wf_eid3,
-                "test.expensive",
+                "test", "expensive",
                 json_args(42),
                 cache={"params": True},
             )
@@ -385,9 +388,9 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
     """Assets are preserved when a run is copied from an old epoch via rerun."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [
-        workflow("test.main"),
-        task("test.producer"),
-        task("test.consumer"),
+        workflow("test", "main"),
+        task("test", "producer"),
+        task("test", "consumer"),
     ]
 
     server = ManagedServer(str(tmp_path / "data"))
@@ -399,14 +402,14 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
 
         with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
             # Submit workflow
-            resp = cli.submit("test.main", host=host)
+            resp = cli.submit("test/main", host=host)
             run_id = resp["runId"]
 
-            conn0, wf_eid, _, _ = executor.next_execute()
+            conn0, wf_eid, _, _, _ = executor.next_execute()
 
             # Submit producer task
-            ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
-            conn1, prod_eid, _, _ = executor.next_execute()
+            ref_prod = conn0.submit_task(wf_eid, "test", "producer", [])
+            conn1, prod_eid, _, _, _ = executor.next_execute()
 
             # Create a temp file and persist as asset
             asset_file = str(tmp_path / "epoch_asset.txt")
@@ -425,8 +428,8 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
 
             # Submit consumer task
-            ref_cons = conn0.submit_task(wf_eid, "test.consumer", [])
-            conn2, cons_eid, _, _ = executor.next_execute()
+            ref_cons = conn0.submit_task(wf_eid, "test", "consumer", [])
+            conn2, cons_eid, _, _, _ = executor.next_execute()
 
             # Consumer retrieves the asset — capture original entries
             original_asset = conn2.get_asset(cons_eid, asset_id)
@@ -459,8 +462,8 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert rerun_resp["attempt"] == 2
 
             # Execute the consumer rerun
-            conn, rerun_eid, target, _ = executor.next_execute()
-            assert target == "test.consumer"
+            conn, rerun_eid, _, target, _ = executor.next_execute()
+            assert target == "consumer"
 
             # The old asset reference should still resolve after copy
             rerun_asset = conn.get_asset(rerun_eid, asset_id)
@@ -481,7 +484,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
 def test_idempotency_across_epoch_boundary(tmp_path):
     """Idempotency key is found in archived epoch after rotation."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
-    targets = [workflow("test.my_workflow")]
+    targets = [workflow("test", "my_workflow")]
 
     server = ManagedServer(str(tmp_path / "data"))
     server.start()
@@ -493,12 +496,12 @@ def test_idempotency_across_epoch_boundary(tmp_path):
         with managed_worker(targets, host, tmp_path) as executor:
             # Submit with idempotency key and complete
             resp1 = cli.submit(
-                "test.my_workflow", idempotency_key="epoch-key", host=host
+                "test/my_workflow", idempotency_key="epoch-key", host=host
             )
             run_id1 = resp1["runId"]
 
-            conn, eid, target, _ = executor.next_execute()
-            assert target == "test.my_workflow"
+            conn, eid, _, target, _ = executor.next_execute()
+            assert target == "my_workflow"
             conn.complete(eid, value=42)
 
             result = poll_result(run_id1, host)
@@ -509,7 +512,7 @@ def test_idempotency_across_epoch_boundary(tmp_path):
 
             # Submit again with the same idempotency key — should return existing run
             resp2 = cli.submit(
-                "test.my_workflow", idempotency_key="epoch-key", host=host
+                "test/my_workflow", idempotency_key="epoch-key", host=host
             )
             run_id2 = resp2["runId"]
 

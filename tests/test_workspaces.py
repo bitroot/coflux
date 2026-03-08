@@ -11,16 +11,16 @@ from support.protocol import execution_result
 
 def test_workspace_pause_resume(worker):
     """Paused workspace stops dispatch; resuming continues dispatch."""
-    targets = [workflow("test.main")]
+    targets = [workflow("test", "main")]
 
-    def handler(eid, target, args):
+    def handler(eid, module, target, args):
         return execution_result(eid, value="done")
 
     with worker(targets, handler) as ctx:
         # Pause the workspace before submitting
         ctx.pause()
 
-        resp = ctx.submit("test.main")
+        resp = ctx.submit("test", "main")
 
         # Execution should NOT be dispatched while paused
         with pytest.raises(TimeoutError):
@@ -30,8 +30,8 @@ def test_workspace_pause_resume(worker):
         ctx.resume()
 
         # Now the execution should be dispatched
-        conn, eid, target, _ = ctx.executor.next_execute(timeout=5)
-        assert target == "test.main"
+        conn, eid, _, target, _ = ctx.executor.next_execute(timeout=5)
+        assert target == "main"
         conn.complete(eid, value="resumed")
 
         result = ctx.result(resp["runId"])
@@ -40,7 +40,7 @@ def test_workspace_pause_resume(worker):
 
 def test_duplicate_workspace_name(worker):
     """Creating a workspace with a duplicate name fails."""
-    targets = [workflow("test.main")]
+    targets = [workflow("test", "main")]
 
     with worker(targets) as ctx:
         # The "default" workspace is already created by the fixture.
@@ -51,9 +51,9 @@ def test_duplicate_workspace_name(worker):
 
 def test_archive_module(worker):
     """Archiving a module removes it from the manifest listing."""
-    targets = [workflow("test.main")]
+    targets = [workflow("test", "main")]
 
-    def handler(eid, target, args):
+    def handler(eid, module, target, args):
         return execution_result(eid, value="done")
 
     with worker(targets, handler) as ctx:
@@ -72,14 +72,14 @@ def test_archive_module(worker):
 
 def test_rerun_step_in_derived_workspace(worker):
     """A step from a base workspace run can be re-run in a derived workspace."""
-    targets = [workflow("test.main")]
+    targets = [workflow("test", "main")]
 
     # Step 1: Run workflow in "base" workspace
     with worker(targets, workspace="base") as ctx_base:
-        resp = ctx_base.submit("test.main")
+        resp = ctx_base.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, eid, _, _ = ctx_base.executor.next_execute()
+        conn0, eid, _, _, _ = ctx_base.executor.next_execute()
         conn0.complete(eid, value="original")
 
         result = ctx_base.result(run_id)
@@ -101,8 +101,8 @@ def test_rerun_step_in_derived_workspace(worker):
         rerun_resp = ctx_derived.rerun(step_id)
         assert rerun_resp["attempt"] > 1
 
-        conn0, eid, target, _ = ctx_derived.executor.next_execute()
-        assert target == "test.main"
+        conn0, eid, _, target, _ = ctx_derived.executor.next_execute()
+        assert target == "main"
         conn0.complete(eid, value="rerun-in-derived")
 
         result = ctx_derived.result(run_id)
@@ -115,8 +115,8 @@ def test_discover_targets(worker):
     Only workflows are shown (matching what 'manifests register' sends).
     """
     targets = [
-        workflow("test.my_workflow", parameters=["x"]),
-        task("test.my_task", parameters=["a", "b"]),
+        workflow("test", "my_workflow", parameters=["x"]),
+        task("test", "my_task", parameters=["a", "b"]),
     ]
 
     with worker(targets) as ctx:
@@ -125,8 +125,8 @@ def test_discover_targets(worker):
 
         # Only workflows should appear (tasks are filtered out)
         names = {t["name"] for t in discovered}
-        assert "test.my_workflow" in names
-        assert "test.my_task" not in names
+        assert "my_workflow" in names
+        assert "my_task" not in names
 
         assert len(discovered) == 1
         assert discovered[0]["type"] == "workflow"
