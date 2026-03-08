@@ -35,6 +35,7 @@ class ExecutorContext:
 
     def submit_execution(
         self,
+        module: str,
         target: str,
         arguments: list[dict[str, Any]],
         type: str | None = None,
@@ -57,6 +58,7 @@ class ExecutorContext:
             group_id = _group_id.get()
         request_id = protocol.request_submit_execution(
             self.execution_id,
+            module,
             target,
             arguments,
             type=type,

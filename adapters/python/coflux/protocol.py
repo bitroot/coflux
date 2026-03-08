@@ -146,6 +146,7 @@ def send_log(
 
 def request_submit_execution(
     execution_id: str,
+    module: str,
     target: str,
     arguments: list[dict[str, Any]],
     type: str | None = None,
@@ -162,6 +163,7 @@ def request_submit_execution(
     """Request to submit a child execution."""
     params: dict[str, Any] = {
         "execution_id": execution_id,
+        "module": module,
         "target": target,
         "arguments": arguments,
     }

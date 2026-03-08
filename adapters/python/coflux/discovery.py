@@ -43,7 +43,8 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
     definition = target.definition
 
     result: dict[str, Any] = {
-        "name": f"{module_name}.{target.name}",
+        "module": module_name,
+        "name": target.name,
         "type": definition.type,
         "parameters": [
             {

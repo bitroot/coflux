@@ -56,7 +56,7 @@ type Worker struct {
 type executionState struct {
 	status      string // "starting", "executing", "aborting"
 	startTime   time.Time
-	target      string // Full target name (module.target)
+	target      string // Full target name (module/target)
 	runID       string // External run ID for logs
 	workspaceID string // External workspace ID for logs
 
@@ -341,24 +341,14 @@ func (w *Worker) buildTargetMap(manifest *adapter.DiscoveryManifest) map[string]
 	// Build targets map: module -> type -> [target_names]
 	targets := make(map[string]map[string][]string)
 	for _, t := range manifest.Targets {
-		// Parse module.target_name format
-		module, name := splitTarget(t.Name)
-		if targets[module] == nil {
-			targets[module] = make(map[string][]string)
+		if targets[t.Module] == nil {
+			targets[t.Module] = make(map[string][]string)
 		}
-		targets[module][t.Type] = append(targets[module][t.Type], name)
+		targets[t.Module][t.Type] = append(targets[t.Module][t.Type], t.Name)
 	}
 	return targets
 }
 
-func splitTarget(fullName string) (module, name string) {
-	for i := len(fullName) - 1; i >= 0; i-- {
-		if fullName[i] == '.' {
-			return fullName[:i], fullName[i+1:]
-		}
-	}
-	return "", fullName
-}
 
 func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig, sessionToken string) (blob.Store, error) {
 	switch cfg.Type {
@@ -408,15 +398,14 @@ func (w *Worker) handleExecute(params []any) error {
 	runID := getString(params[4])
 	workspaceID := getString(params[5])
 
-	w.logger.Debug("executing", "execution_id", executionID, "target", targetName, "run_id", runID)
+	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID)
 
 	// Track execution
-	fullTarget := moduleName + "." + targetName
 	w.mu.Lock()
 	w.executions[executionID] = &executionState{
 		status:      "starting",
 		startTime:   time.Now(),
-		target:      fullTarget,
+		target:      moduleName + "/" + targetName,
 		runID:       runID,
 		workspaceID: workspaceID,
 	}
@@ -438,7 +427,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, fullTarget, args); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "")
 	}
@@ -581,7 +570,7 @@ func (w *Worker) sendHeartbeat(ctx context.Context) {
 
 func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error) {
 	// Convert arguments back to server format
-	module, name := splitTarget(params.Target)
+	module, name := params.Module, params.Target
 	args, err := w.convertArgumentsToServer(params.Arguments)
 	if err != nil {
 		return nil, err
@@ -1415,9 +1404,8 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			continue
 		}
 
-		module, name := splitTarget(t.Name)
-		if manifests[module] == nil {
-			manifests[module] = make(map[string]any)
+		if manifests[t.Module] == nil {
+			manifests[t.Module] = make(map[string]any)
 		}
 
 		// Build waitFor as list (empty if nil)
@@ -1513,7 +1501,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"instruction": instruction,
 		}
 
-		manifests[module][name] = def
+		manifests[t.Module][t.Name] = def
 	}
 
 	return manifests

@@ -193,11 +193,12 @@ func (e *Executor) Send(msg any) error {
 }
 
 // SendExecute sends an execute command to the executor
-func (e *Executor) SendExecute(executionID, target string, arguments []Argument, workingDir string) error {
+func (e *Executor) SendExecute(executionID, module, target string, arguments []Argument, workingDir string) error {
 	req := ExecuteRequest{
 		Method: "execute",
 		Params: ExecuteRequestParams{
 			ExecutionID: executionID,
+			Module:      module,
 			Target:      target,
 			Arguments:   arguments,
 			WorkingDir:  workingDir,

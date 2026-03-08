@@ -259,7 +259,7 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 		if st.StepNum != "" && st.Attempt != "" {
 			label = colorDim + st.StepNum + ":" + st.Attempt + colorReset + " "
 		}
-		label += st.Module + "." + st.Target
+		label += st.Module + "/" + st.Target
 		// Show run ID on root steps
 		if st.ParentID == "" {
 			if idx := strings.Index(l.stepID, ":"); idx > 0 {

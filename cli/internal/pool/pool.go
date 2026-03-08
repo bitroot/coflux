@@ -120,7 +120,7 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 
 // Execute runs a target. Uses a warm executor if available, otherwise spawns
 // one on demand. Returns an error if spawning fails (caller should report to server).
-func (p *Pool) Execute(ctx context.Context, executionID, target string, arguments []adapter.Argument) error {
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument) error {
 	p.mu.Lock()
 	if p.shutdown {
 		p.mu.Unlock()
@@ -148,12 +148,12 @@ func (p *Pool) Execute(ctx context.Context, executionID, target string, argument
 	p.mu.Unlock()
 
 	p.wg.Add(1)
-	go p.runExecution(ctx, exec, executionID, target, arguments)
+	go p.runExecution(ctx, exec, executionID, module, target, arguments)
 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, target string, arguments []adapter.Argument) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument) {
 	defer p.wg.Done()
 
 	// Create a temporary directory for this execution
@@ -166,10 +166,10 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 		return
 	}
 
-	logger := p.logger.With("execution_id", executionID, "target", target)
+	logger := p.logger.With("execution_id", executionID, "module", module, "target", target)
 
 	// Send execute command
-	if err := exec.SendExecute(executionID, target, arguments, workingDir); err != nil {
+	if err := exec.SendExecute(executionID, module, target, arguments, workingDir); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
 		os.RemoveAll(workingDir)
