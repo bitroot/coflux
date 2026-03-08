@@ -97,7 +97,13 @@ defmodule Coflux.Orchestration.Server do
               index_task: nil,
 
               # [epoch_id] awaiting Bloom filter build (FIFO)
-              index_queue: []
+              index_queue: [],
+
+              # execution_id -> MapSet of execution_ids that this execution is waiting on
+              pending_dependencies: %{},
+
+              # execution_id -> MapSet of execution_ids that are waiting on this execution
+              dependency_waiters: %{}
   end
 
   def start_link(opts) do
@@ -300,6 +306,9 @@ defmodule Coflux.Orchestration.Server do
           end)
         end
       end)
+
+    # Initialize pending dependency tracking for existing unassigned executions
+    state = initialize_pending_dependencies(state)
 
     # Schedule periodic epoch rotation check
     Process.send_after(self(), :check_rotation, @rotation_check_interval_ms)
@@ -1018,8 +1027,9 @@ defmodule Coflux.Orchestration.Server do
          ) do
       {:ok,
        %{
+         step_id: step_id,
          step_number: step_number,
-         execution_id: _execution_id,
+         execution_id: execution_id,
          attempt: attempt,
          created_at: created_at,
          cache_key: cache_key,
@@ -1027,6 +1037,19 @@ defmodule Coflux.Orchestration.Server do
          memo_hit: memo_hit,
          child_added: child_added
        }} ->
+        # Compute and register pending dependencies for non-memoised executions
+        state =
+          if step_id && !memo_hit do
+            wait_for = Keyword.get(opts, :wait_for) || []
+
+            pending_dependencies =
+              compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
+
+            register_pending_dependencies(state, execution_id, pending_dependencies)
+          else
+            state
+          end
+
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
         delay = Keyword.get(opts, :delay, 0)
@@ -2005,11 +2028,12 @@ defmodule Coflux.Orchestration.Server do
 
               {state, assigned, unassigned}
             else
-              # TODO: choose session before resolving arguments?
-              {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
+              # Skip executions whose dependencies haven't resolved yet
+              has_pending = Map.has_key?(state.pending_dependencies, execution.execution_id)
 
-              if arguments_ready?(state.db, execution.wait_for, arguments) &&
-                   dependencies_ready?(state.db, execution.execution_id) do
+              if has_pending do
+                {state, assigned, unassigned}
+              else
                 requires =
                   if execution.requires_tag_set_id,
                     do: Map.fetch!(tag_sets, execution.requires_tag_set_id),
@@ -2023,6 +2047,8 @@ defmodule Coflux.Orchestration.Server do
                     session_id ->
                       {:ok, assigned_at} =
                         Runs.assign_execution(state.db, execution.execution_id, session_id)
+
+                      {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
 
                       # Enrich arguments with resolved references (asset/execution metadata)
                       enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
@@ -2055,6 +2081,8 @@ defmodule Coflux.Orchestration.Server do
                       {state, [{execution, assigned_at} | assigned], unassigned}
                   end
                 else
+                  {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
+
                   state =
                     case schedule_run(
                            state,
@@ -2095,8 +2123,6 @@ defmodule Coflux.Orchestration.Server do
 
                   {state, assigned, unassigned}
                 end
-              else
-                {state, assigned, unassigned}
               end
             end
         end
@@ -2979,6 +3005,7 @@ defmodule Coflux.Orchestration.Server do
          ) do
       {:ok,
        %{
+         step_id: step_id,
          external_run_id: external_run_id,
          step_number: step_number,
          execution_id: execution_id,
@@ -2999,6 +3026,19 @@ defmodule Coflux.Orchestration.Server do
           execution_external_id(external_run_id, step_number, attempt)
 
         ws_ext_id = workspace_external_id(state, workspace_id)
+
+        # Compute and register pending dependencies
+        wait_for = Keyword.get(opts, :wait_for) || []
+
+        state =
+          if step_id do
+            pending_dependencies =
+              compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
+
+            register_pending_dependencies(state, execution_id, pending_dependencies)
+          else
+            state
+          end
 
         state =
           state
@@ -3069,6 +3109,12 @@ defmodule Coflux.Orchestration.Server do
             {ext_id, _module, _target} = execution = resolve_execution_ref(state.db, ref_id)
             {ext_id, execution}
           end)
+
+        # Compute and register pending dependencies
+        pending_dependencies =
+          compute_pending_dependencies(state.db, execution_id, step.wait_for || [], step.id)
+
+        state = register_pending_dependencies(state, execution_id, pending_dependencies)
 
         execution_external_id =
           execution_external_id(run.external_id, step.number, attempt)
@@ -3159,6 +3205,9 @@ defmodule Coflux.Orchestration.Server do
     |> Map.update!(:index_queue, &(&1 ++ [epoch_id]))
     |> remap_config_ids(id_mappings)
     |> copy_in_flight_runs()
+    |> Map.put(:pending_dependencies, %{})
+    |> Map.put(:dependency_waiters, %{})
+    |> initialize_pending_dependencies()
     |> maybe_start_index_build()
   end
 
@@ -4079,6 +4128,8 @@ defmodule Coflux.Orchestration.Server do
     case Results.record_result(state.db, execution_id, result, created_by) do
       {:ok, created_at} ->
         state = notify_waiting(state, execution_id)
+        state = update_dependencies_on_result(state, execution_id)
+        state = unregister_pending_dependencies(state, execution_id)
 
         final = is_result_final?(result)
         result = build_result(result, state.db)
@@ -4406,26 +4457,76 @@ defmodule Coflux.Orchestration.Server do
     end)
   end
 
-  defp arguments_ready?(db, wait_for, arguments) do
-    Enum.all?(wait_for, fn index ->
-      references =
-        case Enum.at(arguments, index) do
-          {:raw, _, references} -> references
-          {:blob, _, _, references} -> references
-          nil -> []
-        end
+  # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.
+  defp initialize_pending_dependencies(state) do
+    {:ok, executions} = Runs.get_unassigned_executions(state.db)
 
-      all_references_ready?(db, references, MapSet.new())
+    Enum.reduce(executions, state, fn execution, state ->
+      pending_dependencies =
+        compute_pending_dependencies(
+          state.db,
+          execution.execution_id,
+          execution.wait_for,
+          execution.step_id
+        )
+
+      register_pending_dependencies(state, execution.execution_id, pending_dependencies)
     end)
   end
 
-  defp all_references_ready?(db, references, seen) do
-    Enum.all?(references, fn
-      {:execution, run_ext, step_num, attempt} ->
+  # Compute the set of execution IDs that the given execution is waiting on.
+  # This covers both argument references (when wait_for is set) and result_dependencies.
+  defp compute_pending_dependencies(db, execution_id, wait_for, step_id) do
+    # Collect pending execution IDs from argument references
+    argument_dependencies =
+      if wait_for && wait_for != [] do
+        {:ok, arguments} = Runs.get_step_arguments(db, step_id)
+
+        wait_for
+        |> Enum.flat_map(fn index ->
+          case Enum.at(arguments, index) do
+            {:raw, _, references} -> references
+            {:blob, _, _, references} -> references
+            nil -> []
+          end
+        end)
+        |> collect_pending_execution_ids(db, MapSet.new())
+      else
+        MapSet.new()
+      end
+
+    # Collect pending execution IDs from result_dependencies
+    result_dependencies =
+      case Runs.get_result_dependencies(db, execution_id) do
+        {:ok, dependencies} ->
+          Enum.reduce(dependencies, MapSet.new(), fn {dependency_ref_id}, acc ->
+            {:ok, {run_ext, step_num, attempt, _, _}} =
+              Runs.get_execution_ref(db, dependency_ref_id)
+
+            case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+              {:ok, {dependency_execution_id}} when not is_nil(dependency_execution_id) ->
+                case resolve_result(db, dependency_execution_id) do
+                  {:ok, _} -> acc
+                  {:pending, pending_id} -> MapSet.put(acc, pending_id)
+                end
+
+              _ ->
+                acc
+            end
+          end)
+      end
+
+    MapSet.union(argument_dependencies, result_dependencies)
+  end
+
+  # Walk references and collect execution IDs that are still pending.
+  defp collect_pending_execution_ids(references, db, seen) do
+    Enum.reduce(references, MapSet.new(), fn
+      {:execution, run_ext, step_num, attempt}, acc ->
         case Runs.get_execution_id(db, run_ext, step_num, attempt) do
           {:ok, {execution_id}} when not is_nil(execution_id) ->
             if MapSet.member?(seen, execution_id) do
-              true
+              acc
             else
               case resolve_result(db, execution_id) do
                 {:ok, {:value, value}} ->
@@ -4436,50 +4537,168 @@ defmodule Coflux.Orchestration.Server do
                       _ -> []
                     end
 
-                  all_references_ready?(db, inner_refs, MapSet.put(seen, execution_id))
+                  inner_pending =
+                    collect_pending_execution_ids(
+                      inner_refs,
+                      db,
+                      MapSet.put(seen, execution_id)
+                    )
+
+                  MapSet.union(acc, inner_pending)
 
                 {:ok, _} ->
-                  true
+                  acc
 
-                {:pending, _} ->
-                  false
+                {:pending, pending_id} ->
+                  MapSet.put(acc, pending_id)
               end
             end
 
           _ ->
-            false
+            acc
         end
 
-      {:fragment, _format, _blob_key, _size, _metadata} ->
-        true
+      {:fragment, _format, _blob_key, _size, _metadata}, acc ->
+        acc
 
-      {:asset, _external_id} ->
-        true
+      {:asset, _external_id}, acc ->
+        acc
     end)
   end
 
-  defp dependencies_ready?(db, execution_id) do
-    # TODO: also check assets?
-    case Runs.get_result_dependencies(db, execution_id) do
-      {:ok, dependencies} ->
-        Enum.all?(dependencies, fn {dependency_ref_id} ->
-          {:ok, {run_ext, step_num, attempt, _, _}} =
-            Runs.get_execution_ref(db, dependency_ref_id)
+  # Register an execution's pending dependencies in state.
+  # Only adds entries if there are actual pending dependencies.
+  defp register_pending_dependencies(state, execution_id, dependencies) do
+    if MapSet.size(dependencies) == 0 do
+      state
+    else
+      state =
+        put_in(state, [Access.key(:pending_dependencies), execution_id], dependencies)
 
-          case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-            {:ok, {dep_execution_id}} when not is_nil(dep_execution_id) ->
-              case resolve_result(db, dep_execution_id) do
-                {:ok, _} -> true
-                {:pending, _} -> false
-              end
+      Enum.reduce(dependencies, state, fn dependency_id, state ->
+        update_in(
+          state,
+          [Access.key(:dependency_waiters), Access.key(dependency_id, MapSet.new())],
+          &MapSet.put(&1, execution_id)
+        )
+      end)
+    end
+  end
+
+  # Remove an execution from the dependency tracking (when assigned or completed).
+  defp unregister_pending_dependencies(state, execution_id) do
+    case Map.fetch(state.pending_dependencies, execution_id) do
+      {:ok, dependencies} ->
+        state =
+          Enum.reduce(dependencies, state, fn dependency_id, state ->
+            state =
+              update_in(
+                state,
+                [Access.key(:dependency_waiters), Access.key(dependency_id, MapSet.new())],
+                &MapSet.delete(&1, execution_id)
+              )
+
+            # Clean up empty waiter entries
+            if MapSet.size(state.dependency_waiters[dependency_id] || MapSet.new()) == 0 do
+              update_in(
+                state,
+                [Access.key(:dependency_waiters)],
+                &Map.delete(&1, dependency_id)
+              )
+            else
+              state
+            end
+          end)
+
+        update_in(state, [Access.key(:pending_dependencies)], &Map.delete(&1, execution_id))
+
+      :error ->
+        state
+    end
+  end
+
+  # Called when a result is recorded for an execution. Updates dependency_waiters
+  # and pending_dependencies for any executions that were waiting on this one.
+  # Handles two cases:
+  # 1. Result redirects (spawned, deferred, etc.) — follows the chain to find
+  #    the new pending execution.
+  # 2. Result is a value containing inner execution references (wait_for
+  #    semantics) — extracts any still-pending references from the value.
+  defp update_dependencies_on_result(state, execution_id) do
+    case Map.fetch(state.dependency_waiters, execution_id) do
+      {:ok, waiters} ->
+        state =
+          update_in(
+            state,
+            [Access.key(:dependency_waiters)],
+            &Map.delete(&1, execution_id)
+          )
+
+        # Determine new pending dependencies that replace this resolved one.
+        # This handles both redirect chains and inner value references.
+        new_pending =
+          case resolve_result(state.db, execution_id) do
+            {:pending, new_id} when new_id != execution_id ->
+              MapSet.new([new_id])
+
+            {:ok, {:value, value}} ->
+              # The result is a value — check for inner execution references
+              # that are still pending (needed for wait_for semantics).
+              inner_references =
+                case value do
+                  {:raw, _, references} -> references
+                  {:blob, _, _, references} -> references
+                  _ -> []
+                end
+
+              collect_pending_execution_ids(
+                inner_references,
+                state.db,
+                MapSet.new([execution_id])
+              )
 
             _ ->
-              # Execution not in current epoch. In-flight runs are copied to the
-              # active epoch during rotation, so this should only be reachable for
-              # completed runs whose results are already resolved.
-              false
+              MapSet.new()
+          end
+
+        Enum.reduce(waiters, state, fn waiter_id, state ->
+          case Map.fetch(state.pending_dependencies, waiter_id) do
+            {:ok, current} ->
+              updated =
+                current
+                |> MapSet.delete(execution_id)
+                |> MapSet.union(new_pending)
+
+              # Register waiter with new dependency_waiters entries
+              state =
+                Enum.reduce(new_pending, state, fn new_dependency_id, state ->
+                  update_in(
+                    state,
+                    [
+                      Access.key(:dependency_waiters),
+                      Access.key(new_dependency_id, MapSet.new())
+                    ],
+                    &MapSet.put(&1, waiter_id)
+                  )
+                end)
+
+              if MapSet.size(updated) == 0 do
+                update_in(
+                  state,
+                  [Access.key(:pending_dependencies)],
+                  &Map.delete(&1, waiter_id)
+                )
+              else
+                put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
+              end
+
+            :error ->
+              state
           end
         end)
+
+      :error ->
+        state
     end
   end
 

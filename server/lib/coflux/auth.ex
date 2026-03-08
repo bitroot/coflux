@@ -200,7 +200,12 @@ defmodule Coflux.Auth do
 
     case Orchestration.check_token(project_id, token_hash) do
       {:ok, %{workspaces: workspaces, principal_id: principal_id}} ->
-        {:ok, %{type: :service, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+        {:ok,
+         %{
+           type: :service,
+           workspaces: normalize_workspaces(workspaces),
+           principal_id: principal_id
+         }}
 
       {:error, _reason} ->
         {:error, :unauthorized}
@@ -268,7 +273,12 @@ defmodule Coflux.Auth do
 
     case Orchestration.check_token(project_id, random_hash) do
       {:ok, %{workspaces: workspaces, principal_id: principal_id}} ->
-        {:ok, %{type: :service, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+        {:ok,
+         %{
+           type: :service,
+           workspaces: normalize_workspaces(workspaces),
+           principal_id: principal_id
+         }}
 
       {:error, _reason} ->
         {:error, :unauthorized}
@@ -284,7 +294,9 @@ defmodule Coflux.Auth do
       external_id = claims["sub"]
       # Resolve external_id to principal_id
       {:ok, principal_id} = Orchestration.ensure_principal(project_id, external_id)
-      {:ok, %{type: :studio, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+
+      {:ok,
+       %{type: :studio, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
     else
       {:error, _reason} ->
         {:error, :unauthorized}

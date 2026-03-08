@@ -309,10 +309,10 @@ defmodule Coflux.Orchestration.Runs do
         end
       end
 
-    {step_number, execution_id, attempt, now, memo_hit, cache_key} =
+    {step_id, step_number, execution_id, attempt, now, memo_hit, cache_key} =
       case memoised_execution do
         {step_number, execution_id, attempt, now} ->
-          {step_number, execution_id, attempt, now, true, nil}
+          {nil, step_number, execution_id, attempt, now, true, nil}
 
         nil ->
           cache_key =
@@ -386,7 +386,7 @@ defmodule Coflux.Orchestration.Runs do
           {:ok, execution_id} =
             insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
-          {step_number, execution_id, attempt, now, false, cache_key}
+          {step_id, step_number, execution_id, attempt, now, false, cache_key}
       end
 
     child_added =
@@ -399,6 +399,7 @@ defmodule Coflux.Orchestration.Runs do
 
     {:ok,
      %{
+       step_id: step_id,
        step_number: step_number,
        execution_id: execution_id,
        attempt: attempt,
