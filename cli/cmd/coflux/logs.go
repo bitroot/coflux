@@ -124,7 +124,7 @@ func resolveStepAttempt(data map[string]any, stepAttempt string) (string, error)
 // interpolateTemplate replaces {key} placeholders in the template with
 // formatted values. Returns the interpolated message and any extra key-value
 // pairs not referenced in the template.
-func interpolateTemplate(template string, values map[string]any) (string, map[string]string) {
+func interpolateTemplate(template string, values map[string]any, color bool) (string, map[string]string) {
 	if len(values) == 0 {
 		return template, nil
 	}
@@ -135,7 +135,7 @@ func interpolateTemplate(template string, values map[string]any) (string, map[st
 		if !strings.Contains(result, placeholder) {
 			continue
 		}
-		formatted := formatLogValue(val)
+		formatted := formatLogValue(val, color)
 		result = strings.ReplaceAll(result, placeholder, formatted)
 		used[key] = true
 	}
@@ -147,7 +147,7 @@ func interpolateTemplate(template string, values map[string]any) (string, map[st
 		if extras == nil {
 			extras = map[string]string{}
 		}
-		extras[key] = formatLogValue(val)
+		extras[key] = formatLogValue(val, color)
 	}
 	return result, extras
 }
@@ -155,7 +155,7 @@ func interpolateTemplate(template string, values map[string]any) (string, map[st
 // formatLogValue formats a single log value entry.
 // The value is expected to be {"type": "raw", "data": ..., "references": [...]}
 // or {"type": "blob", "key": "...", "size": N, "references": [...]}.
-func formatLogValue(val any) string {
+func formatLogValue(val any, color bool) string {
 	v, ok := val.(map[string]any)
 	if !ok {
 		return fmt.Sprintf("%v", val)
@@ -164,7 +164,10 @@ func formatLogValue(val any) string {
 	switch typ {
 	case "raw":
 		references, _ := v["references"].([]any)
-		return formatLogData(v["data"], references)
+		if color {
+			return formatLogData(v["data"], references)
+		}
+		return formatLogDataPlain(v["data"], references)
 	case "blob":
 		size, _ := v["size"].(float64)
 		return fmt.Sprintf("<blob (%s)>", humanSize(int64(size)))
@@ -269,7 +272,7 @@ type logState struct {
 // printLogEntry prints a log entry, showing date and execution headers only
 // when they change. Returns updated state.
 func printLogEntry(entry logclient.LogEntry, labelMap map[string]executionLabel, color bool, state logState) logState {
-	message, extras := interpolateTemplate(entry.Template, entry.Values)
+	message, extras := interpolateTemplate(entry.Template, entry.Values, color)
 	t := time.UnixMilli(entry.Timestamp).UTC()
 	date := t.Format("2006-01-02")
 	ts := t.Format("15:04:05.000")
