@@ -1099,6 +1099,11 @@ defmodule Coflux.Orchestration.Server do
                 {:scheduled, execution_external_id, target_name, run.external_id, step_number,
                  attempt, execute_after, created_at}
               )
+              |> notify_listeners(
+                {:queue, ws_ext_id},
+                {:scheduled, execution_external_id, module, target_name, run.external_id,
+                 step_number, attempt, execute_after, created_at}
+              )
 
             send(self(), :tick)
 
@@ -1635,6 +1640,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:subscribe_queue, workspace_external_id, pid}, _from, state) do
+    case resolve_workspace_external_id(state, workspace_external_id) do
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+
+      {:ok, workspace_id} ->
+        {:ok, executions} = Runs.get_queue_executions(state.db, workspace_id)
+        {:ok, ref, state} = add_listener(state, {:queue, workspace_external_id}, pid)
+        {:reply, {:ok, executions, ref}, state}
+    end
+  end
+
   def handle_call({:subscribe_pools, workspace_external_id, pid}, _from, state) do
     case resolve_workspace_external_id(state, workspace_external_id) do
       {:error, error} ->
@@ -2125,10 +2142,37 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       Enum.reduce(assigned_groups, state, fn {workspace_id, workspace_executions}, state ->
-        notify_listeners(
-          state,
-          {:modules, workspace_external_id(state, workspace_id)},
+        ws_ext_id = workspace_external_id(state, workspace_id)
+
+        all_ext_ids =
+          workspace_executions
+          |> Map.values()
+          |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+
+        queue_executions =
+          Enum.reduce(assigned, %{}, fn {execution, assigned_at}, acc ->
+            ext_id =
+              execution_external_id(
+                execution.run_external_id,
+                execution.step_number,
+                execution.attempt
+              )
+
+            if MapSet.member?(all_ext_ids, ext_id) do
+              Map.put(acc, ext_id, assigned_at)
+            else
+              acc
+            end
+          end)
+
+        state
+        |> notify_listeners(
+          {:modules, ws_ext_id},
           {:assigned, workspace_executions}
+        )
+        |> notify_listeners(
+          {:queue, ws_ext_id},
+          {:assigned, queue_executions}
         )
       end)
 
@@ -2624,7 +2668,8 @@ defmodule Coflux.Orchestration.Server do
     {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
 
     executions =
-      Enum.filter(executions, fn {_exec_id, _module, _assigned_at, _completed_at, exec_workspace_id} ->
+      Enum.filter(executions, fn {_exec_id, _module, _assigned_at, _completed_at,
+                                  exec_workspace_id} ->
         exec_workspace_id == workspace_id
       end)
 
@@ -2972,6 +3017,11 @@ defmodule Coflux.Orchestration.Server do
              attempt, execute_after, created_at}
           )
           |> notify_listeners(
+            {:queue, ws_ext_id},
+            {:scheduled, execution_external_id, module, target_name, external_run_id, step_number,
+             attempt, execute_after, created_at}
+          )
+          |> notify_listeners(
             {:targets, ws_ext_id},
             {:step, module, target_name, type, external_run_id, step_number, attempt}
           )
@@ -3041,6 +3091,11 @@ defmodule Coflux.Orchestration.Server do
             {:module, step.module, ws_ext_id},
             {:scheduled, execution_external_id, step.target, run.external_id, step.number,
              attempt, execute_after, created_at}
+          )
+          |> notify_listeners(
+            {:queue, ws_ext_id},
+            {:scheduled, execution_external_id, step.module, step.target, run.external_id,
+             step.number, attempt, execute_after, created_at}
           )
           |> notify_listeners(
             {:targets, ws_ext_id},
@@ -4069,6 +4124,10 @@ defmodule Coflux.Orchestration.Server do
           )
           |> notify_listeners(
             {:module, module, ws_ext_id},
+            {:completed, execution_external_id}
+          )
+          |> notify_listeners(
+            {:queue, ws_ext_id},
             {:completed, execution_external_id}
           )
 
