@@ -647,7 +647,7 @@ defmodule Coflux.Handlers.Api do
     if Config.secret() == nil do
       json_error_response(req, "not_configured",
         status: 501,
-        details: %{message: "API tokens require COFLUX_SECRET to be configured"}
+        details: %{message: "Service tokens require COFLUX_SECRET to be configured"}
       )
     else
       case read_arguments(req, %{}, %{

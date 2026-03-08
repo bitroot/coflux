@@ -228,7 +228,7 @@ func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, p
 
 // Tokens API
 
-// ListTokens lists all API tokens
+// ListTokens lists all service tokens
 func (c *Client) ListTokens(ctx context.Context) ([]map[string]any, error) {
 	var result struct {
 		Tokens []map[string]any `json:"tokens"`
@@ -239,7 +239,7 @@ func (c *Client) ListTokens(ctx context.Context) ([]map[string]any, error) {
 	return result.Tokens, nil
 }
 
-// CreateToken creates a new API token
+// CreateToken creates a new service token
 func (c *Client) CreateToken(ctx context.Context, name string, workspaces []string) (string, error) {
 	body := map[string]any{}
 	if name != "" {
@@ -258,7 +258,7 @@ func (c *Client) CreateToken(ctx context.Context, name string, workspaces []stri
 	return result.Token, nil
 }
 
-// RevokeToken revokes an API token
+// RevokeToken revokes a service token
 func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 	body := map[string]any{
 		"externalId": externalID,

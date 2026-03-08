@@ -23,7 +23,7 @@ defmodule Coflux.Config do
   Authentication methods are enabled based on configuration:
 
   - **Super token**: Set `COFLUX_SUPER_TOKEN_HASH` (SHA-256 hex) for a single token with full access
-  - **Database tokens**: Tokens stored in the project database (created via API)
+  - **Service tokens**: Tokens for programmatic access, stored in the project database
   - **Studio auth (JWT)**: Enabled if `COFLUX_STUDIO_TEAMS` is set
 
   Multiple auth methods can be enabled simultaneously. The auth method is determined
@@ -33,8 +33,8 @@ defmodule Coflux.Config do
   - **COFLUX_REQUIRE_AUTH**: Whether authentication is required (default: "true").
     Set to "false" (case insensitive) to allow anonymous requests.
   - **COFLUX_SUPER_TOKEN_HASH**: SHA-256 hex hash of a super token with full access
-  - **COFLUX_SECRET**: Server secret for signing API tokens. Required for API token
-    support. Should be a long random string, kept consistent across restarts.
+  - **COFLUX_SECRET**: Server secret for signing service tokens. Required for service
+    token support. Should be a long random string, kept consistent across restarts.
   - **COFLUX_STUDIO_TEAMS**: Comma-separated list of team IDs allowed for Studio auth
   - **COFLUX_STUDIO_URL**: Studio URL for JWKS (default: https://studio.coflux.com)
   """
@@ -126,8 +126,8 @@ defmodule Coflux.Config do
   @doc """
   Returns the server secret, or nil if not configured.
 
-  This secret is used to derive per-project signing keys for API tokens.
-  Set via COFLUX_SECRET environment variable. API tokens are only supported
+  This secret is used to derive per-project signing keys for service tokens.
+  Set via COFLUX_SECRET environment variable. Service tokens are only supported
   when this is configured.
   """
   def secret do

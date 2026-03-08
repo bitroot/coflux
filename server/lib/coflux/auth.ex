@@ -8,9 +8,9 @@ defmodule Coflux.Auth do
   a super token with full access. This token can be used to bootstrap the
   system and create other tokens.
 
-  ## Signed API Tokens
+  ## Service Tokens
 
-  Tokens created via the API have the format: `cflx_<random><signature>`
+  Service tokens have the format: `cflx_<random><signature>`
 
   - random: 16 bytes (32 hex chars) - unique identifier, hash stored in DB
   - signature: 4 bytes (8 hex chars) - HMAC signature for quick validation
@@ -23,8 +23,8 @@ defmodule Coflux.Auth do
   - project_key = HMAC-SHA256(COFLUX_SECRET, project_id)
   - signature = first 4 bytes of HMAC-SHA256(project_key, random_hex)
 
-  Requires COFLUX_SECRET to be configured. Token creation and validation will
-  fail if this is not set.
+  Requires COFLUX_SECRET to be configured. Service token creation and validation
+  will fail if this is not set.
 
   ## Studio Authentication (JWT)
 
@@ -39,7 +39,7 @@ defmodule Coflux.Auth do
 
   Multiple auth methods can be enabled simultaneously. The auth method is
   determined by token format:
-  - `cflx_...` (45 chars) → Signed API token
+  - `cflx_...` (45 chars) → Service token
   - JWTs (containing dots) → Studio auth
   - Other tokens → Super token (legacy database tokens deprecated)
 
@@ -101,7 +101,7 @@ defmodule Coflux.Auth do
         end
 
       is_signed_token?(token) ->
-        # Signed API token (cflx_...) - verify signature, then check database
+        # Service token (cflx_...) - verify signature, then check database
         check_signed_token(token, project_id)
 
       is_session_token?(token) ->
@@ -122,7 +122,7 @@ defmodule Coflux.Auth do
     end
   end
 
-  # Check if token is a signed API token (starts with cflx_)
+  # Check if token is a service token (starts with cflx_)
   defp is_signed_token?(token) do
     String.starts_with?(token, "cflx_")
   end
