@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import collections
+import datetime
+import decimal
 import importlib
 import io
 import json
 import pickle
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,13 +74,29 @@ def _encode_value(
                 "type": "dict",
                 "items": [_encode(x) for kv in items for x in kv],
             }
-        elif isinstance(v, set):
+        elif isinstance(v, (set, frozenset)):
             return {
                 "type": "set",
                 "items": [_encode(x) for x in sorted(v, key=repr)],
             }
         elif isinstance(v, tuple):
             return {"type": "tuple", "items": [_encode(x) for x in v]}
+        elif isinstance(v, datetime.datetime):
+            return {"type": "datetime", "value": v.isoformat()}
+        elif isinstance(v, datetime.date):
+            return {"type": "date", "value": v.isoformat()}
+        elif isinstance(v, datetime.time):
+            return {"type": "time", "value": v.isoformat()}
+        elif isinstance(v, datetime.timedelta):
+            return {"type": "duration", "value": v.total_seconds()}
+        elif isinstance(v, (bytes, bytearray)):
+            path = write_temp_file(v)
+            references.append(["fragment", "bytes", path, len(v), {}])
+            return {"type": "ref", "index": len(references) - 1}
+        elif isinstance(v, decimal.Decimal):
+            return {"type": "decimal", "value": str(v)}
+        elif isinstance(v, uuid.UUID):
+            return {"type": "uuid", "value": str(v)}
         elif isinstance(v, Execution):
             references.append(["execution", v.id, v.module, v.target])
             return {"type": "ref", "index": len(references) - 1}
@@ -183,6 +202,18 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                 return {_decode(x) for x in v["items"]}
             elif t == "tuple":
                 return tuple(_decode(x) for x in v["items"])
+            elif t == "datetime":
+                return datetime.datetime.fromisoformat(v["value"])
+            elif t == "date":
+                return datetime.date.fromisoformat(v["value"])
+            elif t == "time":
+                return datetime.time.fromisoformat(v["value"])
+            elif t == "duration":
+                return datetime.timedelta(seconds=v["value"])
+            elif t == "decimal":
+                return decimal.Decimal(v["value"])
+            elif t == "uuid":
+                return uuid.UUID(v["value"])
             elif t == "ref":
                 return _resolve_ref(v["index"])
             else:
@@ -204,7 +235,10 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
             metadata = ref[4] if len(ref) > 4 and isinstance(ref[4], dict) else {}
             if not path:
                 return None
-            if fmt == "pickle":
+            if fmt == "bytes":
+                with open(path, "rb") as f:
+                    return f.read()
+            elif fmt == "pickle":
                 with open(path, "rb") as f:
                     return pickle.load(f)
             elif fmt == "json" and "model" in metadata:

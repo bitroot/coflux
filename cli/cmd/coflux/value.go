@@ -5,6 +5,31 @@ import (
 	"strings"
 )
 
+func formatDuration(seconds float64) string {
+	days := int(seconds) / 86400
+	hours := (int(seconds) % 86400) / 3600
+	minutes := (int(seconds) % 3600) / 60
+	secs := seconds - float64(int(seconds)-int(seconds)%60)
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if secs > 0 || len(parts) == 0 {
+		if secs == float64(int(secs)) {
+			parts = append(parts, fmt.Sprintf("%ds", int(secs)))
+		} else {
+			parts = append(parts, fmt.Sprintf("%gs", secs))
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 type refFormatter func(ref any) string
 
 // formatDataWith recursively formats a Data value as human-readable text,
@@ -57,6 +82,18 @@ func formatDataWith(data any, references []any, fmtRef refFormatter) string {
 				parts[i] = formatDataWith(item, references, fmtRef)
 			}
 			return "(" + strings.Join(parts, ", ") + ")"
+		case "datetime", "date", "time":
+			val, _ := v["value"].(string)
+			return val
+		case "duration":
+			seconds, _ := v["value"].(float64)
+			return formatDuration(seconds)
+		case "decimal":
+			val, _ := v["value"].(string)
+			return val
+		case "uuid":
+			val, _ := v["value"].(string)
+			return val
 		case "ref":
 			index, _ := v["index"].(float64)
 			idx := int(index)
@@ -88,9 +125,9 @@ func formatReference(ref any) string {
 		module, _ := r["module"].(string)
 		target, _ := r["target"].(string)
 		if module != "" || target != "" {
-			return fmt.Sprintf("<step %s/%s>", module, target)
+			return fmt.Sprintf("<execution %s/%s>", module, target)
 		}
-		return "<step>"
+		return "<execution>"
 	case "asset":
 		asset, _ := r["asset"].(map[string]any)
 		if asset != nil {
@@ -126,9 +163,9 @@ func formatLogReference(ref any) string {
 		module, _ := r["module"].(string)
 		target, _ := r["target"].(string)
 		if module != "" || target != "" {
-			return fmt.Sprintf("<step %s/%s>", module, target)
+			return fmt.Sprintf("<execution %s/%s>", module, target)
 		}
-		return "<step>"
+		return "<execution>"
 	case "asset":
 		name, _ := r["name"].(string)
 		totalCount, _ := r["totalCount"].(float64)
