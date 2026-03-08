@@ -88,7 +88,7 @@ func formatReference(ref any) string {
 		module, _ := r["module"].(string)
 		target, _ := r["target"].(string)
 		if module != "" || target != "" {
-			return fmt.Sprintf("<step %s.%s>", module, target)
+			return fmt.Sprintf("<step %s/%s>", module, target)
 		}
 		return "<step>"
 	case "asset":
@@ -126,7 +126,7 @@ func formatLogReference(ref any) string {
 		module, _ := r["module"].(string)
 		target, _ := r["target"].(string)
 		if module != "" || target != "" {
-			return fmt.Sprintf("<step %s.%s>", module, target)
+			return fmt.Sprintf("<step %s/%s>", module, target)
 		}
 		return "<step>"
 	case "asset":

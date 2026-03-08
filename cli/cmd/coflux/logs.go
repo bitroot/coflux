@@ -43,7 +43,7 @@ func init() {
 
 // executionLabel holds the display info for a single execution in log output.
 type executionLabel struct {
-	Target  string // "module.target"
+	Target  string // "module/target"
 	StepNum string // step number within the run
 	Attempt string // execution attempt number
 }
@@ -75,7 +75,7 @@ func buildExecutionLabelMap(data map[string]any) map[string]executionLabel {
 			}
 			if eid, ok := e["executionId"].(string); ok {
 				labels[eid] = executionLabel{
-					Target:  module + "." + target,
+					Target:  module + "/" + target,
 					StepNum: stepNum,
 					Attempt: attempt,
 				}

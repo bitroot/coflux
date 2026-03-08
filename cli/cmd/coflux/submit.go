@@ -16,7 +16,7 @@ var submitCmd = &cobra.Command{
 	Short: "Submit a workflow to be run",
 	Long: `Submit a workflow to be run.
 
-The target should be in the format "module.target" (e.g., "myapp.workflows.process_data").
+The target should be in the format "module/target" (e.g., "myapp.workflows/process_data").
 Arguments are passed as JSON strings.
 
 By default, the command waits for the workflow to complete:
@@ -27,9 +27,9 @@ By default, the command waits for the workflow to complete:
 Use --no-wait to submit and exit immediately without waiting.
 
 Example:
-  coflux submit myapp.workflows.process_data '{"key": "value"}' '123'
-  coflux submit --no-wait myapp.workflows.process_data '"arg"'
-  coflux submit -o json myapp.workflows.process_data '"arg"'`,
+  coflux submit myapp.workflows/process_data '{"key": "value"}' '123'
+  coflux submit --no-wait myapp.workflows/process_data '"arg"'
+  coflux submit -o json myapp.workflows/process_data '"arg"'`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSubmit,
 }
@@ -60,7 +60,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	module, targetName := splitTarget(target)
 	if module == "" {
-		return fmt.Errorf("invalid target format: expected 'module.target', got '%s'", target)
+		return fmt.Errorf("invalid target format: expected 'module/target', got '%s'", target)
 	}
 
 	// Get workflow definition to get options

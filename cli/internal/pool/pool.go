@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/bitroot/coflux/cli/internal/adapter"
 )
@@ -38,63 +39,72 @@ type ExecutionHandler interface {
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
 	ReportError(ctx context.Context, executionID string, errorType, message, traceback string) error
+	// NotifyTerminated notifies the server that an execution's process has exited
+	NotifyTerminated(ctx context.Context, executionID string) error
 }
 
-// Pool manages a pool of executor processes
+// Pool manages executor processes. Each executor handles one execution then
+// exits. The pool maintains warm (pre-spawned) executors as an optimisation
+// and falls back to on-demand spawning when none are available.
 type Pool struct {
-	adapter adapter.Adapter
-	size    int
-	handler ExecutionHandler
-	logger  *slog.Logger
+	adapter     adapter.Adapter
+	concurrency int
+	warmTarget  int
+	handler     ExecutionHandler
+	logger      *slog.Logger
 
-	mu        sync.Mutex
-	executors []*pooledExecutor
-	available chan *pooledExecutor
-	shutdown  bool
+	mu       sync.Mutex
+	warm     []*adapter.Executor          // idle, ready executors
+	busy     map[string]*adapter.Executor // executionID -> running executor
+	aborted  map[string]bool              // executions aborted by the server
+	shutdown bool
+	cancel   context.CancelFunc
+	ctx      context.Context
+	wg       sync.WaitGroup // tracks runExecution goroutines
 }
 
-type pooledExecutor struct {
-	executor *adapter.Executor
-	index    int
-	busy     bool
-}
-
-// NewPool creates a new executor pool
-func NewPool(adp adapter.Adapter, size int, handler ExecutionHandler, logger *slog.Logger) *Pool {
+// NewPool creates a new executor pool.
+// concurrency is the maximum number of concurrent executions.
+// warmTarget is the number of warm executors to try to maintain.
+func NewPool(adp adapter.Adapter, concurrency int, handler ExecutionHandler, logger *slog.Logger) *Pool {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	warmTarget := concurrency
+	if warmTarget > 4 {
+		warmTarget = 4
+	}
 	return &Pool{
-		adapter:   adp,
-		size:      size,
-		handler:   handler,
-		logger:    logger,
-		executors: make([]*pooledExecutor, 0, size),
-		available: make(chan *pooledExecutor, size),
+		adapter:     adp,
+		concurrency: concurrency,
+		warmTarget:  warmTarget,
+		handler:     handler,
+		logger:      logger,
+		busy:        make(map[string]*adapter.Executor),
+		aborted:     make(map[string]bool),
 	}
 }
 
-// Start initializes the pool with the configured number of executors
+// Start initializes the pool by spawning warm executors (best-effort).
 func (p *Pool) Start(ctx context.Context) error {
+	p.ctx, p.cancel = context.WithCancel(ctx)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for i := 0; i < p.size; i++ {
-		pe, err := p.spawnExecutor(ctx, i)
+	for i := 0; i < p.warmTarget; i++ {
+		exec, err := p.spawnExecutor(p.ctx)
 		if err != nil {
-			for _, existing := range p.executors {
-				_ = existing.executor.Close()
-			}
-			return fmt.Errorf("failed to spawn executor %d: %w", i, err)
+			p.logger.Warn("failed to spawn warm executor", "error", err)
+			continue
 		}
-		p.executors = append(p.executors, pe)
-		p.available <- pe
+		p.warm = append(p.warm, exec)
 	}
 
 	return nil
 }
 
-func (p *Pool) spawnExecutor(ctx context.Context, index int) (*pooledExecutor, error) {
+func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 	exec, err := p.adapter.SpawnExecutor(ctx)
 	if err != nil {
 		return nil, err
@@ -105,78 +115,88 @@ func (p *Pool) spawnExecutor(ctx context.Context, index int) (*pooledExecutor, e
 		return nil, fmt.Errorf("executor not ready: %w", err)
 	}
 
-	return &pooledExecutor{
-		executor: exec,
-		index:    index,
-		busy:     false,
-	}, nil
+	return exec, nil
 }
 
-// Execute runs a target on an available executor
-func (p *Pool) Execute(ctx context.Context, executionID, target string, arguments []adapter.Argument) error {
-	// Get an available executor
-	var pe *pooledExecutor
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case pe = <-p.available:
+// Execute runs a target. Uses a warm executor if available, otherwise spawns
+// one on demand. Returns an error if spawning fails (caller should report to server).
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument) error {
+	p.mu.Lock()
+	if p.shutdown {
+		p.mu.Unlock()
+		return fmt.Errorf("pool is shut down")
+	}
+
+	var exec *adapter.Executor
+	if len(p.warm) > 0 {
+		exec = p.warm[0]
+		p.warm = p.warm[1:]
+	}
+	p.mu.Unlock()
+
+	// No warm executor available — spawn on demand
+	if exec == nil {
+		var err error
+		exec, err = p.spawnExecutor(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to spawn executor: %w", err)
+		}
 	}
 
 	p.mu.Lock()
-	pe.busy = true
+	p.busy[executionID] = exec
 	p.mu.Unlock()
 
-	// Run execution in goroutine and handle completion
-	go p.runExecution(ctx, pe, executionID, target, arguments)
+	p.wg.Add(1)
+	go p.runExecution(ctx, exec, executionID, module, target, arguments)
 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID, target string, arguments []adapter.Argument) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument) {
+	defer p.wg.Done()
+
 	// Create a temporary directory for this execution
 	workingDir, err := os.MkdirTemp("", "coflux-exec-*")
 	if err != nil {
 		p.logger.Error("failed to create temp dir for execution", "error", err, "execution_id", executionID)
 		p.handler.ReportError(ctx, executionID, "internal", fmt.Sprintf("failed to create temp dir: %s", err.Error()), "")
-		p.mu.Lock()
-		pe.busy = false
-		shutdown := p.shutdown
-		p.mu.Unlock()
-		if !shutdown {
-			p.available <- pe
-		}
+		p.finishExecution(executionID, exec)
+		p.handler.NotifyTerminated(ctx, executionID)
 		return
 	}
 
-	defer func() {
-		os.RemoveAll(workingDir)
-
-		p.mu.Lock()
-		pe.busy = false
-		shutdown := p.shutdown
-		p.mu.Unlock()
-
-		if !shutdown {
-			p.available <- pe
-		}
-	}()
-
-	logger := p.logger.With("executor", pe.index, "execution_id", executionID, "target", target)
+	logger := p.logger.With("execution_id", executionID, "module", module, "target", target)
 
 	// Send execute command
-	if err := pe.executor.SendExecute(executionID, target, arguments, workingDir); err != nil {
+	if err := exec.SendExecute(executionID, module, target, arguments, workingDir); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+		os.RemoveAll(workingDir)
+		p.finishExecution(executionID, exec)
+		p.handler.NotifyTerminated(ctx, executionID)
 		return
 	}
 
 	// Handle messages until execution completes
+loop:
 	for {
-		msg, err := pe.executor.Receive(ctx)
+		msg, err := exec.Receive(ctx)
 		if err != nil {
-			logger.Error("failed to receive message", "error", err)
-			p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
-			return
+			// If the execution was aborted by the server (e.g., after suspend),
+			// the process was killed intentionally. Don't report an error —
+			// the server already knows the execution state.
+			p.mu.Lock()
+			aborted := p.aborted[executionID]
+			p.mu.Unlock()
+			if aborted {
+				logger.Info("execution aborted")
+				logger.Debug("aborted executor exit", "error", err)
+			} else {
+				logger.Error("failed to receive message", "error", err)
+				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+			}
+			break
 		}
 
 		method, id, params, err := adapter.ParseMessage(msg)
@@ -187,18 +207,18 @@ func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID
 
 		switch method {
 		case "execution_result":
-			p.handleExecutionResult(ctx, pe, executionID, params, logger)
-			return
+			p.handleExecutionResult(ctx, executionID, params, logger)
+			break loop
 
 		case "execution_error":
-			p.handleExecutionError(ctx, pe, executionID, params, logger)
-			return
+			p.handleExecutionError(ctx, executionID, params, logger)
+			break loop
 
 		case "log":
 			p.handleLog(ctx, executionID, params, logger)
 
 		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob":
-			p.handleRequest(ctx, pe, method, *id, params, logger)
+			p.handleRequest(ctx, exec, method, *id, params, logger)
 
 		case "register_group":
 			p.handleRegisterGroup(ctx, executionID, params, logger)
@@ -207,9 +227,67 @@ func (p *Pool) runExecution(ctx context.Context, pe *pooledExecutor, executionID
 			logger.Warn("unknown message method", "method", method)
 		}
 	}
+
+	// Wait for the executor process to exit. With one-shot executors, the
+	// Python process exits on its own after sending the result. Give it a
+	// reasonable timeout before force-killing.
+	if err := exec.Wait(5 * time.Second); err != nil {
+		logger.Warn("executor exit", "error", err)
+	}
+
+	// Clean up temp dir
+	os.RemoveAll(workingDir)
+
+	// Remove from busy tracking and notify server that the process has
+	// exited. This frees the concurrency slot on the server side.
+	p.finishExecution(executionID, nil)
+	p.handler.NotifyTerminated(ctx, executionID)
+
+	// Try to maintain warm pool
+	p.tryWarm()
 }
 
-func (p *Pool) handleExecutionResult(ctx context.Context, pe *pooledExecutor, executionID string, params json.RawMessage, logger *slog.Logger) {
+// finishExecution removes an execution from busy tracking and closes the
+// executor if provided.
+func (p *Pool) finishExecution(executionID string, execToClose *adapter.Executor) {
+	p.mu.Lock()
+	delete(p.busy, executionID)
+	delete(p.aborted, executionID)
+	p.mu.Unlock()
+
+	if execToClose != nil {
+		_ = execToClose.Close()
+	}
+}
+
+// tryWarm attempts to spawn a warm executor if below the warm target and
+// concurrency limit. Failures are silently ignored — warming is best-effort.
+func (p *Pool) tryWarm() {
+	p.mu.Lock()
+	if p.shutdown || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+
+	exec, err := p.spawnExecutor(p.ctx)
+	if err != nil {
+		p.logger.Debug("failed to spawn warm executor", "error", err)
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Re-check limits after spawning (another execution may have started)
+	if p.shutdown || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
+		_ = exec.Close()
+		return
+	}
+	p.warm = append(p.warm, exec)
+}
+
+func (p *Pool) handleExecutionResult(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
 	var result struct {
 		ExecutionID string         `json:"execution_id"`
 		Result      *adapter.Value `json:"result"`
@@ -224,7 +302,7 @@ func (p *Pool) handleExecutionResult(ctx context.Context, pe *pooledExecutor, ex
 	}
 }
 
-func (p *Pool) handleExecutionError(ctx context.Context, pe *pooledExecutor, executionID string, params json.RawMessage, logger *slog.Logger) {
+func (p *Pool) handleExecutionError(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
 	var result struct {
 		ExecutionID string `json:"execution_id"`
 		Error       struct {
@@ -272,7 +350,7 @@ func (p *Pool) handleRegisterGroup(ctx context.Context, executionID string, para
 	}
 }
 
-func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method string, id int, params json.RawMessage, logger *slog.Logger) {
+func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method string, id int, params json.RawMessage, logger *slog.Logger) {
 	var result any
 	var errInfo *adapter.ErrorInfo
 
@@ -392,47 +470,52 @@ func (p *Pool) handleRequest(ctx context.Context, pe *pooledExecutor, method str
 		}
 	}
 
-	if err := pe.executor.SendResponse(id, result, errInfo); err != nil {
+	if err := exec.SendResponse(id, result, errInfo); err != nil {
 		logger.Error("failed to send response", "error", err, "method", method, "id", id)
 	}
 }
 
-// Abort terminates an execution by killing its executor
+// Abort terminates an execution by killing its executor process.
 func (p *Pool) Abort(executionID string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	exec, ok := p.busy[executionID]
+	if ok {
+		p.aborted[executionID] = true
+	}
+	p.mu.Unlock()
 
-	// Find the executor running this execution and kill it
-	// Note: In a more sophisticated implementation, we'd track which executor
-	// is running which execution. For now, we don't have that tracking.
+	if !ok {
+		return nil
+	}
+
+	_ = exec.Close()
 	return nil
 }
 
-// Stop shuts down all executors
+// Stop shuts down the pool. Closes all warm executors and waits for busy
+// executions to finish.
 func (p *Pool) Stop() error {
 	p.mu.Lock()
 	p.shutdown = true
-	executors := p.executors
-	p.executors = nil
+	warm := p.warm
+	p.warm = nil
 	p.mu.Unlock()
 
-	close(p.available)
+	p.cancel()
 
 	var lastErr error
-	for _, pe := range executors {
-		if err := pe.executor.Close(); err != nil {
+	for _, exec := range warm {
+		if err := exec.Close(); err != nil {
 			lastErr = err
 		}
 	}
+
+	p.wg.Wait()
+
 	return lastErr
 }
 
-// Size returns the pool size
+// Size returns the concurrency limit.
 func (p *Pool) Size() int {
-	return p.size
-}
-
-// Available returns the number of available executors
-func (p *Pool) Available() int {
-	return len(p.available)
+	return p.concurrency
 }

@@ -11,6 +11,7 @@ type DiscoveryManifest struct {
 
 // TargetDefinition describes a discovered task or workflow
 type TargetDefinition struct {
+	Module      string              `json:"module"`
 	Name        string              `json:"name"`
 	Type        string              `json:"type"` // "task" or "workflow"
 	Parameters  []Parameter         `json:"parameters"`
@@ -62,6 +63,7 @@ type ExecuteRequest struct {
 // ExecuteRequestParams contains execution parameters
 type ExecuteRequestParams struct {
 	ExecutionID string     `json:"execution_id"`
+	Module      string     `json:"module"`
 	Target      string     `json:"target"`
 	Arguments   []Argument `json:"arguments"`
 	WorkingDir  string     `json:"working_dir,omitempty"`
@@ -161,6 +163,7 @@ type ExecutorRequest struct {
 // SubmitExecutionParams for submit_execution request
 type SubmitExecutionParams struct {
 	ExecutionID string              `json:"execution_id"` // parent execution
+	Module      string              `json:"module"`
 	Target      string              `json:"target"`
 	Type        string              `json:"type,omitempty"` // "task" or "workflow" (default: "task")
 	Arguments   []Argument          `json:"arguments"`

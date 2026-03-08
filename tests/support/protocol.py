@@ -36,6 +36,7 @@ def execution_error(execution_id, error_type, message, traceback=""):
 def submit_execution_request(
     request_id,
     execution_id,
+    module,
     target,
     arguments,
     *,
@@ -52,6 +53,7 @@ def submit_execution_request(
 ):
     params = {
         "execution_id": execution_id,
+        "module": module,
         "target": target,
         "arguments": arguments,
     }
@@ -82,7 +84,10 @@ def resolve_reference_request(request_id, execution_id, target_execution_id):
     return {
         "id": request_id,
         "method": "resolve_reference",
-        "params": {"execution_id": execution_id, "target_execution_id": target_execution_id},
+        "params": {
+            "execution_id": execution_id,
+            "target_execution_id": target_execution_id,
+        },
     }
 
 

@@ -10,7 +10,7 @@ import (
 
 var tokensCmd = &cobra.Command{
 	Use:   "tokens",
-	Short: "Manage API tokens",
+	Short: "Manage service tokens",
 }
 
 func init() {
@@ -22,7 +22,7 @@ func init() {
 // tokens list
 var tokensListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List API tokens",
+	Short: "List service tokens",
 	RunE:  runTokensList,
 }
 
@@ -92,8 +92,8 @@ var (
 
 var tokensCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create an API token",
-	Long: `Create a new API token.
+	Short: "Create a service token",
+	Long: `Create a new service token.
 
 The token value is displayed only once. Make sure to copy it.
 
@@ -145,7 +145,7 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 // tokens revoke
 var tokensRevokeCmd = &cobra.Command{
 	Use:   "revoke <token-id>",
-	Short: "Revoke an API token",
+	Short: "Revoke a service token",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTokensRevoke,
 }

@@ -33,24 +33,18 @@ def _format_filtered_traceback(exc: Exception) -> str:
     return "".join(lines)
 
 
-def execute_target(execution_id: str, target: str, arguments: list[dict[str, Any]], working_dir: str | None = None) -> None:
+def execute_target(execution_id: str, module_name: str, target_name: str, arguments: list[dict[str, Any]], working_dir: str | None = None) -> None:
     """Execute a target with the given arguments."""
     original_dir = os.getcwd()
     try:
         if working_dir:
             os.chdir(working_dir)
 
-        # Parse target name (module.name)
-        parts = target.rsplit(".", 1)
-        if len(parts) != 2:
-            raise ValueError(f"Invalid target name: {target}")
-        module_name, target_name = parts
-
         # Import module and get target
         module = importlib.import_module(module_name)
         target_obj = getattr(module, target_name, None)
         if target_obj is None:
-            raise ValueError(f"Target not found: {target}")
+            raise ValueError(f"Target not found: {module_name}/{target_name}")
 
         # Deserialize arguments
         deserialized_args = [deserialize_value(arg) for arg in arguments]
@@ -92,22 +86,22 @@ def run_executor() -> int:
     # Signal ready
     protocol.send_ready()
 
-    while True:
-        msg = protocol.receive_message()
-        if msg is None:
-            # EOF - clean shutdown
-            return 0
+    msg = protocol.receive_message()
+    if msg is None:
+        # EOF - clean shutdown (e.g., pool is shutting down)
+        return 0
 
-        method = msg.get("method")
-        if method == "execute":
-            params = msg.get("params", {})
-            execute_target(
-                execution_id=params["execution_id"],
-                target=params["target"],
-                arguments=params.get("arguments", []),
-                working_dir=params.get("working_dir"),
-            )
-        else:
-            print(f"Unknown method: {method}", file=sys.stderr)
+    method = msg.get("method")
+    if method == "execute":
+        params = msg.get("params", {})
+        execute_target(
+            execution_id=params["execution_id"],
+            module_name=params["module"],
+            target_name=params["target"],
+            arguments=params.get("arguments", []),
+            working_dir=params.get("working_dir"),
+        )
+        return 0
 
-    return 0
+    print(f"Unknown method: {method}", file=sys.stderr)
+    return 1

@@ -124,7 +124,7 @@ func runManifestsDiscover(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, t := range workflows {
-		fmt.Println(t.Name)
+		fmt.Printf("%s/%s\n", t.Module, t.Name)
 	}
 	return nil
 }
@@ -234,7 +234,7 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			fmt.Printf("%s.%s\n", module, name)
+			fmt.Printf("%s/%s\n", module, name)
 		}
 	}
 
@@ -251,9 +251,8 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			continue
 		}
 
-		module, name := splitTarget(t.Name)
-		if manifests[module] == nil {
-			manifests[module] = make(map[string]any)
+		if manifests[t.Module] == nil {
+			manifests[t.Module] = make(map[string]any)
 		}
 
 		// Build waitFor as list (empty if nil)
@@ -349,7 +348,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"instruction": instruction,
 		}
 
-		manifests[module][name] = def
+		manifests[t.Module][t.Name] = def
 	}
 
 	return manifests

@@ -313,8 +313,6 @@ class Target(t.Generic[P, T]):
         # Use only the declared wait_for from the decorator
         wait_for_val = sorted(self._definition.wait_for) if self._definition.wait_for else None
 
-        # Build full target name
-        full_target = f"{self._module}.{self._name}"
 
         # Build cache dict if present
         cache_dict = None
@@ -345,7 +343,8 @@ class Target(t.Generic[P, T]):
 
         # Submit via context with all target definition fields
         result = ctx.submit_execution(
-            full_target,
+            self._module,
+            self._name,
             serialized_args,
             type=self._definition.type,
             wait_for=wait_for_val,

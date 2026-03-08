@@ -122,10 +122,6 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	// Determine if we should watch for changes
 	shouldWatch := workerWatch || workerDev
 
-	if workerDev {
-		logger.Info("development mode enabled (watch + register)")
-	}
-
 	if shouldWatch {
 		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger, sigCh)
 	}
@@ -134,6 +130,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	logger.Info("starting worker",
 		"workspace", cfg.Workspace,
 		"host", cfg.Server.Host,
+		"modules", modules,
 		"concurrency", cfg.Worker.Concurrency,
 		"register", shouldRegister,
 	)
@@ -177,6 +174,13 @@ func runWorkerWithWatch(
 	logger.Info("watching for file changes", "directory", ".")
 
 	for {
+		// Re-resolve token before each run (project tokens may have expired)
+		token, err := resolveToken()
+		if err != nil {
+			return fmt.Errorf("failed to refresh token: %w", err)
+		}
+		cfg.Server.Token = token
+
 		// Create a cancellable context for this worker run
 		runCtx, runCancel := context.WithCancel(ctx)
 

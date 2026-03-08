@@ -51,7 +51,7 @@ func init() {
 	viper.SetDefault("blobs.threshold", 100)
 	viper.SetDefault("logs.batch_size", 100)
 	viper.SetDefault("logs.flush_interval", 0.5)
-	viper.SetDefault("log_level", "warn")
+	viper.SetDefault("log_level", "info")
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "coflux.toml", "Path to configuration file")

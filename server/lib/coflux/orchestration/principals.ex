@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Principals do
   Manages principals (users and tokens) in the orchestration database.
 
   A principal represents an authenticated identity - either a user (from JWT)
-  or a token (from API token auth).
+  or a token (from service token auth).
   - Users have `user_external_id` set (from JWT sub claim)
   - Tokens have `token_id` set, with `external_id` on the tokens table
   """

@@ -94,10 +94,11 @@ func outputJSON(v any) error {
 	return nil
 }
 
-// splitTarget splits a full target name into module and name
+// splitTarget splits a "module/target" string into module and target name.
+// Splits on the last '/' to allow module names containing '/'.
 func splitTarget(fullName string) (module, name string) {
 	for i := len(fullName) - 1; i >= 0; i-- {
-		if fullName[i] == '.' {
+		if fullName[i] == '/' {
 			return fullName[:i], fullName[i+1:]
 		}
 	}

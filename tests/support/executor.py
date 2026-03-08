@@ -1,6 +1,11 @@
 import socket
+import threading
+import time
+from collections import namedtuple
 
 from . import protocol
+
+Execution = namedtuple("Execution", ["conn", "execution_id", "module", "target", "arguments"])
 
 
 class ExecutorConnection:
@@ -31,12 +36,7 @@ class ExecutorConnection:
         self.send(protocol.ready_message())
 
     def run_one(self, handler):
-        """Wait for execute, call handler, send response.
-
-        The initial ready is sent by the fixture during setup. After each
-        execution completes, the pool automatically makes the executor
-        available for the next one.
-        """
+        """Wait for execute, call handler, send response."""
         msg = self.recv()
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         params = msg["params"]
@@ -49,11 +49,11 @@ class ExecutorConnection:
             self.send(response)
 
     def recv_execute(self, **kwargs):
-        """Receive an execute message, return (execution_id, target, arguments)."""
+        """Receive an execute message, return (execution_id, module, target, arguments)."""
         msg = self.recv(**kwargs)
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         p = msg["params"]
-        return p["execution_id"], p["target"], p.get("arguments", [])
+        return p["execution_id"], p.get("module", ""), p["target"], p.get("arguments", [])
 
     def _request(self, msg):
         """Send a request message (with auto-assigned ID) and return the response."""
@@ -65,11 +65,12 @@ class ExecutorConnection:
         assert resp["id"] == rid
         return resp
 
-    def submit_task(self, execution_id, target, arguments, **kwargs):
+    def submit_task(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child task execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
+            module,
             target,
             arguments,
             **kwargs,
@@ -77,11 +78,12 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp["result"]["execution_id"]
 
-    def submit_workflow(self, execution_id, target, arguments, **kwargs):
+    def submit_workflow(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child workflow execution and return the target execution ID."""
         msg = protocol.submit_execution_request(
             None,
             execution_id,
+            module,
             target,
             arguments,
             type="workflow",
@@ -92,7 +94,9 @@ class ExecutorConnection:
 
     def resolve(self, execution_id, target_execution_id):
         """Resolve a reference and return the result dict (or error dict)."""
-        msg = protocol.resolve_reference_request(None, execution_id, target_execution_id)
+        msg = protocol.resolve_reference_request(
+            None, execution_id, target_execution_id
+        )
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
@@ -124,35 +128,111 @@ class ExecutorConnection:
 
     def fail(self, execution_id, error_type, message, traceback=""):
         """Send execution_error."""
-        self.send(protocol.execution_error(execution_id, error_type, message, traceback))
+        self.send(
+            protocol.execution_error(execution_id, error_type, message, traceback)
+        )
 
     def close(self):
-        self._file.close()
-        self._conn.close()
+        try:
+            self._file.close()
+        except OSError:
+            pass
+        try:
+            self._conn.close()
+        except OSError:
+            pass
 
 
 class Executor:
-    """Manages the Unix socket server and accepts connections from test-adapter shims."""
+    """Manages the Unix socket server and accepts connections from test-adapter shims.
+
+    Connections are accepted in a background thread. Each new connection
+    automatically sends "ready". Use next_execute() to wait for the next
+    execution to arrive on any connection.
+    """
 
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
         self._server_sock = None
         self.connections = []
+        self._lock = threading.Lock()
+        self._accept_thread = None
+        self._stopped = threading.Event()
+        self._consumed = (
+            set()
+        )  # indices of connections already returned by next_execute
 
     def start(self):
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(self.socket_path)
-        self._server_sock.listen(5)
+        self._server_sock.listen(16)
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
 
-    def accept(self, count=1, timeout=30):
-        """Accept `count` connections from test-adapter shim instances."""
-        self._server_sock.settimeout(timeout)
-        for _ in range(count):
-            conn, _ = self._server_sock.accept()
-            self.connections.append(ExecutorConnection(conn))
+    def _accept_loop(self):
+        """Continuously accept connections and send ready."""
+        while not self._stopped.is_set():
+            self._server_sock.settimeout(0.5)
+            try:
+                conn, _ = self._server_sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            ec = ExecutorConnection(conn)
+            ec.send_ready()
+            with self._lock:
+                self.connections.append(ec)
+
+    def wait_connections(self, count, timeout=15):
+        """Wait until at least `count` connections have been accepted."""
+        deadline = time.time() + timeout
+        while True:
+            with self._lock:
+                if len(self.connections) >= count:
+                    return
+            if time.time() >= deadline:
+                with self._lock:
+                    n = len(self.connections)
+                raise TimeoutError(
+                    f"expected {count} connections within {timeout}s, got {n}"
+                )
+            time.sleep(0.05)
+
+    def next_execute(self, timeout=10):
+        """Wait for the next execution to arrive on any connection.
+
+        Each execution gets its own connection with one-shot executors.
+        Previously consumed or dead connections are skipped.
+
+        Returns an Execution named tuple.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                conns = list(enumerate(self.connections))
+            for idx, conn in conns:
+                if idx in self._consumed:
+                    continue
+                try:
+                    eid, module, target, args = conn.recv_execute(timeout=0.1)
+                    self._consumed.add(idx)
+                    return Execution(conn, eid, module, target, args)
+                except TimeoutError:
+                    continue
+                except (ConnectionError, OSError):
+                    self._consumed.add(idx)
+                    continue
+            time.sleep(0.05)
+        raise TimeoutError(f"no execute received within {timeout}s")
 
     def close(self):
-        for c in self.connections:
-            c.close()
+        self._stopped.set()
+        if self._accept_thread:
+            self._accept_thread.join(timeout=2)
+        with self._lock:
+            for c in self.connections:
+                try:
+                    c.close()
+                except OSError:
+                    pass
         if self._server_sock:
             self._server_sock.close()

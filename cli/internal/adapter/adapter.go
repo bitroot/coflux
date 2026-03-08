@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // Adapter is the interface for language adapters.
@@ -192,11 +193,12 @@ func (e *Executor) Send(msg any) error {
 }
 
 // SendExecute sends an execute command to the executor
-func (e *Executor) SendExecute(executionID, target string, arguments []Argument, workingDir string) error {
+func (e *Executor) SendExecute(executionID, module, target string, arguments []Argument, workingDir string) error {
 	req := ExecuteRequest{
 		Method: "execute",
 		Params: ExecuteRequestParams{
 			ExecutionID: executionID,
+			Module:      module,
 			Target:      target,
 			Arguments:   arguments,
 			WorkingDir:  workingDir,
@@ -242,6 +244,45 @@ func (e *Executor) IsClosed() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.closed
+}
+
+// Wait gracefully waits for the executor process to exit within the given
+// timeout. It closes stdin (signaling the process to shut down) and waits.
+// If the process doesn't exit in time, it is force-killed.
+func (e *Executor) Wait(timeout time.Duration) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.mu.Unlock()
+
+	// Close stdin to signal the process to exit
+	_ = e.stdin.Close()
+
+	// Wait for the process to exit, with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- e.cmd.Wait()
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(timeout):
+		// Process didn't exit in time — force kill
+		if e.cmd.Process != nil {
+			_ = e.cmd.Process.Kill()
+		}
+		<-done
+		err = fmt.Errorf("executor did not exit within %s, killed", timeout)
+	}
+
+	e.mu.Lock()
+	e.closed = true
+	e.mu.Unlock()
+
+	return err
 }
 
 // Close terminates the executor process

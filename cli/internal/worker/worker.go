@@ -56,12 +56,16 @@ type Worker struct {
 type executionState struct {
 	status      string // "starting", "executing", "aborting"
 	startTime   time.Time
+	target      string // Full target name (module/target)
 	runID       string // External run ID for logs
 	workspaceID string // External workspace ID for logs
 
 	// Buffered result (set when execution finishes, cleared after successful send)
 	pendingNotify string // "put_result" or "put_error", empty if nothing pending
 	pendingValue  any    // server-format value or error tuple
+
+	// Set when the executor process has exited but notify_terminated hasn't been delivered yet
+	pendingTerminated bool
 }
 
 // New creates a new worker
@@ -118,21 +122,21 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.workspaceID = workspaceID
 
 	// Discover targets
-	w.logger.Info("discovering targets", "modules", modules)
+	w.logger.Debug("discovering targets", "modules", modules)
 	manifest, err := w.adapter.Discover(ctx, modules)
 	if err != nil {
 		return fmt.Errorf("discovery failed: %w", err)
 	}
-	w.logger.Info("discovered targets", "count", len(manifest.Targets))
+	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
 	// Register manifests if requested (before connecting)
 	if register {
-		w.logger.Info("registering manifests")
+		w.logger.Debug("registering manifests")
 		manifests := w.buildManifests(manifest)
 		if err := w.client.RegisterManifests(ctx, w.workspaceID, manifests); err != nil {
 			return fmt.Errorf("failed to register manifests: %w", err)
 		}
-		w.logger.Info("manifests registered")
+		w.logger.Debug("manifests registered")
 	}
 
 	// Create or use existing session
@@ -140,17 +144,17 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if w.session != "" {
 		// Use pre-existing session (for pool-launched workers)
 		sessionID = w.session
-		w.logger.Info("using existing session", "session_id", sessionID)
+		w.logger.Debug("using existing session", "session_id", sessionID)
 	} else {
 		// Create new session
-		w.logger.Info("creating session", "workspace", w.cfg.Workspace)
+		w.logger.Debug("creating session", "workspace", w.cfg.Workspace)
 		provides := config.ParseProvides(w.cfg.Worker.Provides)
 		var err error
 		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, w.cfg.Worker.Concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
-		w.logger.Info("created session", "session_id", sessionID)
+		w.logger.Debug("created session", "session_id", sessionID)
 	}
 	w.sessionID = sessionID
 
@@ -161,7 +165,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("coflux-%s", sessionID), "cache", "blobs")
 	stores := w.createBlobStores(ctx, w.sessionID)
 	w.blobs = blob.NewManager(stores, cacheDir, w.cfg.Blobs.Threshold)
-	w.logger.Info("blob manager configured", "threshold", w.cfg.Blobs.Threshold, "cache_dir", cacheDir)
+	w.logger.Debug("blob manager configured", "threshold", w.cfg.Blobs.Threshold, "cache_dir", cacheDir)
 	if err := w.blobs.EnsureCacheDir(); err != nil {
 		return fmt.Errorf("failed to create blob cache: %w", err)
 	}
@@ -181,7 +185,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if poolSize <= 0 {
 		poolSize = runtime.NumCPU() + 4
 	}
-	w.logger.Info("starting executor pool", "size", poolSize)
+	w.logger.Debug("starting executor pool", "size", poolSize)
 
 	// Create executor pool
 	w.pool = pool.NewPool(w.adapter, poolSize, w, w.logger)
@@ -287,7 +291,15 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	if err := conn.Notify("declare_targets", targets); err != nil {
 		return true, err
 	}
-	w.logger.Info("connected and declared targets")
+
+	w.mu.RLock()
+	hasExecutions := len(w.executions) > 0
+	w.mu.RUnlock()
+	if hasExecutions {
+		w.logger.Info("reconnected", "host", w.cfg.Server.Host)
+	} else {
+		w.logger.Info("connected", "host", w.cfg.Server.Host)
+	}
 
 	// Start heartbeat for this connection
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
@@ -329,23 +341,12 @@ func (w *Worker) buildTargetMap(manifest *adapter.DiscoveryManifest) map[string]
 	// Build targets map: module -> type -> [target_names]
 	targets := make(map[string]map[string][]string)
 	for _, t := range manifest.Targets {
-		// Parse module.target_name format
-		module, name := splitTarget(t.Name)
-		if targets[module] == nil {
-			targets[module] = make(map[string][]string)
+		if targets[t.Module] == nil {
+			targets[t.Module] = make(map[string][]string)
 		}
-		targets[module][t.Type] = append(targets[module][t.Type], name)
+		targets[t.Module][t.Type] = append(targets[t.Module][t.Type], t.Name)
 	}
 	return targets
-}
-
-func splitTarget(fullName string) (module, name string) {
-	for i := len(fullName) - 1; i >= 0; i-- {
-		if fullName[i] == '.' {
-			return fullName[:i], fullName[i+1:]
-		}
-	}
-	return "", fullName
 }
 
 func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig, sessionToken string) (blob.Store, error) {
@@ -396,13 +397,14 @@ func (w *Worker) handleExecute(params []any) error {
 	runID := getString(params[4])
 	workspaceID := getString(params[5])
 
-	w.logger.Info("executing", "execution_id", executionID, "target", targetName, "run_id", runID)
+	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID)
 
 	// Track execution
 	w.mu.Lock()
 	w.executions[executionID] = &executionState{
 		status:      "starting",
 		startTime:   time.Now(),
+		target:      moduleName + "/" + targetName,
 		runID:       runID,
 		workspaceID: workspaceID,
 	}
@@ -424,8 +426,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	fullTarget := moduleName + "." + targetName
-	if err := w.pool.Execute(context.Background(), executionID, fullTarget, args); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "")
 	}
@@ -506,7 +507,7 @@ func (w *Worker) handleAbort(params []any) error {
 	}
 
 	executionID := getString(params[0])
-	w.logger.Info("handling abort", "execution_id", executionID)
+	w.logger.Debug("handling abort", "execution_id", executionID)
 
 	w.mu.Lock()
 	if state, ok := w.executions[executionID]; ok {
@@ -568,7 +569,7 @@ func (w *Worker) sendHeartbeat(ctx context.Context) {
 
 func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error) {
 	// Convert arguments back to server format
-	module, name := splitTarget(params.Target)
+	module, name := params.Module, params.Target
 	args, err := w.convertArgumentsToServer(params.Arguments)
 	if err != nil {
 		return nil, err
@@ -1161,6 +1162,8 @@ func (w *Worker) ReportResult(ctx context.Context, executionID string, result *a
 	if ok {
 		state.pendingNotify = "put_result"
 		state.pendingValue = serverValue
+		elapsed := time.Since(state.startTime).Round(time.Millisecond)
+		w.logger.Info("execution completed", "execution_id", executionID, "target", state.target, "elapsed", elapsed)
 	}
 	w.mu.Unlock()
 
@@ -1185,6 +1188,8 @@ func (w *Worker) ReportError(ctx context.Context, executionID string, errorType,
 	if ok {
 		state.pendingNotify = "put_error"
 		state.pendingValue = errorTuple
+		elapsed := time.Since(state.startTime).Round(time.Millisecond)
+		w.logger.Info("execution failed", "execution_id", executionID, "target", state.target, "error_type", errorType, "elapsed", elapsed)
 	}
 	w.mu.Unlock()
 
@@ -1240,7 +1245,13 @@ func (w *Worker) convertValueToServerFormat(v *adapter.Value) (any, error) {
 }
 
 // trySendResult attempts to deliver the buffered result for an execution.
-// If the send fails (e.g., disconnected), the result stays buffered for retry on reconnect.
+// The result stays buffered (pendingNotify is never cleared) so it can be
+// re-sent on reconnect — a successful local WebSocket write doesn't guarantee
+// the data reaches the server if the connection drops mid-flight. The server
+// deduplicates via has_result?.
+// After the write completes, chains to trySendTerminated if the process has
+// already exited, relying on sendCh FIFO ordering to ensure the result
+// message precedes notify_terminated.
 func (w *Worker) trySendResult(executionID string) {
 	conn := w.getConn()
 	if conn == nil || !conn.IsConnected() {
@@ -1258,34 +1269,97 @@ func (w *Worker) trySendResult(executionID string) {
 	value := state.pendingValue
 	w.mu.RUnlock()
 
-	// Attempt to send. Notify is fire-and-forget (queues to send channel),
-	// so we can't confirm delivery. We intentionally leave the execution in
-	// the map with its pending data intact. On reconnect, handleSession will
-	// either prune it (server no longer lists it → result was delivered) or
-	// reflush it (server still lists it → result was lost in transit).
-	if err := conn.Notify(notify, executionID, value); err != nil {
-		w.logger.Warn("failed to send result, will retry on reconnect", "execution_id", executionID, "error", err)
-		return
+	// After the write completes, chain to trySendTerminated if pending.
+	// pendingNotify is NOT cleared — the result stays buffered for potential
+	// re-send on reconnect.
+	onSent := func() {
+		w.mu.RLock()
+		sendTerminated := false
+		if state, ok := w.executions[executionID]; ok && state.pendingTerminated {
+			sendTerminated = true
+		}
+		w.mu.RUnlock()
+
+		if sendTerminated {
+			w.trySendTerminated(executionID)
+		}
 	}
-	if err := conn.Notify("notify_terminated", []string{executionID}); err != nil {
-		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
+
+	if err := conn.NotifyWithCallback(onSent, notify, executionID, value); err != nil {
+		w.logger.Warn("failed to send result, will retry on reconnect", "execution_id", executionID, "error", err)
 		return
 	}
 }
 
-// flushPendingResults attempts to deliver all buffered results.
-func (w *Worker) flushPendingResults() {
+// trySendTerminated attempts to deliver a pending notify_terminated message.
+// Should only be called after the result has been queued to sendCh (either
+// via the write callback chain or from flushPending), so that FIFO ordering
+// ensures the result message precedes notify_terminated.
+func (w *Worker) trySendTerminated(executionID string) {
+	conn := w.getConn()
+	if conn == nil || !conn.IsConnected() {
+		return
+	}
+
 	w.mu.RLock()
-	var pending []string
+	state, ok := w.executions[executionID]
+	if !ok || !state.pendingTerminated {
+		w.mu.RUnlock()
+		return
+	}
+	w.mu.RUnlock()
+
+	if err := conn.Notify("notify_terminated", []string{executionID}); err != nil {
+		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
+		return
+	}
+
+	w.mu.Lock()
+	delete(w.executions, executionID)
+	w.mu.Unlock()
+}
+
+// NotifyTerminated is called by the pool after an execution's process has exited.
+func (w *Worker) NotifyTerminated(ctx context.Context, executionID string) error {
+	w.mu.Lock()
+	state, ok := w.executions[executionID]
+	if !ok {
+		// Already pruned (e.g., server no longer cares)
+		w.mu.Unlock()
+		return nil
+	}
+	state.pendingTerminated = true
+	w.mu.Unlock()
+
+	w.trySendTerminated(executionID)
+	return nil
+}
+
+// flushPending attempts to deliver all buffered results and terminations.
+// Results are sent first; trySendResult chains to trySendTerminated when both
+// are pending. Standalone terminations (result already delivered) are sent after.
+func (w *Worker) flushPending() {
+	w.mu.RLock()
+	var pendingResults []string
+	var pendingTerminations []string
 	for id, state := range w.executions {
 		if state.pendingNotify != "" {
-			pending = append(pending, id)
+			pendingResults = append(pendingResults, id)
+		}
+		if state.pendingTerminated {
+			pendingTerminations = append(pendingTerminations, id)
 		}
 	}
 	w.mu.RUnlock()
 
-	for _, id := range pending {
+	// Send results first. The write callback in trySendResult chains to
+	// trySendTerminated if both are pending.
+	for _, id := range pendingResults {
 		w.trySendResult(id)
+	}
+	// Send any remaining terminations (where result was already delivered earlier)
+	for _, id := range pendingTerminations {
+		w.trySendTerminated(id)
 	}
 }
 
@@ -1308,8 +1382,8 @@ func (w *Worker) handleSession(executionIDs []string) {
 	}
 	w.mu.Unlock()
 
-	// Flush any buffered results
-	w.flushPendingResults()
+	// Flush any buffered results and terminations
+	w.flushPending()
 }
 
 func getString(v any) string {
@@ -1329,9 +1403,8 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			continue
 		}
 
-		module, name := splitTarget(t.Name)
-		if manifests[module] == nil {
-			manifests[module] = make(map[string]any)
+		if manifests[t.Module] == nil {
+			manifests[t.Module] = make(map[string]any)
 		}
 
 		// Build waitFor as list (empty if nil)
@@ -1427,7 +1500,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"instruction": instruction,
 		}
 
-		manifests[module][name] = def
+		manifests[t.Module][t.Name] = def
 	}
 
 	return manifests
