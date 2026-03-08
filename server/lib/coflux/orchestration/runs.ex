@@ -611,7 +611,7 @@ defmodule Coflux.Orchestration.Runs do
         INNER JOIN steps AS s ON s.parent_id = d.execution_id
         INNER JOIN executions AS e ON e.step_id = s.id
       )
-      SELECT e.id, s.module, a.created_at, r.created_at
+      SELECT e.id, s.module, a.created_at, r.created_at, e.workspace_id
       FROM descendants AS d
       INNER JOIN executions AS e ON e.id = d.execution_id
       INNER JOIN steps AS s ON s.id = e.step_id

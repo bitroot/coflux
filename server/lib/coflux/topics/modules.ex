@@ -93,18 +93,36 @@ defmodule Coflux.Topics.Modules do
         fun
       )
 
-    {executing, scheduled} = topic.state.executions[module]
-    next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
+    # Only update topic value for modules that have a manifest registered,
+    # otherwise we'd create an entry with only executing/scheduled/nextDueAt
+    # (missing the workflows key)
+    if Map.has_key?(topic.value, module) do
+      {executing, scheduled} = topic.state.executions[module]
+      next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
 
-    topic
-    |> Topic.set([module, :executing], MapSet.size(executing))
-    |> Topic.set([module, :scheduled], map_size(scheduled))
-    |> Topic.set([module, :nextDueAt], next_due_at)
+      topic
+      |> Topic.set([module, :executing], MapSet.size(executing))
+      |> Topic.set([module, :scheduled], map_size(scheduled))
+      |> Topic.set([module, :nextDueAt], next_due_at)
+    else
+      topic
+    end
   end
 
   defp update_manifest(topic, module, workflows) do
     if workflows do
-      Topic.set(topic, [module, :workflows], Map.keys(workflows))
+      {executing, scheduled} =
+        Map.get(topic.state.executions, module, {MapSet.new(), %{}})
+
+      next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
+
+      topic
+      |> Topic.set([module], %{
+        workflows: Map.keys(workflows),
+        executing: MapSet.size(executing),
+        scheduled: map_size(scheduled),
+        nextDueAt: next_due_at
+      })
     else
       Topic.unset(topic, [], module)
     end

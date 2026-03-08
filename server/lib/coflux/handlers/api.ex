@@ -538,9 +538,6 @@ defmodule Coflux.Handlers.Api do
 
           {:error, :workspace_invalid} ->
             json_error_response(req, "not_found", status: 404)
-
-          {:error, :workspace_mismatch} ->
-            json_error_response(req, "bad_request", details: %{"workspaceId" => "mismatch"})
         end
 
       {:error, errors, req} ->
