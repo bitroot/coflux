@@ -349,7 +349,6 @@ func (w *Worker) buildTargetMap(manifest *adapter.DiscoveryManifest) map[string]
 	return targets
 }
 
-
 func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig, sessionToken string) (blob.Store, error) {
 	switch cfg.Type {
 	case "http":

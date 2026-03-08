@@ -191,7 +191,7 @@ loop:
 			p.mu.Unlock()
 			if aborted {
 				logger.Info("execution aborted")
-			logger.Debug("aborted executor exit", "error", err)
+				logger.Debug("aborted executor exit", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
 				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
