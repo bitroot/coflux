@@ -153,19 +153,16 @@ def test_cache_from_base_workspace(worker):
         conn0.complete(wf_eid, value="done")
         assert ctx_base.result(run_id)["value"]["data"] == "done"
 
-        # Save env for creating derived workspace
-        saved_env = ctx_base.env.copy()
+        saved_host = ctx_base.host
 
     # Step 2: Create "derived" workspace inheriting from "base"
-    saved_env["COFLUX_WORKSPACE"] = "derived"
-    cli.workspaces_create("derived", base="base", env=saved_env)
+    cli.workspaces_create("derived", base="base", host=saved_host, workspace="derived")
 
     # Step 3: Run in "derived" workspace - child task should hit cache
     with worker(
         targets,
         workspace="derived",
         concurrency=2,
-        create_workspace=False,
     ) as ctx_derived:
         resp = ctx_derived.submit("test.main")
 
@@ -210,16 +207,13 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
         conn0.complete(wf_eid, value="done")
         assert ctx_a.result(resp["runId"])["value"]["data"] == "done"
 
-        saved_env = ctx_a.env.copy()
+        saved_host = ctx_a.host
 
     # Step 2: Create "ws_b" (sibling, NOT derived from ws_a)
-    saved_env["COFLUX_WORKSPACE"] = "ws_b"
-    cli.workspaces_create("ws_b", env=saved_env)
+    cli.workspaces_create("ws_b", host=saved_host, workspace="ws_b")
 
     # Step 3: Run in "ws_b" - should NOT hit ws_a's cache (must execute again)
-    with worker(
-        targets, workspace="ws_b", concurrency=2, create_workspace=False
-    ) as ctx_b:
+    with worker(targets, workspace="ws_b", concurrency=2) as ctx_b:
         resp = ctx_b.submit("test.main")
 
         conn0, wf_eid, _, _ = ctx_b.executor.next_execute()

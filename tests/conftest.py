@@ -1,6 +1,4 @@
 import json
-import os
-import signal
 import subprocess
 import time
 import uuid
@@ -8,11 +6,159 @@ from contextlib import contextmanager
 
 import pytest
 import support.cli as cli
-from support.executor import Executor
-from support.manifest import manifest
+from support.helpers import ADAPTER_SCRIPT, managed_worker
 from support.server import ManagedServer
 
-ADAPTER_SCRIPT = os.path.join(os.path.dirname(__file__), "support", "adapter.py")
+
+class WorkerContext:
+    def __init__(self, host, workspace, executor, handler, project_id, worker_dir):
+        self.host = host
+        self.workspace = workspace
+        self.executor = executor
+        self.project_id = project_id
+        self._handler = handler
+        self._worker_dir = worker_dir
+
+    def handle_one(self):
+        """Handle one execution."""
+        conn, eid, target, args = self.executor.next_execute()
+        response = self._handler(eid, target, args)
+        if response is not None:
+            conn.send(response)
+
+    def submit(self, target, *arguments, idempotency_key=None):
+        """Submit a workflow and return the parsed JSON response."""
+        return cli.submit(
+            target,
+            *arguments,
+            idempotency_key=idempotency_key,
+            host=self.host,
+            workspace=self.workspace,
+        )
+
+    def result(self, run_id, timeout=10):
+        """Poll for a run result."""
+        deadline = time.time() + timeout
+        last_error = None
+        interval = 0.05
+        while time.time() < deadline:
+            try:
+                return cli.runs_result(run_id, host=self.host, workspace=self.workspace)
+            except (
+                subprocess.CalledProcessError,
+                json.JSONDecodeError,
+            ) as e:
+                last_error = e
+                time.sleep(interval)
+                interval = min(interval * 2, 0.5)
+        raise TimeoutError(
+            f"run {run_id} did not complete within {timeout}s"
+            f" (last error: {last_error})"
+        )
+
+    def inspect(self, run_id):
+        """Get the full run topic snapshot."""
+        return cli.runs_inspect(run_id, host=self.host, workspace=self.workspace)
+
+    def rerun(self, step_id):
+        """Re-run a step and return the parsed JSON response."""
+        return cli.runs_rerun(step_id, host=self.host, workspace=self.workspace)
+
+    def cancel(self, execution_id):
+        """Cancel an execution."""
+        cli.runs_cancel(execution_id, host=self.host, workspace=self.workspace)
+
+    def pause(self):
+        """Pause the workspace."""
+        cli.workspaces_pause(host=self.host, workspace=self.workspace)
+
+    def resume(self):
+        """Resume the workspace."""
+        cli.workspaces_resume(host=self.host, workspace=self.workspace)
+
+    def discover_modules(self, *modules):
+        """Discover targets from local code."""
+        manifest_path = self._worker_dir / "manifest.json"
+        socket_path = self._worker_dir / "executor.sock"
+        adapter = f"python3,{ADAPTER_SCRIPT},--manifest,{manifest_path},--socket,{socket_path}"
+        return cli.manifests_discover(
+            *modules, adapter=adapter, host=self.host, workspace=self.workspace
+        )
+
+    def archive_module(self, module):
+        """Archive a module."""
+        cli.manifests_archive(module, host=self.host, workspace=self.workspace)
+
+    def inspect_manifests(self):
+        """Get the current manifests for the workspace."""
+        return cli.manifests_inspect(host=self.host, workspace=self.workspace)
+
+    def inspect_asset(self, asset_id):
+        """Get asset metadata by ID."""
+        return cli.assets_inspect(asset_id, host=self.host, workspace=self.workspace)
+
+    def download_asset(self, asset_id, dest_dir):
+        """Download asset files to a directory."""
+        cli.assets_download(
+            asset_id, dest_dir, host=self.host, workspace=self.workspace
+        )
+
+    def get_blob(self, key, output_path):
+        """Download a blob by key to a file."""
+        cli.blobs_get(key, output_path, host=self.host, workspace=self.workspace)
+
+    def logs(
+        self,
+        run_id,
+        step_attempt=None,
+        from_ts=None,
+        json_output=True,
+        min_entries=None,
+        timeout=5,
+    ):
+        """Fetch logs, polling until min_entries are available."""
+        deadline = time.time() + timeout if min_entries else 0
+        while True:
+            data = cli.logs_get(
+                run_id,
+                step_attempt=step_attempt,
+                from_ts=from_ts,
+                host=self.host,
+                workspace=self.workspace,
+                json_output=json_output,
+            )
+            if not min_entries or time.time() >= deadline:
+                return data
+            if json_output:
+                if len(data.get("logs", [])) >= min_entries:
+                    return data
+            else:
+                if data.strip():
+                    return data
+            time.sleep(0.05)
+
+    def run(self, target, *arguments):
+        """Submit, handle one execution, and return the run result.
+
+        Returns a dict with either {"value": <data>} or
+        {"error": {"type": ..., "message": ...}}.
+        """
+        resp = self.submit(target, *arguments)
+        self.handle_one()
+        run_result = self.result(resp["runId"])
+        if run_result["type"] == "value":
+            value = run_result["value"]
+            if value["type"] == "raw":
+                return {"value": value["data"]}
+            elif value["type"] == "blob":
+                blob_file = str(self._worker_dir / f"blob-{value['key'][:16]}")
+                self.get_blob(value["key"], blob_file)
+                with open(blob_file) as f:
+                    return {"value": json.load(f)}
+        elif run_result["type"] == "error":
+            err = run_result["error"]
+            return {"error": {k: v for k, v in err.items() if k in ("type", "message")}}
+        return run_result
 
 
 @pytest.fixture(scope="session")
@@ -41,210 +187,27 @@ def worker(server, project_id, tmp_path):
         concurrency=1,
         provides=None,
         workspace="default",
-        create_workspace=True,
     ):
         nonlocal _worker_count
         if handler is None:
             handler = lambda eid, target, args: None
-        modules = modules or ["test"]
-        manifest_json = json.dumps(manifest(targets))
         _worker_count += 1
-        socket_path = str(tmp_path / f"executor-{_worker_count}.sock")
+
         host = f"{project_id}.localhost:{server.port}"
+        worker_dir = tmp_path / f"worker-{_worker_count}"
 
-        env = {
-            "PATH": os.environ["PATH"],
-            "COFLUX_SERVER_HOST": host,
-            "COFLUX_WORKSPACE": workspace,
-            "COFLUX_TEST_MANIFEST": manifest_json,
-            "COFLUX_TEST_SOCKET": socket_path,
-            "COFLUX_LOGS_STORE_FLUSH_INTERVAL": "0",
-        }
-
-        # Create the workspace (each test gets a fresh project)
-        if create_workspace:
-            cli.workspaces_create(workspace, env=env)
-
-        # Start executor socket server
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(
-            modules,
-            adapter,
+        with managed_worker(
+            targets,
+            host,
+            worker_dir,
+            workspace=workspace,
             concurrency=concurrency,
+            modules=modules,
             provides=provides,
-            env=env,
-        )
-
-        def worker_stderr():
-            if worker_proc.stderr:
-                return worker_proc.stderr.read().decode()
-            return ""
-
-        try:
-            # Wait for warm executor connections. The pool spawns warm
-            # executors on startup; the background accept thread handles
-            # the ready handshake automatically.
-            try:
-                warm_count = min(concurrency, 4)
-                executor.wait_connections(warm_count, timeout=15)
-            except (OSError, TimeoutError) as e:
-                raise OSError(
-                    f"{e}\n--- worker stderr ---\n{worker_stderr()}"
-                ) from None
-
-            class WorkerContext:
-                def __init__(self):
-                    self.env = env
-                    self.executor = executor
-                    self.project_id = project_id
-
-                def handle_one(self):
-                    """Handle one execution."""
-                    conn, eid, target, args = executor.next_execute()
-                    response = handler(eid, target, args)
-                    if response is not None:
-                        conn.send(response)
-
-                def submit(self, target, *arguments, idempotency_key=None):
-                    """Submit a workflow and return the parsed JSON response."""
-                    return cli.submit(target, *arguments, idempotency_key=idempotency_key, env=env)
-
-                def result(self, run_id, timeout=10):
-                    """Poll for a run result."""
-                    deadline = time.time() + timeout
-                    last_error = None
-                    interval = 0.05
-                    while time.time() < deadline:
-                        try:
-                            return cli.runs_result(run_id, env=env)
-                        except (
-                            subprocess.CalledProcessError,
-                            json.JSONDecodeError,
-                        ) as e:
-                            last_error = e
-                            time.sleep(interval)
-                            interval = min(interval * 2, 0.5)
-                    raise TimeoutError(
-                        f"run {run_id} did not complete within {timeout}s"
-                        f" (last error: {last_error})"
-                    )
-
-                def inspect(self, run_id):
-                    """Get the full run topic snapshot."""
-                    return cli.runs_inspect(run_id, env=env)
-
-                def rerun(self, step_id):
-                    """Re-run a step and return the parsed JSON response."""
-                    return cli.runs_rerun(step_id, env=env)
-
-                def cancel(self, execution_id):
-                    """Cancel an execution."""
-                    cli.runs_cancel(execution_id, env=env)
-
-                def pause(self):
-                    """Pause the workspace."""
-                    cli.workspaces_pause(env=env)
-
-                def resume(self):
-                    """Resume the workspace."""
-                    cli.workspaces_resume(env=env)
-
-                def discover_modules(self, *modules):
-                    """Discover targets from local code."""
-                    adapter_arg = f"python3,{ADAPTER_SCRIPT}"
-                    return cli.manifests_discover(
-                        *modules, adapter=adapter_arg, env=env
-                    )
-
-                def archive_module(self, module):
-                    """Archive a module."""
-                    cli.manifests_archive(module, env=env)
-
-                def inspect_manifests(self):
-                    """Get the current manifests for the workspace."""
-                    return cli.manifests_inspect(env=env)
-
-                def inspect_asset(self, asset_id):
-                    """Get asset metadata by ID."""
-                    return cli.assets_inspect(asset_id, env=env)
-
-                def download_asset(self, asset_id, dest_dir):
-                    """Download asset files to a directory."""
-                    cli.assets_download(asset_id, dest_dir, env=env)
-
-                def get_blob(self, key, output_path):
-                    """Download a blob by key to a file."""
-                    cli.blobs_get(key, output_path, env=env)
-
-                def logs(
-                    self,
-                    run_id,
-                    step_attempt=None,
-                    from_ts=None,
-                    json_output=True,
-                    min_entries=None,
-                    timeout=5,
-                ):
-                    """Fetch logs, polling until min_entries are available."""
-                    deadline = time.time() + timeout if min_entries else 0
-                    while True:
-                        data = cli.logs_get(
-                            run_id,
-                            step_attempt=step_attempt,
-                            from_ts=from_ts,
-                            env=env,
-                            json_output=json_output,
-                        )
-                        if not min_entries or time.time() >= deadline:
-                            return data
-                        if json_output:
-                            if len(data.get("logs", [])) >= min_entries:
-                                return data
-                        else:
-                            if data.strip():
-                                return data
-                        time.sleep(0.05)
-
-                def run(self, target, *arguments):
-                    """Submit, handle one execution, and return the run result.
-
-                    Returns a dict with either {"value": <data>} or
-                    {"error": {"type": ..., "message": ...}}.
-                    """
-                    resp = self.submit(target, *arguments)
-                    self.handle_one()
-                    run_result = self.result(resp["runId"])
-                    if run_result["type"] == "value":
-                        value = run_result["value"]
-                        if value["type"] == "raw":
-                            return {"value": value["data"]}
-                        elif value["type"] == "blob":
-                            blob_file = str(tmp_path / f"blob-{value['key'][:16]}")
-                            self.get_blob(value["key"], blob_file)
-                            with open(blob_file) as f:
-                                return {"value": json.load(f)}
-                    elif run_result["type"] == "error":
-                        err = run_result["error"]
-                        return {
-                            "error": {
-                                k: v for k, v in err.items() if k in ("type", "message")
-                            }
-                        }
-                    return run_result
-
-            ctx = WorkerContext()
+        ) as executor:
+            ctx = WorkerContext(
+                host, workspace, executor, handler, project_id, worker_dir
+            )
             yield ctx
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
 
     return _worker

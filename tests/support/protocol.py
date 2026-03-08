@@ -82,7 +82,10 @@ def resolve_reference_request(request_id, execution_id, target_execution_id):
     return {
         "id": request_id,
         "method": "resolve_reference",
-        "params": {"execution_id": execution_id, "target_execution_id": target_execution_id},
+        "params": {
+            "execution_id": execution_id,
+            "target_execution_id": target_execution_id,
+        },
     }
 
 

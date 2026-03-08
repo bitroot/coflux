@@ -352,7 +352,6 @@ def test_requires_matching(worker):
             targets,
             concurrency=1,
             provides={"gpu": ["cuda-12"]},
-            create_workspace=False,
         ) as ctx_b:
             resp = ctx_a.submit("test.main")
             run_id = resp["runId"]
@@ -381,12 +380,16 @@ def test_requires_matching(worker):
                 # Workflow landed on B's only slot; task must wait.
                 # Complete the workflow first so B's slot frees up.
                 wf_conn.complete(wf_eid, value="done")
-                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(timeout=5)
+                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(
+                    timeout=5
+                )
                 assert target == "test.compute"
                 conn_b_task.complete(task_eid, value="computed")
             else:
                 # Workflow is on worker A -- B's slot is free
-                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(timeout=5)
+                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(
+                    timeout=5
+                )
                 assert target == "test.compute"
 
                 conn_b_task.complete(task_eid, value="computed")

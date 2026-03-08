@@ -46,7 +46,7 @@ def test_duplicate_workspace_name(worker):
         # The "default" workspace is already created by the fixture.
         # Trying to create another with the same name should fail.
         with pytest.raises(subprocess.CalledProcessError):
-            cli.workspaces_create("default", env=ctx.env)
+            cli.workspaces_create("default", host=ctx.host, workspace=ctx.workspace)
 
 
 def test_archive_module(worker):
@@ -91,16 +91,13 @@ def test_rerun_step_in_derived_workspace(worker):
         assert len(step_ids) == 1
         step_id = step_ids[0]
 
-        saved_env = ctx_base.env.copy()
+        saved_host = ctx_base.host
 
     # Step 2: Create "derived" workspace inheriting from "base"
-    saved_env["COFLUX_WORKSPACE"] = "derived"
-    cli.workspaces_create("derived", base="base", env=saved_env)
+    cli.workspaces_create("derived", base="base", host=saved_host, workspace="derived")
 
     # Step 3: Start worker in "derived", re-run the step there
-    with worker(
-        targets, workspace="derived", create_workspace=False
-    ) as ctx_derived:
+    with worker(targets, workspace="derived") as ctx_derived:
         rerun_resp = ctx_derived.rerun(step_id)
         assert rerun_resp["attempt"] > 1
 

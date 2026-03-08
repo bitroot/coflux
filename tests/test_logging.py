@@ -182,7 +182,12 @@ def test_log_with_values(worker):
                 "info",
                 "processing {data}",
                 values={
-                    "data": {"type": "inline", "format": "json", "value": {"id": 42}, "references": []},
+                    "data": {
+                        "type": "inline",
+                        "format": "json",
+                        "value": {"id": 42},
+                        "references": [],
+                    },
                 },
             )
         )
@@ -220,7 +225,12 @@ def test_log_display_format(worker):
                 "info",
                 "count is {n}",
                 values={
-                    "n": {"type": "inline", "format": "json", "value": 7, "references": []},
+                    "n": {
+                        "type": "inline",
+                        "format": "json",
+                        "value": 7,
+                        "references": [],
+                    },
                 },
             )
         )
@@ -250,8 +260,6 @@ def _rotate_logs(port, project_id):
         headers={"Content-Type": "application/json"},
     )
     urllib.request.urlopen(req, timeout=10)
-
-
 
 
 def test_logs_across_partition_boundary(worker, server):

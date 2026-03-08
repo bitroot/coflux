@@ -4,7 +4,7 @@ import time
 import uuid
 
 import support.cli as cli
-from support.helpers import make_env, managed_worker, poll_result
+from support.helpers import managed_worker, poll_result
 from support.manifest import workflow
 from support.proxy import TCPProxy
 from support.server import ManagedServer
@@ -15,17 +15,17 @@ def test_result_buffered_on_disconnect(server, tmp_path):
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [workflow("test.my_workflow")]
 
-    # Direct env for CLI commands (submit, result) - bypasses proxy
-    direct_env = make_env(f"{project_id}.localhost:{server.port}")
-    cli.workspaces_create("default", env=direct_env)
+    # Direct host for CLI commands (submit, result) - bypasses proxy
+    direct_host = f"{project_id}.localhost:{server.port}"
+    cli.workspaces_create("default", host=direct_host)
 
     proxy = TCPProxy("127.0.0.1", server.port)
     try:
-        # Worker env goes through proxy so we can disrupt the WebSocket
-        worker_env = make_env(f"{project_id}.localhost:{proxy.port}")
+        # Worker host goes through proxy so we can disrupt the WebSocket
+        worker_host = f"{project_id}.localhost:{proxy.port}"
 
-        with managed_worker(targets, worker_env, str(tmp_path / "executor.sock")) as executor:
-            resp = cli.submit("test.my_workflow", env=direct_env)
+        with managed_worker(targets, worker_host, tmp_path) as executor:
+            resp = cli.submit("test.my_workflow", host=direct_host)
             run_id = resp["runId"]
 
             conn, eid, target, _ = executor.next_execute()
@@ -42,7 +42,7 @@ def test_result_buffered_on_disconnect(server, tmp_path):
             # Worker reconnects through the proxy (still accepting),
             # server sends session message with execution IDs,
             # worker flushes the buffered result.
-            result = poll_result(run_id, direct_env, timeout=15)
+            result = poll_result(run_id, direct_host, timeout=15)
             assert result["type"] == "value"
             assert result["value"]["data"] == 42
     finally:
@@ -54,15 +54,15 @@ def test_error_buffered_on_disconnect(server, tmp_path):
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [workflow("test.my_workflow")]
 
-    direct_env = make_env(f"{project_id}.localhost:{server.port}")
-    cli.workspaces_create("default", env=direct_env)
+    direct_host = f"{project_id}.localhost:{server.port}"
+    cli.workspaces_create("default", host=direct_host)
 
     proxy = TCPProxy("127.0.0.1", server.port)
     try:
-        worker_env = make_env(f"{project_id}.localhost:{proxy.port}")
+        worker_host = f"{project_id}.localhost:{proxy.port}"
 
-        with managed_worker(targets, worker_env, str(tmp_path / "executor.sock")) as executor:
-            resp = cli.submit("test.my_workflow", env=direct_env)
+        with managed_worker(targets, worker_host, tmp_path) as executor:
+            resp = cli.submit("test.my_workflow", host=direct_host)
             run_id = resp["runId"]
 
             conn, eid, target, _ = executor.next_execute()
@@ -73,7 +73,7 @@ def test_error_buffered_on_disconnect(server, tmp_path):
 
             conn.fail(eid, "RuntimeError", "something broke")
 
-            result = poll_result(run_id, direct_env, timeout=15)
+            result = poll_result(run_id, direct_host, timeout=15)
             assert result["type"] == "error"
             assert result["error"]["type"] == "RuntimeError"
             assert result["error"]["message"] == "something broke"
@@ -90,11 +90,11 @@ def test_result_buffered_across_server_restart(tmp_path):
     server.start()
 
     try:
-        env = make_env(f"{project_id}.localhost:{server.port}")
-        cli.workspaces_create("default", env=env)
+        host = f"{project_id}.localhost:{server.port}"
+        cli.workspaces_create("default", host=host)
 
-        with managed_worker(targets, env, str(tmp_path / "executor.sock")) as executor:
-            resp = cli.submit("test.my_workflow", env=env)
+        with managed_worker(targets, host, tmp_path) as executor:
+            resp = cli.submit("test.my_workflow", host=host)
             run_id = resp["runId"]
 
             conn, eid, target, _ = executor.next_execute()
@@ -112,7 +112,7 @@ def test_result_buffered_across_server_restart(tmp_path):
 
             # Worker reconnects, server restores session from DB,
             # sends execution IDs, worker flushes buffered result
-            result = poll_result(run_id, env, timeout=20)
+            result = poll_result(run_id, host, timeout=20)
             assert result["type"] == "value"
             assert result["value"]["data"] == 42
     finally:

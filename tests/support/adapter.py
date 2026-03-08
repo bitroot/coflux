@@ -1,31 +1,24 @@
 """Test adapter shim: proxies the CLI adapter protocol over a Unix socket.
 
-discover: prints the manifest from COFLUX_TEST_MANIFEST env var.
-execute:  bidirectional proxy between stdin/stdout and a Unix socket.
+discover: prints the manifest from the file specified by --manifest.
+execute:  bidirectional proxy between stdin/stdout and a Unix socket (--socket).
 """
 
+import argparse
 import os
 import socket
 import sys
 import threading
 
 
-def discover():
-    manifest = os.environ.get("COFLUX_TEST_MANIFEST", "")
-    if not manifest:
-        print("COFLUX_TEST_MANIFEST not set", file=sys.stderr)
-        sys.exit(1)
-    print(manifest)
+def discover(args):
+    with open(args.manifest) as f:
+        print(f.read(), end="")
 
 
-def execute():
-    socket_path = os.environ.get("COFLUX_TEST_SOCKET", "")
-    if not socket_path:
-        print("COFLUX_TEST_SOCKET not set", file=sys.stderr)
-        sys.exit(1)
-
+def execute(args):
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.connect(socket_path)
+    conn.connect(args.socket)
 
     stdin_fd = sys.stdin.buffer.fileno()
     stdout_fd = sys.stdout.buffer.fileno()
@@ -60,15 +53,17 @@ def execute():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("usage: adapter.py <discover|execute>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--socket")
+    parser.add_argument("command", choices=["discover", "execute"])
+    parser.add_argument("modules", nargs="*")
+    args = parser.parse_args()
 
-    match sys.argv[1]:
-        case "discover":
-            discover()
-        case "execute":
-            execute()
-        case cmd:
-            print(f"unknown command: {cmd}", file=sys.stderr)
-            sys.exit(1)
+    if args.command == "discover":
+        discover(args)
+    elif args.socket:
+        execute(args)
+    else:
+        print("--socket is required for execute", file=sys.stderr)
+        sys.exit(1)

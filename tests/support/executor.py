@@ -89,7 +89,9 @@ class ExecutorConnection:
 
     def resolve(self, execution_id, target_execution_id):
         """Resolve a reference and return the result dict (or error dict)."""
-        msg = protocol.resolve_reference_request(None, execution_id, target_execution_id)
+        msg = protocol.resolve_reference_request(
+            None, execution_id, target_execution_id
+        )
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
@@ -121,7 +123,9 @@ class ExecutorConnection:
 
     def fail(self, execution_id, error_type, message, traceback=""):
         """Send execution_error."""
-        self.send(protocol.execution_error(execution_id, error_type, message, traceback))
+        self.send(
+            protocol.execution_error(execution_id, error_type, message, traceback)
+        )
 
     def close(self):
         try:
@@ -149,7 +153,9 @@ class Executor:
         self._lock = threading.Lock()
         self._accept_thread = None
         self._stopped = threading.Event()
-        self._consumed = set()  # indices of connections already returned by next_execute
+        self._consumed = (
+            set()
+        )  # indices of connections already returned by next_execute
 
     def start(self):
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
