@@ -217,13 +217,23 @@ func (c *Connection) writeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case msg := <-c.sendCh:
+		case rawMsg := <-c.sendCh:
 			c.mu.Lock()
 			conn := c.conn
 			c.mu.Unlock()
 
 			if conn == nil {
 				continue
+			}
+
+			// Unwrap callback wrapper if present
+			var msg any
+			var onSent func()
+			if wrapped, ok := rawMsg.(sendWithCallback); ok {
+				msg = wrapped.msg
+				onSent = wrapped.onSent
+			} else {
+				msg = rawMsg
 			}
 
 			data, err := json.Marshal(msg)
@@ -236,6 +246,10 @@ func (c *Connection) writeLoop(ctx context.Context) {
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				c.logger.Error("failed to write message", "error", err)
 				return
+			}
+
+			if onSent != nil {
+				onSent()
 			}
 
 		case <-ticker.C:
@@ -330,6 +344,30 @@ func (c *Connection) Notify(request string, params ...any) error {
 
 	select {
 	case c.sendCh <- req:
+		return nil
+	default:
+		return fmt.Errorf("send queue full")
+	}
+}
+
+// sendWithCallback wraps a message with an onSent callback
+type sendWithCallback struct {
+	msg    any
+	onSent func()
+}
+
+// NotifyWithCallback sends a notification and calls onSent after the message
+// has been written to the WebSocket. If the write fails or the connection is
+// nil, onSent is NOT called.
+func (c *Connection) NotifyWithCallback(onSent func(), request string, params ...any) error {
+	req := Request{
+		Request: request,
+		Params:  params,
+	}
+
+	wrapped := sendWithCallback{msg: req, onSent: onSent}
+	select {
+	case c.sendCh <- wrapped:
 		return nil
 	default:
 		return fmt.Errorf("send queue full")

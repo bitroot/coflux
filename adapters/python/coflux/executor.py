@@ -92,22 +92,21 @@ def run_executor() -> int:
     # Signal ready
     protocol.send_ready()
 
-    while True:
-        msg = protocol.receive_message()
-        if msg is None:
-            # EOF - clean shutdown
-            return 0
+    msg = protocol.receive_message()
+    if msg is None:
+        # EOF - clean shutdown (e.g., pool is shutting down)
+        return 0
 
-        method = msg.get("method")
-        if method == "execute":
-            params = msg.get("params", {})
-            execute_target(
-                execution_id=params["execution_id"],
-                target=params["target"],
-                arguments=params.get("arguments", []),
-                working_dir=params.get("working_dir"),
-            )
-        else:
-            print(f"Unknown method: {method}", file=sys.stderr)
+    method = msg.get("method")
+    if method == "execute":
+        params = msg.get("params", {})
+        execute_target(
+            execution_id=params["execution_id"],
+            target=params["target"],
+            arguments=params.get("arguments", []),
+            working_dir=params.get("working_dir"),
+        )
+        return 0
 
-    return 0
+    print(f"Unknown method: {method}", file=sys.stderr)
+    return 1

@@ -62,6 +62,9 @@ type executionState struct {
 	// Buffered result (set when execution finishes, cleared after successful send)
 	pendingNotify string // "put_result" or "put_error", empty if nothing pending
 	pendingValue  any    // server-format value or error tuple
+
+	// Set when the executor process has exited but notify_terminated hasn't been delivered yet
+	pendingTerminated bool
 }
 
 // New creates a new worker
@@ -1240,7 +1243,13 @@ func (w *Worker) convertValueToServerFormat(v *adapter.Value) (any, error) {
 }
 
 // trySendResult attempts to deliver the buffered result for an execution.
-// If the send fails (e.g., disconnected), the result stays buffered for retry on reconnect.
+// The result stays buffered (pendingNotify is never cleared) so it can be
+// re-sent on reconnect — a successful local WebSocket write doesn't guarantee
+// the data reaches the server if the connection drops mid-flight. The server
+// deduplicates via has_result?.
+// After the write completes, chains to trySendTerminated if the process has
+// already exited, relying on sendCh FIFO ordering to ensure the result
+// message precedes notify_terminated.
 func (w *Worker) trySendResult(executionID string) {
 	conn := w.getConn()
 	if conn == nil || !conn.IsConnected() {
@@ -1258,34 +1267,97 @@ func (w *Worker) trySendResult(executionID string) {
 	value := state.pendingValue
 	w.mu.RUnlock()
 
-	// Attempt to send. Notify is fire-and-forget (queues to send channel),
-	// so we can't confirm delivery. We intentionally leave the execution in
-	// the map with its pending data intact. On reconnect, handleSession will
-	// either prune it (server no longer lists it → result was delivered) or
-	// reflush it (server still lists it → result was lost in transit).
-	if err := conn.Notify(notify, executionID, value); err != nil {
-		w.logger.Warn("failed to send result, will retry on reconnect", "execution_id", executionID, "error", err)
-		return
+	// After the write completes, chain to trySendTerminated if pending.
+	// pendingNotify is NOT cleared — the result stays buffered for potential
+	// re-send on reconnect.
+	onSent := func() {
+		w.mu.RLock()
+		sendTerminated := false
+		if state, ok := w.executions[executionID]; ok && state.pendingTerminated {
+			sendTerminated = true
+		}
+		w.mu.RUnlock()
+
+		if sendTerminated {
+			w.trySendTerminated(executionID)
+		}
 	}
-	if err := conn.Notify("notify_terminated", []string{executionID}); err != nil {
-		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
+
+	if err := conn.NotifyWithCallback(onSent, notify, executionID, value); err != nil {
+		w.logger.Warn("failed to send result, will retry on reconnect", "execution_id", executionID, "error", err)
 		return
 	}
 }
 
-// flushPendingResults attempts to deliver all buffered results.
-func (w *Worker) flushPendingResults() {
+// trySendTerminated attempts to deliver a pending notify_terminated message.
+// Should only be called after the result has been queued to sendCh (either
+// via the write callback chain or from flushPending), so that FIFO ordering
+// ensures the result message precedes notify_terminated.
+func (w *Worker) trySendTerminated(executionID string) {
+	conn := w.getConn()
+	if conn == nil || !conn.IsConnected() {
+		return
+	}
+
 	w.mu.RLock()
-	var pending []string
+	state, ok := w.executions[executionID]
+	if !ok || !state.pendingTerminated {
+		w.mu.RUnlock()
+		return
+	}
+	w.mu.RUnlock()
+
+	if err := conn.Notify("notify_terminated", []string{executionID}); err != nil {
+		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
+		return
+	}
+
+	w.mu.Lock()
+	delete(w.executions, executionID)
+	w.mu.Unlock()
+}
+
+// NotifyTerminated is called by the pool after an execution's process has exited.
+func (w *Worker) NotifyTerminated(ctx context.Context, executionID string) error {
+	w.mu.Lock()
+	state, ok := w.executions[executionID]
+	if !ok {
+		// Already pruned (e.g., server no longer cares)
+		w.mu.Unlock()
+		return nil
+	}
+	state.pendingTerminated = true
+	w.mu.Unlock()
+
+	w.trySendTerminated(executionID)
+	return nil
+}
+
+// flushPending attempts to deliver all buffered results and terminations.
+// Results are sent first; trySendResult chains to trySendTerminated when both
+// are pending. Standalone terminations (result already delivered) are sent after.
+func (w *Worker) flushPending() {
+	w.mu.RLock()
+	var pendingResults []string
+	var pendingTerminations []string
 	for id, state := range w.executions {
 		if state.pendingNotify != "" {
-			pending = append(pending, id)
+			pendingResults = append(pendingResults, id)
+		}
+		if state.pendingTerminated {
+			pendingTerminations = append(pendingTerminations, id)
 		}
 	}
 	w.mu.RUnlock()
 
-	for _, id := range pending {
+	// Send results first. The write callback in trySendResult chains to
+	// trySendTerminated if both are pending.
+	for _, id := range pendingResults {
 		w.trySendResult(id)
+	}
+	// Send any remaining terminations (where result was already delivered earlier)
+	for _, id := range pendingTerminations {
+		w.trySendTerminated(id)
 	}
 }
 
@@ -1308,8 +1380,8 @@ func (w *Worker) handleSession(executionIDs []string) {
 	}
 	w.mu.Unlock()
 
-	// Flush any buffered results
-	w.flushPendingResults()
+	// Flush any buffered results and terminations
+	w.flushPending()
 }
 
 func getString(v any) string {
