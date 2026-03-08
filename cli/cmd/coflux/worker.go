@@ -122,10 +122,6 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	// Determine if we should watch for changes
 	shouldWatch := workerWatch || workerDev
 
-	if workerDev {
-		logger.Info("development mode enabled (watch + register)")
-	}
-
 	if shouldWatch {
 		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger, sigCh)
 	}
