@@ -54,8 +54,9 @@ type Pool struct {
 	logger      *slog.Logger
 
 	mu       sync.Mutex
-	warm     []*adapter.Executor // idle, ready executors
-	busy     map[string]*adapter.Executor // executionID -> running executor
+	warm     []*adapter.Executor            // idle, ready executors
+	busy     map[string]*adapter.Executor   // executionID -> running executor
+	aborted  map[string]bool                // executions aborted by the server
 	shutdown bool
 	cancel   context.CancelFunc
 	ctx      context.Context
@@ -80,6 +81,7 @@ func NewPool(adp adapter.Adapter, concurrency int, handler ExecutionHandler, log
 		handler:     handler,
 		logger:      logger,
 		busy:        make(map[string]*adapter.Executor),
+		aborted:     make(map[string]bool),
 	}
 }
 
@@ -181,8 +183,18 @@ loop:
 	for {
 		msg, err := exec.Receive(ctx)
 		if err != nil {
-			logger.Error("failed to receive message", "error", err)
-			p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+			// If the execution was aborted by the server (e.g., after suspend),
+			// the process was killed intentionally. Don't report an error —
+			// the server already knows the execution state.
+			p.mu.Lock()
+			aborted := p.aborted[executionID]
+			p.mu.Unlock()
+			if aborted {
+				logger.Info("execution aborted", "error", err)
+			} else {
+				logger.Error("failed to receive message", "error", err)
+				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+			}
 			break
 		}
 
@@ -218,14 +230,15 @@ loop:
 	// Wait for the executor process to exit. With one-shot executors, the
 	// Python process exits on its own after sending the result. Give it a
 	// reasonable timeout before force-killing.
-	if err := exec.Wait(10 * time.Second); err != nil {
+	if err := exec.Wait(5 * time.Second); err != nil {
 		logger.Warn("executor exit", "error", err)
 	}
 
 	// Clean up temp dir
 	os.RemoveAll(workingDir)
 
-	// Remove from busy tracking and notify server
+	// Remove from busy tracking and notify server that the process has
+	// exited. This frees the concurrency slot on the server side.
 	p.finishExecution(executionID, nil)
 	p.handler.NotifyTerminated(ctx, executionID)
 
@@ -238,6 +251,7 @@ loop:
 func (p *Pool) finishExecution(executionID string, execToClose *adapter.Executor) {
 	p.mu.Lock()
 	delete(p.busy, executionID)
+	delete(p.aborted, executionID)
 	p.mu.Unlock()
 
 	if execToClose != nil {
@@ -464,13 +478,17 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 func (p *Pool) Abort(executionID string) error {
 	p.mu.Lock()
 	exec, ok := p.busy[executionID]
+	if ok {
+		p.aborted[executionID] = true
+	}
 	p.mu.Unlock()
 
 	if !ok {
 		return nil
 	}
 
-	return exec.Close()
+	_ = exec.Close()
+	return nil
 }
 
 // Stop shuts down the pool. Closes all warm executors and waits for busy

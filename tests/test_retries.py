@@ -41,7 +41,7 @@ def test_retry_limit_exhausted(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.doomed")
 
-        # Handle all attempts (fail every time) until retries are exhausted
+        # Fail all attempts until retries are exhausted
         attempts = 0
         while True:
             try:

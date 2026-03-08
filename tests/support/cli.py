@@ -101,9 +101,11 @@ def logs_get(run_id, step_attempt=None, from_ts=None, env=None, json_output=True
     return result.stdout
 
 
-def worker(modules, adapter, concurrency=1, provides=None, env=None):
+def worker(modules, adapter, concurrency=1, provides=None, env=None, log_level=None):
     cmd = [_COFLUX_BIN, "worker", "--register", "--adapter", adapter,
            "--concurrency", str(concurrency)]
+    if log_level:
+        cmd.extend(["--log-level", log_level])
     if provides:
         for key, values in provides.items():
             cmd.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])

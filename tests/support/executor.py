@@ -149,6 +149,7 @@ class Executor:
         self._lock = threading.Lock()
         self._accept_thread = None
         self._stopped = threading.Event()
+        self._consumed = set()  # indices of connections already returned by next_execute
 
     def start(self):
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -188,26 +189,26 @@ class Executor:
     def next_execute(self, timeout=10):
         """Wait for the next execution to arrive on any connection.
 
-        Polls all connections that haven't been consumed yet for an execute
-        message. Each execution gets its own connection with one-shot executors.
+        Each execution gets its own connection with one-shot executors.
+        Previously consumed or dead connections are skipped.
 
         Returns (connection, execution_id, target, arguments).
         """
         deadline = time.time() + timeout
-        checked = set()
         while time.time() < deadline:
             with self._lock:
                 conns = list(enumerate(self.connections))
             for idx, conn in conns:
-                if idx in checked:
+                if idx in self._consumed:
                     continue
                 try:
                     eid, target, args = conn.recv_execute(timeout=0.1)
+                    self._consumed.add(idx)
                     return conn, eid, target, args
                 except TimeoutError:
                     continue
                 except (ConnectionError, OSError):
-                    checked.add(idx)
+                    self._consumed.add(idx)
                     continue
             time.sleep(0.05)
         raise TimeoutError(f"no execute received within {timeout}s")

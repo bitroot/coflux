@@ -4112,7 +4112,7 @@ defmodule Coflux.Orchestration.Server do
                 )
 
               state =
-                if execution_ext_id, do: abort_execution(state, execution_ext_id), else: state
+                if execution_ext_id, do: cleanup_execution(state, execution_ext_id), else: state
 
               {retry_id, state}
 
@@ -4563,8 +4563,9 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # abort_execution now takes an external execution ID
-  defp abort_execution(state, execution_ext_id) do
+  # Clean up waiting map entries and pending requests for an execution,
+  # without sending an abort message to the worker.
+  defp cleanup_execution(state, execution_ext_id) do
     # Clean up waiting map entries where this execution is the waiter,
     # and collect pending request IDs so we can send responses
     {state, pending_request_ids} =
@@ -4595,16 +4596,25 @@ defmodule Coflux.Orchestration.Server do
         end
       )
 
-    # find_session_for_execution now takes external ID
+    # Send responses for any pending get_result requests so the worker
+    # doesn't hang waiting for a reply that will never come
     case find_session_for_execution(state, execution_ext_id) do
       {:ok, session_id} ->
-        # Send responses for any pending get_result requests so the worker
-        # doesn't hang waiting for a reply that will never come
-        state =
-          Enum.reduce(pending_request_ids, state, fn request_id, state ->
-            send_session(state, session_id, {:result, request_id, :suspended})
-          end)
+        Enum.reduce(pending_request_ids, state, fn request_id, state ->
+          send_session(state, session_id, {:result, request_id, :suspended})
+        end)
 
+      :error ->
+        state
+    end
+  end
+
+  # Clean up an execution's state and send an abort message to the worker.
+  defp abort_execution(state, execution_ext_id) do
+    state = cleanup_execution(state, execution_ext_id)
+
+    case find_session_for_execution(state, execution_ext_id) do
+      {:ok, session_id} ->
         send_session(state, session_id, {:abort, execution_ext_id})
 
       :error ->

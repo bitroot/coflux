@@ -31,7 +31,7 @@ def project_id():
 
 @pytest.fixture
 def worker(server, project_id, tmp_path):
-    _worker_count = [0]
+    _worker_count = 0
 
     @contextmanager
     def _worker(
@@ -43,12 +43,13 @@ def worker(server, project_id, tmp_path):
         workspace="default",
         create_workspace=True,
     ):
+        nonlocal _worker_count
         if handler is None:
             handler = lambda eid, target, args: None
         modules = modules or ["test"]
         manifest_json = json.dumps(manifest(targets))
-        _worker_count[0] += 1
-        socket_path = str(tmp_path / f"executor-{_worker_count[0]}.sock")
+        _worker_count += 1
+        socket_path = str(tmp_path / f"executor-{_worker_count}.sock")
         host = f"{project_id}.localhost:{server.port}"
 
         env = {

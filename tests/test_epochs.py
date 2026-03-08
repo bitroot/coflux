@@ -1,20 +1,13 @@
 """Tests for epoch database rotation and cross-epoch behavior."""
 
-import json
-import os
-import signal
-import subprocess
-import time
 import urllib.request
 import uuid
 
 import support.cli as cli
-from support.executor import Executor
-from support.manifest import manifest, task, workflow
+from support.helpers import make_env, managed_worker, poll_result
+from support.manifest import task, workflow
 from support.protocol import json_args
 from support.server import ManagedServer
-
-ADAPTER_SCRIPT = os.path.join(os.path.dirname(__file__), "support", "adapter.py")
 
 
 def _rotate_epoch(port, project_id):
@@ -29,56 +22,19 @@ def _rotate_epoch(port, project_id):
     urllib.request.urlopen(req, timeout=10)
 
 
-
-def _make_env(host):
-    return {
-        "PATH": os.environ["PATH"],
-        "COFLUX_SERVER_HOST": host,
-        "COFLUX_WORKSPACE": "default",
-    }
-
-
-def _poll_result(run_id, env, timeout=15):
-    """Poll for a run result until it completes or times out."""
-    deadline = time.time() + timeout
-    interval = 0.1
-    while time.time() < deadline:
-        try:
-            return cli.runs_result(run_id, env=env)
-        except (subprocess.CalledProcessError, json.JSONDecodeError):
-            time.sleep(interval)
-            interval = min(interval * 2, 1.0)
-    raise TimeoutError(f"run {run_id} did not complete within {timeout}s")
-
-
 def test_epoch_rotation_creates_new_epoch(tmp_path):
     """Rotation creates a new epoch file and server remains functional."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [workflow("test.my_workflow")]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
-
-        try:
-            executor.wait_connections(1, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock")) as executor:
             # Submit and complete a workflow
             resp = cli.submit("test.my_workflow", env=env)
             run_id = resp["runId"]
@@ -87,7 +43,7 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 
-            result = _poll_result(run_id, env)
+            result = poll_result(run_id, env)
             assert result["type"] == "value"
             assert result["value"]["data"] == 42
 
@@ -102,18 +58,9 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
             assert target2 == "test.my_workflow"
             conn2.complete(eid2, value=99)
 
-            result2 = _poll_result(run_id2, env)
+            result2 = poll_result(run_id2, env)
             assert result2["type"] == "value"
             assert result2["value"]["data"] == 99
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -122,31 +69,15 @@ def test_rerun_across_epoch_boundary(tmp_path):
     """Re-running a step whose data is in an old epoch works (copy-on-reference)."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [workflow("test.my_workflow")]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
-
-        try:
-            executor.wait_connections(1, timeout=15)
-
-            # Submit and complete a workflow
+        with managed_worker(targets, env, str(tmp_path / "executor.sock")) as executor:
             resp = cli.submit("test.my_workflow", env=env)
             run_id = resp["runId"]
             step_id = resp["stepId"]
@@ -155,13 +86,12 @@ def test_rerun_across_epoch_boundary(tmp_path):
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 
-            result = _poll_result(run_id, env)
+            result = poll_result(run_id, env)
             assert result["type"] == "value"
             assert result["value"]["data"] == 42
 
             # Force rotation — original run is now in old epoch
             _rotate_epoch(server.port, project_id)
-
 
             # Re-run the step (this triggers copy-on-reference from old epoch)
             rerun_resp = cli.runs_rerun(step_id, env=env)
@@ -172,18 +102,9 @@ def test_rerun_across_epoch_boundary(tmp_path):
             assert target2 == "test.my_workflow"
             conn2.complete(eid2, value=99)
 
-            result2 = _poll_result(run_id, env)
+            result2 = poll_result(run_id, env)
             assert result2["type"] == "value"
             assert result2["value"]["data"] == 99
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -195,30 +116,15 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
         workflow("test.main"),
         task("test.expensive", parameters=["x"]),
     ]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
-
-        try:
-            executor.wait_connections(2, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock"), concurrency=2) as executor:
             # First workflow: execute a cached task
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
@@ -238,13 +144,12 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
 
             conn0.complete(wf_eid1, value="done1")
-            result1 = _poll_result(run_id1, env)
+            result1 = poll_result(run_id1, env)
             assert result1["type"] == "value"
             assert result1["value"]["data"] == "done1"
 
             # Force rotation — cached execution is now in old epoch
             _rotate_epoch(server.port, project_id)
-
 
             # Second workflow: submit same cached task — should hit cache.
             resp2 = cli.submit("test.main", env=env)
@@ -263,18 +168,9 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
             assert wf_conn.resolve(wf_eid2, ref2)["value"] == 84
 
             wf_conn.complete(wf_eid2, value="done2")
-            result2 = _poll_result(run_id2, env)
+            result2 = poll_result(run_id2, env)
             assert result2["type"] == "value"
             assert result2["value"]["data"] == "done2"
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -286,30 +182,15 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
         workflow("test.main"),
         workflow("test.child"),
     ]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
-
-        try:
-            executor.wait_connections(2, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock"), concurrency=2) as executor:
             # Submit parent workflow
             resp = cli.submit("test.main", env=env)
             run_id = resp["runId"]
@@ -329,7 +210,7 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
             assert resolved["value"] == 42
 
             conn0.complete(wf_eid, value="done")
-            result = _poll_result(run_id, env)
+            result = poll_result(run_id, env)
             assert result["type"] == "value"
             assert result["value"]["data"] == "done"
 
@@ -340,7 +221,6 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
             # Rotate epoch — both parent and child runs now in old epoch
             _rotate_epoch(server.port, project_id)
 
-
             # Rerun the child step — triggers copy_run on child, which recursively copies parent
             rerun_resp = cli.runs_rerun(child_step_id, env=env)
             assert rerun_resp["attempt"] == 2
@@ -350,15 +230,6 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
             conn, eid, target, _ = executor.next_execute()
             assert target == "test.child"
             conn.complete(eid, value=99)
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -370,30 +241,15 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
         workflow("test.main"),
         task("test.producer", parameters=["x"]),
     ]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
-
-        try:
-            executor.wait_connections(2, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock"), concurrency=2) as executor:
             # First workflow: submit a task and capture the execution reference
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
@@ -410,13 +266,12 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
             assert conn0.resolve(wf_eid1, producer_ref)["value"] == 84
 
             conn0.complete(wf_eid1, value="done1")
-            result1 = _poll_result(run_id1, env)
+            result1 = poll_result(run_id1, env)
             assert result1["type"] == "value"
             assert result1["value"]["data"] == "done1"
 
             # Rotate epoch — first run with task is now in old epoch
             _rotate_epoch(server.port, project_id)
-
 
             # Second workflow: resolve the OLD producer reference
             resp2 = cli.submit("test.main", env=env)
@@ -430,18 +285,9 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
             assert resolved["value"] == 84
 
             conn.complete(wf_eid2, value="done2")
-            result2 = _poll_result(run_id2, env)
+            result2 = poll_result(run_id2, env)
             assert result2["type"] == "value"
             assert result2["value"]["data"] == "done2"
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -453,30 +299,15 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
         workflow("test.main"),
         task("test.expensive", parameters=["x"]),
     ]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
-
-        try:
-            executor.wait_connections(2, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock"), concurrency=2) as executor:
             # --- Epoch 1: cached task with args(42) → value 84 ---
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
@@ -492,12 +323,11 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
 
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
             conn0.complete(wf_eid1, value="done1")
-            result1 = _poll_result(run_id1, env)
+            result1 = poll_result(run_id1, env)
             assert result1["value"]["data"] == "done1"
 
             # Rotate → epoch 2
             _rotate_epoch(server.port, project_id)
-
 
             # --- Epoch 2: cached task with args(99) → value 198 (different args) ---
             resp2 = cli.submit("test.main", env=env)
@@ -515,12 +345,11 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
 
             assert conn_wf2.resolve(wf_eid2, ref2)["value"] == 198
             conn_wf2.complete(wf_eid2, value="done2")
-            result2 = _poll_result(run_id2, env)
+            result2 = poll_result(run_id2, env)
             assert result2["value"]["data"] == "done2"
 
             # Rotate → epoch 3
             _rotate_epoch(server.port, project_id)
-
 
             # --- Epoch 3: cached task with args(42) again — should hit epoch 1's cache ---
             resp3 = cli.submit("test.main", env=env)
@@ -538,17 +367,8 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
             assert resolved3["value"] == 84  # from epoch 1, NOT 198
 
             conn_wf3.complete(wf_eid3, value="done3")
-            result3 = _poll_result(run_id3, env)
+            result3 = poll_result(run_id3, env)
             assert result3["value"]["data"] == "done3"
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -561,30 +381,15 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
         task("test.producer"),
         task("test.consumer"),
     ]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
-
-        try:
-            executor.wait_connections(2, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock"), concurrency=2) as executor:
             # Submit workflow
             resp = cli.submit("test.main", env=env)
             run_id = resp["runId"]
@@ -628,7 +433,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert conn0.resolve(wf_eid, ref_cons)["value"] == "consumed"
 
             conn0.complete(wf_eid, value="done")
-            result = _poll_result(run_id, env)
+            result = poll_result(run_id, env)
             assert result["type"] == "value"
             assert result["value"]["data"] == "done"
 
@@ -638,7 +443,6 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
 
             # Rotate epoch — run with asset is now in old epoch
             _rotate_epoch(server.port, project_id)
-
 
             # Rerun the consumer step — copy_run copies run + assets to active epoch
             rerun_resp = cli.runs_rerun(cons_step_id, env=env)
@@ -660,15 +464,6 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert rerun_entry[1] == original_size
 
             conn.complete(rerun_eid, value="consumed again")
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
 
@@ -677,30 +472,15 @@ def test_idempotency_across_epoch_boundary(tmp_path):
     """Idempotency key is found in archived epoch after rotation."""
     project_id = f"test-{uuid.uuid4().hex[:12]}"
     targets = [workflow("test.my_workflow")]
-    manifest_json = json.dumps(manifest(targets))
-    socket_path = str(tmp_path / "executor.sock")
-    data_dir = str(tmp_path / "data")
 
-    server = ManagedServer(data_dir)
+    server = ManagedServer(str(tmp_path / "data"))
     server.start()
 
     try:
-        env = _make_env(f"{project_id}.localhost:{server.port}")
-        env["COFLUX_TEST_MANIFEST"] = manifest_json
-        env["COFLUX_TEST_SOCKET"] = socket_path
-        env["COFLUX_LOGS_STORE_FLUSH_INTERVAL"] = "0"
-
+        env = make_env(f"{project_id}.localhost:{server.port}")
         cli.workspaces_create("default", env=env)
 
-        executor = Executor(socket_path)
-        executor.start()
-
-        adapter = f"python3,{ADAPTER_SCRIPT}"
-        worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
-
-        try:
-            executor.wait_connections(1, timeout=15)
-
+        with managed_worker(targets, env, str(tmp_path / "executor.sock")) as executor:
             # Submit with idempotency key and complete
             resp1 = cli.submit("test.my_workflow", idempotency_key="epoch-key", env=env)
             run_id1 = resp1["runId"]
@@ -709,7 +489,7 @@ def test_idempotency_across_epoch_boundary(tmp_path):
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 
-            result = _poll_result(run_id1, env)
+            result = poll_result(run_id1, env)
             assert result["type"] == "value"
 
             # Force epoch rotation
@@ -720,14 +500,5 @@ def test_idempotency_across_epoch_boundary(tmp_path):
             run_id2 = resp2["runId"]
 
             assert run_id1 == run_id2
-
-        finally:
-            worker_proc.send_signal(signal.SIGTERM)
-            try:
-                worker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker_proc.kill()
-                worker_proc.wait(timeout=5)
-            executor.close()
     finally:
         server.stop()
