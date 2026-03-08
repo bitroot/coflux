@@ -1,11 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/bitroot/coflux/cli/internal/blob"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 )
 
@@ -64,14 +69,19 @@ func init() {
 }
 
 var runsResultCmd = &cobra.Command{
-	Use:   "result <run-id>",
-	Short: "Get the result of a run",
-	Long: `Get the result of a run.
+	Use:   "result <target>",
+	Short: "Get the result of a run, step, or execution",
+	Long: `Get the result of a run, step, or execution.
 
-Returns the JSON-formatted result of the root workflow execution.
+The target can be:
+  <run-id>              Result of the initial step's latest execution
+  <run-id>:<step>       Result of the latest execution of a specific step
+  <run-id>:<step>:<attempt>  Result of a specific execution
 
 Example:
-  coflux runs result abc123`,
+  coflux runs result RTbj
+  coflux runs result RTbj:2
+  coflux runs result RTbj:2:1`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunsResult,
 }
@@ -110,17 +120,7 @@ func findRootStep(data map[string]any) (step map[string]any, exec map[string]any
 			continue
 		}
 		step = s
-
-		executions, _ := s["executions"].(map[string]any)
-		var latestAttempt string
-		for attempt := range executions {
-			if latestAttempt == "" || attempt > latestAttempt {
-				latestAttempt = attempt
-			}
-		}
-		if latestAttempt != "" {
-			exec, _ = executions[latestAttempt].(map[string]any)
-		}
+		exec = latestExecution(s)
 		return
 	}
 	return
@@ -196,28 +196,85 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runRunsResult(cmd *cobra.Command, args []string) error {
-	runID := args[0]
+// findStepByNumber finds a step by its step number.
+func findStepByNumber(data map[string]any, stepNumber string) map[string]any {
+	steps, _ := data["steps"].(map[string]any)
+	for _, stepData := range steps {
+		s, ok := stepData.(map[string]any)
+		if !ok {
+			continue
+		}
+		sn, _ := s["stepNumber"].(float64)
+		if fmt.Sprintf("%d", int(sn)) == stepNumber {
+			return s
+		}
+	}
+	return nil
+}
 
-	data, _, err := captureRunTopic(cmd, runID)
+// latestExecution returns the latest execution (highest attempt) of a step.
+func latestExecution(step map[string]any) map[string]any {
+	executions, _ := step["executions"].(map[string]any)
+	var latestAttempt string
+	for attempt := range executions {
+		if latestAttempt == "" || attempt > latestAttempt {
+			latestAttempt = attempt
+		}
+	}
+	if latestAttempt != "" {
+		exec, _ := executions[latestAttempt].(map[string]any)
+		return exec
+	}
+	return nil
+}
+
+// parseResultTarget parses a target string into runID, stepNumber, attempt.
+func parseResultTarget(target string) (runID, stepNumber, attempt string) {
+	parts := strings.SplitN(target, ":", 3)
+	runID = parts[0]
+	if len(parts) >= 2 {
+		stepNumber = parts[1]
+	}
+	if len(parts) >= 3 {
+		attempt = parts[2]
+	}
+	return
+}
+
+// loadBlobData loads a blob's JSON data using the blob store.
+func loadBlobData(key string) (any, error) {
+	token, err := resolveToken()
 	if err != nil {
-		return err
+		return nil, err
+	}
+	stores, err := createBlobStoresFromViper(token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create blob stores: %w", err)
+	}
+	if len(stores) == 0 {
+		return nil, fmt.Errorf("blob store not configured")
 	}
 
-	_, rootExec := findRootStep(data)
-	if rootExec == nil {
-		return fmt.Errorf("no execution found for run %s", runID)
+	blobManager := blob.NewManager(stores, filepath.Join(os.TempDir(), "coflux-cache", "blobs"), viper.GetInt("blobs.threshold"))
+	reader, err := blobManager.Get(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load blob: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	blobData, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read blob: %w", err)
 	}
 
-	result, _ := rootExec["result"].(map[string]any)
-	if result == nil {
-		return fmt.Errorf("run %s has no result yet", runID)
+	var parsed any
+	if err := json.Unmarshal(blobData, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse blob JSON: %w", err)
 	}
+	return parsed, nil
+}
 
-	if isOutput("json") {
-		return outputJSON(result)
-	}
-
+func printResult(result map[string]any) error {
 	resultType, _ := result["type"].(string)
 	switch resultType {
 	case "value":
@@ -226,13 +283,19 @@ func runRunsResult(cmd *cobra.Command, args []string) error {
 			break
 		}
 		valueType, _ := value["type"].(string)
+		references, _ := value["references"].([]any)
 		switch valueType {
 		case "raw":
-			references, _ := value["references"].([]any)
 			fmt.Println(formatData(value["data"], references))
 		case "blob":
-			size, _ := value["size"].(float64)
-			fmt.Printf("<blob (%s)>\n", humanSize(int64(size)))
+			key, _ := value["key"].(string)
+			blobData, err := loadBlobData(key)
+			if err != nil {
+				size, _ := value["size"].(float64)
+				fmt.Printf("<blob (%s)>\n", humanSize(int64(size)))
+			} else {
+				fmt.Println(formatData(blobData, references))
+			}
 		}
 	case "error":
 		errData, _ := result["error"].(map[string]any)
@@ -270,8 +333,58 @@ func runRunsResult(cmd *cobra.Command, args []string) error {
 	default:
 		fmt.Println(resultType)
 	}
-
 	return nil
+}
+
+func runRunsResult(cmd *cobra.Command, args []string) error {
+	target := args[0]
+	runID, stepNumber, attempt := parseResultTarget(target)
+
+	data, _, err := captureRunTopic(cmd, runID)
+	if err != nil {
+		return err
+	}
+
+	var exec map[string]any
+	if stepNumber == "" {
+		// Run ID only: get the root step's latest execution
+		_, exec = findRootStep(data)
+		if exec == nil {
+			return fmt.Errorf("no execution found for run %s", runID)
+		}
+	} else if attempt == "" {
+		// Run ID + step number: get latest execution of that step
+		step := findStepByNumber(data, stepNumber)
+		if step == nil {
+			return fmt.Errorf("step %s not found in run %s", stepNumber, runID)
+		}
+		exec = latestExecution(step)
+		if exec == nil {
+			return fmt.Errorf("no execution found for step %s in run %s", stepNumber, runID)
+		}
+	} else {
+		// Run ID + step number + attempt: get specific execution
+		step := findStepByNumber(data, stepNumber)
+		if step == nil {
+			return fmt.Errorf("step %s not found in run %s", stepNumber, runID)
+		}
+		executions, _ := step["executions"].(map[string]any)
+		exec, _ = executions[attempt].(map[string]any)
+		if exec == nil {
+			return fmt.Errorf("execution attempt %s not found for step %s in run %s", attempt, stepNumber, runID)
+		}
+	}
+
+	result, _ := exec["result"].(map[string]any)
+	if result == nil {
+		return fmt.Errorf("no result yet")
+	}
+
+	if isOutput("json") {
+		return outputJSON(result)
+	}
+
+	return printResult(result)
 }
 
 var runsCancelCmd = &cobra.Command{

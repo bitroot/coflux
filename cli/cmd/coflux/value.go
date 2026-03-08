@@ -32,9 +32,8 @@ func formatDuration(seconds float64) string {
 
 type refFormatter func(ref any) string
 
-// formatDataWith recursively formats a Data value as human-readable text,
-// using the provided reference formatter to resolve {"type": "ref", "index": N} entries.
-func formatDataWith(data any, references []any, fmtRef refFormatter) string {
+// formatDataIndent recursively formats a Data value as human-readable text with indentation.
+func formatDataIndent(data any, references []any, fmtRef refFormatter, depth int) string {
 	switch v := data.(type) {
 	case string:
 		return fmt.Sprintf(`"%s"`, v)
@@ -53,7 +52,7 @@ func formatDataWith(data any, references []any, fmtRef refFormatter) string {
 	case []any:
 		items := make([]string, len(v))
 		for i, item := range v {
-			items[i] = formatDataWith(item, references, fmtRef)
+			items[i] = formatDataIndent(item, references, fmtRef, depth)
 		}
 		return "[" + strings.Join(items, ", ") + "]"
 	case map[string]any:
@@ -61,25 +60,33 @@ func formatDataWith(data any, references []any, fmtRef refFormatter) string {
 		switch typ {
 		case "dict":
 			items, _ := v["items"].([]any)
-			pairs := make([]string, 0, len(items)/2)
-			for i := 0; i+1 < len(items); i += 2 {
-				key := formatDataWith(items[i], references, fmtRef)
-				val := formatDataWith(items[i+1], references, fmtRef)
-				pairs = append(pairs, key+": "+val)
+			if len(items) == 0 {
+				return "{}"
 			}
-			return "{" + strings.Join(pairs, ", ") + "}"
+			indent := strings.Repeat("  ", depth+1)
+			outdent := strings.Repeat("  ", depth)
+			var lines []string
+			for i := 0; i+1 < len(items); i += 2 {
+				key := formatDataIndent(items[i], references, fmtRef, depth+1)
+				val := formatDataIndent(items[i+1], references, fmtRef, depth+1)
+				lines = append(lines, indent+key+" ↦ "+val)
+			}
+			return "{\n" + strings.Join(lines, "\n") + "\n" + outdent + "}"
 		case "set":
 			items, _ := v["items"].([]any)
+			if len(items) == 0 {
+				return "∅"
+			}
 			parts := make([]string, len(items))
 			for i, item := range items {
-				parts[i] = formatDataWith(item, references, fmtRef)
+				parts[i] = formatDataIndent(item, references, fmtRef, depth)
 			}
 			return "{" + strings.Join(parts, ", ") + "}"
 		case "tuple":
 			items, _ := v["items"].([]any)
 			parts := make([]string, len(items))
 			for i, item := range items {
-				parts[i] = formatDataWith(item, references, fmtRef)
+				parts[i] = formatDataIndent(item, references, fmtRef, depth)
 			}
 			return "(" + strings.Join(parts, ", ") + ")"
 		case "datetime", "date", "time":
@@ -107,10 +114,8 @@ func formatDataWith(data any, references []any, fmtRef refFormatter) string {
 }
 
 // formatData recursively formats a Data value as human-readable text.
-// The references slice corresponds to the value's references array,
-// used to resolve {"type": "ref", "index": N} entries.
 func formatData(data any, references []any) string {
-	return formatDataWith(data, references, formatReference)
+	return formatDataIndent(data, references, formatReference, 0)
 }
 
 func formatReference(ref any) string {
@@ -149,8 +154,6 @@ func formatReference(ref any) string {
 }
 
 // formatLogReference formats a reference in the flat log format.
-// Log references have fields at the top level (e.g. r["module"], r["target"])
-// rather than nested under r["execution"] or r["asset"].
 func formatLogReference(ref any) string {
 	r, ok := ref.(map[string]any)
 	if !ok {
@@ -184,5 +187,5 @@ func formatLogReference(ref any) string {
 
 // formatLogData formats a log value's data using the flat log reference format.
 func formatLogData(data any, references []any) string {
-	return formatDataWith(data, references, formatLogReference)
+	return formatDataIndent(data, references, formatLogReference, 0)
 }
