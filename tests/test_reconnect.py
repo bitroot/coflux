@@ -28,8 +28,8 @@ def test_result_buffered_on_disconnect(server, tmp_path):
             resp = cli.submit("test/my_workflow", host=direct_host)
             run_id = resp["runId"]
 
-            conn, eid, _, target, _ = executor.next_execute()
-            assert target == "my_workflow"
+            ex = executor.next_execute()
+            assert ex.target == "my_workflow"
 
             # Kill proxy connections — Go worker loses its WebSocket
             proxy.disconnect()
@@ -37,7 +37,7 @@ def test_result_buffered_on_disconnect(server, tmp_path):
 
             # Complete the execution while the worker is disconnected.
             # The Go worker will buffer the result.
-            conn.complete(eid, value=42)
+            ex.conn.complete(ex.execution_id, value=42)
 
             # Worker reconnects through the proxy (still accepting),
             # server sends session message with execution IDs,
@@ -65,13 +65,13 @@ def test_error_buffered_on_disconnect(server, tmp_path):
             resp = cli.submit("test/my_workflow", host=direct_host)
             run_id = resp["runId"]
 
-            conn, eid, _, target, _ = executor.next_execute()
-            assert target == "my_workflow"
+            ex = executor.next_execute()
+            assert ex.target == "my_workflow"
 
             proxy.disconnect()
             time.sleep(0.5)
 
-            conn.fail(eid, "RuntimeError", "something broke")
+            ex.conn.fail(ex.execution_id, "RuntimeError", "something broke")
 
             result = poll_result(run_id, direct_host, timeout=15)
             assert result["type"] == "error"
@@ -97,15 +97,15 @@ def test_result_buffered_across_server_restart(tmp_path):
             resp = cli.submit("test/my_workflow", host=host)
             run_id = resp["runId"]
 
-            conn, eid, _, target, _ = executor.next_execute()
-            assert target == "my_workflow"
+            ex = executor.next_execute()
+            assert ex.target == "my_workflow"
 
             # Kill server
             server.stop()
             time.sleep(0.5)
 
             # Complete execution while server is down
-            conn.complete(eid, value=42)
+            ex.conn.complete(ex.execution_id, value=42)
 
             # Restart server — same port, same data directory
             server.start()

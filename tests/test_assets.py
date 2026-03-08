@@ -18,12 +18,12 @@ def test_persist_and_get_asset(worker):
         resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
+        ex0 = ctx.executor.next_execute()
 
         # Submit producer task
-        ref_prod = conn0.submit_task(wf_eid, "test", "producer", [])
+        ref_prod = ex0.conn.submit_task(ex0.execution_id, "test", "producer", [])
 
-        conn1, prod_eid, _, _, _ = ctx.executor.next_execute()
+        ex1 = ctx.executor.next_execute()
 
         # Create a temp file to persist as an asset
         fd, tmp_path = tempfile.mkstemp(suffix=".txt")
@@ -31,23 +31,23 @@ def test_persist_and_get_asset(worker):
             f.write("hello asset")
 
         # Persist the file as an asset
-        asset_result = conn1.persist_asset(
-            prod_eid,
+        asset_result = ex1.conn.persist_asset(
+            ex1.execution_id,
             [tmp_path],
             metadata={"name": "my_asset"},
         )
         assert "asset_id" in asset_result
         asset_id = asset_result["asset_id"]
 
-        conn1.complete(prod_eid, value="produced")
-        assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
+        ex1.conn.complete(ex1.execution_id, value="produced")
+        assert ex0.conn.resolve(ex0.execution_id, ref_prod)["value"] == "produced"
 
         # Submit consumer task (fresh connection)
-        ref_cons = conn0.submit_task(wf_eid, "test", "consumer", [])
-        conn2, cons_eid, _, _, _ = ctx.executor.next_execute()
+        ref_cons = ex0.conn.submit_task(ex0.execution_id, "test", "consumer", [])
+        ex2 = ctx.executor.next_execute()
 
         # Retrieve the asset (response is {"entries": {path: [blob_key, size, metadata]}})
-        result = conn2.get_asset(cons_eid, asset_id)
+        result = ex2.conn.get_asset(ex2.execution_id, asset_id)
         assert "entries" in result
         entries = result["entries"]
         assert isinstance(entries, dict)
@@ -60,10 +60,10 @@ def test_persist_and_get_asset(worker):
             assert isinstance(blob_key, str)
             assert size > 0
 
-        conn2.complete(cons_eid, value="consumed")
-        assert conn0.resolve(wf_eid, ref_cons)["value"] == "consumed"
+        ex2.conn.complete(ex2.execution_id, value="consumed")
+        assert ex0.conn.resolve(ex0.execution_id, ref_cons)["value"] == "consumed"
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
 
         # Clean up
@@ -82,27 +82,27 @@ def test_asset_inspect_and_download(worker, tmp_path):
         resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
+        ex0 = ctx.executor.next_execute()
 
         # Submit producer task
-        ref_prod = conn0.submit_task(wf_eid, "test", "producer", [])
-        conn1, prod_eid, _, _, _ = ctx.executor.next_execute()
+        ref_prod = ex0.conn.submit_task(ex0.execution_id, "test", "producer", [])
+        ex1 = ctx.executor.next_execute()
 
         # Create a temp file and persist as asset
         src_path = str(tmp_path / "data.txt")
         with open(src_path, "w") as f:
             f.write("asset content for CLI test")
 
-        asset_result = conn1.persist_asset(
-            prod_eid,
+        asset_result = ex1.conn.persist_asset(
+            ex1.execution_id,
             [src_path],
             metadata={"name": "cli_test_asset"},
         )
         asset_id = asset_result["asset_id"]
 
-        conn1.complete(prod_eid, value="done")
-        assert conn0.resolve(wf_eid, ref_prod)["value"] == "done"
-        conn0.complete(wf_eid, value="done")
+        ex1.conn.complete(ex1.execution_id, value="done")
+        assert ex0.conn.resolve(ex0.execution_id, ref_prod)["value"] == "done"
+        ex0.conn.complete(ex0.execution_id, value="done")
         ctx.result(run_id)
 
         # Inspect the asset via CLI

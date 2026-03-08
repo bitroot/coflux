@@ -16,33 +16,33 @@ def test_cache_hit(worker):
         resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
+        ex0 = ctx.executor.next_execute()
 
         # First submit - cache miss, task executes
-        ref1 = conn0.submit_task(
-            wf_eid,
+        ref1 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
-        conn1, task_eid, _, _, _ = ctx.executor.next_execute()
-        conn1.complete(task_eid, value=84)
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=84)
 
-        assert conn0.resolve(wf_eid, ref1)["value"] == 84
+        assert ex0.conn.resolve(ex0.execution_id, ref1)["value"] == 84
 
         # Second submit - same target + args, should be cached
-        ref2 = conn0.submit_task(
-            wf_eid,
+        ref2 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
         # Should resolve immediately from cache (no second execute)
-        assert conn0.resolve(wf_eid, ref2)["value"] == 84
+        assert ex0.conn.resolve(ex0.execution_id, ref2)["value"] == 84
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
@@ -57,31 +57,31 @@ def test_cache_miss_different_args(worker):
         resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
+        ex0 = ctx.executor.next_execute()
 
         # First submit with cache
-        ref1 = conn0.submit_task(
-            wf_eid,
+        ref1 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "compute",
             json_args(1),
             cache={"params": True},
         )
-        conn_t1, task_eid1, _, _, _ = ctx.executor.next_execute()
-        conn_t1.complete(task_eid1, value=10)
-        assert conn0.resolve(wf_eid, ref1)["value"] == 10
+        ex_t1 = ctx.executor.next_execute()
+        ex_t1.conn.complete(ex_t1.execution_id, value=10)
+        assert ex0.conn.resolve(ex0.execution_id, ref1)["value"] == 10
 
         # Second submit with different args - should execute (cache miss)
-        ref2 = conn0.submit_task(
-            wf_eid,
+        ref2 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "compute",
             json_args(2),
             cache={"params": True},
         )
-        conn_t2, task_eid2, _, _, _ = ctx.executor.next_execute()
-        conn_t2.complete(task_eid2, value=20)
-        assert conn0.resolve(wf_eid, ref2)["value"] == 20
+        ex_t2 = ctx.executor.next_execute()
+        ex_t2.conn.complete(ex_t2.execution_id, value=20)
+        assert ex0.conn.resolve(ex0.execution_id, ref2)["value"] == 20
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
@@ -96,33 +96,33 @@ def test_memo_within_run(worker):
         resp = ctx.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx.executor.next_execute()
+        ex0 = ctx.executor.next_execute()
 
         # First submit with memo
-        ref1 = conn0.submit_task(
-            wf_eid,
+        ref1 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "compute",
             json_args(10),
             memo=True,
         )
 
-        conn1, task_eid, _, _, _ = ctx.executor.next_execute()
-        conn1.complete(task_eid, value=99)
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=99)
 
-        assert conn0.resolve(wf_eid, ref1)["value"] == 99
+        assert ex0.conn.resolve(ex0.execution_id, ref1)["value"] == 99
 
         # Second submit with same args and memo - should reuse
-        ref2 = conn0.submit_task(
-            wf_eid,
+        ref2 = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "compute",
             json_args(10),
             memo=True,
         )
 
         # Should resolve from memo hit (no second execute)
-        assert conn0.resolve(wf_eid, ref2)["value"] == 99
+        assert ex0.conn.resolve(ex0.execution_id, ref2)["value"] == 99
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
@@ -138,19 +138,19 @@ def test_cache_from_base_workspace(worker):
         resp = ctx_base.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, wf_eid, _, _, _ = ctx_base.executor.next_execute()
-        ref = conn0.submit_task(
-            wf_eid,
+        ex0 = ctx_base.executor.next_execute()
+        ref = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
-        conn1, task_eid, _, _, _ = ctx_base.executor.next_execute()
-        conn1.complete(task_eid, value=84)
-        assert conn0.resolve(wf_eid, ref)["value"] == 84
+        ex1 = ctx_base.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=84)
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == 84
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx_base.result(run_id)["value"]["data"] == "done"
 
         saved_host = ctx_base.host
@@ -166,18 +166,18 @@ def test_cache_from_base_workspace(worker):
     ) as ctx_derived:
         resp = ctx_derived.submit("test", "main")
 
-        conn0, wf_eid, _, _, _ = ctx_derived.executor.next_execute()
-        ref = conn0.submit_task(
-            wf_eid,
+        ex0 = ctx_derived.executor.next_execute()
+        ref = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
         # Should resolve from base workspace cache (no new execution needed)
-        assert conn0.resolve(wf_eid, ref)["value"] == 84
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == 84
 
-        conn0.complete(wf_eid, value="cached")
+        ex0.conn.complete(ex0.execution_id, value="cached")
         assert ctx_derived.result(resp["runId"])["value"]["data"] == "cached"
 
 
@@ -192,19 +192,19 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
     with worker(targets, workspace="ws_a", concurrency=2) as ctx_a:
         resp = ctx_a.submit("test", "main")
 
-        conn0, wf_eid, _, _, _ = ctx_a.executor.next_execute()
-        ref = conn0.submit_task(
-            wf_eid,
+        ex0 = ctx_a.executor.next_execute()
+        ref = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
-        conn1, task_eid, _, _, _ = ctx_a.executor.next_execute()
-        conn1.complete(task_eid, value=84)
-        assert conn0.resolve(wf_eid, ref)["value"] == 84
+        ex1 = ctx_a.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=84)
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == 84
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx_a.result(resp["runId"])["value"]["data"] == "done"
 
         saved_host = ctx_a.host
@@ -216,18 +216,18 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
     with worker(targets, workspace="ws_b", concurrency=2) as ctx_b:
         resp = ctx_b.submit("test", "main")
 
-        conn0, wf_eid, _, _, _ = ctx_b.executor.next_execute()
-        ref = conn0.submit_task(
-            wf_eid,
+        ex0 = ctx_b.executor.next_execute()
+        ref = ex0.conn.submit_task(
+            ex0.execution_id,
             "test", "expensive",
             json_args(42),
             cache={"params": True},
         )
 
         # Should require a new execution (cache miss in unrelated workspace)
-        conn1, task_eid, _, _, _ = ctx_b.executor.next_execute()
-        conn1.complete(task_eid, value=999)
-        assert conn0.resolve(wf_eid, ref)["value"] == 999
+        ex1 = ctx_b.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=999)
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == 999
 
-        conn0.complete(wf_eid, value="done")
+        ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx_b.result(resp["runId"])["value"]["data"] == "done"

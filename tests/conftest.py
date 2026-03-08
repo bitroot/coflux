@@ -22,10 +22,10 @@ class WorkerContext:
 
     def handle_one(self):
         """Handle one execution."""
-        conn, eid, module, target, args = self.executor.next_execute()
-        response = self._handler(eid, module, target, args)
+        ex = self.executor.next_execute()
+        response = self._handler(ex.execution_id, ex.module, ex.target, ex.arguments)
         if response is not None:
-            conn.send(response)
+            ex.conn.send(response)
 
     def submit(self, module, target, *arguments, idempotency_key=None):
         """Submit a workflow and return the parsed JSON response."""

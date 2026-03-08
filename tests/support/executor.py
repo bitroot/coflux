@@ -1,8 +1,11 @@
 import socket
 import threading
 import time
+from collections import namedtuple
 
 from . import protocol
+
+Execution = namedtuple("Execution", ["conn", "execution_id", "module", "target", "arguments"])
 
 
 class ExecutorConnection:
@@ -200,7 +203,7 @@ class Executor:
         Each execution gets its own connection with one-shot executors.
         Previously consumed or dead connections are skipped.
 
-        Returns (connection, execution_id, module, target, arguments).
+        Returns an Execution named tuple.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -212,7 +215,7 @@ class Executor:
                 try:
                     eid, module, target, args = conn.recv_execute(timeout=0.1)
                     self._consumed.add(idx)
-                    return conn, eid, module, target, args
+                    return Execution(conn, eid, module, target, args)
                 except TimeoutError:
                     continue
                 except (ConnectionError, OSError):

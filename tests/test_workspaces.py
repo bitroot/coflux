@@ -30,9 +30,9 @@ def test_workspace_pause_resume(worker):
         ctx.resume()
 
         # Now the execution should be dispatched
-        conn, eid, _, target, _ = ctx.executor.next_execute(timeout=5)
-        assert target == "main"
-        conn.complete(eid, value="resumed")
+        ex = ctx.executor.next_execute(timeout=5)
+        assert ex.target == "main"
+        ex.conn.complete(ex.execution_id, value="resumed")
 
         result = ctx.result(resp["runId"])
         assert result["value"]["data"] == "resumed"
@@ -79,8 +79,8 @@ def test_rerun_step_in_derived_workspace(worker):
         resp = ctx_base.submit("test", "main")
         run_id = resp["runId"]
 
-        conn0, eid, _, _, _ = ctx_base.executor.next_execute()
-        conn0.complete(eid, value="original")
+        ex0 = ctx_base.executor.next_execute()
+        ex0.conn.complete(ex0.execution_id, value="original")
 
         result = ctx_base.result(run_id)
         assert result["value"]["data"] == "original"
@@ -101,9 +101,9 @@ def test_rerun_step_in_derived_workspace(worker):
         rerun_resp = ctx_derived.rerun(step_id)
         assert rerun_resp["attempt"] > 1
 
-        conn0, eid, _, target, _ = ctx_derived.executor.next_execute()
-        assert target == "main"
-        conn0.complete(eid, value="rerun-in-derived")
+        ex0 = ctx_derived.executor.next_execute()
+        assert ex0.target == "main"
+        ex0.conn.complete(ex0.execution_id, value="rerun-in-derived")
 
         result = ctx_derived.result(run_id)
         assert result["value"]["data"] == "rerun-in-derived"
