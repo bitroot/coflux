@@ -53,7 +53,10 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 
 	var rows [][]string
 	for name, pool := range pools {
-		launcher := getString(pool, "launcherType")
+		launcher := ""
+		if l, ok := pool["launcher"].(map[string]any); ok {
+			launcher = getString(l, "type")
+		}
 		modules := ""
 		if m, ok := pool["modules"].([]any); ok {
 			var mods []string
