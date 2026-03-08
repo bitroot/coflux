@@ -14,10 +14,8 @@ defmodule Coflux.MixProject do
   end
 
   def application do
-    [
-      extra_applications: [:logger],
-      mod: {Coflux.Application, []}
-    ]
+    [extra_applications: [:logger]] ++
+      if(Mix.env() != :test, do: [mod: {Coflux.Application, []}], else: [])
   end
 
   defp deps do
