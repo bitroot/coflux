@@ -178,6 +178,13 @@ func runWorkerWithWatch(
 	logger.Info("watching for file changes", "directory", ".")
 
 	for {
+		// Re-resolve token before each run (project tokens may have expired)
+		token, err := resolveToken()
+		if err != nil {
+			return fmt.Errorf("failed to refresh token: %w", err)
+		}
+		cfg.Server.Token = token
+
 		// Create a cancellable context for this worker run
 		runCtx, runCancel := context.WithCancel(ctx)
 
