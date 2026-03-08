@@ -1,5 +1,6 @@
 import json
 import subprocess
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -161,13 +162,36 @@ class WorkerContext:
         return run_result
 
 
+def pytest_configure(config):
+    """Start a shared test server (runs on the controller and in non-xdist mode)."""
+    if not hasattr(config, "workerinput"):
+        data_dir = tempfile.mkdtemp(prefix="coflux-test-server-")
+        srv = ManagedServer(data_dir)
+        srv.start()
+        config._server = srv
+
+
+def pytest_configure_node(node):
+    """Pass server port to each xdist worker."""
+    node.workerinput["server_port"] = node.config._server.port
+
+
+def pytest_unconfigure(config):
+    """Stop the shared test server (runs on the controller and in non-xdist mode)."""
+    srv = getattr(config, "_server", None)
+    if srv:
+        srv.stop()
+
+
 @pytest.fixture(scope="session")
-def server(tmp_path_factory):
-    data_dir = str(tmp_path_factory.mktemp("server_data"))
-    srv = ManagedServer(data_dir)
-    srv.start()
-    yield srv
-    srv.stop()
+def server(request):
+    if hasattr(request.config, "workerinput"):
+        # xdist worker — server is running on the controller.
+        port = request.config.workerinput["server_port"]
+        return ManagedServer("", port=port)
+    else:
+        # No xdist — server was started in pytest_configure.
+        return request.config._server
 
 
 @pytest.fixture
