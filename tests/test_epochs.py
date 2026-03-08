@@ -77,15 +77,13 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            executor.wait_connections(1, timeout=15)
 
             # Submit and complete a workflow
             resp = cli.submit("test.my_workflow", env=env)
             run_id = resp["runId"]
 
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 
@@ -100,9 +98,9 @@ def test_epoch_rotation_creates_new_epoch(tmp_path):
             resp2 = cli.submit("test.my_workflow", env=env)
             run_id2 = resp2["runId"]
 
-            eid2, target2, _ = conn.recv_execute()
+            conn2, eid2, target2, _ = executor.next_execute()
             assert target2 == "test.my_workflow"
-            conn.complete(eid2, value=99)
+            conn2.complete(eid2, value=99)
 
             result2 = _poll_result(run_id2, env)
             assert result2["type"] == "value"
@@ -146,16 +144,14 @@ def test_rerun_across_epoch_boundary(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            executor.wait_connections(1, timeout=15)
 
             # Submit and complete a workflow
             resp = cli.submit("test.my_workflow", env=env)
             run_id = resp["runId"]
             step_id = resp["stepId"]
 
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 
@@ -172,9 +168,9 @@ def test_rerun_across_epoch_boundary(tmp_path):
             assert rerun_resp["attempt"] == 2
 
             # Execute the re-run
-            eid2, target2, _ = conn.recv_execute()
+            conn2, eid2, target2, _ = executor.next_execute()
             assert target2 == "test.my_workflow"
-            conn.complete(eid2, value=99)
+            conn2.complete(eid2, value=99)
 
             result2 = _poll_result(run_id, env)
             assert result2["type"] == "value"
@@ -221,18 +217,13 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
 
         try:
-            for _ in range(2):
-                executor.accept(count=1, timeout=15)
-                executor.connections[-1].send_ready()
-
-            conn0 = executor.connections[0]
-            conn1 = executor.connections[1]
+            executor.wait_connections(2, timeout=15)
 
             # First workflow: execute a cached task
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
 
-            wf_eid1, _, _ = conn0.recv_execute()
+            conn0, wf_eid1, _, _ = executor.next_execute()
 
             ref1 = conn0.submit_task(
                 wf_eid1,
@@ -241,7 +232,7 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
                 cache={"params": True},
             )
 
-            task_eid, _, _ = conn1.recv_execute()
+            conn1, task_eid, _, _ = executor.next_execute()
             conn1.complete(task_eid, value=84)
 
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
@@ -256,16 +247,10 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
 
 
             # Second workflow: submit same cached task — should hit cache.
-            # The workflow execution may land on either connection.
             resp2 = cli.submit("test.main", env=env)
             run_id2 = resp2["runId"]
 
-            try:
-                wf_eid2, _, _ = conn0.recv_execute(timeout=5)
-                wf_conn = conn0
-            except TimeoutError:
-                wf_eid2, _, _ = conn1.recv_execute(timeout=5)
-                wf_conn = conn1
+            wf_conn, wf_eid2, _, _ = executor.next_execute(timeout=5)
 
             ref2 = wf_conn.submit_task(
                 wf_eid2,
@@ -274,7 +259,7 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
                 cache={"params": True},
             )
 
-            # Should resolve immediately from cache (no new execution on other conn)
+            # Should resolve immediately from cache (no new execution)
             assert wf_conn.resolve(wf_eid2, ref2)["value"] == 84
 
             wf_conn.complete(wf_eid2, value="done2")
@@ -292,20 +277,6 @@ def test_cache_hit_across_epoch_boundary(tmp_path):
             executor.close()
     finally:
         server.stop()
-
-
-
-def _recv_from_either(conn0, conn1, timeout=10):
-    """Try to receive an execute message from either connection.
-
-    Returns (connection, execution_id, target, arguments).
-    """
-    try:
-        eid, target, args = conn0.recv_execute(timeout=1)
-        return conn0, eid, target, args
-    except TimeoutError:
-        eid, target, args = conn1.recv_execute(timeout=timeout)
-        return conn1, eid, target, args
 
 
 def test_parent_child_run_across_epoch_boundary(tmp_path):
@@ -337,24 +308,19 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
 
         try:
-            for _ in range(2):
-                executor.accept(count=1, timeout=15)
-                executor.connections[-1].send_ready()
-
-            conn0 = executor.connections[0]
-            conn1 = executor.connections[1]
+            executor.wait_connections(2, timeout=15)
 
             # Submit parent workflow
             resp = cli.submit("test.main", env=env)
             run_id = resp["runId"]
 
-            wf_eid, target, _ = conn0.recv_execute()
+            conn0, wf_eid, target, _ = executor.next_execute()
             assert target == "test.main"
 
             # From parent, submit child workflow
             child_ref = conn0.submit_workflow(wf_eid, "test.child", [])
 
-            child_eid, target, _ = conn1.recv_execute()
+            conn1, child_eid, target, _ = executor.next_execute()
             assert target == "test.child"
             conn1.complete(child_eid, value=42)
 
@@ -381,7 +347,7 @@ def test_parent_child_run_across_epoch_boundary(tmp_path):
 
             # Execute the rerun — the fact that the execution was dispatched means
             # copy_run succeeded (including recursive parent copy)
-            conn, eid, target, _ = _recv_from_either(conn0, conn1)
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.child"
             conn.complete(eid, value=99)
 
@@ -426,24 +392,19 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
 
         try:
-            for _ in range(2):
-                executor.accept(count=1, timeout=15)
-                executor.connections[-1].send_ready()
-
-            conn0 = executor.connections[0]
-            conn1 = executor.connections[1]
+            executor.wait_connections(2, timeout=15)
 
             # First workflow: submit a task and capture the execution reference
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
 
-            wf_eid1, _, _ = conn0.recv_execute()
+            conn0, wf_eid1, _, _ = executor.next_execute()
 
             producer_ref = conn0.submit_task(
                 wf_eid1, "test.producer", json_args(42),
             )
 
-            task_eid, _, _ = conn1.recv_execute()
+            conn1, task_eid, _, _ = executor.next_execute()
             conn1.complete(task_eid, value=84)
 
             assert conn0.resolve(wf_eid1, producer_ref)["value"] == 84
@@ -461,7 +422,7 @@ def test_resolve_execution_reference_from_old_epoch(tmp_path):
             resp2 = cli.submit("test.main", env=env)
             run_id2 = resp2["runId"]
 
-            conn, wf_eid2, target, _ = _recv_from_either(conn0, conn1)
+            conn, wf_eid2, target, _ = executor.next_execute()
             assert target == "test.main"
 
             # Resolve the old execution reference — server must find it in archived epoch
@@ -514,24 +475,19 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
 
         try:
-            for _ in range(2):
-                executor.accept(count=1, timeout=15)
-                executor.connections[-1].send_ready()
-
-            conn0 = executor.connections[0]
-            conn1 = executor.connections[1]
+            executor.wait_connections(2, timeout=15)
 
             # --- Epoch 1: cached task with args(42) → value 84 ---
             resp1 = cli.submit("test.main", env=env)
             run_id1 = resp1["runId"]
 
-            wf_eid1, _, _ = conn0.recv_execute()
+            conn0, wf_eid1, _, _ = executor.next_execute()
             ref1 = conn0.submit_task(
                 wf_eid1, "test.expensive", json_args(42),
                 cache={"params": True},
             )
 
-            task_eid1, _, _ = conn1.recv_execute()
+            conn1, task_eid1, _, _ = executor.next_execute()
             conn1.complete(task_eid1, value=84)
 
             assert conn0.resolve(wf_eid1, ref1)["value"] == 84
@@ -547,15 +503,14 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
             resp2 = cli.submit("test.main", env=env)
             run_id2 = resp2["runId"]
 
-            conn_wf2, wf_eid2, _, _ = _recv_from_either(conn0, conn1)
-            conn_task2 = conn1 if conn_wf2 is conn0 else conn0
+            conn_wf2, wf_eid2, _, _ = executor.next_execute()
 
             ref2 = conn_wf2.submit_task(
                 wf_eid2, "test.expensive", json_args(99),
                 cache={"params": True},
             )
 
-            task_eid2, _, _ = conn_task2.recv_execute()
+            conn_task2, task_eid2, _, _ = executor.next_execute()
             conn_task2.complete(task_eid2, value=198)
 
             assert conn_wf2.resolve(wf_eid2, ref2)["value"] == 198
@@ -571,7 +526,7 @@ def test_multiple_rotations_cache_hit_from_oldest_epoch(tmp_path):
             resp3 = cli.submit("test.main", env=env)
             run_id3 = resp3["runId"]
 
-            conn_wf3, wf_eid3, _, _ = _recv_from_either(conn0, conn1)
+            conn_wf3, wf_eid3, _, _ = executor.next_execute()
 
             ref3 = conn_wf3.submit_task(
                 wf_eid3, "test.expensive", json_args(42),
@@ -628,22 +583,17 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=2, env=env)
 
         try:
-            for _ in range(2):
-                executor.accept(count=1, timeout=15)
-                executor.connections[-1].send_ready()
-
-            conn0 = executor.connections[0]
-            conn1 = executor.connections[1]
+            executor.wait_connections(2, timeout=15)
 
             # Submit workflow
             resp = cli.submit("test.main", env=env)
             run_id = resp["runId"]
 
-            wf_eid, _, _ = conn0.recv_execute()
+            conn0, wf_eid, _, _ = executor.next_execute()
 
             # Submit producer task
             ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
-            prod_eid, _, _ = conn1.recv_execute()
+            conn1, prod_eid, _, _ = executor.next_execute()
 
             # Create a temp file and persist as asset
             asset_file = str(tmp_path / "epoch_asset.txt")
@@ -661,10 +611,10 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
 
             # Submit consumer task
             ref_cons = conn0.submit_task(wf_eid, "test.consumer", [])
-            cons_eid, _, _ = conn1.recv_execute()
+            conn2, cons_eid, _, _ = executor.next_execute()
 
             # Consumer retrieves the asset — capture original entries
-            original_asset = conn1.get_asset(cons_eid, asset_id)
+            original_asset = conn2.get_asset(cons_eid, asset_id)
             assert "entries" in original_asset
             original_entries = original_asset["entries"]
             assert len(original_entries) > 0
@@ -674,7 +624,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             original_blob_key = original_entry[0]
             original_size = original_entry[1]
 
-            conn1.complete(cons_eid, value="consumed")
+            conn2.complete(cons_eid, value="consumed")
             assert conn0.resolve(wf_eid, ref_cons)["value"] == "consumed"
 
             conn0.complete(wf_eid, value="done")
@@ -695,7 +645,7 @@ def test_asset_reference_across_epoch_boundary(tmp_path):
             assert rerun_resp["attempt"] == 2
 
             # Execute the consumer rerun
-            conn, rerun_eid, target, _ = _recv_from_either(conn0, conn1)
+            conn, rerun_eid, target, _ = executor.next_execute()
             assert target == "test.consumer"
 
             # The old asset reference should still resolve after copy
@@ -749,15 +699,13 @@ def test_idempotency_across_epoch_boundary(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            executor.wait_connections(1, timeout=15)
 
             # Submit with idempotency key and complete
             resp1 = cli.submit("test.my_workflow", idempotency_key="epoch-key", env=env)
             run_id1 = resp1["runId"]
 
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
             conn.complete(eid, value=42)
 

@@ -1,4 +1,6 @@
 import socket
+import threading
+import time
 
 from . import protocol
 
@@ -31,12 +33,7 @@ class ExecutorConnection:
         self.send(protocol.ready_message())
 
     def run_one(self, handler):
-        """Wait for execute, call handler, send response.
-
-        The initial ready is sent by the fixture during setup. After each
-        execution completes, the pool automatically makes the executor
-        available for the next one.
-        """
+        """Wait for execute, call handler, send response."""
         msg = self.recv()
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         params = msg["params"]
@@ -127,32 +124,103 @@ class ExecutorConnection:
         self.send(protocol.execution_error(execution_id, error_type, message, traceback))
 
     def close(self):
-        self._file.close()
-        self._conn.close()
+        try:
+            self._file.close()
+        except OSError:
+            pass
+        try:
+            self._conn.close()
+        except OSError:
+            pass
 
 
 class Executor:
-    """Manages the Unix socket server and accepts connections from test-adapter shims."""
+    """Manages the Unix socket server and accepts connections from test-adapter shims.
+
+    Connections are accepted in a background thread. Each new connection
+    automatically sends "ready". Use next_execute() to wait for the next
+    execution to arrive on any connection.
+    """
 
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
         self._server_sock = None
         self.connections = []
+        self._lock = threading.Lock()
+        self._accept_thread = None
+        self._stopped = threading.Event()
 
     def start(self):
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(self.socket_path)
-        self._server_sock.listen(5)
+        self._server_sock.listen(16)
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
 
-    def accept(self, count=1, timeout=30):
-        """Accept `count` connections from test-adapter shim instances."""
-        self._server_sock.settimeout(timeout)
-        for _ in range(count):
-            conn, _ = self._server_sock.accept()
-            self.connections.append(ExecutorConnection(conn))
+    def _accept_loop(self):
+        """Continuously accept connections and send ready."""
+        while not self._stopped.is_set():
+            self._server_sock.settimeout(0.5)
+            try:
+                conn, _ = self._server_sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            ec = ExecutorConnection(conn)
+            ec.send_ready()
+            with self._lock:
+                self.connections.append(ec)
+
+    def wait_connections(self, count, timeout=15):
+        """Wait until at least `count` connections have been accepted."""
+        deadline = time.time() + timeout
+        while True:
+            with self._lock:
+                if len(self.connections) >= count:
+                    return
+            if time.time() >= deadline:
+                with self._lock:
+                    n = len(self.connections)
+                raise TimeoutError(
+                    f"expected {count} connections within {timeout}s, got {n}"
+                )
+            time.sleep(0.05)
+
+    def next_execute(self, timeout=10):
+        """Wait for the next execution to arrive on any connection.
+
+        Polls all connections that haven't been consumed yet for an execute
+        message. Each execution gets its own connection with one-shot executors.
+
+        Returns (connection, execution_id, target, arguments).
+        """
+        deadline = time.time() + timeout
+        checked = set()
+        while time.time() < deadline:
+            with self._lock:
+                conns = list(enumerate(self.connections))
+            for idx, conn in conns:
+                if idx in checked:
+                    continue
+                try:
+                    eid, target, args = conn.recv_execute(timeout=0.1)
+                    return conn, eid, target, args
+                except TimeoutError:
+                    continue
+                except (ConnectionError, OSError):
+                    checked.add(idx)
+                    continue
+            time.sleep(0.05)
+        raise TimeoutError(f"no execute received within {timeout}s")
 
     def close(self):
-        for c in self.connections:
-            c.close()
+        self._stopped.set()
+        if self._accept_thread:
+            self._accept_thread.join(timeout=2)
+        with self._lock:
+            for c in self.connections:
+                try:
+                    c.close()
+                except OSError:
+                    pass
         if self._server_sock:
             self._server_sock.close()

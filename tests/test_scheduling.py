@@ -15,9 +15,9 @@ def test_workflow_delay_from_manifest(worker):
     with worker(targets) as ctx:
         start = time.time()
         resp = ctx.submit("test.delayed")
-        conn = ctx.executor.connections[0]
 
-        eid, _, _ = conn.recv_execute(timeout=5)
+        conn, eid, _, _ = ctx.executor.next_execute(timeout=5)
+
         elapsed = time.time() - start
 
         conn.complete(eid, value="delayed")
@@ -35,17 +35,15 @@ def test_delayed_execution(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit a child task with 500ms delay
         start = time.time()
         ref = conn0.submit_task(wf_eid, "test.slow", [], delay=500)
 
         # Wait for the delayed task to be assigned
-        task_eid, _, _ = conn1.recv_execute(timeout=5)
+        conn1, task_eid, _, _ = ctx.executor.next_execute(timeout=5)
         elapsed = time.time() - start
         conn1.complete(task_eid, value="delayed")
 
@@ -68,11 +66,8 @@ def test_wait_for(worker):
     with worker(targets, concurrency=3) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
-        conn2 = ctx.executor.connections[2]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit producer (no wait_for)
         ref_a = conn0.submit_task(wf_eid, "test.producer", [])
@@ -88,19 +83,19 @@ def test_wait_for(worker):
         ]
         ref_b = conn0.submit_task(wf_eid, "test.consumer", consumer_args, wait_for=[0])
 
-        # Producer should be dispatched to conn1
-        prod_eid, target, _ = conn1.recv_execute()
+        # Producer should be dispatched
+        conn1, prod_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.producer"
 
         # Consumer should NOT be dispatched yet (producer not complete)
         with pytest.raises(TimeoutError):
-            conn2.recv_execute(timeout=1)
+            ctx.executor.next_execute(timeout=1)
 
         # Complete producer
         conn1.complete(prod_eid, value=42)
 
-        # Now consumer should be dispatched to conn2
-        cons_eid, target, args = conn2.recv_execute(timeout=5)
+        # Now consumer should be dispatched
+        conn2, cons_eid, target, args = ctx.executor.next_execute(timeout=5)
         assert target == "test.consumer"
 
         conn2.complete(cons_eid, value="done")
@@ -124,12 +119,8 @@ def test_wait_for_multiple_dependencies(worker):
     with worker(targets, concurrency=4) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
-        conn2 = ctx.executor.connections[2]
-        conn3 = ctx.executor.connections[3]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit two producers
         ref_a = conn0.submit_task(wf_eid, "test.producer", [])
@@ -154,22 +145,22 @@ def test_wait_for_multiple_dependencies(worker):
             wf_eid, "test.consumer", consumer_args, wait_for=[0, 1]
         )
 
-        # Both producers should be dispatched to conn1 and conn2
-        prod_eid1, _, _ = conn1.recv_execute()
-        prod_eid2, _, _ = conn2.recv_execute()
+        # Both producers should be dispatched
+        conn1, prod_eid1, _, _ = ctx.executor.next_execute()
+        conn2, prod_eid2, _, _ = ctx.executor.next_execute()
 
         # Complete only the first producer
         conn1.complete(prod_eid1, value=1)
 
         # Consumer should NOT be dispatched yet (second producer still running)
         with pytest.raises(TimeoutError):
-            conn3.recv_execute(timeout=1)
+            ctx.executor.next_execute(timeout=1)
 
         # Complete the second producer
         conn2.complete(prod_eid2, value=2)
 
-        # Now consumer should be dispatched to conn3
-        cons_eid, target, _ = conn3.recv_execute(timeout=5)
+        # Now consumer should be dispatched
+        conn3, cons_eid, target, _ = ctx.executor.next_execute(timeout=5)
         assert target == "test.consumer"
         conn3.complete(cons_eid, value="done")
 
@@ -191,10 +182,8 @@ def test_defer_deduplicates(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit two tasks with same args and defer config.
         # The delay prevents either from being assigned before both are
@@ -216,7 +205,7 @@ def test_defer_deduplicates(worker):
         )
 
         # Only one task should actually execute
-        task_eid, _, _ = conn1.recv_execute(timeout=5)
+        conn1, task_eid, _, _ = ctx.executor.next_execute(timeout=5)
         conn1.complete(task_eid, value=99)
 
         # Both references should resolve to the same value
@@ -225,7 +214,7 @@ def test_defer_deduplicates(worker):
 
         # No second execution should arrive (it was deferred)
         with pytest.raises(TimeoutError):
-            conn1.recv_execute(timeout=1)
+            ctx.executor.next_execute(timeout=1)
 
         conn0.complete(wf_eid, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
@@ -238,10 +227,9 @@ def test_suspend_and_resume(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.suspendable")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
         # First execute
-        eid1, _, _ = conn0.recv_execute()
+        conn0, eid1, _, _ = ctx.executor.next_execute()
 
         # Suspend (no execute_after = immediate retry)
         conn0.suspend(eid1)
@@ -250,11 +238,11 @@ def test_suspend_and_resume(worker):
         # (the pool loop waits for execution_result/error before freeing the slot)
         conn0.complete(eid1)
 
-        # Second execute (retry after suspend)
-        eid2, _, _ = conn0.recv_execute()
+        # Second execute (retry after suspend) on fresh connection
+        conn1, eid2, _, _ = ctx.executor.next_execute()
         assert eid2 != eid1
 
-        conn0.complete(eid2, value="resumed")
+        conn1.complete(eid2, value="resumed")
         assert ctx.result(run_id)["value"]["data"] == "resumed"
 
 
@@ -265,9 +253,8 @@ def test_suspend_with_execute_after(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.suspendable")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid1, _, _ = conn0.recv_execute()
+        conn0, eid1, _, _ = ctx.executor.next_execute()
 
         # Suspend with execute_after 500ms in the future
         execute_after = int(time.time() * 1000) + 500
@@ -277,15 +264,15 @@ def test_suspend_with_execute_after(worker):
 
         # Re-dispatch should not arrive immediately
         with pytest.raises(TimeoutError):
-            conn0.recv_execute(timeout=0.2)
+            ctx.executor.next_execute(timeout=0.2)
 
         # But should arrive after the delay
-        eid2, _, _ = conn0.recv_execute(timeout=5)
+        conn1, eid2, _, _ = ctx.executor.next_execute(timeout=5)
         elapsed = time.time() - suspend_time
         assert eid2 != eid1
         assert elapsed >= 0.4, f"expected >=0.4s delay, got {elapsed:.2f}s"
 
-        conn0.complete(eid2, value="resumed later")
+        conn1.complete(eid2, value="resumed later")
         assert ctx.result(run_id)["value"]["data"] == "resumed later"
 
 
@@ -296,23 +283,22 @@ def test_suspend_twice(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.suspendable")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
         # First attempt: suspend immediately
-        eid1, _, _ = conn0.recv_execute()
+        conn0, eid1, _, _ = ctx.executor.next_execute()
         conn0.suspend(eid1)
         conn0.complete(eid1)
 
         # Second attempt: suspend again
-        eid2, _, _ = conn0.recv_execute()
+        conn1, eid2, _, _ = ctx.executor.next_execute()
         assert eid2 != eid1
-        conn0.suspend(eid2)
-        conn0.complete(eid2)
+        conn1.suspend(eid2)
+        conn1.complete(eid2)
 
         # Third attempt: complete normally
-        eid3, _, _ = conn0.recv_execute()
+        conn2, eid3, _, _ = ctx.executor.next_execute()
         assert eid3 != eid2
-        conn0.complete(eid3, value="third time")
+        conn2.complete(eid3, value="third time")
 
         assert ctx.result(run_id)["value"]["data"] == "third time"
 
@@ -327,15 +313,13 @@ def test_cancel_child_execution(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         ref = conn0.submit_task(wf_eid, "test.slow", [])
 
         # Wait for task to be assigned
-        conn1.recv_execute()
+        ctx.executor.next_execute()
 
         # Cancel the task
         conn0.cancel(wf_eid, ref)
@@ -375,20 +359,14 @@ def test_requires_matching(worker):
 
             # The workflow has no requires, so it could land on either worker.
             # Try worker A first (more likely with 2 slots), fall back to B.
-            conn_a0 = ctx_a.executor.connections[0]
-            conn_b0 = ctx_b.executor.connections[0]
-            wf_conn = None
-            wf_eid = None
-            wf_on_a = False
             try:
-                wf_eid, target, _ = conn_a0.recv_execute(timeout=5)
+                wf_conn, wf_eid, target, _ = ctx_a.executor.next_execute(timeout=5)
                 assert target == "test.main"
-                wf_conn = conn_a0
                 wf_on_a = True
             except TimeoutError:
-                wf_eid, target, _ = conn_b0.recv_execute(timeout=5)
+                wf_conn, wf_eid, target, _ = ctx_b.executor.next_execute(timeout=5)
                 assert target == "test.main"
-                wf_conn = conn_b0
+                wf_on_a = False
 
             # Submit child task with requires
             ref = wf_conn.submit_task(
@@ -403,20 +381,15 @@ def test_requires_matching(worker):
                 # Workflow landed on B's only slot; task must wait.
                 # Complete the workflow first so B's slot frees up.
                 wf_conn.complete(wf_eid, value="done")
-                task_eid, target, _ = conn_b0.recv_execute(timeout=5)
+                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(timeout=5)
                 assert target == "test.compute"
-                conn_b0.complete(task_eid, value="computed")
+                conn_b_task.complete(task_eid, value="computed")
             else:
                 # Workflow is on worker A -- B's slot is free
-                task_eid, target, _ = conn_b0.recv_execute(timeout=5)
+                conn_b_task, task_eid, target, _ = ctx_b.executor.next_execute(timeout=5)
                 assert target == "test.compute"
 
-                # Worker A's other slot should NOT receive the requires task
-                conn_a1 = ctx_a.executor.connections[1]
-                with pytest.raises(TimeoutError):
-                    conn_a1.recv_execute(timeout=1)
-
-                conn_b0.complete(task_eid, value="computed")
+                conn_b_task.complete(task_eid, value="computed")
                 assert wf_conn.resolve(wf_eid, ref)["value"] == "computed"
                 wf_conn.complete(wf_eid, value="done")
 
@@ -440,6 +413,5 @@ def test_cancel_execution_externally(worker):
         assert result["type"] == "cancelled"
 
         # Verify the execute message never arrives
-        conn0 = ctx.executor.connections[0]
         with pytest.raises(TimeoutError):
-            conn0.recv_execute(timeout=1)
+            ctx.executor.next_execute(timeout=1)

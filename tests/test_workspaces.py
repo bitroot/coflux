@@ -21,19 +21,18 @@ def test_workspace_pause_resume(worker):
         ctx.pause()
 
         resp = ctx.submit("test.main")
-        conn0 = ctx.executor.connections[0]
 
         # Execution should NOT be dispatched while paused
         with pytest.raises(TimeoutError):
-            conn0.recv_execute(timeout=1)
+            ctx.executor.next_execute(timeout=1)
 
         # Resume the workspace
         ctx.resume()
 
         # Now the execution should be dispatched
-        eid, target, _ = conn0.recv_execute(timeout=5)
+        conn, eid, target, _ = ctx.executor.next_execute(timeout=5)
         assert target == "test.main"
-        conn0.complete(eid, value="resumed")
+        conn.complete(eid, value="resumed")
 
         result = ctx.result(resp["runId"])
         assert result["value"]["data"] == "resumed"
@@ -79,9 +78,8 @@ def test_rerun_step_in_derived_workspace(worker):
     with worker(targets, workspace="base") as ctx_base:
         resp = ctx_base.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx_base.executor.connections[0]
 
-        eid, _, _ = conn0.recv_execute()
+        conn0, eid, _, _ = ctx_base.executor.next_execute()
         conn0.complete(eid, value="original")
 
         result = ctx_base.result(run_id)
@@ -106,8 +104,7 @@ def test_rerun_step_in_derived_workspace(worker):
         rerun_resp = ctx_derived.rerun(step_id)
         assert rerun_resp["attempt"] > 1
 
-        conn0 = ctx_derived.executor.connections[0]
-        eid, target, _ = conn0.recv_execute()
+        conn0, eid, target, _ = ctx_derived.executor.next_execute()
         assert target == "test.main"
         conn0.complete(eid, value="rerun-in-derived")
 

@@ -15,10 +15,8 @@ def test_cache_hit(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # First submit - cache miss, task executes
         ref1 = conn0.submit_task(
@@ -28,7 +26,7 @@ def test_cache_hit(worker):
             cache={"params": True},
         )
 
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx.executor.next_execute()
         conn1.complete(task_eid, value=84)
 
         assert conn0.resolve(wf_eid, ref1)["value"] == 84
@@ -41,7 +39,7 @@ def test_cache_hit(worker):
             cache={"params": True},
         )
 
-        # Should resolve immediately from cache (no second execute on conn1)
+        # Should resolve immediately from cache (no second execute)
         assert conn0.resolve(wf_eid, ref2)["value"] == 84
 
         conn0.complete(wf_eid, value="done")
@@ -58,10 +56,8 @@ def test_cache_miss_different_args(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # First submit with cache
         ref1 = conn0.submit_task(
@@ -70,8 +66,8 @@ def test_cache_miss_different_args(worker):
             json_args(1),
             cache={"params": True},
         )
-        task_eid1, _, _ = conn1.recv_execute()
-        conn1.complete(task_eid1, value=10)
+        conn_t1, task_eid1, _, _ = ctx.executor.next_execute()
+        conn_t1.complete(task_eid1, value=10)
         assert conn0.resolve(wf_eid, ref1)["value"] == 10
 
         # Second submit with different args - should execute (cache miss)
@@ -81,8 +77,8 @@ def test_cache_miss_different_args(worker):
             json_args(2),
             cache={"params": True},
         )
-        task_eid2, _, _ = conn1.recv_execute()
-        conn1.complete(task_eid2, value=20)
+        conn_t2, task_eid2, _, _ = ctx.executor.next_execute()
+        conn_t2.complete(task_eid2, value=20)
         assert conn0.resolve(wf_eid, ref2)["value"] == 20
 
         conn0.complete(wf_eid, value="done")
@@ -99,10 +95,8 @@ def test_memo_within_run(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # First submit with memo
         ref1 = conn0.submit_task(
@@ -112,7 +106,7 @@ def test_memo_within_run(worker):
             memo=True,
         )
 
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx.executor.next_execute()
         conn1.complete(task_eid, value=99)
 
         assert conn0.resolve(wf_eid, ref1)["value"] == 99
@@ -143,10 +137,8 @@ def test_cache_from_base_workspace(worker):
     with worker(targets, workspace="base", concurrency=2) as ctx_base:
         resp = ctx_base.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx_base.executor.connections[0]
-        conn1 = ctx_base.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx_base.executor.next_execute()
         ref = conn0.submit_task(
             wf_eid,
             "test.expensive",
@@ -154,7 +146,7 @@ def test_cache_from_base_workspace(worker):
             cache={"params": True},
         )
 
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx_base.executor.next_execute()
         conn1.complete(task_eid, value=84)
         assert conn0.resolve(wf_eid, ref)["value"] == 84
 
@@ -176,9 +168,8 @@ def test_cache_from_base_workspace(worker):
         create_workspace=False,
     ) as ctx_derived:
         resp = ctx_derived.submit("test.main")
-        conn0 = ctx_derived.executor.connections[0]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx_derived.executor.next_execute()
         ref = conn0.submit_task(
             wf_eid,
             "test.expensive",
@@ -203,10 +194,8 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
     # Step 1: Run in "ws_a" workspace, execute the cached task
     with worker(targets, workspace="ws_a", concurrency=2) as ctx_a:
         resp = ctx_a.submit("test.main")
-        conn0 = ctx_a.executor.connections[0]
-        conn1 = ctx_a.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx_a.executor.next_execute()
         ref = conn0.submit_task(
             wf_eid,
             "test.expensive",
@@ -214,7 +203,7 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
             cache={"params": True},
         )
 
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx_a.executor.next_execute()
         conn1.complete(task_eid, value=84)
         assert conn0.resolve(wf_eid, ref)["value"] == 84
 
@@ -232,10 +221,8 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
         targets, workspace="ws_b", concurrency=2, create_workspace=False
     ) as ctx_b:
         resp = ctx_b.submit("test.main")
-        conn0 = ctx_b.executor.connections[0]
-        conn1 = ctx_b.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx_b.executor.next_execute()
         ref = conn0.submit_task(
             wf_eid,
             "test.expensive",
@@ -244,7 +231,7 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
         )
 
         # Should require a new execution (cache miss in unrelated workspace)
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx_b.executor.next_execute()
         conn1.complete(task_eid, value=999)
         assert conn0.resolve(wf_eid, ref)["value"] == 999
 

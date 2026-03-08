@@ -63,16 +63,15 @@ def test_result_buffered_on_disconnect(server, tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=worker_env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            # Wait for warm executor to connect
+            executor.wait_connections(1, timeout=15)
 
             # Submit workflow via direct connection
             resp = cli.submit("test.my_workflow", env=direct_env)
             run_id = resp["runId"]
 
             # Executor receives the execution
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
 
             # Kill proxy connections — Go worker loses its WebSocket
@@ -128,14 +127,12 @@ def test_error_buffered_on_disconnect(server, tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=worker_env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            executor.wait_connections(1, timeout=15)
 
             resp = cli.submit("test.my_workflow", env=direct_env)
             run_id = resp["runId"]
 
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
 
             # Kill proxy connections
@@ -187,14 +184,12 @@ def test_result_buffered_across_server_restart(tmp_path):
         worker_proc = cli.worker(["test"], adapter, concurrency=1, env=env)
 
         try:
-            executor.accept(count=1, timeout=15)
-            conn = executor.connections[0]
-            conn.send_ready()
+            executor.wait_connections(1, timeout=15)
 
             resp = cli.submit("test.my_workflow", env=env)
             run_id = resp["runId"]
 
-            eid, target, _ = conn.recv_execute()
+            conn, eid, target, _ = executor.next_execute()
             assert target == "test.my_workflow"
 
             # Kill server

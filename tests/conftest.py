@@ -83,14 +83,13 @@ def worker(server, project_id, tmp_path):
             return ""
 
         try:
-            # Accept connections from test-adapter shim instances (one per
-            # concurrency slot). The pool spawns executors sequentially,
-            # waiting for each to be ready before starting the next.
+            # Wait for warm executor connections. The pool spawns warm
+            # executors on startup; the background accept thread handles
+            # the ready handshake automatically.
             try:
-                for _ in range(concurrency):
-                    executor.accept(count=1, timeout=15)
-                    executor.connections[-1].send_ready()
-            except OSError as e:
+                warm_count = min(concurrency, 4)
+                executor.wait_connections(warm_count, timeout=15)
+            except (OSError, TimeoutError) as e:
                 raise OSError(
                     f"{e}\n--- worker stderr ---\n{worker_stderr()}"
                 ) from None
@@ -101,9 +100,12 @@ def worker(server, project_id, tmp_path):
                     self.executor = executor
                     self.project_id = project_id
 
-                def handle_one(self, conn_index=0):
-                    """Handle one execution on the specified connection."""
-                    executor.connections[conn_index].run_one(handler)
+                def handle_one(self):
+                    """Handle one execution."""
+                    conn, eid, target, args = executor.next_execute()
+                    response = handler(eid, target, args)
+                    if response is not None:
+                        conn.send(response)
 
                 def submit(self, target, *arguments, idempotency_key=None):
                     """Submit a workflow and return the parsed JSON response."""

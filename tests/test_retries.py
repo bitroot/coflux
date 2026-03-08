@@ -15,16 +15,15 @@ def test_retry_on_error(worker):
 
     with worker(targets) as ctx:
         resp = ctx.submit("test.flaky")
-        conn = ctx.executor.connections[0]
 
         # First attempt: fail
-        eid1, _, _ = conn.recv_execute()
-        conn.fail(eid1, "RuntimeError", "transient failure")
+        conn0, eid1, _, _ = ctx.executor.next_execute()
+        conn0.fail(eid1, "RuntimeError", "transient failure")
 
-        # Retry: succeed
-        eid2, _, _ = conn.recv_execute()
+        # Retry: succeed (fresh connection)
+        conn1, eid2, _, _ = ctx.executor.next_execute()
         assert eid2 != eid1
-        conn.complete(eid2, value="recovered")
+        conn1.complete(eid2, value="recovered")
 
         result = ctx.result(resp["runId"])
         assert result["type"] == "value"
@@ -41,13 +40,12 @@ def test_retry_limit_exhausted(worker):
 
     with worker(targets) as ctx:
         resp = ctx.submit("test.doomed")
-        conn = ctx.executor.connections[0]
 
         # Handle all attempts (fail every time) until retries are exhausted
         attempts = 0
         while True:
             try:
-                eid, _, _ = conn.recv_execute(timeout=3)
+                conn, eid, _, _ = ctx.executor.next_execute(timeout=3)
                 conn.fail(eid, "RuntimeError", "permanent failure")
                 attempts += 1
             except TimeoutError:
@@ -69,10 +67,8 @@ def test_retry_with_delay(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         ref = conn0.submit_task(
             wf_eid,
@@ -82,15 +78,15 @@ def test_retry_with_delay(worker):
         )
 
         # First attempt: fail
-        task_eid1, _, _ = conn1.recv_execute()
+        conn_t1, task_eid1, _, _ = ctx.executor.next_execute()
         fail_time = time.time()
-        conn1.fail(task_eid1, "RuntimeError", "transient")
+        conn_t1.fail(task_eid1, "RuntimeError", "transient")
 
-        # Retry should be delayed by ~500ms (same connection handles the retry)
-        task_eid2, _, _ = conn1.recv_execute(timeout=5)
+        # Retry should be delayed by ~500ms (fresh connection)
+        conn_t2, task_eid2, _, _ = ctx.executor.next_execute(timeout=5)
         elapsed = time.time() - fail_time
 
-        conn1.complete(task_eid2, value="recovered")
+        conn_t2.complete(task_eid2, value="recovered")
         assert conn0.resolve(wf_eid, ref)["value"] == "recovered"
 
         conn0.complete(wf_eid, value="done")

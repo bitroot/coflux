@@ -15,18 +15,17 @@ def test_log_messages(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.logged")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid, _, _ = conn0.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Send log messages at various levels
-        conn0.send(log_message(eid, "info", "starting work"))
-        conn0.send(log_message(eid, "warning", "something is off"))
-        conn0.send(log_message(eid, "error", "recoverable issue"))
-        conn0.send(log_message(eid, "debug", "detail"))
+        conn.send(log_message(eid, "info", "starting work"))
+        conn.send(log_message(eid, "warning", "something is off"))
+        conn.send(log_message(eid, "error", "recoverable issue"))
+        conn.send(log_message(eid, "debug", "detail"))
 
         # Complete execution normally
-        conn0.complete(eid, value="logged")
+        conn.complete(eid, value="logged")
 
         assert ctx.result(run_id)["value"]["data"] == "logged"
 
@@ -41,10 +40,8 @@ def test_execution_groups(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.grouped")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Register a group
         conn0.send(register_group_notification(wf_eid, group_id=1, name="batch"))
@@ -63,11 +60,11 @@ def test_execution_groups(worker):
             group_id=1,
         )
 
-        # Handle both tasks (first goes to conn1, second reuses conn1 after complete)
-        task_eid1, _, _ = conn1.recv_execute()
-        conn1.complete(task_eid1, value="ok")
-        task_eid2, _, _ = conn1.recv_execute()
-        conn1.complete(task_eid2, value="ok")
+        # Handle both tasks (each gets a fresh connection)
+        conn_t1, task_eid1, _, _ = ctx.executor.next_execute()
+        conn_t1.complete(task_eid1, value="ok")
+        conn_t2, task_eid2, _, _ = ctx.executor.next_execute()
+        conn_t2.complete(task_eid2, value="ok")
 
         # Resolve both
         conn0.resolve(wf_eid, ref1)
@@ -92,17 +89,16 @@ def test_log_retrieval_via_cli(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.log_retrieve")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid, _, _ = conn0.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Send log messages at various levels
-        conn0.send(log_message(eid, "info", "hello from cli"))
-        conn0.send(log_message(eid, "warning", "a warning"))
-        conn0.send(log_message(eid, "error", "an error"))
+        conn.send(log_message(eid, "info", "hello from cli"))
+        conn.send(log_message(eid, "warning", "a warning"))
+        conn.send(log_message(eid, "error", "an error"))
 
         # Complete execution
-        conn0.complete(eid, value="done")
+        conn.complete(eid, value="done")
 
         # Wait for result to ensure execution finished
         assert ctx.result(run_id)["value"]["data"] == "done"
@@ -127,10 +123,8 @@ def test_log_filter_by_execution(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.log_parent")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Parent logs a message
         conn0.send(log_message(wf_eid, "info", "parent message"))
@@ -139,7 +133,7 @@ def test_log_filter_by_execution(worker):
         ref1 = conn0.submit_task(wf_eid, "test.log_child", json_args("a"))
 
         # Handle child task
-        child_eid, _, _ = conn1.recv_execute()
+        conn1, child_eid, _, _ = ctx.executor.next_execute()
         conn1.send(log_message(child_eid, "info", "child message"))
         conn1.complete(child_eid, value="child_done")
 
@@ -178,12 +172,11 @@ def test_log_with_values(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.log_values")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid, _, _ = conn0.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Send log with values (dict format matching adapter.Value)
-        conn0.send(
+        conn.send(
             log_message(
                 eid,
                 "info",
@@ -194,7 +187,7 @@ def test_log_with_values(worker):
             )
         )
 
-        conn0.complete(eid, value="done")
+        conn.complete(eid, value="done")
 
         assert ctx.result(run_id)["value"]["data"] == "done"
 
@@ -217,12 +210,11 @@ def test_log_display_format(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.log_display")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid, _, _ = conn0.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Send log with value placeholder
-        conn0.send(
+        conn.send(
             log_message(
                 eid,
                 "info",
@@ -233,7 +225,7 @@ def test_log_display_format(worker):
             )
         )
 
-        conn0.complete(eid, value="done")
+        conn.complete(eid, value="done")
 
         assert ctx.result(run_id)["value"]["data"] == "done"
 
@@ -269,9 +261,8 @@ def test_logs_across_partition_boundary(worker, server):
     with worker(targets) as ctx:
         resp = ctx.submit("test.partitioned")
         run_id = resp["runId"]
-        conn = ctx.executor.connections[0]
 
-        eid, _, _ = conn.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Write logs in first partition
         conn.send(log_message(eid, "info", "msg_before_rotation_1"))
@@ -303,9 +294,8 @@ def test_bloom_filter_narrows_search(worker, server):
         # Run A — logs go to partition 1
         resp_a = ctx.submit("test.bloom_a")
         run_id_a = resp_a["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid_a, _, _ = conn0.recv_execute()
+        conn0, eid_a, _, _ = ctx.executor.next_execute()
         conn0.send(log_message(eid_a, "info", "run_a_message"))
         conn0.complete(eid_a, value="a_done")
         assert ctx.result(run_id_a)["value"]["data"] == "a_done"
@@ -323,9 +313,8 @@ def test_bloom_filter_narrows_search(worker, server):
         # Run B — logs go to partition 2 (new active)
         resp_b = ctx.submit("test.bloom_b")
         run_id_b = resp_b["runId"]
-        conn1 = ctx.executor.connections[1]
 
-        eid_b, _, _ = conn1.recv_execute()
+        conn1, eid_b, _, _ = ctx.executor.next_execute()
         conn1.send(log_message(eid_b, "info", "run_b_message"))
         conn1.complete(eid_b, value="b_done")
         assert ctx.result(run_id_b)["value"]["data"] == "b_done"
@@ -351,9 +340,8 @@ def test_from_parameter_skips_old_partitions(worker, server):
         # Write logs in first partition
         resp_old = ctx.submit("test.from_old")
         run_id_old = resp_old["runId"]
-        conn0 = ctx.executor.connections[0]
 
-        eid_old, _, _ = conn0.recv_execute()
+        conn0, eid_old, _, _ = ctx.executor.next_execute()
         conn0.send(log_message(eid_old, "info", "old_message"))
         conn0.complete(eid_old, value="old_done")
         assert ctx.result(run_id_old)["value"]["data"] == "old_done"
@@ -370,9 +358,8 @@ def test_from_parameter_skips_old_partitions(worker, server):
         # Write logs in second partition
         resp_new = ctx.submit("test.from_new")
         run_id_new = resp_new["runId"]
-        conn1 = ctx.executor.connections[1]
 
-        eid_new, _, _ = conn1.recv_execute()
+        conn1, eid_new, _, _ = ctx.executor.next_execute()
         conn1.send(log_message(eid_new, "info", "new_message"))
         conn1.complete(eid_new, value="new_done")
         assert ctx.result(run_id_new)["value"]["data"] == "new_done"
@@ -395,9 +382,8 @@ def test_sse_subscription_across_rotation(worker, server):
     with worker(targets) as ctx:
         resp = ctx.submit("test.sse_rotate")
         run_id = resp["runId"]
-        conn = ctx.executor.connections[0]
 
-        eid, _, _ = conn.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Write initial log
         conn.send(log_message(eid, "info", "before_rotation"))
@@ -429,9 +415,8 @@ def test_pagination_across_partitions(worker, server):
     with worker(targets) as ctx:
         resp = ctx.submit("test.paginate")
         run_id = resp["runId"]
-        conn = ctx.executor.connections[0]
 
-        eid, _, _ = conn.recv_execute()
+        conn, eid, _, _ = ctx.executor.next_execute()
 
         # Write logs in first partition
         for i in range(3):

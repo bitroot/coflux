@@ -17,15 +17,13 @@ def test_persist_and_get_asset(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit producer task
         ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
 
-        prod_eid, _, _ = conn1.recv_execute()
+        conn1, prod_eid, _, _ = ctx.executor.next_execute()
 
         # Create a temp file to persist as an asset
         fd, tmp_path = tempfile.mkstemp(suffix=".txt")
@@ -44,12 +42,12 @@ def test_persist_and_get_asset(worker):
         conn1.complete(prod_eid, value="produced")
         assert conn0.resolve(wf_eid, ref_prod)["value"] == "produced"
 
-        # Submit consumer task (conn1 is reused after completing)
+        # Submit consumer task (fresh connection)
         ref_cons = conn0.submit_task(wf_eid, "test.consumer", [])
-        cons_eid, _, _ = conn1.recv_execute()
+        conn2, cons_eid, _, _ = ctx.executor.next_execute()
 
         # Retrieve the asset (response is {"entries": {path: [blob_key, size, metadata]}})
-        result = conn1.get_asset(cons_eid, asset_id)
+        result = conn2.get_asset(cons_eid, asset_id)
         assert "entries" in result
         entries = result["entries"]
         assert isinstance(entries, dict)
@@ -62,7 +60,7 @@ def test_persist_and_get_asset(worker):
             assert isinstance(blob_key, str)
             assert size > 0
 
-        conn1.complete(cons_eid, value="consumed")
+        conn2.complete(cons_eid, value="consumed")
         assert conn0.resolve(wf_eid, ref_cons)["value"] == "consumed"
 
         conn0.complete(wf_eid, value="done")
@@ -83,14 +81,12 @@ def test_asset_inspect_and_download(worker, tmp_path):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit producer task
         ref_prod = conn0.submit_task(wf_eid, "test.producer", [])
-        prod_eid, _, _ = conn1.recv_execute()
+        conn1, prod_eid, _, _ = ctx.executor.next_execute()
 
         # Create a temp file and persist as asset
         src_path = str(tmp_path / "data.txt")

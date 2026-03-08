@@ -123,15 +123,13 @@ def test_task_from_workflow(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.orchestrator")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, target, _ = conn0.recv_execute()
+        conn0, wf_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.orchestrator"
 
         ref = conn0.submit_task(wf_eid, "test.compute", json_args("10"))
 
-        task_eid, target, _ = conn1.recv_execute()
+        conn1, task_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.compute"
         conn1.complete(task_eid, value=20)
 
@@ -152,14 +150,12 @@ def test_task_error_propagation(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         ref = conn0.submit_task(wf_eid, "test.failing_task", [])
 
-        task_eid, _, _ = conn1.recv_execute()
+        conn1, task_eid, _, _ = ctx.executor.next_execute()
         conn1.fail(task_eid, "RuntimeError", "task failed")
 
         # Resolving a failed child returns a successful response with error details
@@ -203,13 +199,11 @@ def test_child_error_details_in_resolve(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.parent")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        parent_eid, _, _ = conn0.recv_execute()
+        conn0, parent_eid, _, _ = ctx.executor.next_execute()
         ref = conn0.submit_task(parent_eid, "test.child", [])
 
-        child_eid, _, _ = conn1.recv_execute()
+        conn1, child_eid, _, _ = ctx.executor.next_execute()
         conn1.fail(child_eid, "builtins.ValueError", "invalid input")
 
         result = conn0.resolve(parent_eid, ref)
@@ -231,19 +225,16 @@ def test_fan_out(worker):
     with worker(targets, concurrency=3) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
-        conn2 = ctx.executor.connections[2]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit two tasks
         ref1 = conn0.submit_task(wf_eid, "test.compute", json_args(3))
         ref2 = conn0.submit_task(wf_eid, "test.compute", json_args(7))
 
-        # Tasks execute on conn1 and conn2
-        for conn in [conn1, conn2]:
-            eid, _, args = conn.recv_execute()
+        # Tasks execute on fresh connections
+        for _ in range(2):
+            conn, eid, _, args = ctx.executor.next_execute()
             x = args[0]["value"]
             conn.complete(eid, value=x * 2)
 
@@ -267,26 +258,24 @@ def test_sequential_tasks(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.pipeline")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Submit add(3, 4) and resolve
         ref1 = conn0.submit_task(wf_eid, "test.add", json_args(3, 4))
 
-        task_eid, target, _ = conn1.recv_execute()
+        conn_t1, task_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.add"
-        conn1.complete(task_eid, value=7)
+        conn_t1.complete(task_eid, value=7)
 
         assert conn0.resolve(wf_eid, ref1)["value"] == 7
 
-        # Submit multiply(7, 2) and resolve (conn1 is reused)
+        # Submit multiply(7, 2) and resolve (fresh connection)
         ref2 = conn0.submit_task(wf_eid, "test.multiply", json_args(7, 2))
 
-        task_eid, target, _ = conn1.recv_execute()
+        conn_t2, task_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.multiply"
-        conn1.complete(task_eid, value=14)
+        conn_t2.complete(task_eid, value=14)
 
         assert conn0.resolve(wf_eid, ref2)["value"] == 14
 
@@ -304,15 +293,13 @@ def test_multiple_modules(worker):
     with worker(targets, modules=["app", "compute"], concurrency=2) as ctx:
         resp = ctx.submit("app.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, target, _ = conn0.recv_execute()
+        conn0, wf_eid, target, _ = ctx.executor.next_execute()
         assert target == "app.main"
 
         ref = conn0.submit_task(wf_eid, "compute.double", json_args(5))
 
-        task_eid, target, _ = conn1.recv_execute()
+        conn1, task_eid, target, _ = ctx.executor.next_execute()
         assert target == "compute.double"
         conn1.complete(task_eid, value=10)
 
@@ -329,10 +316,9 @@ def test_rerun_step(worker):
     with worker(targets) as ctx:
         resp = ctx.submit("test.my_workflow")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
 
         # First execution
-        eid1, _, _ = conn0.recv_execute()
+        conn0, eid1, _, _ = ctx.executor.next_execute()
         conn0.complete(eid1, value="first")
 
         result = ctx.result(run_id)
@@ -348,10 +334,10 @@ def test_rerun_step(worker):
         rerun_resp = ctx.rerun(step_id)
         assert rerun_resp["attempt"] > 1
 
-        # Second execution arrives
-        eid2, _, _ = conn0.recv_execute()
+        # Second execution arrives on a fresh connection
+        conn1, eid2, _, _ = ctx.executor.next_execute()
         assert eid2 != eid1
-        conn0.complete(eid2, value="rerun")
+        conn1.complete(eid2, value="rerun")
 
         result = ctx.result(run_id)
         assert result["value"]["data"] == "rerun"
@@ -367,16 +353,14 @@ def test_workflow_calls_workflow(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.outer")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, target, _ = conn0.recv_execute()
+        conn0, wf_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.outer"
 
         # Submit inner workflow (type="workflow")
         ref = conn0.submit_workflow(wf_eid, "test.inner", [])
 
-        inner_eid, target, _ = conn1.recv_execute()
+        conn1, inner_eid, target, _ = ctx.executor.next_execute()
         assert target == "test.inner"
         conn1.complete(inner_eid, value="inner result")
 
@@ -397,10 +381,8 @@ def test_blob_argument_round_trip(worker):
     with worker(targets, concurrency=2) as ctx:
         resp = ctx.submit("test.main")
         run_id = resp["runId"]
-        conn0 = ctx.executor.connections[0]
-        conn1 = ctx.executor.connections[1]
 
-        wf_eid, _, _ = conn0.recv_execute()
+        conn0, wf_eid, _, _ = ctx.executor.next_execute()
 
         # Create a temp file larger than blob threshold (100 bytes)
         content = "x" * 200
@@ -414,7 +396,7 @@ def test_blob_argument_round_trip(worker):
             ref = conn0.submit_task(wf_eid, "test.process", file_arg)
 
             # Receiving executor should get the argument as a file
-            task_eid, target, args = conn1.recv_execute()
+            conn1, task_eid, target, args = ctx.executor.next_execute()
             assert target == "test.process"
             assert len(args) == 1
             assert args[0]["type"] == "file"
