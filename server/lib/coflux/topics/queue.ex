@@ -12,11 +12,16 @@ defmodule Coflux.Topics.Queue do
     workspace_id = Map.fetch!(params, :workspace_id)
 
     case Orchestration.subscribe_queue(project_id, workspace_id, self()) do
-      {:ok, executions, ref} ->
+      {:ok, executions, tag_sets, dependencies, ref} ->
         value =
           Map.new(executions, fn {module, target, run_external_id, step_number, attempt,
-                                  execute_after, created_at, assigned_at} ->
+                                  execute_after, created_at, assigned_at, requires_tag_set_id} ->
             execution_id = "#{run_external_id}:#{step_number}:#{attempt}"
+
+            requires =
+              if requires_tag_set_id,
+                do: Map.fetch!(tag_sets, requires_tag_set_id),
+                else: %{}
 
             {execution_id,
              %{
@@ -28,7 +33,9 @@ defmodule Coflux.Topics.Queue do
                attempt: attempt,
                executeAfter: execute_after,
                createdAt: created_at,
-               assignedAt: assigned_at
+               assignedAt: assigned_at,
+               dependencies: Map.get(dependencies, execution_id, []),
+               requires: requires
              }}
           end)
 
@@ -46,7 +53,7 @@ defmodule Coflux.Topics.Queue do
 
   defp process_notification(
          {:scheduled, execution_external_id, module, target, run_external_id, step_number,
-          attempt, execute_after, created_at},
+          attempt, execute_after, created_at, dependencies, requires},
          topic
        ) do
     Topic.set(topic, [execution_external_id], %{
@@ -58,8 +65,14 @@ defmodule Coflux.Topics.Queue do
       attempt: attempt,
       executeAfter: execute_after,
       createdAt: created_at,
-      assignedAt: nil
+      assignedAt: nil,
+      dependencies: dependencies,
+      requires: requires
     })
+  end
+
+  defp process_notification({:dependencies, execution_external_id, dependency_ids}, topic) do
+    Topic.set(topic, [execution_external_id, :dependencies], dependency_ids)
   end
 
   defp process_notification({:assigned, executions}, topic) do

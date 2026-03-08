@@ -1038,16 +1038,19 @@ defmodule Coflux.Orchestration.Server do
          child_added: child_added
        }} ->
         # Compute and register pending dependencies for non-memoised executions
-        state =
+        {state, pending_dependencies} =
           if step_id && !memo_hit do
             wait_for = Keyword.get(opts, :wait_for) || []
 
             pending_dependencies =
               compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
 
-            register_pending_dependencies(state, execution_id, pending_dependencies)
+            state =
+              register_pending_dependencies(state, execution_id, pending_dependencies)
+
+            {state, pending_dependencies}
           else
-            state
+            {state, MapSet.new()}
           end
 
         group_id = Keyword.get(opts, :group_id)
@@ -1125,7 +1128,8 @@ defmodule Coflux.Orchestration.Server do
               |> notify_listeners(
                 {:queue, ws_ext_id},
                 {:scheduled, execution_external_id, module, target_name, run.external_id,
-                 step_number, attempt, execute_after, created_at}
+                 step_number, attempt, execute_after, created_at,
+                 pending_dependency_external_ids(state.db, pending_dependencies), requires}
               )
 
             send(self(), :tick)
@@ -1670,8 +1674,25 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok, workspace_id} ->
         {:ok, executions} = Runs.get_queue_executions(state.db, workspace_id)
+
+        # Resolve tag sets, de-duplicating by ID
+        tag_sets =
+          executions
+          |> Enum.map(&elem(&1, 8))
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+          |> Map.new(fn tag_set_id ->
+            {:ok, tag_set} = TagSets.get_tag_set(state.db, tag_set_id)
+            {tag_set_id, tag_set}
+          end)
+
+        # Build a map of execution_external_id -> [dependency_external_id]
+        # from the in-memory pending_dependencies (which uses internal IDs)
+        dependencies =
+          build_queue_dependencies(state, workspace_id)
+
         {:ok, ref, state} = add_listener(state, {:queue, workspace_external_id}, pid)
-        {:reply, {:ok, executions, ref}, state}
+        {:reply, {:ok, executions, tag_sets, dependencies, ref}, state}
     end
   end
 
@@ -3029,15 +3050,19 @@ defmodule Coflux.Orchestration.Server do
 
         # Compute and register pending dependencies
         wait_for = Keyword.get(opts, :wait_for) || []
+        requires = Keyword.get(opts, :requires) || %{}
 
-        state =
+        {state, pending_dependencies} =
           if step_id do
             pending_dependencies =
               compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
 
-            register_pending_dependencies(state, execution_id, pending_dependencies)
+            state =
+              register_pending_dependencies(state, execution_id, pending_dependencies)
+
+            {state, pending_dependencies}
           else
-            state
+            {state, MapSet.new()}
           end
 
         state =
@@ -3059,7 +3084,8 @@ defmodule Coflux.Orchestration.Server do
           |> notify_listeners(
             {:queue, ws_ext_id},
             {:scheduled, execution_external_id, module, target_name, external_run_id, step_number,
-             attempt, execute_after, created_at}
+             attempt, execute_after, created_at,
+             pending_dependency_external_ids(state.db, pending_dependencies), requires}
           )
           |> notify_listeners(
             {:targets, ws_ext_id},
@@ -3114,7 +3140,16 @@ defmodule Coflux.Orchestration.Server do
         pending_dependencies =
           compute_pending_dependencies(state.db, execution_id, step.wait_for || [], step.id)
 
-        state = register_pending_dependencies(state, execution_id, pending_dependencies)
+        state =
+          register_pending_dependencies(state, execution_id, pending_dependencies)
+
+        requires =
+          if step.requires_tag_set_id do
+            {:ok, requires} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
+            requires
+          else
+            %{}
+          end
 
         execution_external_id =
           execution_external_id(run.external_id, step.number, attempt)
@@ -3141,7 +3176,8 @@ defmodule Coflux.Orchestration.Server do
           |> notify_listeners(
             {:queue, ws_ext_id},
             {:scheduled, execution_external_id, step.module, step.target, run.external_id,
-             step.number, attempt, execute_after, created_at}
+             step.number, attempt, execute_after, created_at,
+             pending_dependency_external_ids(state.db, pending_dependencies), requires}
           )
           |> notify_listeners(
             {:targets, ws_ext_id},
@@ -4127,9 +4163,11 @@ defmodule Coflux.Orchestration.Server do
 
     case Results.record_result(state.db, execution_id, result, created_by) do
       {:ok, created_at} ->
-        state = notify_waiting(state, execution_id)
-        state = update_dependencies_on_result(state, execution_id)
-        state = unregister_pending_dependencies(state, execution_id)
+        state =
+          state
+          |> notify_waiting(execution_id)
+          |> update_dependencies_on_result(execution_id)
+          |> unregister_pending_dependencies(execution_id)
 
         final = is_result_final?(result)
         result = build_result(result, state.db)
@@ -4457,6 +4495,82 @@ defmodule Coflux.Orchestration.Server do
     end)
   end
 
+  # Convert a set of internal pending dependency IDs to a list of external IDs.
+  defp pending_dependency_external_ids(db, pending_dependency_ids) do
+    pending_dependency_ids
+    |> Enum.map(fn dependency_id ->
+      case Runs.get_execution_key(db, dependency_id) do
+        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+        {:error, _} -> nil
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  # Send a queue notification with the current pending dependencies for an execution.
+  # Converts internal execution IDs to external IDs.
+  defp notify_queue_dependencies(state, execution_id, pending_dependency_ids) do
+    case Runs.get_execution_key(state.db, execution_id) do
+      {:ok, {r, s, a}} ->
+        execution_ext_id = execution_external_id(r, s, a)
+
+        dependency_ext_ids =
+          pending_dependency_ids
+          |> Enum.map(fn dependency_id ->
+            case Runs.get_execution_key(state.db, dependency_id) do
+              {:ok, {dr, ds, da}} -> execution_external_id(dr, ds, da)
+              {:error, _} -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+        ws_ext_id = workspace_external_id(state, workspace_id)
+
+        notify_listeners(
+          state,
+          {:queue, ws_ext_id},
+          {:dependencies, execution_ext_id, dependency_ext_ids}
+        )
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  # Build a map of execution_external_id -> [dependency_external_id] for all
+  # pending executions in the given workspace, for the Queue topic snapshot.
+  defp build_queue_dependencies(state, workspace_id) do
+    state.pending_dependencies
+    |> Enum.reduce(%{}, fn {execution_id, dependency_ids}, acc ->
+      case Runs.get_workspace_id_for_execution(state.db, execution_id) do
+        {:ok, ^workspace_id} ->
+          case Runs.get_execution_key(state.db, execution_id) do
+            {:ok, {r, s, a}} ->
+              ext_id = execution_external_id(r, s, a)
+
+              dependency_ext_ids =
+                dependency_ids
+                |> Enum.map(fn dependency_id ->
+                  case Runs.get_execution_key(state.db, dependency_id) do
+                    {:ok, {dr, ds, da}} -> execution_external_id(dr, ds, da)
+                    {:error, _} -> nil
+                  end
+                end)
+                |> Enum.reject(&is_nil/1)
+
+              Map.put(acc, ext_id, dependency_ext_ids)
+
+            {:error, _} ->
+              acc
+          end
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
   # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.
   defp initialize_pending_dependencies(state) do
     {:ok, executions} = Runs.get_unassigned_executions(state.db)
@@ -4670,7 +4784,8 @@ defmodule Coflux.Orchestration.Server do
                 |> MapSet.union(new_pending)
 
               # Register waiter with new dependency_waiters entries
-              state =
+              state
+              |> then(fn state ->
                 Enum.reduce(new_pending, state, fn new_dependency_id, state ->
                   update_in(
                     state,
@@ -4681,16 +4796,19 @@ defmodule Coflux.Orchestration.Server do
                     &MapSet.put(&1, waiter_id)
                   )
                 end)
-
-              if MapSet.size(updated) == 0 do
-                update_in(
-                  state,
-                  [Access.key(:pending_dependencies)],
-                  &Map.delete(&1, waiter_id)
-                )
-              else
-                put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
-              end
+              end)
+              |> then(fn state ->
+                if MapSet.size(updated) == 0 do
+                  update_in(
+                    state,
+                    [Access.key(:pending_dependencies)],
+                    &Map.delete(&1, waiter_id)
+                  )
+                else
+                  put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
+                end
+              end)
+              |> notify_queue_dependencies(waiter_id, updated)
 
             :error ->
               state

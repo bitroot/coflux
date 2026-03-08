@@ -586,7 +586,8 @@ defmodule Coflux.Orchestration.Runs do
              e.attempt,
              e.execute_after,
              e.created_at,
-             a.created_at
+             a.created_at,
+             s.requires_tag_set_id
            FROM executions AS e
            INNER JOIN steps AS s ON s.id = e.step_id
            INNER JOIN runs AS r ON r.id = s.run_id
@@ -599,9 +600,9 @@ defmodule Coflux.Orchestration.Runs do
       {:ok, rows} ->
         {:ok,
          Enum.map(rows, fn {module, target, run_external_id, step_number, attempt, execute_after,
-                            created_at, assigned_at} ->
+                            created_at, assigned_at, requires_tag_set_id} ->
            {module, target, run_external_id, step_number, attempt, execute_after, created_at,
-            assigned_at}
+            assigned_at, requires_tag_set_id}
          end)}
     end
   end
