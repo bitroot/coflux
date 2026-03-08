@@ -134,6 +134,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	logger.Info("starting worker",
 		"workspace", cfg.Workspace,
 		"host", cfg.Server.Host,
+		"modules", modules,
 		"concurrency", cfg.Worker.Concurrency,
 		"register", shouldRegister,
 	)

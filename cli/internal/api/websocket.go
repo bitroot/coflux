@@ -121,7 +121,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 		Subprotocols: subprotocols,
 	}
 
-	c.logger.Info("connecting to server", "url", u.String())
+	c.logger.Debug("connecting to server", "url", u.String())
 
 	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
@@ -133,7 +133,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
-	c.logger.Info("connected to server")
+	c.logger.Debug("connected to server")
 
 	return nil
 }
@@ -276,7 +276,7 @@ func (c *Connection) handleMessage(msgType int, payload any) error {
 		if !ok {
 			return fmt.Errorf("invalid session message type")
 		}
-		c.logger.Info("received session", "session_id", session.SessionID, "execution_ids", len(session.ExecutionIDs))
+		c.logger.Debug("received session", "session_id", session.SessionID, "execution_ids", len(session.ExecutionIDs))
 		c.mu.Lock()
 		handler := c.onSession
 		c.mu.Unlock()

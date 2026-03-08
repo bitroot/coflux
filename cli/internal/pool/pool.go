@@ -54,9 +54,9 @@ type Pool struct {
 	logger      *slog.Logger
 
 	mu       sync.Mutex
-	warm     []*adapter.Executor            // idle, ready executors
-	busy     map[string]*adapter.Executor   // executionID -> running executor
-	aborted  map[string]bool                // executions aborted by the server
+	warm     []*adapter.Executor          // idle, ready executors
+	busy     map[string]*adapter.Executor // executionID -> running executor
+	aborted  map[string]bool              // executions aborted by the server
 	shutdown bool
 	cancel   context.CancelFunc
 	ctx      context.Context
@@ -190,7 +190,8 @@ loop:
 			aborted := p.aborted[executionID]
 			p.mu.Unlock()
 			if aborted {
-				logger.Info("execution aborted", "error", err)
+				logger.Info("execution aborted")
+			logger.Debug("aborted executor exit", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
 				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")

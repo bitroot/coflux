@@ -56,6 +56,7 @@ type Worker struct {
 type executionState struct {
 	status      string // "starting", "executing", "aborting"
 	startTime   time.Time
+	target      string // Full target name (module.target)
 	runID       string // External run ID for logs
 	workspaceID string // External workspace ID for logs
 
@@ -121,21 +122,21 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.workspaceID = workspaceID
 
 	// Discover targets
-	w.logger.Info("discovering targets", "modules", modules)
+	w.logger.Debug("discovering targets", "modules", modules)
 	manifest, err := w.adapter.Discover(ctx, modules)
 	if err != nil {
 		return fmt.Errorf("discovery failed: %w", err)
 	}
-	w.logger.Info("discovered targets", "count", len(manifest.Targets))
+	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
 	// Register manifests if requested (before connecting)
 	if register {
-		w.logger.Info("registering manifests")
+		w.logger.Debug("registering manifests")
 		manifests := w.buildManifests(manifest)
 		if err := w.client.RegisterManifests(ctx, w.workspaceID, manifests); err != nil {
 			return fmt.Errorf("failed to register manifests: %w", err)
 		}
-		w.logger.Info("manifests registered")
+		w.logger.Debug("manifests registered")
 	}
 
 	// Create or use existing session
@@ -143,17 +144,17 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if w.session != "" {
 		// Use pre-existing session (for pool-launched workers)
 		sessionID = w.session
-		w.logger.Info("using existing session", "session_id", sessionID)
+		w.logger.Debug("using existing session", "session_id", sessionID)
 	} else {
 		// Create new session
-		w.logger.Info("creating session", "workspace", w.cfg.Workspace)
+		w.logger.Debug("creating session", "workspace", w.cfg.Workspace)
 		provides := config.ParseProvides(w.cfg.Worker.Provides)
 		var err error
 		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, w.cfg.Worker.Concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
-		w.logger.Info("created session", "session_id", sessionID)
+		w.logger.Debug("created session", "session_id", sessionID)
 	}
 	w.sessionID = sessionID
 
@@ -164,7 +165,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("coflux-%s", sessionID), "cache", "blobs")
 	stores := w.createBlobStores(ctx, w.sessionID)
 	w.blobs = blob.NewManager(stores, cacheDir, w.cfg.Blobs.Threshold)
-	w.logger.Info("blob manager configured", "threshold", w.cfg.Blobs.Threshold, "cache_dir", cacheDir)
+	w.logger.Debug("blob manager configured", "threshold", w.cfg.Blobs.Threshold, "cache_dir", cacheDir)
 	if err := w.blobs.EnsureCacheDir(); err != nil {
 		return fmt.Errorf("failed to create blob cache: %w", err)
 	}
@@ -184,7 +185,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if poolSize <= 0 {
 		poolSize = runtime.NumCPU() + 4
 	}
-	w.logger.Info("starting executor pool", "size", poolSize)
+	w.logger.Debug("starting executor pool", "size", poolSize)
 
 	// Create executor pool
 	w.pool = pool.NewPool(w.adapter, poolSize, w, w.logger)
@@ -290,7 +291,15 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	if err := conn.Notify("declare_targets", targets); err != nil {
 		return true, err
 	}
-	w.logger.Info("connected and declared targets")
+
+	w.mu.RLock()
+	hasExecutions := len(w.executions) > 0
+	w.mu.RUnlock()
+	if hasExecutions {
+		w.logger.Info("reconnected", "host", w.cfg.Server.Host)
+	} else {
+		w.logger.Info("connected", "host", w.cfg.Server.Host)
+	}
 
 	// Start heartbeat for this connection
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
@@ -399,13 +408,15 @@ func (w *Worker) handleExecute(params []any) error {
 	runID := getString(params[4])
 	workspaceID := getString(params[5])
 
-	w.logger.Info("executing", "execution_id", executionID, "target", targetName, "run_id", runID)
+	w.logger.Debug("executing", "execution_id", executionID, "target", targetName, "run_id", runID)
 
 	// Track execution
+	fullTarget := moduleName + "." + targetName
 	w.mu.Lock()
 	w.executions[executionID] = &executionState{
 		status:      "starting",
 		startTime:   time.Now(),
+		target:      fullTarget,
 		runID:       runID,
 		workspaceID: workspaceID,
 	}
@@ -427,7 +438,6 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	fullTarget := moduleName + "." + targetName
 	if err := w.pool.Execute(context.Background(), executionID, fullTarget, args); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "")
@@ -509,7 +519,7 @@ func (w *Worker) handleAbort(params []any) error {
 	}
 
 	executionID := getString(params[0])
-	w.logger.Info("handling abort", "execution_id", executionID)
+	w.logger.Debug("handling abort", "execution_id", executionID)
 
 	w.mu.Lock()
 	if state, ok := w.executions[executionID]; ok {
@@ -1164,6 +1174,8 @@ func (w *Worker) ReportResult(ctx context.Context, executionID string, result *a
 	if ok {
 		state.pendingNotify = "put_result"
 		state.pendingValue = serverValue
+		elapsed := time.Since(state.startTime).Round(time.Millisecond)
+		w.logger.Info("execution completed", "execution_id", executionID, "target", state.target, "elapsed", elapsed)
 	}
 	w.mu.Unlock()
 
@@ -1188,6 +1200,8 @@ func (w *Worker) ReportError(ctx context.Context, executionID string, errorType,
 	if ok {
 		state.pendingNotify = "put_error"
 		state.pendingValue = errorTuple
+		elapsed := time.Since(state.startTime).Round(time.Millisecond)
+		w.logger.Info("execution failed", "execution_id", executionID, "target", state.target, "error_type", errorType, "elapsed", elapsed)
 	}
 	w.mu.Unlock()
 
