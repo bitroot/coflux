@@ -56,7 +56,11 @@ defmodule Coflux.Auth do
 
   alias Coflux.{Config, JwksStore, Orchestration}
 
-  @type access :: %{workspaces: :all | [String.t()], principal_id: integer() | nil}
+  @type access :: %{
+          type: :super | :none | :service | :studio | :session,
+          workspaces: :all | [String.t()],
+          principal_id: integer() | nil
+        }
 
   @doc """
   Checks if the given token is authorized for the project.
@@ -82,7 +86,7 @@ defmodule Coflux.Auth do
     if Config.require_auth?() do
       {:error, :unauthorized}
     else
-      {:ok, %{workspaces: :all, principal_id: nil}}
+      {:ok, %{type: :none, workspaces: :all, principal_id: nil}}
     end
   end
 
@@ -184,7 +188,7 @@ defmodule Coflux.Auth do
       expected_hash ->
         if hash_token(token) == expected_hash do
           # Super token has full access, no principal
-          {:ok, %{workspaces: :all, principal_id: nil}}
+          {:ok, %{type: :super, workspaces: :all, principal_id: nil}}
         else
           :error
         end
@@ -196,7 +200,7 @@ defmodule Coflux.Auth do
 
     case Orchestration.check_token(project_id, token_hash) do
       {:ok, %{workspaces: workspaces, principal_id: principal_id}} ->
-        {:ok, %{workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+        {:ok, %{type: :service, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
 
       {:error, _reason} ->
         {:error, :unauthorized}
@@ -264,7 +268,7 @@ defmodule Coflux.Auth do
 
     case Orchestration.check_token(project_id, random_hash) do
       {:ok, %{workspaces: workspaces, principal_id: principal_id}} ->
-        {:ok, %{workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+        {:ok, %{type: :service, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
 
       {:error, _reason} ->
         {:error, :unauthorized}
@@ -280,7 +284,7 @@ defmodule Coflux.Auth do
       external_id = claims["sub"]
       # Resolve external_id to principal_id
       {:ok, principal_id} = Orchestration.ensure_principal(project_id, external_id)
-      {:ok, %{workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
+      {:ok, %{type: :studio, workspaces: normalize_workspaces(workspaces), principal_id: principal_id}}
     else
       {:error, _reason} ->
         {:error, :unauthorized}

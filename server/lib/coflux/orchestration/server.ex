@@ -830,7 +830,7 @@ defmodule Coflux.Orchestration.Server do
          session = Map.fetch!(state.sessions, session_id),
          :ok <- verify_session_secret(secret, session.secret_hash) do
       workspace = Map.fetch!(state.workspaces, session.workspace_id)
-      {:reply, {:ok, %{workspaces: [workspace.name], principal_id: nil}}, state}
+      {:reply, {:ok, %{type: :session, workspaces: [workspace.name], principal_id: nil}}, state}
     else
       _ -> {:reply, {:error, :session_invalid}, state}
     end
