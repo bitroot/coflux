@@ -1199,10 +1199,8 @@ defmodule Coflux.Orchestration.Server do
          {:ok, run_ext_id, step_number, attempt} <-
            parse_execution_external_id(execution_external_id),
          {:ok, {execution_id}} <-
-           Runs.get_execution_id(state.db, run_ext_id, step_number, attempt),
-         {:ok, exec_workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id),
-         :ok <- require_workspace_match(exec_workspace_id, workspace_id) do
-      do_cancel_execution(state, execution_id, access[:principal_id])
+           Runs.get_execution_id(state.db, run_ext_id, step_number, attempt) do
+      do_cancel_execution(state, execution_id, workspace_id, access[:principal_id])
     else
       {:error, :invalid_format} ->
         {:reply, {:error, :not_found}, state}
@@ -1215,9 +1213,6 @@ defmodule Coflux.Orchestration.Server do
 
       {:error, :forbidden} ->
         {:reply, {:error, :forbidden}, state}
-
-      {:error, :workspace_mismatch} ->
-        {:reply, {:error, :workspace_mismatch}, state}
 
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
@@ -2616,7 +2611,7 @@ defmodule Coflux.Orchestration.Server do
 
   # Private helper functions
 
-  defp do_cancel_execution(state, execution_id, principal_id) do
+  defp do_cancel_execution(state, execution_id, workspace_id, principal_id) do
     root_execution_id =
       case Results.get_result(state.db, execution_id) do
         {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} ->
@@ -2628,11 +2623,16 @@ defmodule Coflux.Orchestration.Server do
 
     {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
 
+    executions =
+      Enum.filter(executions, fn {_exec_id, _module, _assigned_at, _completed_at, exec_workspace_id} ->
+        exec_workspace_id == workspace_id
+      end)
+
     state =
       Enum.reduce(
         executions,
         state,
-        fn {execution_id, module, assigned_at, completed_at}, state ->
+        fn {execution_id, module, assigned_at, completed_at, _exec_workspace_id}, state ->
           if !completed_at do
             # Only record created_by for the root execution (the one user explicitly cancelled)
             created_by = if execution_id == root_execution_id, do: principal_id, else: nil
