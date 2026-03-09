@@ -891,12 +891,7 @@ defmodule Coflux.Orchestration.Server do
         notify_listeners(
           state,
           {:sessions, workspace_external_id(state, session.workspace_id)},
-          {:session, session.external_id,
-           %{
-             connected: true,
-             executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
-             pool_name: get_in(state.workers, [session.worker_id, :pool_name])
-           }}
+          {:session, session.external_id, build_session_data(state, session)}
         )
 
       state =
@@ -944,9 +939,16 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:declare_targets, external_id, targets}, _from, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
+    state = assign_targets(state, targets, session_id)
+
+    session = Map.fetch!(state.sessions, session_id)
+
     state =
       state
-      |> assign_targets(targets, session_id)
+      |> notify_listeners(
+        {:sessions, workspace_external_id(state, session.workspace_id)},
+        {:session, session.external_id, build_session_data(state, session)}
+      )
       |> flush_notifications()
 
     send(self(), :tick)
@@ -1773,19 +1775,7 @@ defmodule Coflux.Orchestration.Server do
             session.workspace_id == workspace_id
           end)
           |> Map.new(fn {_session_id, session} ->
-            executions =
-              session.starting
-              |> MapSet.union(session.executing)
-              |> Enum.count()
-
-            pool_name = get_in(state.workers, [session.worker_id, :pool_name])
-
-            {session.external_id,
-             %{
-               connected: !is_nil(session.connection),
-               executions: executions,
-               pool_name: pool_name
-             }}
+            {session.external_id, build_session_data(state, session)}
           end)
 
         {:ok, ref, state} = add_listener(state, {:sessions, workspace_external_id}, pid)
@@ -4493,6 +4483,27 @@ defmodule Coflux.Orchestration.Server do
       |> Map.get(key, [])
       |> Enum.any?(&(&1 in requires_values))
     end)
+  end
+
+  # Build the session data map sent to the Sessions topic.
+  defp build_session_data(state, session) do
+    worker = session.worker_id && Map.get(state.workers, session.worker_id)
+
+    # Build targets as %{module => [target_name]} (session.targets values are MapSets)
+    targets =
+      Map.new(session.targets, fn {module, target_names} ->
+        {module, target_names |> MapSet.to_list() |> Enum.sort()}
+      end)
+
+    %{
+      connected: !is_nil(session.connection),
+      executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
+      concurrency: session.concurrency,
+      pool_name: if(worker, do: worker.pool_name),
+      targets: targets,
+      provides: session.provides,
+      worker_state: if(worker, do: worker.state)
+    }
   end
 
   # Convert a set of internal pending dependency IDs to a list of external IDs.
