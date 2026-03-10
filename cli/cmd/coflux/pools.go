@@ -14,6 +14,7 @@ var poolsCmd = &cobra.Command{
 
 func init() {
 	poolsCmd.AddCommand(poolsListCmd)
+	poolsCmd.AddCommand(poolsInspectCmd)
 	poolsCmd.AddCommand(poolsUpdateCmd)
 	poolsCmd.AddCommand(poolsDeleteCmd)
 }
@@ -46,6 +47,10 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if isOutput("json") {
+		return outputJSON(pools)
+	}
+
 	if len(pools) == 0 {
 		fmt.Println("No pools found.")
 		return nil
@@ -72,6 +77,74 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 	}
 
 	printTable([]string{"Name", "Launcher", "Modules", "Provides"}, rows)
+	return nil
+}
+
+// pools inspect
+var poolsInspectCmd = &cobra.Command{
+	Use:   "inspect <name>",
+	Short: "Inspect a pool",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPoolsInspect,
+}
+
+func runPoolsInspect(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	pool, err := client.GetPool(cmd.Context(), workspaceID, name)
+	if err != nil {
+		return fmt.Errorf("pool '%s' not found", name)
+	}
+
+	if isOutput("json") {
+		return outputJSON(pool)
+	}
+
+	// Modules
+	if modules, ok := pool["modules"].([]any); ok && len(modules) > 0 {
+		var mods []string
+		for _, m := range modules {
+			if s, ok := m.(string); ok {
+				mods = append(mods, s)
+			}
+		}
+		fmt.Printf("Modules: %s\n", strings.Join(mods, ", "))
+	}
+
+	// Provides
+	if provides := encodeProvides(pool["provides"]); provides != "" {
+		fmt.Printf("Provides: %s\n", provides)
+	}
+
+	// Launcher
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		fmt.Printf("Launcher: %s\n", getString(launcher, "type"))
+		if image := getString(launcher, "image"); image != "" {
+			fmt.Printf("Image: %s\n", image)
+		}
+		if dockerHost := getString(launcher, "dockerHost"); dockerHost != "" {
+			fmt.Printf("Docker host: %s\n", dockerHost)
+		}
+		if serverHost := getString(launcher, "serverHost"); serverHost != "" {
+			fmt.Printf("Server host: %s\n", serverHost)
+		}
+	}
+
 	return nil
 }
 
