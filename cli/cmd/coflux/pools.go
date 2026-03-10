@@ -77,10 +77,13 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 
 // pools update
 var (
-	poolsUpdateModules     []string
-	poolsUpdateProvides    []string
-	poolsUpdateDockerImage string
-	poolsUpdateDockerHost  string
+	poolsUpdateModules      []string
+	poolsUpdateProvides     []string
+	poolsUpdateDockerImage  string
+	poolsUpdateDockerHost   string
+	poolsUpdateNoDockerHost bool
+	poolsUpdateServerHost   string
+	poolsUpdateNoServerHost bool
 )
 
 var poolsUpdateCmd = &cobra.Command{
@@ -95,6 +98,11 @@ func init() {
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateProvides, "provides", nil, "Features that workers provide")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -128,7 +136,7 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	if poolsUpdateProvides != nil {
 		pool["provides"] = parseProvides(poolsUpdateProvides)
 	}
-	if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" {
+	if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" || poolsUpdateNoDockerHost || poolsUpdateServerHost != "" || poolsUpdateNoServerHost {
 		launcher, ok := pool["launcher"].(map[string]any)
 		if !ok || getString(launcher, "type") != "docker" {
 			launcher = map[string]any{"type": "docker"}
@@ -138,6 +146,13 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		}
 		if poolsUpdateDockerHost != "" {
 			launcher["dockerHost"] = poolsUpdateDockerHost
+		} else if poolsUpdateNoDockerHost {
+			delete(launcher, "dockerHost")
+		}
+		if poolsUpdateServerHost != "" {
+			launcher["serverHost"] = poolsUpdateServerHost
+		} else if poolsUpdateNoServerHost {
+			delete(launcher, "serverHost")
 		}
 		pool["launcher"] = launcher
 	}

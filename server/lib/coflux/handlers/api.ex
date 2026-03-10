@@ -747,6 +747,7 @@ defmodule Coflux.Handlers.Api do
   defp parse_docker_launcher(value) do
     image = Map.get(value, "image")
     docker_host = Map.get(value, "dockerHost")
+    server_host = Map.get(value, "serverHost")
 
     cond do
       not is_binary(image) or String.length(image) > 200 ->
@@ -755,11 +756,17 @@ defmodule Coflux.Handlers.Api do
       not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
         {:error, :invalid}
 
+      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+        {:error, :invalid}
+
       true ->
         launcher = %{type: :docker, image: image}
 
         launcher =
           if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+
+        launcher =
+          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
 
         {:ok, launcher}
     end

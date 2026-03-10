@@ -3,7 +3,7 @@ defmodule Coflux.DockerLauncher do
 
   def launch(project_id, workspace_name, session_token, modules, config \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
-    coflux_host = get_coflux_host()
+    coflux_host = config[:server_host] || Coflux.Config.server_host(project_id)
 
     with {:ok, %{"Id" => container_id}} <-
            create_container(
@@ -13,8 +13,7 @@ defmodule Coflux.DockerLauncher do
                "HostConfig" => %{"NetworkMode" => "host"},
                "Cmd" => modules,
                "Env" => [
-                 "COFLUX_HOST=#{coflux_host}",
-                 "COFLUX_PROJECT=#{project_id}",
+                 "COFLUX_SERVER_HOST=#{coflux_host}",
                  "COFLUX_WORKSPACE=#{workspace_name}",
                  "COFLUX_SESSION=#{session_token}"
                ]
@@ -82,13 +81,6 @@ defmodule Coflux.DockerLauncher do
       _ ->
         raise ArgumentError, "Invalid docker_host: #{inspect(docker_host)}"
     end
-  end
-
-  # Gets the Coflux host for workers to connect to.
-  # Priority: COFLUX_PUBLIC_HOST env -> localhost:PORT
-  defp get_coflux_host() do
-    System.get_env("COFLUX_PUBLIC_HOST") ||
-      "localhost:#{System.get_env("PORT", "7777")}"
   end
 
   defp docker_request(docker_conn, method, path, opts \\ []) do

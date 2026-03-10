@@ -44,8 +44,10 @@ defmodule Coflux.Config do
   """
   def init do
     :persistent_term.put(:coflux_data_dir, parse_data_dir())
+    :persistent_term.put(:coflux_port, String.to_integer(System.get_env("PORT", "7777")))
     :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
     :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
+    :persistent_term.put(:coflux_public_host, parse_public_host())
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
     :persistent_term.put(:coflux_require_auth, parse_require_auth())
     :persistent_term.put(:coflux_studio_teams, parse_studio_teams())
@@ -78,6 +80,36 @@ defmodule Coflux.Config do
   """
   def base_domain do
     :persistent_term.get(:coflux_base_domain)
+  end
+
+  @doc """
+  Returns the host that workers should use to connect to this server.
+
+  Uses the following fallback chain:
+  1. COFLUX_PUBLIC_HOST env var (for deployments behind a load balancer, etc.)
+  2. COFLUX_BASE_DOMAIN + PORT (for subdomain-routed setups)
+  3. localhost:PORT (local dev fallback)
+
+  When `project_id` is given and COFLUX_BASE_DOMAIN is set, the project is
+  prepended as a subdomain.
+  """
+  def server_host(project_id \\ nil) do
+    port = :persistent_term.get(:coflux_port)
+    port_suffix = if port in [80, 443], do: "", else: ":#{port}"
+
+    case {:persistent_term.get(:coflux_public_host), base_domain(), project_id} do
+      {host, _, _} when host != nil ->
+        host
+
+      {nil, domain, pid} when domain != nil and pid != nil ->
+        "#{pid}.#{domain}#{port_suffix}"
+
+      {nil, domain, nil} when domain != nil ->
+        "#{domain}#{port_suffix}"
+
+      {nil, nil, _} ->
+        "localhost#{port_suffix}"
+    end
   end
 
   @doc """
@@ -132,6 +164,14 @@ defmodule Coflux.Config do
   """
   def secret do
     :persistent_term.get(:coflux_secret)
+  end
+
+  defp parse_public_host do
+    case System.get_env("COFLUX_PUBLIC_HOST") do
+      nil -> nil
+      "" -> nil
+      host -> host
+    end
   end
 
   defp parse_data_dir do
