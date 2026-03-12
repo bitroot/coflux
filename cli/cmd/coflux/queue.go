@@ -234,7 +234,7 @@ func runQueue(cmd *cobra.Command, args []string) error {
 	}
 
 	if isOutput("json") {
-		data, err := client.CaptureTopic(cmd.Context(), "queue/"+workspaceID)
+		data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/queue")
 		if err != nil {
 			return err
 		}
@@ -242,7 +242,7 @@ func runQueue(cmd *cobra.Command, args []string) error {
 	}
 
 	if queueNoWatch {
-		data, err := client.CaptureTopic(cmd.Context(), "queue/"+workspaceID)
+		data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/queue")
 		if err != nil {
 			return err
 		}
@@ -273,10 +273,10 @@ func watchQueue(ctx context.Context, host string, secure bool, token string, wor
 	}
 	defer client.Close()
 
-	queueSub := client.Subscribe("queue/"+workspaceID, nil)
+	queueSub := client.Subscribe("workspaces/"+workspaceID+"/queue", nil)
 	defer queueSub.Unsubscribe()
 
-	sessionsSub := client.Subscribe("sessions/"+workspaceID, nil)
+	sessionsSub := client.Subscribe("workspaces/"+workspaceID+"/sessions", nil)
 	defer sessionsSub.Unsubscribe()
 
 	// We also need workspace state to check if paused

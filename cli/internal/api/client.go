@@ -90,12 +90,12 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspaceID, module, target
 
 // GetManifests retrieves the latest manifests for a workspace
 func (c *Client) GetManifests(ctx context.Context, workspaceID string) (map[string]any, error) {
-	return c.CaptureTopic(ctx, "manifests/"+workspaceID)
+	return c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/manifests")
 }
 
 // GetWorkflow retrieves a workflow definition
 func (c *Client) GetWorkflow(ctx context.Context, workspaceID, module, target string) (map[string]any, error) {
-	result, err := c.CaptureTopic(ctx, "workflows/"+module+"/"+target+"/"+workspaceID)
+	result, err := c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/workflows/"+module+"/"+target)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (c *Client) ArchiveModule(ctx context.Context, workspaceID, moduleName stri
 // GetPools lists all pools in a workspace
 func (c *Client) GetPools(ctx context.Context, workspaceID string) (map[string]map[string]any, error) {
 	var result map[string]map[string]any
-	if err := c.get(ctx, "/topics/pools/"+workspaceID, nil, &result); err != nil {
+	if err := c.get(ctx, "/topics/workspaces/"+workspaceID+"/pools", nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -197,7 +197,7 @@ func (c *Client) GetPools(ctx context.Context, workspaceID string) (map[string]m
 
 // GetPool gets a single pool
 func (c *Client) GetPool(ctx context.Context, workspaceID, pool string) (map[string]any, error) {
-	result, err := c.CaptureTopic(ctx, "pools/"+workspaceID+"/"+pool)
+	result, err := c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/pools/"+pool)
 	if err != nil {
 		return nil, err
 	}

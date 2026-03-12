@@ -33,7 +33,7 @@ func watchRun(ctx context.Context, host string, secure bool, token string, runID
 	}
 	defer client.Close()
 
-	sub := client.Subscribe("runs/"+runID+"/"+workspaceID, nil)
+	sub := client.Subscribe("workspaces/"+workspaceID+"/runs/"+runID, nil)
 	defer sub.Unsubscribe()
 
 	// Ctrl+C detaches (stops watching) but leaves the workflow running
@@ -102,7 +102,7 @@ func waitForRootResult(ctx context.Context, host string, secure bool, token stri
 	}
 	defer client.Close()
 
-	sub := client.Subscribe("runs/"+runID+"/"+workspaceID, nil)
+	sub := client.Subscribe("workspaces/"+workspaceID+"/runs/"+runID, nil)
 	defer sub.Unsubscribe()
 
 	for {

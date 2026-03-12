@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Manifests do
-  use Topical.Topic, route: ["manifests", :workspace_id]
+  use Topical.Topic, route: ["workspaces", :workspace_id, "manifests"]
 
   alias Coflux.Orchestration
 

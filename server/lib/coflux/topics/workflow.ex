@@ -1,6 +1,6 @@
 defmodule Coflux.Topics.Workflow do
   use Topical.Topic,
-    route: ["workflows", :module, :target, :workspace_id]
+    route: ["workspaces", :workspace_id, "workflows", :module, :target]
 
   import Coflux.TopicUtils
 

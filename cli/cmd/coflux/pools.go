@@ -204,7 +204,7 @@ func runPoolsLaunchList(cmd *cobra.Command, poolName string) error {
 		return err
 	}
 
-	data, err := client.CaptureTopic(cmd.Context(), "pools/"+workspaceID+"/"+poolName)
+	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/pools/"+poolName)
 	if err != nil {
 		return fmt.Errorf("pool '%s' not found", poolName)
 	}
@@ -240,7 +240,7 @@ func runPoolsLaunchFollow(cmd *cobra.Command, poolName string) error {
 		return err
 	}
 
-	topicPath := "pools/" + workspaceID + "/" + poolName
+	topicPath := "workspaces/" + workspaceID + "/pools/" + poolName
 
 	client, err := topicalclient.Connect(cmd.Context(), getHost(), isSecure(), token)
 	if err != nil {
@@ -440,7 +440,7 @@ func runPoolsLaunchDetail(cmd *cobra.Command, poolName, workerID string) error {
 		return err
 	}
 
-	data, err := client.CaptureTopic(cmd.Context(), "pools/"+workspaceID+"/"+poolName)
+	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/pools/"+poolName)
 	if err != nil {
 		return fmt.Errorf("pool '%s' not found", poolName)
 	}

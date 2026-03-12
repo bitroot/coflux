@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Pool do
-  use Topical.Topic, route: ["pools", :workspace_id, :pool_name]
+  use Topical.Topic, route: ["workspaces", :workspace_id, "pools", :pool_name]
 
   alias Coflux.Orchestration
 

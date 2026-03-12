@@ -161,7 +161,7 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 	}
 
 	if isOutput("json") {
-		data, err := client.CaptureTopic(cmd.Context(), "sessions/"+workspaceID)
+		data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/sessions")
 		if err != nil {
 			return err
 		}
@@ -172,7 +172,7 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 		return watchSessions(cmd.Context(), getHost(), isSecure(), token, workspaceID)
 	}
 
-	data, err := client.CaptureTopic(cmd.Context(), "sessions/"+workspaceID)
+	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/sessions")
 	if err != nil {
 		return err
 	}
@@ -187,7 +187,7 @@ func watchSessions(ctx context.Context, host string, secure bool, token string, 
 	}
 	defer client.Close()
 
-	sub := client.Subscribe("sessions/"+workspaceID, nil)
+	sub := client.Subscribe("workspaces/"+workspaceID+"/sessions", nil)
 	defer sub.Unsubscribe()
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
