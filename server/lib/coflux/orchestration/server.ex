@@ -737,6 +737,10 @@ defmodule Coflux.Orchestration.Server do
                 {:manifests, manifests}
               )
               |> notify_listeners(
+                {:manifests, ws_ext_id},
+                {:manifests, manifests}
+              )
+              |> notify_listeners(
                 {:targets, ws_ext_id},
                 {:manifests,
                  Map.new(manifests, fn {module_name, workflows} ->
@@ -758,10 +762,16 @@ defmodule Coflux.Orchestration.Server do
       {:ok, workspace_id, _} ->
         case Manifests.archive_module(state.db, workspace_id, module_name, access[:principal_id]) do
           :ok ->
+            ws_ext_id = workspace_external_id(state, workspace_id)
+
             state =
               state
               |> notify_listeners(
-                {:modules, workspace_external_id(state, workspace_id)},
+                {:modules, ws_ext_id},
+                {:manifest, module_name, nil}
+              )
+              |> notify_listeners(
+                {:manifests, ws_ext_id},
                 {:manifest, module_name, nil}
               )
               |> flush_notifications()
@@ -779,6 +789,18 @@ defmodule Coflux.Orchestration.Server do
       {:ok, workspace_id, _} ->
         {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
         {:reply, {:ok, manifests}, state}
+    end
+  end
+
+  def handle_call({:subscribe_manifests, workspace_external_id, pid}, _from, state) do
+    case require_workspace(state, workspace_external_id) do
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+
+      {:ok, workspace_id, _} ->
+        {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
+        {:ok, ref, state} = add_listener(state, {:manifests, workspace_external_id}, pid)
+        {:reply, {:ok, manifests, ref}, state}
     end
   end
 

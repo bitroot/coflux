@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/adapter"
 	"github.com/bitroot/coflux/cli/internal/api"
@@ -16,6 +17,7 @@ var manifestsCmd = &cobra.Command{
 }
 
 var manifestsAdapter []string
+var manifestsInspectWatch bool
 
 func init() {
 	manifestsCmd.PersistentFlags().StringSliceVar(&manifestsAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
@@ -24,6 +26,8 @@ func init() {
 	manifestsCmd.AddCommand(manifestsRegisterCmd)
 	manifestsCmd.AddCommand(manifestsArchiveCmd)
 	manifestsCmd.AddCommand(manifestsInspectCmd)
+
+	manifestsInspectCmd.Flags().BoolVar(&manifestsInspectWatch, "watch", false, "Watch for changes")
 }
 
 var manifestsDiscoverCmd = &cobra.Command{
@@ -192,6 +196,11 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+
 	client, err := newClient()
 	if err != nil {
 		return err
@@ -202,18 +211,40 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if isOutput("json") {
+		manifests, err := client.GetManifests(cmd.Context(), workspaceID)
+		if err != nil {
+			return fmt.Errorf("failed to get manifests: %w", err)
+		}
+		return outputJSON(manifests)
+	}
+
+	if manifestsInspectWatch {
+		return watchTopics(cmd.Context(), getHost(), isSecure(), token,
+			[]string{"workspaces/" + workspaceID + "/manifests"},
+			func(data []map[string]any) []string {
+				if data[0] == nil {
+					return nil
+				}
+				return renderManifestLines(data[0])
+			},
+		)
+	}
+
 	manifests, err := client.GetManifests(cmd.Context(), workspaceID)
 	if err != nil {
 		return fmt.Errorf("failed to get manifests: %w", err)
 	}
 
-	if isOutput("json") {
-		return outputJSON(manifests)
+	for _, line := range renderManifestLines(manifests) {
+		fmt.Println(line)
 	}
+	return nil
+}
 
+func renderManifestLines(manifests map[string]any) []string {
 	if len(manifests) == 0 {
-		fmt.Println("No modules registered.")
-		return nil
+		return []string{colorDim + "No modules registered." + colorReset}
 	}
 
 	modules := make([]string, 0, len(manifests))
@@ -222,10 +253,15 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 	}
 	sort.Strings(modules)
 
-	for _, module := range modules {
+	var lines []string
+	for i, module := range modules {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, colorBold+module+colorReset)
+
 		targets, ok := manifests[module].(map[string]any)
 		if !ok {
-			fmt.Printf("%s\n", module)
 			continue
 		}
 		names := make([]string, 0, len(targets))
@@ -234,11 +270,34 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			fmt.Printf("%s/%s\n", module, name)
+			detail := formatTargetDetail(targets[name])
+			if detail != "" {
+				lines = append(lines, "  "+name+"  "+colorDim+detail+colorReset)
+			} else {
+				lines = append(lines, "  "+name)
+			}
 		}
 	}
+	return lines
+}
 
-	return nil
+func formatTargetDetail(raw any) string {
+	t, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if params, ok := t["parameters"].([]any); ok && len(params) > 0 {
+		var names []string
+		for _, p := range params {
+			if pm, ok := p.(map[string]any); ok {
+				if name, ok := pm["name"].(string); ok {
+					names = append(names, name)
+				}
+			}
+		}
+		return "(" + strings.Join(names, ", ") + ")"
+	}
+	return ""
 }
 
 func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]any {

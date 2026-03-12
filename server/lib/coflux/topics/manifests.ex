@@ -11,23 +11,52 @@ defmodule Coflux.Topics.Manifests do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    case Orchestration.get_manifests(project_id, workspace_id) do
-      {:ok, manifests} ->
-        value =
-          Map.new(manifests, fn {module, workflows} ->
-            targets =
-              Map.new(workflows, fn {name, workflow} ->
-                {name, build_workflow(workflow)}
-              end)
-
-            {module, targets}
-          end)
-
-        {:ok, Topic.new(value, %{})}
+    case Orchestration.subscribe_manifests(project_id, workspace_id, self()) do
+      {:ok, manifests, ref} ->
+        {:ok, Topic.new(build_value(manifests), %{ref: ref})}
 
       {:error, :workspace_invalid} ->
         {:error, :not_found}
     end
+  end
+
+  def handle_info({:topic, _ref, notifications}, topic) do
+    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
+    {:ok, topic}
+  end
+
+  defp process_notification(topic, {:manifests, manifests}) do
+    Enum.reduce(manifests, topic, fn {module, workflows}, topic ->
+      update_module(topic, module, workflows)
+    end)
+  end
+
+  defp process_notification(topic, {:manifest, module, workflows}) do
+    update_module(topic, module, workflows)
+  end
+
+  defp update_module(topic, module, nil) do
+    Topic.unset(topic, [], module)
+  end
+
+  defp update_module(topic, module, workflows) do
+    targets =
+      Map.new(workflows, fn {name, workflow} ->
+        {name, build_workflow(workflow)}
+      end)
+
+    Topic.set(topic, [module], targets)
+  end
+
+  defp build_value(manifests) do
+    Map.new(manifests, fn {module, workflows} ->
+      targets =
+        Map.new(workflows, fn {name, workflow} ->
+          {name, build_workflow(workflow)}
+        end)
+
+      {module, targets}
+    end)
   end
 
   defp build_workflow(workflow) do

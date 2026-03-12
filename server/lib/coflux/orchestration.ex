@@ -91,6 +91,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:get_manifests, workspace_id})
   end
 
+  def subscribe_manifests(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_manifests, workspace_id, pid})
+  end
+
   def get_workflow(project_id, workspace_id, module, target_name) do
     call_server(project_id, {:get_workflow, workspace_id, module, target_name})
   end
