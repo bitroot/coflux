@@ -368,6 +368,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:create_token, name, principal_id, opts}, _from, state) do
     {:ok, result} = Principals.create_token(state.db, state.project_id, name, principal_id, opts)
+    state = notify_listeners(state, :tokens, {:token, result.external_id, result})
     {:reply, {:ok, result}, state}
   end
 
@@ -376,9 +377,21 @@ defmodule Coflux.Orchestration.Server do
     {:reply, {:ok, tokens}, state}
   end
 
+  def handle_call({:subscribe_tokens, pid}, _from, state) do
+    {:ok, tokens} = Principals.list_tokens(state.db)
+    {:ok, ref, state} = add_listener(state, :tokens, pid)
+    {:reply, {:ok, tokens, ref}, state}
+  end
+
   def handle_call({:revoke_token, token_id}, _from, state) do
-    result = Principals.revoke_token(state.db, token_id)
-    {:reply, result, state}
+    case Principals.revoke_token(state.db, token_id) do
+      {:ok, external_id} ->
+        state = notify_listeners(state, :tokens, {:token, external_id, nil})
+        {:reply, {:ok, external_id}, state}
+
+      error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:get_token, external_id}, _from, state) do

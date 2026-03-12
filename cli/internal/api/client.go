@@ -222,13 +222,15 @@ func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, p
 
 // ListTokens lists all service tokens
 func (c *Client) ListTokens(ctx context.Context) ([]map[string]any, error) {
-	var result struct {
-		Tokens []map[string]any `json:"tokens"`
-	}
+	var result map[string]map[string]any
 	if err := c.get(ctx, "/topics/tokens", nil, &result); err != nil {
 		return nil, err
 	}
-	return result.Tokens, nil
+	tokens := make([]map[string]any, 0, len(result))
+	for _, token := range result {
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
 }
 
 // CreateToken creates a new service token

@@ -25,6 +25,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, :list_tokens)
   end
 
+  def subscribe_tokens(project_id, pid) do
+    call_server(project_id, {:subscribe_tokens, pid})
+  end
+
   def revoke_token(project_id, token_id) do
     call_server(project_id, {:revoke_token, token_id})
   end

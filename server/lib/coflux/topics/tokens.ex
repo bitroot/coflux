@@ -12,13 +12,27 @@ defmodule Coflux.Topics.Tokens do
   def init(params) do
     project_id = Map.fetch!(params, :project)
 
-    {:ok, tokens} = Orchestration.list_tokens(project_id)
+    {:ok, tokens, ref} = Orchestration.subscribe_tokens(project_id, self())
 
-    value = %{
-      tokens: Enum.map(tokens, &build_token/1)
-    }
+    active_tokens =
+      tokens
+      |> Enum.filter(fn token -> is_nil(token.revoked_at) end)
+      |> Map.new(fn token -> {token.external_id, build_token(token)} end)
 
-    {:ok, Topic.new(value, %{})}
+    {:ok, Topic.new(active_tokens, %{ref: ref})}
+  end
+
+  def handle_info({:topic, _ref, notifications}, topic) do
+    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
+    {:ok, topic}
+  end
+
+  defp process_notification(topic, {:token, external_id, nil}) do
+    Topic.unset(topic, [], external_id)
+  end
+
+  defp process_notification(topic, {:token, external_id, token}) do
+    Topic.set(topic, [external_id], build_token(token))
   end
 
   defp build_token(token) do
@@ -29,7 +43,6 @@ defmodule Coflux.Topics.Tokens do
       workspaces: token.workspaces,
       createdAt: token.created_at,
       expiresAt: token.expires_at,
-      revokedAt: token.revoked_at,
       createdBy: build_principal(token.created_by)
     }
   end

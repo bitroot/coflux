@@ -589,7 +589,7 @@ defmodule Coflux.Handlers.Api do
 
             if can_revoke do
               case Orchestration.revoke_token(project_id, token.id) do
-                :ok ->
+                {:ok, _external_id} ->
                   :cowboy_req.reply(204, req)
 
                 {:error, :not_found} ->
