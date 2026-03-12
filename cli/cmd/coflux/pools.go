@@ -2,16 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"os/signal"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
-	topicalclient "github.com/bitroot/coflux/cli/internal/topical"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 var poolsCmd = &cobra.Command{
@@ -215,7 +210,9 @@ func runPoolsLaunchList(cmd *cobra.Command, poolName string) error {
 		return outputJSON(workers)
 	}
 
-	renderWorkerTable(data, 0, 0)
+	for _, line := range renderWorkerLines(data) {
+		fmt.Println(line)
+	}
 	return nil
 }
 
@@ -240,50 +237,15 @@ func runPoolsLaunchFollow(cmd *cobra.Command, poolName string) error {
 		return err
 	}
 
-	topicPath := "workspaces/" + workspaceID + "/pools/" + poolName
-
-	client, err := topicalclient.Connect(cmd.Context(), getHost(), isSecure(), token)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
-
-	sub := client.Subscribe(topicPath, nil)
-	defer sub.Unsubscribe()
-
-	sigCtx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	linesDrawn := 0
-	maxLines := 0
-	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-		maxLines = h - 1
-	}
-
-	for {
-		select {
-		case value, ok := <-sub.Values():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
+	return watchTopics(cmd.Context(), getHost(), isSecure(), token,
+		[]string{"workspaces/" + workspaceID + "/pools/" + poolName},
+		func(data []map[string]any) []string {
+			if data[0] == nil {
+				return nil
 			}
-
-			data, ok := value.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			linesDrawn = renderWorkerTable(data, linesDrawn, maxLines)
-
-		case err, ok := <-sub.Err():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			return fmt.Errorf("subscription error: %w", err)
-
-		case <-sigCtx.Done():
-			return nil
-		}
-	}
+			return renderWorkerLines(data[0])
+		},
+	)
 }
 
 type workerRow struct {
@@ -310,57 +272,29 @@ func buildWorkerRows(workers map[string]any) []workerRow {
 	return rows
 }
 
-func renderWorkerTable(data map[string]any, linesDrawn int, maxLines int) int {
+func renderWorkerLines(data map[string]any) []string {
 	workers, _ := data["workers"].(map[string]any)
 	if workers == nil {
-		return linesDrawn
+		return []string{colorDim + "No launches." + colorReset}
 	}
 
 	rows := buildWorkerRows(workers)
 
-	// Move cursor up to overwrite previous output
-	if linesDrawn > 0 {
-		fmt.Printf("\033[%dA", linesDrawn)
-	}
-
 	if len(rows) == 0 {
-		fmt.Printf("\r%sNo launches.%s\033[K\n", colorDim, colorReset)
-		for i := 1; i < linesDrawn; i++ {
-			fmt.Print("\r\033[K\n")
-		}
-		return max(1, linesDrawn)
+		return []string{colorDim + "No launches." + colorReset}
 	}
 
-	// Truncate if needed
-	displayRows := rows
-	truncated := 0
-	if maxLines > 0 && len(displayRows) > maxLines {
-		truncated = len(displayRows) - (maxLines - 1)
-		displayRows = displayRows[:maxLines-1]
-	}
-
-	outputLines := 0
-	for _, r := range displayRows {
+	var lines []string
+	for _, r := range rows {
 		indicator := workerStatusIndicator(r.status)
 		ts := colorDim + formatMillis(r.ts) + colorReset
 		line := fmt.Sprintf("%s  %s  %s", indicator, ts, r.id)
 		if r.detail != "" {
 			line += "  " + r.detail
 		}
-		fmt.Printf("\r%s\033[K\n", line)
-		outputLines++
+		lines = append(lines, line)
 	}
-	if truncated > 0 {
-		fmt.Printf("\r%s... %d more (%d total)%s\033[K\n", colorDim, truncated, len(rows), colorReset)
-		outputLines++
-	}
-
-	// Clear leftover lines
-	for i := outputLines; i < linesDrawn; i++ {
-		fmt.Print("\r\033[K\n")
-	}
-
-	return max(outputLines, linesDrawn)
+	return lines
 }
 
 func workerStatus(w map[string]any) (status, detail string, ts int64) {

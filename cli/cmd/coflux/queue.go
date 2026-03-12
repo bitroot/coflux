@@ -3,16 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
-	"golang.org/x/term"
-
-	topicalclient "github.com/bitroot/coflux/cli/internal/topical"
 	"github.com/spf13/cobra"
 )
 
@@ -272,133 +266,36 @@ func printQueueTable(entries []queueEntry, sessions []sessionEntry, workspaceSta
 }
 
 func watchQueue(ctx context.Context, host string, secure bool, token string, workspaceID string, workspaceName string) error {
-	client, err := topicalclient.Connect(ctx, host, secure, token)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
+	return watchTopics(ctx, host, secure, token,
+		[]string{
+			"workspaces/" + workspaceID + "/queue",
+			"workspaces/" + workspaceID + "/sessions",
+			"workspaces",
+		},
+		func(data []map[string]any) []string {
+			queueData, sessionsData, workspacesData := data[0], data[1], data[2]
+			if queueData == nil || sessionsData == nil {
+				return nil
+			}
 
-	queueSub := client.Subscribe("workspaces/"+workspaceID+"/queue", nil)
-	defer queueSub.Unsubscribe()
+			entries := parseQueueEntries(queueData)
+			sessions := parseSessionEntriesWithTargets(sessionsData)
 
-	sessionsSub := client.Subscribe("workspaces/"+workspaceID+"/sessions", nil)
-	defer sessionsSub.Unsubscribe()
-
-	// We also need workspace state to check if paused
-	workspacesSub := client.Subscribe("workspaces", nil)
-	defer workspacesSub.Unsubscribe()
-
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	var queueData map[string]any
-	var sessionsData map[string]any
-	var workspacesData map[string]any
-	linesDrawn := 0
-
-	// Get terminal height for capping live output
-	maxLines := 0
-	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-		maxLines = h - 1 // leave room for the cursor line
-	}
-
-	render := func() {
-		if queueData == nil || sessionsData == nil {
-			return
-		}
-
-		entries := parseQueueEntries(queueData)
-		sessions := parseSessionEntriesWithTargets(sessionsData)
-
-		workspaceState := ""
-		if workspacesData != nil {
-			for _, ws := range workspacesData {
-				if wsMap, ok := ws.(map[string]any); ok {
-					if name, _ := wsMap["name"].(string); name == workspaceName {
-						workspaceState, _ = wsMap["state"].(string)
-						break
+			workspaceState := ""
+			if workspacesData != nil {
+				for _, ws := range workspacesData {
+					if wsMap, ok := ws.(map[string]any); ok {
+						if name, _ := wsMap["name"].(string); name == workspaceName {
+							workspaceState, _ = wsMap["state"].(string)
+							break
+						}
 					}
 				}
 			}
-		}
 
-		// Move cursor up to overwrite previous output
-		if linesDrawn > 0 {
-			fmt.Printf("\033[%dA", linesDrawn)
-		}
-
-		lines := renderQueueTable(entries, sessions, workspaceState)
-		totalRows := len(lines) - 1 // exclude header
-		truncated := 0
-		if maxLines > 0 && len(lines) > maxLines {
-			truncated = len(lines) - (maxLines - 1)
-			lines = lines[:maxLines-1]
-		}
-		for _, line := range lines {
-			fmt.Printf("\r%s\033[K\n", line)
-		}
-		if truncated > 0 {
-			fmt.Printf("\r%s… %d more executions (%d total)%s\033[K\n", colorDim, truncated, totalRows, colorReset)
-		}
-		outputLines := len(lines)
-		if truncated > 0 {
-			outputLines++
-		}
-		fmt.Print("\033[J") // clear from cursor to end of screen
-		linesDrawn = outputLines
-	}
-
-	for {
-		select {
-		case value, ok := <-queueSub.Values():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			if data, ok := value.(map[string]any); ok {
-				queueData = data
-				render()
-			}
-
-		case value, ok := <-sessionsSub.Values():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			if data, ok := value.(map[string]any); ok {
-				sessionsData = data
-				render()
-			}
-
-		case value, ok := <-workspacesSub.Values():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			if data, ok := value.(map[string]any); ok {
-				workspacesData = data
-				render()
-			}
-
-		case err, ok := <-queueSub.Err():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			return fmt.Errorf("subscription error: %w", err)
-
-		case err, ok := <-sessionsSub.Err():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			return fmt.Errorf("subscription error: %w", err)
-
-		case err, ok := <-workspacesSub.Err():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			return fmt.Errorf("subscription error: %w", err)
-
-		case <-sigCtx.Done():
-			return nil
-		}
-	}
+			return renderQueueTable(entries, sessions, workspaceState)
+		},
+	)
 }
 
 // parseSessionEntriesWithTargets parses session data including raw target maps

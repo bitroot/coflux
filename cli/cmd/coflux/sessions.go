@@ -3,16 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"sort"
 	"strings"
-	"syscall"
 	"unicode/utf8"
 
-	"golang.org/x/term"
-
-	topicalclient "github.com/bitroot/coflux/cli/internal/topical"
 	"github.com/spf13/cobra"
 )
 
@@ -181,73 +175,15 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 }
 
 func watchSessions(ctx context.Context, host string, secure bool, token string, workspaceID string) error {
-	client, err := topicalclient.Connect(ctx, host, secure, token)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
-
-	sub := client.Subscribe("workspaces/"+workspaceID+"/sessions", nil)
-	defer sub.Unsubscribe()
-
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	linesDrawn := 0
-
-	// Get terminal height for capping live output
-	maxLines := 0
-	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-		maxLines = h - 1 // leave room for the cursor line
-	}
-
-	for {
-		select {
-		case value, ok := <-sub.Values():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
+	return watchTopics(ctx, host, secure, token,
+		[]string{"workspaces/" + workspaceID + "/sessions"},
+		func(data []map[string]any) []string {
+			if data[0] == nil {
+				return nil
 			}
-			data, ok := value.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			// Move cursor up to overwrite previous output
-			if linesDrawn > 0 {
-				fmt.Printf("\033[%dA", linesDrawn)
-			}
-
-			entries := parseSessionEntries(data)
-			lines := renderSessionsTable(entries)
-			totalRows := len(lines) - 1 // exclude header
-			truncated := 0
-			if maxLines > 0 && len(lines) > maxLines {
-				truncated = len(lines) - (maxLines - 1)
-				lines = lines[:maxLines-1]
-			}
-			for _, line := range lines {
-				fmt.Printf("\r%s\033[K\n", line)
-			}
-			if truncated > 0 {
-				fmt.Printf("\r%s… %d more sessions (%d total)%s\033[K\n", colorDim, truncated, totalRows, colorReset)
-			}
-			outputLines := len(lines)
-			if truncated > 0 {
-				outputLines++
-			}
-			fmt.Print("\033[J") // clear from cursor to end of screen
-			linesDrawn = outputLines
-
-		case err, ok := <-sub.Err():
-			if !ok {
-				return fmt.Errorf("subscription closed unexpectedly")
-			}
-			return fmt.Errorf("subscription error: %w", err)
-
-		case <-sigCtx.Done():
-			return nil
-		}
-	}
+			return renderSessionsTable(parseSessionEntries(data[0]))
+		},
+	)
 }
 
 func renderSessionsTable(entries []sessionEntry) []string {
