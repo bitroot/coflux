@@ -1,5 +1,7 @@
 defmodule Coflux.DockerLauncher do
   @docker_api_version "v1.47"
+  @log_tail_lines 20
+  @log_max_bytes 1024
 
   def launch(project_id, workspace_name, session_token, modules, config \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
@@ -47,11 +49,12 @@ defmodule Coflux.DockerLauncher do
           {:ok, true}
         else
           error = build_error(state)
-          {:ok, false, error}
+          logs = if error, do: fetch_logs(docker_conn, container_id)
+          {:ok, false, error, logs}
         end
 
       {:error, :no_such_container} ->
-        {:ok, false, nil}
+        {:ok, false, nil, nil}
     end
   end
 
@@ -127,6 +130,49 @@ defmodule Coflux.DockerLauncher do
       404 -> {:error, :no_such_container}
       500 -> {:error, :server_error}
     end
+  end
+
+  defp fetch_logs(docker_conn, container_id) do
+    case container_logs(docker_conn, container_id, @log_tail_lines) do
+      {:ok, logs} when logs != "" -> truncate_bytes(logs, @log_max_bytes)
+      _ -> nil
+    end
+  end
+
+  defp container_logs(docker_conn, container_id, tail) do
+    response =
+      docker_request(docker_conn, :get, "/containers/#{container_id}/logs",
+        params: [stdout: true, stderr: true, tail: tail]
+      )
+
+    case response.status do
+      200 -> {:ok, demux_docker_logs(response.body)}
+      404 -> {:error, :no_such_container}
+      500 -> {:error, :server_error}
+    end
+  end
+
+  # Docker multiplexed stream format: each frame has an 8-byte header
+  # [stream_type(1), padding(3), size(4, big-endian)] followed by the payload.
+  defp demux_docker_logs(data) when is_binary(data) do
+    demux_docker_logs(data, [])
+  end
+
+  defp demux_docker_logs(
+         <<_type::8, _pad::24, size::32, payload::binary-size(size), rest::binary>>,
+         acc
+       ) do
+    demux_docker_logs(rest, [acc, payload])
+  end
+
+  defp demux_docker_logs(_, acc), do: IO.iodata_to_binary(acc)
+
+  defp truncate_bytes(string, max_bytes) when byte_size(string) <= max_bytes, do: string
+
+  defp truncate_bytes(string, max_bytes) do
+    string
+    |> binary_part(byte_size(string) - max_bytes, max_bytes)
+    |> String.replace(~r/^[^\n]*\n/, "")
   end
 
   defp stop_container(docker_conn, container_id) do

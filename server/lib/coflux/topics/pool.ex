@@ -48,6 +48,7 @@ defmodule Coflux.Topics.Pool do
       stoppingAt: nil,
       stopError: nil,
       deactivatedAt: nil,
+      logs: nil,
       state: :active,
       connected: nil
     })
@@ -72,11 +73,12 @@ defmodule Coflux.Topics.Pool do
 
   defp process_notification(
          topic,
-         {:worker_deactivated, worker_external_id, deactivated_at, error}
+         {:worker_deactivated, worker_external_id, deactivated_at, error, logs}
        ) do
     topic
     |> Topic.set([:workers, worker_external_id, :deactivatedAt], deactivated_at)
     |> Topic.set([:workers, worker_external_id, :error], error)
+    |> Topic.set([:workers, worker_external_id, :logs], logs)
   end
 
   defp process_notification(topic, {:worker_state, worker_external_id, state}) do
@@ -122,6 +124,7 @@ defmodule Coflux.Topics.Pool do
       stopError: worker.stop_error,
       deactivatedAt: worker.deactivated_at,
       error: worker.error,
+      logs: worker.logs,
       state: worker.state,
       connected: worker.connected
     }

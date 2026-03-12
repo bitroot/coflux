@@ -64,16 +64,58 @@ defmodule Coflux.Orchestration.Workers do
     end
   end
 
-  def create_worker_deactivation(db, worker_id, error) do
+  def create_worker_deactivation(db, worker_id, error, logs \\ nil) do
     now = current_timestamp()
+
+    worker_log_id =
+      case logs do
+        nil -> nil
+        "" -> nil
+        content -> get_or_create_worker_log(db, content)
+      end
 
     case insert_one(db, :worker_deactivations, %{
            worker_id: worker_id,
            error: error,
+           worker_log_id: worker_log_id,
            created_at: now
          }) do
       {:ok, _} ->
         {:ok, now}
+    end
+  end
+
+  def get_worker_logs(db, worker_id) do
+    case query_one(
+           db,
+           """
+           SELECT wl.content
+           FROM worker_deactivations AS wd
+           INNER JOIN worker_logs AS wl ON wl.id = wd.worker_log_id
+           WHERE wd.worker_id = ?1
+           """,
+           {worker_id}
+         ) do
+      {:ok, {content}} -> {:ok, content}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
+  defp get_or_create_worker_log(db, content) do
+    hash = :crypto.hash(:sha256, content)
+
+    case query_one(db, "SELECT id FROM worker_logs WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {id}} ->
+        id
+
+      {:ok, nil} ->
+        {:ok, id} =
+          insert_one(db, :worker_logs, %{
+            hash: {:blob, hash},
+            content: content
+          })
+
+        id
     end
   end
 
@@ -128,7 +170,7 @@ defmodule Coflux.Orchestration.Workers do
       db,
       """
       SELECT w.id, w.external_id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
-             d.created_at, d.error
+             d.created_at, d.error, wl.content
       FROM workers AS w
       INNER JOIN pools AS p ON p.id = w.pool_id
       LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
@@ -141,6 +183,7 @@ defmodule Coflux.Orchestration.Workers do
       )
       LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
       LEFT JOIN worker_deactivations AS d ON d.worker_id = w.id
+      LEFT JOIN worker_logs AS wl ON wl.id = d.worker_log_id
       WHERE p.name = ?1
       ORDER BY w.created_at DESC
       LIMIT ?2

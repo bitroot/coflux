@@ -197,11 +197,19 @@ CREATE TABLE worker_stop_results (
   FOREIGN KEY (worker_stop_id) REFERENCES worker_stops
 ) STRICT;
 
+CREATE TABLE worker_logs (
+  id INTEGER PRIMARY KEY,
+  hash BLOB NOT NULL UNIQUE,
+  content TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE worker_deactivations (
   worker_id INTEGER PRIMARY KEY,
   error TEXT,
+  worker_log_id INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (worker_id) REFERENCES workers
+  FOREIGN KEY (worker_id) REFERENCES workers,
+  FOREIGN KEY (worker_log_id) REFERENCES worker_logs ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE sessions (

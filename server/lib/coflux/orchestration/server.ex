@@ -1723,7 +1723,7 @@ defmodule Coflux.Orchestration.Server do
           Map.new(
             pool_workers,
             fn {worker_id, worker_external_id, starting_at, started_at, start_error, stopping_at,
-                stopped_at, stop_error, deactivated_at, error} ->
+                stopped_at, stop_error, deactivated_at, error, logs} ->
               worker = Map.get(state.workers, worker_id)
 
               connected =
@@ -1749,6 +1749,7 @@ defmodule Coflux.Orchestration.Server do
                  stop_error: stop_error,
                  deactivated_at: deactivated_at,
                  error: error,
+                 logs: logs,
                  state: if(worker, do: worker.state),
                  connected: connected
                }}
@@ -2412,8 +2413,8 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {:ok, true}} ->
               state
 
-            {:ok, {:ok, false, error}} ->
-              deactivate_worker(state, worker_id, error)
+            {:ok, {:ok, false, error, logs}} ->
+              deactivate_worker(state, worker_id, error, logs)
 
             :error ->
               # TODO: ?
@@ -5072,8 +5073,8 @@ defmodule Coflux.Orchestration.Server do
     )
   end
 
-  defp deactivate_worker(state, worker_id, error) do
-    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, error)
+  defp deactivate_worker(state, worker_id, error, logs \\ nil) do
+    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, error, logs)
 
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
@@ -5082,7 +5083,7 @@ defmodule Coflux.Orchestration.Server do
     notify_listeners(
       state,
       {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-      {:worker_deactivated, worker.external_id, deactivated_at, error}
+      {:worker_deactivated, worker.external_id, deactivated_at, error, logs}
     )
   end
 
