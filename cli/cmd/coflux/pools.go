@@ -116,7 +116,7 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 
 	pool, err := client.GetPool(cmd.Context(), workspaceID, name)
 	if err != nil {
-		return fmt.Errorf("pool '%s' not found", name)
+		return fmt.Errorf("failed to get pool '%s': %w", name, err)
 	}
 
 	if isOutput("json") {
@@ -499,7 +499,7 @@ func runPoolsLaunchDetail(cmd *cobra.Command, poolName, workerID string) error {
 }
 
 func formatMillis(ms int64) string {
-	t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
+	t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond)).UTC()
 	return t.Format("2006-01-02 15:04:05 UTC")
 }
 

@@ -246,8 +246,13 @@ func runQueue(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		sessionsData, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/sessions")
+		if err != nil {
+			return err
+		}
 		entries := parseQueueEntries(data)
-		printQueueTable(entries, nil, "")
+		sessions := parseSessionEntriesWithTargets(sessionsData)
+		printQueueTable(entries, sessions, "")
 		return nil
 	}
 
@@ -379,6 +384,12 @@ func watchQueue(ctx context.Context, host string, secure bool, token string, wor
 			return fmt.Errorf("subscription error: %w", err)
 
 		case err, ok := <-sessionsSub.Err():
+			if !ok {
+				return fmt.Errorf("subscription closed unexpectedly")
+			}
+			return fmt.Errorf("subscription error: %w", err)
+
+		case err, ok := <-workspacesSub.Err():
 			if !ok {
 				return fmt.Errorf("subscription closed unexpectedly")
 			}

@@ -598,12 +598,7 @@ defmodule Coflux.Orchestration.Runs do
            {workspace_id}
          ) do
       {:ok, rows} ->
-        {:ok,
-         Enum.map(rows, fn {module, target, run_external_id, step_number, attempt, execute_after,
-                            created_at, assigned_at, requires_tag_set_id} ->
-           {module, target, run_external_id, step_number, attempt, execute_after, created_at,
-            assigned_at, requires_tag_set_id}
-         end)}
+        {:ok, rows}
     end
   end
 
