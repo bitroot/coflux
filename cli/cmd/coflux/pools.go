@@ -251,7 +251,7 @@ func runPoolsLaunchFollow(cmd *cobra.Command, poolName string) error {
 type workerRow struct {
 	id     string
 	status string
-	detail string
+	error  string
 	ts     int64
 }
 
@@ -262,8 +262,8 @@ func buildWorkerRows(workers map[string]any) []workerRow {
 		if !ok {
 			continue
 		}
-		status, detail, ts := workerStatus(w)
-		rows = append(rows, workerRow{id: id, status: status, detail: detail, ts: ts})
+		status, errMsg, ts := workerStatus(w)
+		rows = append(rows, workerRow{id: id, status: status, error: errMsg, ts: ts})
 	}
 	// Sort by timestamp descending (most recent first)
 	sort.Slice(rows, func(i, j int) bool {
@@ -286,18 +286,18 @@ func renderWorkerLines(data map[string]any) []string {
 
 	var lines []string
 	for _, r := range rows {
-		indicator := workerStatusIndicator(r.status)
 		ts := colorDim + formatMillis(r.ts) + colorReset
-		line := fmt.Sprintf("%s  %s  %s", indicator, ts, r.id)
-		if r.detail != "" {
-			line += "  " + r.detail
+		statusStr := formatWorkerStatus(r.status)
+		line := fmt.Sprintf("%s  %s  %s", ts, r.id, statusStr)
+		if r.error != "" {
+			line += "  " + r.error
 		}
 		lines = append(lines, line)
 	}
 	return lines
 }
 
-func workerStatus(w map[string]any) (status, detail string, ts int64) {
+func workerStatus(w map[string]any) (status, errMsg string, ts int64) {
 	startingAt := getFloat64(w, "startingAt")
 	startedAt := getFloat64(w, "startedAt")
 	deactivatedAt := getFloat64(w, "deactivatedAt")
@@ -308,53 +308,49 @@ func workerStatus(w map[string]any) (status, detail string, ts int64) {
 
 	if deactivatedAt > 0 {
 		ts = int64(deactivatedAt)
-		if workerError != "" || startError != "" {
-			errMsg := workerError
-			if errMsg == "" {
-				errMsg = startError
-			}
-			return "failed", colorRed + errMsg + colorReset, ts
+		if workerError != "" {
+			return "failed", workerError, ts
+		}
+		if startError != "" {
+			return "failed", startError, ts
 		}
 		return "stopped", "", ts
 	}
 	if stoppingAt > 0 {
-		ts = int64(stoppingAt)
-		return "stopping", colorDim + "Stopping..." + colorReset, ts
+		return "stopping", "", int64(stoppingAt)
 	}
 	if startedAt > 0 {
 		ts = int64(startedAt)
 		if connected {
-			return "running", colorDim + "Connected" + colorReset, ts
+			return "running", "", ts
 		}
-		return "started", colorDim + "Started" + colorReset, ts
+		return "started", "", ts
 	}
 	if startError != "" {
-		ts = int64(startingAt)
-		return "failed", colorRed + startError + colorReset, ts
+		return "failed", startError, int64(startingAt)
 	}
 	if startingAt > 0 {
-		ts = int64(startingAt)
-		return "starting", colorDim + "Starting..." + colorReset, ts
+		return "starting", "", int64(startingAt)
 	}
 	return "unknown", "", 0
 }
 
-func workerStatusIndicator(status string) string {
+func formatWorkerStatus(status string) string {
 	switch status {
 	case "running":
-		return colorGreen + "●" + colorReset
+		return colorGreen + "◆ Running" + colorReset
 	case "started":
-		return colorBlue + "●" + colorReset
+		return colorBlue + "◆ Started" + colorReset
 	case "starting":
-		return colorDim + "●" + colorReset
+		return colorDim + "◇ Starting" + colorReset
 	case "stopping":
-		return colorYellow + "●" + colorReset
+		return colorYellow + "◆ Stopping" + colorReset
 	case "stopped":
-		return colorDim + "●" + colorReset
+		return colorDim + "◇ Stopped" + colorReset
 	case "failed":
-		return colorRed + "●" + colorReset
+		return colorRed + "✗ Failed" + colorReset
 	default:
-		return colorDim + "●" + colorReset
+		return colorDim + "◇ Unknown" + colorReset
 	}
 }
 
@@ -394,39 +390,34 @@ func runPoolsLaunchDetail(cmd *cobra.Command, poolName, workerID string) error {
 	}
 
 	// Text output
-	status, _, _ := workerStatus(w)
-	fmt.Printf("Status: %s\n", status)
+	status, errMsg, _ := workerStatus(w)
+	statusLine := formatWorkerStatus(status)
+	if errMsg != "" {
+		statusLine += "  " + errMsg
+	}
+	fmt.Printf("Status:         %s\n", statusLine)
 
 	if v := getFloat64(w, "startingAt"); v > 0 {
-		fmt.Printf("Starting at: %s\n", formatMillis(int64(v)))
+		fmt.Printf("Starting at:    %s\n", formatMillis(int64(v)))
 	}
 	if v := getFloat64(w, "startedAt"); v > 0 {
-		fmt.Printf("Started at: %s\n", formatMillis(int64(v)))
-	}
-	if s, _ := w["startError"].(string); s != "" {
-		fmt.Printf("Start error: %s\n", s)
+		fmt.Printf("Started at:     %s\n", formatMillis(int64(v)))
 	}
 	if v := getFloat64(w, "stoppingAt"); v > 0 {
-		fmt.Printf("Stopping at: %s\n", formatMillis(int64(v)))
+		fmt.Printf("Stopping at:    %s\n", formatMillis(int64(v)))
 	}
 	if v := getFloat64(w, "stoppedAt"); v > 0 {
-		fmt.Printf("Stopped at: %s\n", formatMillis(int64(v)))
-	}
-	if s, _ := w["stopError"].(string); s != "" {
-		fmt.Printf("Stop error: %s\n", s)
+		fmt.Printf("Stopped at:     %s\n", formatMillis(int64(v)))
 	}
 	if v := getFloat64(w, "deactivatedAt"); v > 0 {
 		fmt.Printf("Deactivated at: %s\n", formatMillis(int64(v)))
 	}
-	if s, _ := w["error"].(string); s != "" {
-		fmt.Printf("Error: %s\n", s)
-	}
 	if connected, ok := w["connected"].(bool); ok {
-		fmt.Printf("Connected: %v\n", connected)
+		fmt.Printf("Connected:      %v\n", connected)
 	}
 
 	if logs, _ := w["logs"].(string); logs != "" {
-		fmt.Printf("\nLogs:\n%s\n", logs)
+		fmt.Printf("\nLogs:\n%s%s%s\n", colorDim, logs, colorReset)
 	}
 
 	return nil
