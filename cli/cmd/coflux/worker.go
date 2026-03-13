@@ -80,6 +80,10 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// For pool-launched workers, the session token doubles as the auth token
+	if token == "" && session != "" {
+		token = session
+	}
 	cfg.Server.Token = token
 
 	modules := args

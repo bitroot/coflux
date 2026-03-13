@@ -90,38 +90,28 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspaceID, module, target
 
 // GetManifests retrieves the latest manifests for a workspace
 func (c *Client) GetManifests(ctx context.Context, workspaceID string) (map[string]any, error) {
-	var result map[string]any
-	params := url.Values{
-		"workspaceId": {workspaceID},
-	}
-	if err := c.get(ctx, "/api/get_manifests", params, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/manifests")
 }
 
 // GetWorkflow retrieves a workflow definition
 func (c *Client) GetWorkflow(ctx context.Context, workspaceID, module, target string) (map[string]any, error) {
-	var result map[string]any
-	params := url.Values{
-		"workspaceId": {workspaceID},
-		"module":      {module},
-		"target":      {target},
-	}
-	if err := c.get(ctx, "/api/get_workflow", params, &result); err != nil {
+	result, err := c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/workflows/"+module+"/"+target)
+	if err != nil {
 		return nil, err
+	}
+	// Flatten configuration into top level for callers that expect it there
+	if config, ok := result["configuration"].(map[string]any); ok {
+		for k, v := range config {
+			result[k] = v
+		}
+		delete(result, "configuration")
 	}
 	return result, nil
 }
 
 // GetAssetByID retrieves asset information by ID
 func (c *Client) GetAssetByID(ctx context.Context, assetID string) (map[string]any, error) {
-	var result map[string]any
-	params := url.Values{"asset": {assetID}}
-	if err := c.get(ctx, "/api/get_asset", params, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return c.CaptureTopic(ctx, "asset/"+assetID)
 }
 
 // Workspaces API
@@ -129,7 +119,7 @@ func (c *Client) GetAssetByID(ctx context.Context, assetID string) (map[string]a
 // GetWorkspaces lists all workspaces
 func (c *Client) GetWorkspaces(ctx context.Context) (map[string]map[string]any, error) {
 	var result map[string]map[string]any
-	if err := c.get(ctx, "/api/get_workspaces", nil, &result); err != nil {
+	if err := c.get(ctx, "/topics/workspaces", nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -199,8 +189,7 @@ func (c *Client) ArchiveModule(ctx context.Context, workspaceID, moduleName stri
 // GetPools lists all pools in a workspace
 func (c *Client) GetPools(ctx context.Context, workspaceID string) (map[string]map[string]any, error) {
 	var result map[string]map[string]any
-	params := url.Values{"workspaceId": {workspaceID}}
-	if err := c.get(ctx, "/api/get_pools", params, &result); err != nil {
+	if err := c.get(ctx, "/topics/workspaces/"+workspaceID+"/pools", nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -208,10 +197,13 @@ func (c *Client) GetPools(ctx context.Context, workspaceID string) (map[string]m
 
 // GetPool gets a single pool
 func (c *Client) GetPool(ctx context.Context, workspaceID, pool string) (map[string]any, error) {
-	var result map[string]any
-	params := url.Values{"workspaceId": {workspaceID}, "pool": {pool}}
-	if err := c.get(ctx, "/api/get_pool", params, &result); err != nil {
+	result, err := c.CaptureTopic(ctx, "workspaces/"+workspaceID+"/pools/"+pool)
+	if err != nil {
 		return nil, err
+	}
+	// Extract the pool sub-object (topic returns {pool: {...}, workers: {...}})
+	if p, ok := result["pool"].(map[string]any); ok {
+		return p, nil
 	}
 	return result, nil
 }
@@ -230,13 +222,15 @@ func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, p
 
 // ListTokens lists all service tokens
 func (c *Client) ListTokens(ctx context.Context) ([]map[string]any, error) {
-	var result struct {
-		Tokens []map[string]any `json:"tokens"`
-	}
-	if err := c.get(ctx, "/api/list_tokens", nil, &result); err != nil {
+	var result map[string]map[string]any
+	if err := c.get(ctx, "/topics/tokens", nil, &result); err != nil {
 		return nil, err
 	}
-	return result.Tokens, nil
+	tokens := make([]map[string]any, 0, len(result))
+	for _, token := range result {
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
 }
 
 // CreateToken creates a new service token

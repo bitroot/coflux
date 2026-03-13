@@ -9,7 +9,7 @@ defmodule Coflux.Handlers.Topics.WebSocket do
   The server echoes back "v1" on successful auth.
 
   The project is determined by COFLUX_PROJECT (if set) or extracted from the
-  subdomain (if COFLUX_BASE_DOMAIN is set).
+  subdomain (if COFLUX_PUBLIC_HOST starts with %).
   """
 
   import Coflux.Handlers.Utils

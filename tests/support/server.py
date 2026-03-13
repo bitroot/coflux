@@ -62,7 +62,7 @@ class ManagedServer:
             "HOME": os.environ.get("HOME", "/tmp"),
             "PORT": str(self.port),
             "COFLUX_DATA_DIR": self.data_dir,
-            "COFLUX_BASE_DOMAIN": "localhost",
+            "COFLUX_PUBLIC_HOST": "%.localhost:" + str(self.port),
             "COFLUX_REQUIRE_AUTH": "false",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
         }
@@ -89,7 +89,7 @@ class ManagedServer:
                 "-v",
                 f"{self.data_dir}:/data",
                 "-e",
-                "COFLUX_BASE_DOMAIN=localhost",
+                "COFLUX_PUBLIC_HOST=%.localhost:7777",
                 "-e",
                 "COFLUX_REQUIRE_AUTH=false",
                 "-e",

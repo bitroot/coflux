@@ -110,22 +110,6 @@ defmodule Coflux.Handlers.Api do
     json_response(req, %{"workspaces" => patterns})
   end
 
-  defp handle(req, "GET", ["get_workspaces"], project_id, _access) do
-    case Orchestration.get_workspaces(project_id) do
-      {:ok, workspaces} ->
-        json_response(
-          req,
-          Map.new(workspaces, fn {_workspace_id, workspace} ->
-            {workspace.external_id,
-             %{
-               "name" => workspace.name,
-               "baseId" => workspace.base_external_id
-             }}
-          end)
-        )
-    end
-  end
-
   defp handle(req, "POST", ["create_workspace"], project_id, access) do
     case read_arguments(req, %{name: "name"}, %{base_id: "baseId"}) do
       {:ok, arguments, req} ->
@@ -254,58 +238,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_pools"], project_id, _access) do
-    qs = :cowboy_req.parse_qs(req)
-    workspace_id = get_query_param(qs, "workspaceId")
-
-    case Orchestration.get_pools(project_id, workspace_id) do
-      {:ok, pools} ->
-        json_response(
-          req,
-          Map.new(pools, fn {pool_name, pool} ->
-            {
-              pool_name,
-              %{
-                "provides" => pool.provides,
-                "modules" => pool.modules,
-                "launcherType" => if(pool.launcher, do: pool.launcher.type)
-              }
-            }
-          end)
-        )
-
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "workspace_not_found", status: 404)
-    end
-  end
-
-  defp handle(req, "GET", ["get_pool"], project_id, _access) do
-    qs = :cowboy_req.parse_qs(req)
-    workspace_id = get_query_param(qs, "workspaceId")
-    pool_name = get_query_param(qs, "pool")
-
-    case Orchestration.get_pools(project_id, workspace_id) do
-      {:ok, pools} ->
-        case Map.fetch(pools, pool_name) do
-          {:ok, pool} ->
-            json_response(
-              req,
-              %{
-                "provides" => pool.provides,
-                "modules" => pool.modules,
-                "launcher" => format_launcher(pool.launcher)
-              }
-            )
-
-          :error ->
-            json_error_response(req, "not_found", status: 404)
-        end
-
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "workspace_not_found", status: 404)
-    end
-  end
-
   defp handle(req, "POST", ["update_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
@@ -417,47 +349,6 @@ defmodule Coflux.Handlers.Api do
 
       {:error, errors, req} ->
         json_error_response(req, "bad_request", details: errors)
-    end
-  end
-
-  defp handle(req, "GET", ["get_manifests"], project_id, _access) do
-    qs = :cowboy_req.parse_qs(req)
-    workspace_id = get_query_param(qs, "workspaceId")
-
-    case Orchestration.get_manifests(project_id, workspace_id) do
-      {:ok, manifests} ->
-        composed =
-          Map.new(manifests, fn {module, workflows} ->
-            targets =
-              Map.new(workflows, fn {name, workflow} ->
-                {name, compose_workflow(workflow)}
-              end)
-
-            {module, targets}
-          end)
-
-        json_response(req, composed)
-
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "not_found", status: 404)
-    end
-  end
-
-  defp handle(req, "GET", ["get_workflow"], project_id, _access) do
-    qs = :cowboy_req.parse_qs(req)
-    workspace_id = get_query_param(qs, "workspaceId")
-    module = get_query_param(qs, "module")
-    target_name = get_query_param(qs, "target")
-
-    case Orchestration.get_workflow(project_id, workspace_id, module, target_name) do
-      {:ok, nil} ->
-        json_error_response(req, "not_found", status: 404)
-
-      {:ok, workflow} ->
-        json_response(req, compose_workflow(workflow))
-
-      {:error, :workspace_invalid} ->
-        json_error_response(req, "workspace_invalid", status: 404)
     end
   end
 
@@ -595,19 +486,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_asset"], project_id, _access) do
-    qs = :cowboy_req.parse_qs(req)
-    asset_id = get_query_param(qs, "asset")
-
-    case Orchestration.get_asset(project_id, asset_id) do
-      {:error, :not_found} ->
-        json_error_response(req, "not_found", status: 404)
-
-      {:ok, name, entries} ->
-        json_response(req, compose_asset(name, entries))
-    end
-  end
-
   defp handle(req, "POST", ["create_session"], project_id, access) do
     case read_arguments(
            req,
@@ -695,39 +573,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["list_tokens"], project_id, access) do
-    case Orchestration.list_tokens(project_id) do
-      {:ok, tokens} ->
-        # Filter tokens based on caller's access:
-        # - Full access: see all tokens
-        # - Limited access: see only tokens they created
-        filtered_tokens =
-          if access.workspaces == :all do
-            tokens
-          else
-            Enum.filter(tokens, fn token ->
-              token.created_by_principal_id == access[:principal_id]
-            end)
-          end
-
-        json_response(req, %{
-          "tokens" =>
-            Enum.map(filtered_tokens, fn token ->
-              %{
-                "id" => token.id,
-                "externalId" => token.external_id,
-                "name" => token.name,
-                "workspaces" => token.workspaces,
-                "createdAt" => token.created_at,
-                "expiresAt" => token.expires_at,
-                "revokedAt" => token.revoked_at,
-                "createdBy" => format_principal(token.created_by)
-              }
-            end)
-        })
-    end
-  end
-
   defp handle(req, "POST", ["revoke_token"], project_id, access) do
     case read_arguments(req, %{external_id: "externalId"}) do
       {:ok, arguments, req} ->
@@ -744,7 +589,7 @@ defmodule Coflux.Handlers.Api do
 
             if can_revoke do
               case Orchestration.revoke_token(project_id, token.id) do
-                :ok ->
+                {:ok, _external_id} ->
                   :cowboy_req.reply(204, req)
 
                 {:error, :not_found} ->
@@ -753,29 +598,6 @@ defmodule Coflux.Handlers.Api do
             else
               json_error_response(req, "forbidden", status: 403)
             end
-        end
-
-      {:error, errors, req} ->
-        json_error_response(req, "bad_request", details: errors)
-    end
-  end
-
-  defp handle(req, "GET", ["get_token"], project_id, _access) do
-    case read_arguments(req, %{external_id: "externalId"}) do
-      {:ok, arguments, req} ->
-        case Orchestration.get_token(project_id, arguments.external_id) do
-          {:ok, nil} ->
-            json_error_response(req, "not_found", status: 404)
-
-          {:ok, token} ->
-            json_response(req, %{
-              "id" => token.id,
-              "externalId" => token.external_id,
-              "name" => token.name,
-              "createdAt" => token.created_at,
-              "expiresAt" => token.expires_at,
-              "revokedAt" => token.revoked_at
-            })
         end
 
       {:error, errors, req} ->
@@ -807,24 +629,6 @@ defmodule Coflux.Handlers.Api do
   end
 
   # Helper functions for handle/5 clauses
-
-  defp format_launcher(nil), do: nil
-
-  defp format_launcher(launcher) do
-    base = %{"type" => Atom.to_string(launcher.type), "image" => launcher.image}
-
-    base
-    |> maybe_put("dockerHost", Map.get(launcher, :docker_host))
-  end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp format_principal(nil), do: nil
-
-  defp format_principal(%{type: type, external_id: external_id}) do
-    %{"type" => type, "externalId" => external_id}
-  end
 
   defp parse_workspaces(value) when is_list(value) do
     if Enum.all?(value, &is_binary/1) do
@@ -943,6 +747,7 @@ defmodule Coflux.Handlers.Api do
   defp parse_docker_launcher(value) do
     image = Map.get(value, "image")
     docker_host = Map.get(value, "dockerHost")
+    server_host = Map.get(value, "serverHost")
 
     cond do
       not is_binary(image) or String.length(image) > 200 ->
@@ -951,11 +756,17 @@ defmodule Coflux.Handlers.Api do
       not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
         {:error, :invalid}
 
+      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+        {:error, :invalid}
+
       true ->
         launcher = %{type: :docker, image: image}
 
         launcher =
           if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+
+        launcher =
+          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
 
         {:ok, launcher}
     end
@@ -1283,62 +1094,5 @@ defmodule Coflux.Handlers.Api do
     else
       {:error, :invalid}
     end
-  end
-
-  defp compose_workflow_cache(cache) do
-    if cache do
-      %{
-        "params" => cache.params,
-        "maxAge" => cache.max_age,
-        "namespace" => cache.namespace,
-        "version" => cache.version
-      }
-    end
-  end
-
-  defp compose_workflow_defer(defer) do
-    if defer do
-      %{"params" => defer.params}
-    end
-  end
-
-  defp compose_workflow_retries(retries) do
-    if retries do
-      %{
-        "limit" => retries.limit,
-        "delayMin" => retries.delay_min,
-        "delayMax" => retries.delay_max
-      }
-    end
-  end
-
-  defp compose_workflow(workflow) do
-    %{
-      "parameters" =>
-        Enum.map(workflow.parameters, fn {name, default, annotation} ->
-          %{"name" => name, "default" => default, "annotation" => annotation}
-        end),
-      "waitFor" => workflow.wait_for,
-      "cache" => compose_workflow_cache(workflow.cache),
-      "defer" => compose_workflow_defer(workflow.defer),
-      "delay" => workflow.delay,
-      "retries" => compose_workflow_retries(workflow.retries),
-      "requires" => workflow.requires
-    }
-  end
-
-  defp compose_asset(name, entries) do
-    %{
-      "name" => name,
-      "entries" =>
-        Map.new(entries, fn {path, blob_key, size, metadata} ->
-          {path,
-           %{
-             "blobKey" => blob_key,
-             "size" => size,
-             "metadata" => metadata
-           }}
-        end)
-    }
   end
 end

@@ -1,6 +1,6 @@
 defmodule Coflux.Topics.Module do
   use Topical.Topic,
-    route: ["modules", :module, :workspace_id]
+    route: ["workspaces", :workspace_id, "modules", :module]
 
   alias Coflux.Orchestration
 

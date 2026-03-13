@@ -103,7 +103,7 @@ func captureRunTopic(cmd *cobra.Command, runID string) (map[string]any, string, 
 		return nil, "", err
 	}
 
-	topicPath := fmt.Sprintf("runs/%s/%s", runID, workspaceID)
+	topicPath := fmt.Sprintf("workspaces/%s/runs/%s", workspaceID, runID)
 	data, err := client.CaptureTopic(cmd.Context(), topicPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get run: %w", err)

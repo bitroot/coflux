@@ -1,5 +1,5 @@
 defmodule Coflux.Topics.Sessions do
-  use Topical.Topic, route: ["sessions", :workspace_id]
+  use Topical.Topic, route: ["workspaces", :workspace_id, "sessions"]
 
   alias Coflux.Orchestration
 
@@ -46,7 +46,11 @@ defmodule Coflux.Topics.Sessions do
     %{
       connected: session.connected,
       executions: session.executions,
-      poolName: session.pool_name
+      concurrency: session.concurrency,
+      poolName: session.pool_name,
+      targets: session.targets,
+      provides: session.provides,
+      workerState: session.worker_state
     }
   end
 end

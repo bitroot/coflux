@@ -309,10 +309,10 @@ defmodule Coflux.Orchestration.Runs do
         end
       end
 
-    {step_number, execution_id, attempt, now, memo_hit, cache_key} =
+    {step_id, step_number, execution_id, attempt, now, memo_hit, cache_key} =
       case memoised_execution do
         {step_number, execution_id, attempt, now} ->
-          {step_number, execution_id, attempt, now, true, nil}
+          {nil, step_number, execution_id, attempt, now, true, nil}
 
         nil ->
           cache_key =
@@ -386,7 +386,7 @@ defmodule Coflux.Orchestration.Runs do
           {:ok, execution_id} =
             insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
-          {step_number, execution_id, attempt, now, false, cache_key}
+          {step_id, step_number, execution_id, attempt, now, false, cache_key}
       end
 
     child_added =
@@ -399,6 +399,7 @@ defmodule Coflux.Orchestration.Runs do
 
     {:ok,
      %{
+       step_id: step_id,
        step_number: step_number,
        execution_id: execution_id,
        attempt: attempt,
@@ -570,6 +571,34 @@ defmodule Coflux.Orchestration.Runs do
                             created_at, assigned_at} ->
            {target, run_external_id, step_number, attempt, execute_after, created_at, assigned_at}
          end)}
+    end
+  end
+
+  def get_queue_executions(db, workspace_id) do
+    case query(
+           db,
+           """
+           SELECT
+             s.module,
+             s.target,
+             r.external_id,
+             s.number,
+             e.attempt,
+             e.execute_after,
+             e.created_at,
+             a.created_at,
+             s.requires_tag_set_id
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           INNER JOIN runs AS r ON r.id = s.run_id
+           LEFT JOIN assignments AS a ON a.execution_id = e.id
+           LEFT JOIN results AS re ON re.execution_id = e.id
+           WHERE e.workspace_id = ?1 AND re.created_at IS NULL
+           """,
+           {workspace_id}
+         ) do
+      {:ok, rows} ->
+        {:ok, rows}
     end
   end
 

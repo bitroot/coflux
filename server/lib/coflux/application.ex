@@ -38,7 +38,11 @@ defmodule Coflux.Application do
       Topics.Module,
       Topics.Pools,
       Topics.Pool,
-      Topics.Search
+      Topics.Search,
+      Topics.Manifests,
+      Topics.Tokens,
+      Topics.Asset,
+      Topics.Queue
     ]
   end
 end

@@ -1,7 +1,7 @@
 defmodule Coflux.Topics.Search do
   alias Coflux.Orchestration
 
-  use Topical.Topic, route: ["search", :workspace_id]
+  use Topical.Topic, route: ["workspaces", :workspace_id, "search"]
 
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}

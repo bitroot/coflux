@@ -8,7 +8,7 @@ defmodule Coflux.Handlers.Utils do
 
   - Neither set: Returns `{:error, :not_configured}`
   - COFLUX_PROJECT only: Returns the configured project (any access method works)
-  - COFLUX_BASE_DOMAIN only: Extracts project from subdomain (subdomain required)
+  - COFLUX_PUBLIC_HOST starts with `%`: Extracts project from subdomain
   - Both set: Extracts from subdomain, but must match COFLUX_PROJECT
   """
   def resolve_project(hostname) do

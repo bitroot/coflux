@@ -25,6 +25,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, :list_tokens)
   end
 
+  def subscribe_tokens(project_id, pid) do
+    call_server(project_id, {:subscribe_tokens, pid})
+  end
+
   def revoke_token(project_id, token_id) do
     call_server(project_id, {:revoke_token, token_id})
   end
@@ -85,6 +89,10 @@ defmodule Coflux.Orchestration do
 
   def get_manifests(project_id, workspace_id) do
     call_server(project_id, {:get_manifests, workspace_id})
+  end
+
+  def subscribe_manifests(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_manifests, workspace_id, pid})
   end
 
   def get_workflow(project_id, workspace_id, module, target_name) do
@@ -166,6 +174,10 @@ defmodule Coflux.Orchestration do
 
   def subscribe_module(project_id, module, workspace_id, pid) do
     call_server(project_id, {:subscribe_module, module, workspace_id, pid})
+  end
+
+  def subscribe_queue(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_queue, workspace_id, pid})
   end
 
   def subscribe_pools(project_id, workspace_id, pid) do

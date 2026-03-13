@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -14,8 +16,10 @@ var poolsCmd = &cobra.Command{
 
 func init() {
 	poolsCmd.AddCommand(poolsListCmd)
+	poolsCmd.AddCommand(poolsGetCmd)
 	poolsCmd.AddCommand(poolsUpdateCmd)
 	poolsCmd.AddCommand(poolsDeleteCmd)
+	poolsCmd.AddCommand(poolsLaunchesCmd)
 }
 
 // pools list
@@ -46,6 +50,10 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if isOutput("json") {
+		return outputJSON(pools)
+	}
+
 	if len(pools) == 0 {
 		fmt.Println("No pools found.")
 		return nil
@@ -53,7 +61,10 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 
 	var rows [][]string
 	for name, pool := range pools {
-		launcher := getString(pool, "launcherType")
+		launcher := ""
+		if l, ok := pool["launcher"].(map[string]any); ok {
+			launcher = getString(l, "type")
+		}
 		modules := ""
 		if m, ok := pool["modules"].([]any); ok {
 			var mods []string
@@ -72,12 +83,369 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// pools get
+var poolsGetCmd = &cobra.Command{
+	Use:   "get <name>",
+	Short: "Get pool configuration",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPoolsGet,
+}
+
+func runPoolsGet(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	pool, err := client.GetPool(cmd.Context(), workspaceID, name)
+	if err != nil {
+		return fmt.Errorf("failed to get pool '%s': %w", name, err)
+	}
+
+	if isOutput("json") {
+		return outputJSON(pool)
+	}
+
+	// Modules
+	if modules, ok := pool["modules"].([]any); ok && len(modules) > 0 {
+		var mods []string
+		for _, m := range modules {
+			if s, ok := m.(string); ok {
+				mods = append(mods, s)
+			}
+		}
+		fmt.Printf("Modules: %s\n", strings.Join(mods, ", "))
+	}
+
+	// Provides
+	if provides := encodeProvides(pool["provides"]); provides != "" {
+		fmt.Printf("Provides: %s\n", provides)
+	}
+
+	// Launcher
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		fmt.Printf("Launcher: %s\n", getString(launcher, "type"))
+		if image := getString(launcher, "image"); image != "" {
+			fmt.Printf("Image: %s\n", image)
+		}
+		if dockerHost := getString(launcher, "dockerHost"); dockerHost != "" {
+			fmt.Printf("Docker host: %s\n", dockerHost)
+		}
+		if serverHost := getString(launcher, "serverHost"); serverHost != "" {
+			fmt.Printf("Server host: %s\n", serverHost)
+		}
+	}
+
+	return nil
+}
+
+// pools launches
+var poolsLaunchesWatch bool
+
+var poolsLaunchesCmd = &cobra.Command{
+	Use:   "launches <pool> [worker-id]",
+	Short: "Show pool launches",
+	Long: `Show launches for a pool. Without a worker ID, lists all workers.
+With a worker ID, shows details for that specific launch.
+
+Use --watch to stream live updates.`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: runPoolsLaunches,
+}
+
+func init() {
+	poolsLaunchesCmd.Flags().BoolVar(&poolsLaunchesWatch, "watch", false, "Watch for changes")
+}
+
+func runPoolsLaunches(cmd *cobra.Command, args []string) error {
+	poolName := args[0]
+
+	if len(args) == 2 {
+		return runPoolsLaunchDetail(cmd, poolName, args[1])
+	}
+
+	if poolsLaunchesWatch {
+		return runPoolsLaunchFollow(cmd, poolName)
+	}
+
+	return runPoolsLaunchList(cmd, poolName)
+}
+
+func runPoolsLaunchList(cmd *cobra.Command, poolName string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/pools/"+poolName)
+	if err != nil {
+		return fmt.Errorf("pool '%s' not found", poolName)
+	}
+
+	workers, _ := data["workers"].(map[string]any)
+
+	if isOutput("json") {
+		return outputJSON(workers)
+	}
+
+	for _, line := range renderWorkerLines(data) {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+func runPoolsLaunchFollow(cmd *cobra.Command, poolName string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	apiClient, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), apiClient, workspace)
+	if err != nil {
+		return err
+	}
+
+	token, err := resolveToken()
+	if err != nil {
+		return err
+	}
+
+	return watchTopics(cmd.Context(), getHost(), isSecure(), token,
+		[]string{"workspaces/" + workspaceID + "/pools/" + poolName},
+		func(data []map[string]any) []string {
+			if data[0] == nil {
+				return nil
+			}
+			return renderWorkerLines(data[0])
+		},
+	)
+}
+
+type workerRow struct {
+	id     string
+	status string
+	error  string
+	ts     int64
+}
+
+func buildWorkerRows(workers map[string]any) []workerRow {
+	var rows []workerRow
+	for id, raw := range workers {
+		w, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		status, errMsg, ts := workerStatus(w)
+		rows = append(rows, workerRow{id: id, status: status, error: errMsg, ts: ts})
+	}
+	// Sort by timestamp descending (most recent first)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].ts > rows[j].ts
+	})
+	return rows
+}
+
+func renderWorkerLines(data map[string]any) []string {
+	workers, _ := data["workers"].(map[string]any)
+	if workers == nil {
+		return []string{colorDim + "No launches." + colorReset}
+	}
+
+	rows := buildWorkerRows(workers)
+
+	if len(rows) == 0 {
+		return []string{colorDim + "No launches." + colorReset}
+	}
+
+	var lines []string
+	for _, r := range rows {
+		ts := colorDim + formatMillis(r.ts) + colorReset
+		statusStr := formatWorkerStatus(r.status)
+		line := fmt.Sprintf("%s  %s  %s", ts, r.id, statusStr)
+		if r.error != "" {
+			line += "  " + r.error
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func workerStatus(w map[string]any) (status, errMsg string, ts int64) {
+	startingAt := getFloat64(w, "startingAt")
+	startedAt := getFloat64(w, "startedAt")
+	deactivatedAt := getFloat64(w, "deactivatedAt")
+	stoppingAt := getFloat64(w, "stoppingAt")
+	startError, _ := w["startError"].(string)
+	workerError, _ := w["error"].(string)
+	connected, _ := w["connected"].(bool)
+
+	if deactivatedAt > 0 {
+		ts = int64(deactivatedAt)
+		if workerError != "" {
+			return "failed", workerError, ts
+		}
+		if startError != "" {
+			return "failed", startError, ts
+		}
+		return "stopped", "", ts
+	}
+	if stoppingAt > 0 {
+		return "stopping", "", int64(stoppingAt)
+	}
+	if startedAt > 0 {
+		ts = int64(startedAt)
+		if connected {
+			return "running", "", ts
+		}
+		return "started", "", ts
+	}
+	if startError != "" {
+		return "failed", startError, int64(startingAt)
+	}
+	if startingAt > 0 {
+		return "starting", "", int64(startingAt)
+	}
+	return "unknown", "", 0
+}
+
+func formatWorkerStatus(status string) string {
+	switch status {
+	case "running":
+		return colorGreen + "◆ Running" + colorReset
+	case "started":
+		return colorBlue + "◆ Started" + colorReset
+	case "starting":
+		return colorDim + "◇ Starting" + colorReset
+	case "stopping":
+		return colorYellow + "◆ Stopping" + colorReset
+	case "stopped":
+		return colorDim + "◇ Stopped" + colorReset
+	case "failed":
+		return colorRed + "✗ Failed" + colorReset
+	default:
+		return colorDim + "◇ Unknown" + colorReset
+	}
+}
+
+func runPoolsLaunchDetail(cmd *cobra.Command, poolName, workerID string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/pools/"+poolName)
+	if err != nil {
+		return fmt.Errorf("pool '%s' not found", poolName)
+	}
+
+	workers, _ := data["workers"].(map[string]any)
+	if workers == nil {
+		return fmt.Errorf("worker '%s' not found", workerID)
+	}
+
+	w, ok := workers[workerID].(map[string]any)
+	if !ok {
+		return fmt.Errorf("worker '%s' not found", workerID)
+	}
+
+	if isOutput("json") {
+		return outputJSON(w)
+	}
+
+	// Text output
+	status, errMsg, _ := workerStatus(w)
+	statusLine := formatWorkerStatus(status)
+	if errMsg != "" {
+		statusLine += "  " + errMsg
+	}
+	fmt.Printf("Status:         %s\n", statusLine)
+
+	if v := getFloat64(w, "startingAt"); v > 0 {
+		fmt.Printf("Starting at:    %s\n", formatMillis(int64(v)))
+	}
+	if v := getFloat64(w, "startedAt"); v > 0 {
+		fmt.Printf("Started at:     %s\n", formatMillis(int64(v)))
+	}
+	if v := getFloat64(w, "stoppingAt"); v > 0 {
+		fmt.Printf("Stopping at:    %s\n", formatMillis(int64(v)))
+	}
+	if v := getFloat64(w, "stoppedAt"); v > 0 {
+		fmt.Printf("Stopped at:     %s\n", formatMillis(int64(v)))
+	}
+	if v := getFloat64(w, "deactivatedAt"); v > 0 {
+		fmt.Printf("Deactivated at: %s\n", formatMillis(int64(v)))
+	}
+	if connected, ok := w["connected"].(bool); ok {
+		fmt.Printf("Connected:      %v\n", connected)
+	}
+
+	if logs, _ := w["logs"].(string); logs != "" {
+		fmt.Printf("\nLogs:\n%s%s%s\n", colorDim, logs, colorReset)
+	}
+
+	return nil
+}
+
+func formatMillis(ms int64) string {
+	t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond)).UTC()
+	return t.Format("2006-01-02 15:04:05 UTC")
+}
+
+func getFloat64(m map[string]any, key string) float64 {
+	if v, ok := m[key]; ok {
+		if f, ok := v.(float64); ok {
+			return f
+		}
+	}
+	return 0
+}
+
 // pools update
 var (
-	poolsUpdateModules     []string
-	poolsUpdateProvides    []string
-	poolsUpdateDockerImage string
-	poolsUpdateDockerHost  string
+	poolsUpdateModules      []string
+	poolsUpdateProvides     []string
+	poolsUpdateDockerImage  string
+	poolsUpdateDockerHost   string
+	poolsUpdateNoDockerHost bool
+	poolsUpdateServerHost   string
+	poolsUpdateNoServerHost bool
 )
 
 var poolsUpdateCmd = &cobra.Command{
@@ -92,6 +460,11 @@ func init() {
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateProvides, "provides", nil, "Features that workers provide")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -125,7 +498,7 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	if poolsUpdateProvides != nil {
 		pool["provides"] = parseProvides(poolsUpdateProvides)
 	}
-	if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" {
+	if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" || poolsUpdateNoDockerHost || poolsUpdateServerHost != "" || poolsUpdateNoServerHost {
 		launcher, ok := pool["launcher"].(map[string]any)
 		if !ok || getString(launcher, "type") != "docker" {
 			launcher = map[string]any{"type": "docker"}
@@ -135,6 +508,13 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		}
 		if poolsUpdateDockerHost != "" {
 			launcher["dockerHost"] = poolsUpdateDockerHost
+		} else if poolsUpdateNoDockerHost {
+			delete(launcher, "dockerHost")
+		}
+		if poolsUpdateServerHost != "" {
+			launcher["serverHost"] = poolsUpdateServerHost
+		} else if poolsUpdateNoServerHost {
+			delete(launcher, "serverHost")
 		}
 		pool["launcher"] = launcher
 	}

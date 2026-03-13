@@ -6,17 +6,22 @@ defmodule Coflux.Config do
 
   ## Project Configuration
 
-  At least one of the following must be configured:
-
   - **COFLUX_PROJECT**: Restricts the server to a single project. All requests
     are routed to this project. Supports any access method including IP addresses.
 
-  - **COFLUX_BASE_DOMAIN**: Enables subdomain-based project routing. The project
-    is extracted from the subdomain (e.g., `acme.example.com` → project "acme").
-    Requires subdomain access - direct IP or base domain access is not allowed.
+  - **COFLUX_PUBLIC_HOST**: The public-facing host for the server. Prefix with
+    `%` as a placeholder for the project ID to enable subdomain-based routing.
 
-  When both are set, subdomain routing is used but only the configured project
-  is allowed.
+    Examples:
+    - `%.example.com:7777` — multi-project subdomain routing
+    - `%.localhost:7777` — local dev with multiple projects
+    - `myserver.internal:7777` — single-project, no subdomain routing
+
+    When the placeholder is present, the project is extracted from the subdomain
+    of incoming requests. When combined with COFLUX_PROJECT, subdomain routing
+    is used but only the configured project is accepted.
+
+    When not set, falls back to `localhost:PORT`.
 
   ## Authentication Configuration
 
@@ -44,8 +49,9 @@ defmodule Coflux.Config do
   """
   def init do
     :persistent_term.put(:coflux_data_dir, parse_data_dir())
+    :persistent_term.put(:coflux_port, String.to_integer(System.get_env("PORT", "7777")))
     :persistent_term.put(:coflux_project, System.get_env("COFLUX_PROJECT"))
-    :persistent_term.put(:coflux_base_domain, System.get_env("COFLUX_BASE_DOMAIN"))
+    :persistent_term.put(:coflux_public_host, parse_public_host())
     :persistent_term.put(:coflux_allowed_origins, parse_allowed_origins())
     :persistent_term.put(:coflux_require_auth, parse_require_auth())
     :persistent_term.put(:coflux_studio_teams, parse_studio_teams())
@@ -72,12 +78,59 @@ defmodule Coflux.Config do
   end
 
   @doc """
-  Returns the base domain for subdomain-based routing, or nil if not set.
+  Returns the parsed public host configuration, or nil if not set.
 
-  When set, the project is extracted from the request's subdomain.
+  When set with a leading `%` (e.g., `%.example.com:7777`), returns
+  `{:template, suffix}` for subdomain-based routing. Without a `%` prefix,
+  returns the literal host string.
+  """
+  def public_host do
+    :persistent_term.get(:coflux_public_host)
+  end
+
+  @doc """
+  Returns the base domain for subdomain-based routing, or nil.
+
+  Derived from COFLUX_PUBLIC_HOST when it starts with `%`.
+  For example, `%.example.com:7777` yields base domain `example.com`.
   """
   def base_domain do
-    :persistent_term.get(:coflux_base_domain)
+    case public_host() do
+      {:template, suffix} ->
+        suffix
+        |> String.trim_leading(".")
+        |> String.split(":")
+        |> hd()
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Returns the host that workers should use to connect to this server.
+
+  When COFLUX_PUBLIC_HOST starts with `%`, the project ID is substituted.
+  Otherwise the literal host is returned. Falls back to `localhost:PORT`
+  when not configured.
+  """
+  def server_host(project_id \\ nil) do
+    port_suffix =
+      case :persistent_term.get(:coflux_port) do
+        port when port in [80, 443] -> ""
+        port -> ":#{port}"
+      end
+
+    case public_host() do
+      {:template, suffix} ->
+        "#{project_id}#{suffix}"
+
+      host when is_binary(host) ->
+        host
+
+      nil ->
+        "localhost#{port_suffix}"
+    end
   end
 
   @doc """
@@ -132,6 +185,15 @@ defmodule Coflux.Config do
   """
   def secret do
     :persistent_term.get(:coflux_secret)
+  end
+
+  defp parse_public_host do
+    case System.get_env("COFLUX_PUBLIC_HOST") do
+      nil -> nil
+      "" -> nil
+      "%" <> suffix -> {:template, suffix}
+      host -> host
+    end
   end
 
   defp parse_data_dir do
