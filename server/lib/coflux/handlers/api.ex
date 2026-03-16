@@ -105,9 +105,9 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "GET", ["get_access"], _project_id, %{workspaces: workspaces}) do
+  defp handle(req, "GET", ["discover"], _project_id, %{workspaces: workspaces}) do
     patterns = if workspaces == :all, do: ["*"], else: workspaces
-    json_response(req, %{"workspaces" => patterns})
+    json_response(req, %{"version" => Version.version(), "access" => %{"workspaces" => patterns}})
   end
 
   defp handle(req, "POST", ["create_workspace"], project_id, access) do

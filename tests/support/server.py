@@ -20,11 +20,12 @@ def _find_free_port():
 
 def _wait_for_ready(port, timeout=15):
     """Wait until the server is accepting HTTP requests."""
-    url = f"http://127.0.0.1:{port}/.well-known/com.coflux"
+    url = f"http://127.0.0.1:{port}/api/discover"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(url, timeout=1)
+            req = urllib.request.Request(url, headers={"Host": f"healthcheck.localhost:{port}"})
+            urllib.request.urlopen(req, timeout=1)
             return
         except (urllib.error.URLError, OSError):
             time.sleep(0.1)
