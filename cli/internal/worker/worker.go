@@ -414,7 +414,7 @@ func (w *Worker) handleExecute(params []any) error {
 	args, err := w.convertArguments(arguments)
 	if err != nil {
 		w.logger.Error("failed to convert arguments", "error", err)
-		w.ReportError(context.Background(), executionID, "internal", err.Error(), "")
+		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 		return nil
 	}
 
@@ -428,7 +428,7 @@ func (w *Worker) handleExecute(params []any) error {
 	// Execute on pool
 	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
-		w.ReportError(context.Background(), executionID, "internal", err.Error(), "")
+		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
 
 	return nil
@@ -1177,10 +1177,14 @@ func (w *Worker) ReportResult(ctx context.Context, executionID string, result *a
 	return nil
 }
 
-func (w *Worker) ReportError(ctx context.Context, executionID string, errorType, message, traceback string) error {
-	// Build error tuple matching Python's format: (type, message, frames)
+func (w *Worker) ReportError(ctx context.Context, executionID string, errorType, message, traceback string, retryable *bool) error {
+	// Build error tuple matching Python's format: (type, message, frames[, retryable])
+	// retryable is nil when no callback configured, true/false when callback ran
 	frames := parseTraceback(traceback)
 	errorTuple := []any{errorType, message, frames}
+	if retryable != nil {
+		errorTuple = append(errorTuple, *retryable)
+	}
 
 	// Buffer the error on the execution state
 	w.mu.Lock()

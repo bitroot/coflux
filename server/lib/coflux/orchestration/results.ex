@@ -7,51 +7,55 @@ defmodule Coflux.Orchestration.Results do
     with_transaction(db, fn ->
       now = current_timestamp()
 
-      {type, error_id, value_id, successor_id, successor_ref_id} =
+      {type, error_id, value_id, successor_id, successor_ref_id, retryable} =
         case result do
+          {:error, type, message, frames, retry_id, retryable} ->
+            {:ok, error_id} = get_or_create_error(db, type, message, frames)
+            {0, error_id, nil, retry_id, nil, retryable}
+
           {:error, type, message, frames, retry_id} ->
             {:ok, error_id} = get_or_create_error(db, type, message, frames)
-            {0, error_id, nil, retry_id, nil}
+            {0, error_id, nil, retry_id, nil, nil}
 
           {:value, value} ->
             {:ok, value_id} = Values.get_or_create_value(db, value)
-            {1, nil, value_id, nil, nil}
+            {1, nil, value_id, nil, nil, nil}
 
           {:abandoned, retry_id} ->
-            {2, nil, nil, retry_id, nil}
+            {2, nil, nil, retry_id, nil, nil}
 
           :cancelled ->
-            {3, nil, nil, nil, nil}
+            {3, nil, nil, nil, nil, nil}
 
           # In-flight deferred (successor still executing)
           {:deferred, defer_id} ->
-            {4, nil, nil, defer_id, nil}
+            {4, nil, nil, defer_id, nil, nil}
 
           # Resolved deferred (successor resolved to a value)
           {:deferred, ref_id, value} ->
             {:ok, value_id} = Values.get_or_create_value(db, value)
-            {4, nil, value_id, nil, ref_id}
+            {4, nil, value_id, nil, ref_id, nil}
 
           # In-flight cached
           {:cached, cached_id} ->
-            {5, nil, nil, cached_id, nil}
+            {5, nil, nil, cached_id, nil, nil}
 
           # Resolved cached (successor resolved to a value)
           {:cached, ref_id, value} ->
             {:ok, value_id} = Values.get_or_create_value(db, value)
-            {5, nil, value_id, nil, ref_id}
+            {5, nil, value_id, nil, ref_id, nil}
 
           {:suspended, successor_id} ->
-            {6, nil, nil, successor_id, nil}
+            {6, nil, nil, successor_id, nil, nil}
 
           # In-flight spawned
           {:spawned, execution_id} ->
-            {7, nil, nil, execution_id, nil}
+            {7, nil, nil, execution_id, nil, nil}
 
           # Resolved spawned (successor resolved to a value)
           {:spawned, ref_id, value} ->
             {:ok, value_id} = Values.get_or_create_value(db, value)
-            {7, nil, value_id, nil, ref_id}
+            {7, nil, value_id, nil, ref_id, nil}
         end
 
       case insert_result(
@@ -62,6 +66,7 @@ defmodule Coflux.Orchestration.Results do
              value_id,
              successor_id,
              successor_ref_id,
+             retryable,
              now,
              created_by
            ) do
@@ -85,7 +90,7 @@ defmodule Coflux.Orchestration.Results do
     case query_one(
            db,
            """
-           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.successor_ref_id, r.created_at,
+           SELECT r.type, r.error_id, r.value_id, r.successor_id, r.successor_ref_id, r.retryable, r.created_at,
                   p.user_external_id AS created_by_user_external_id,
                   t.external_id AS created_by_token_external_id
            FROM results AS r
@@ -96,7 +101,7 @@ defmodule Coflux.Orchestration.Results do
            {execution_id}
          ) do
       {:ok,
-       {type, error_id, value_id, successor_id, successor_ref_id, created_at,
+       {type, error_id, value_id, successor_id, successor_ref_id, retryable, created_at,
         created_by_user_ext_id, created_by_token_ext_id}} ->
         created_by =
           case {created_by_user_ext_id, created_by_token_ext_id} do
@@ -105,12 +110,19 @@ defmodule Coflux.Orchestration.Results do
             {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
           end
 
+        retryable =
+          case retryable do
+            1 -> true
+            0 -> false
+            nil -> nil
+          end
+
         result =
           case {type, error_id, value_id, successor_id, successor_ref_id} do
             {0, error_id, nil, retry_id, nil} ->
               case get_error_by_id(db, error_id) do
                 {:ok, {type, message, frames}} ->
-                  {:error, type, message, frames, retry_id}
+                  {:error, type, message, frames, retry_id, retryable}
               end
 
             {1, nil, value_id, nil, nil} ->
@@ -255,6 +267,7 @@ defmodule Coflux.Orchestration.Results do
          value_id,
          successor_id,
          successor_ref_id,
+         retryable,
          created_at,
          created_by
        ) do
@@ -265,6 +278,12 @@ defmodule Coflux.Orchestration.Results do
       value_id: value_id,
       successor_id: successor_id,
       successor_ref_id: successor_ref_id,
+      retryable:
+        case retryable do
+          nil -> nil
+          true -> 1
+          false -> 0
+        end,
       created_at: created_at,
       created_by: created_by
     })

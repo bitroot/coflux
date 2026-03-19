@@ -96,17 +96,21 @@ def send_execution_error(
     error_type: str,
     message: str,
     traceback: str = "",
+    retryable: bool | None = None,
 ) -> None:
     """Send execution error notification."""
+    error: dict[str, Any] = {
+        "type": error_type,
+        "message": message,
+        "traceback": traceback,
+    }
+    if retryable is not None:
+        error["retryable"] = retryable
     get_protocol().send_message(
         "execution_error",
         {
             "execution_id": execution_id,
-            "error": {
-                "type": error_type,
-                "message": message,
-                "traceback": traceback,
-            },
+            "error": error,
         },
     )
 

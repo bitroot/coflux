@@ -23,10 +23,12 @@ def execution_result(execution_id, value=None, format="json"):
     }
 
 
-def execution_error(execution_id, error_type, message, traceback=""):
+def execution_error(execution_id, error_type, message, traceback="", retryable=None):
     error = {"type": error_type, "message": message}
     if traceback:
         error["traceback"] = traceback
+    if retryable is not None:
+        error["retryable"] = retryable
     return {
         "method": "execution_error",
         "params": {"execution_id": execution_id, "error": error},

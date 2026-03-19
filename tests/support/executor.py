@@ -126,10 +126,10 @@ class ExecutorConnection:
         """Send execution_result."""
         self.send(protocol.execution_result(execution_id, value=value))
 
-    def fail(self, execution_id, error_type, message, traceback=""):
+    def fail(self, execution_id, error_type, message, traceback="", retryable=None):
         """Send execution_error."""
         self.send(
-            protocol.execution_error(execution_id, error_type, message, traceback)
+            protocol.execution_error(execution_id, error_type, message, traceback, retryable=retryable)
         )
 
     def close(self):

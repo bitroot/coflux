@@ -47,6 +47,7 @@ class Retries(t.NamedTuple):
     limit: int | None = None  # 0 = no retries, None = unlimited
     delay_min: float = 1      # seconds
     delay_max: float = 60     # seconds
+    when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None = None
 
 
 class TargetDefinition(t.NamedTuple):
@@ -123,6 +124,20 @@ def _parse_cache(
     )
 
 
+def _normalize_retry_when(
+    when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None,
+) -> t.Callable[[BaseException], bool] | None:
+    if when is None:
+        return None
+    if isinstance(when, type) and issubclass(when, BaseException):
+        return lambda e, _cls=when: isinstance(e, _cls)
+    if isinstance(when, tuple) and all(isinstance(c, type) and issubclass(c, BaseException) for c in when):
+        return lambda e, _classes=when: isinstance(e, _classes)
+    if callable(when):
+        return when
+    raise TypeError(f"Invalid 'when' argument: expected exception type(s) or callable, got {type(when).__name__}")
+
+
 def _parse_retries(
     retries: int | bool | Retries,
 ) -> Retries | None:
@@ -134,13 +149,14 @@ def _parse_retries(
             return Retries(None, 1000, 60000)
         case int(limit):
             return Retries(limit, 0, 0)
-        case Retries(limit, delay_min, delay_max):
+        case Retries(limit, delay_min, delay_max, when):
             if limit == 0:
                 return None
             return Retries(
                 limit,
                 int(delay_min * 1000),
                 int(delay_max * 1000),
+                _normalize_retry_when(when),
             )
 
 
