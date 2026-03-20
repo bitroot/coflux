@@ -63,7 +63,18 @@ def execute_target(execution_id: str, module_name: str, target_name: str, argume
         protocol.send_execution_result(execution_id, result_value)
 
     except Exception as e:
-        # Send error with real exception type and filtered traceback
+        # Evaluate retry 'when' callback if present
+        # None = no callback configured, True/False = callback result
+        # If the callback raises, report that exception instead (makes bugs visible)
+        retryable = None
+        if hasattr(target_obj, "definition"):
+            retries = target_obj.definition.retries
+            if retries and retries.when is not None:
+                try:
+                    retryable = bool(retries.when(e))
+                except Exception as callback_exc:
+                    e = callback_exc
+
         error_type = f"{type(e).__module__}.{type(e).__qualname__}"
         tb = _format_filtered_traceback(e)
         protocol.send_execution_error(
@@ -71,6 +82,7 @@ def execute_target(execution_id: str, module_name: str, target_name: str, argume
             error_type=error_type,
             message=str(e),
             traceback=tb,
+            retryable=retryable,
         )
     finally:
         os.chdir(original_dir)

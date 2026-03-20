@@ -269,6 +269,19 @@ defmodule Coflux.Topics.Run do
     created_by = build_principal(created_by)
 
     case result do
+      {:error, type, message, frames, retry, retryable} ->
+        %{
+          type: "error",
+          createdBy: created_by,
+          error: %{
+            type: type,
+            message: message,
+            frames: build_frames(frames)
+          },
+          retry: if(retry, do: execution_attempt(retry)),
+          retryable: retryable
+        }
+
       {:error, type, message, frames, retry} ->
         %{
           type: "error",
@@ -278,7 +291,8 @@ defmodule Coflux.Topics.Run do
             message: message,
             frames: build_frames(frames)
           },
-          retry: if(retry, do: execution_attempt(retry))
+          retry: if(retry, do: execution_attempt(retry)),
+          retryable: nil
         }
 
       {:value, value} ->

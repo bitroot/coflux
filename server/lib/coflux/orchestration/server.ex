@@ -3237,7 +3237,8 @@ defmodule Coflux.Orchestration.Server do
 
   defp result_retryable?(result) do
     case result do
-      {:error, _, _, _} -> true
+      {:error, _, _, _, false} -> false
+      {:error, _, _, _, _} -> true
       :abandoned -> true
       _ -> false
     end
@@ -4114,6 +4115,7 @@ defmodule Coflux.Orchestration.Server do
 
   defp is_result_final?(result) do
     case result do
+      {:error, _, _, _, retry_id, _retryable} -> is_nil(retry_id)
       {:error, _, _, _, retry_id} -> is_nil(retry_id)
       {:value, _} -> true
       {:abandoned, retry_id} -> is_nil(retry_id)
@@ -4131,6 +4133,10 @@ defmodule Coflux.Orchestration.Server do
 
   defp build_result(result, db) do
     case result do
+      {:error, type, message, frames, retry_id, retryable} ->
+        retry = if retry_id, do: resolve_execution(db, retry_id)
+        {:error, type, message, frames, retry, retryable}
+
       {:error, type, message, frames, retry_id} ->
         retry = if retry_id, do: resolve_execution(db, retry_id)
         {:error, type, message, frames, retry}
@@ -4347,10 +4353,17 @@ defmodule Coflux.Orchestration.Server do
 
         result =
           case result do
-            {:error, type, message, frames} -> {:error, type, message, frames, retry_id}
-            :abandoned -> {:abandoned, retry_id}
-            {:suspended, _, _} -> {:suspended, retry_id}
-            other -> other
+            {:error, type, message, frames, retryable} ->
+              {:error, type, message, frames, retry_id, retryable}
+
+            :abandoned ->
+              {:abandoned, retry_id}
+
+            {:suspended, _, _} ->
+              {:suspended, retry_id}
+
+            other ->
+              other
           end
 
         state =
@@ -4376,7 +4389,7 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok, {result, _created_at, _created_by}} ->
         case result do
-          {:error, _, _, _, execution_id} when not is_nil(execution_id) ->
+          {:error, _, _, _, execution_id, _retryable} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           {:abandoned, execution_id} when not is_nil(execution_id) ->

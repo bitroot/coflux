@@ -138,6 +138,7 @@ type ErrorDetail struct {
 	Type      string `json:"type"` // "exception", "cancelled", etc.
 	Message   string `json:"message"`
 	Traceback string `json:"traceback,omitempty"`
+	Retryable *bool  `json:"retryable,omitempty"` // nil = default (true), false = don't retry
 }
 
 // LogMessage is sent during execution for logging

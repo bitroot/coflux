@@ -176,9 +176,10 @@ defmodule Coflux.Orchestration.Principals do
     {:ok, Enum.map(rows, &build_token/1)}
   end
 
-  defp build_token({id, external_id, name, workspaces_json, created_at, expires_at,
-                              revoked_at, created_by_principal_id, creator_user_ext_id,
-                              creator_token_ext_id}) do
+  defp build_token(
+         {id, external_id, name, workspaces_json, created_at, expires_at, revoked_at,
+          created_by_principal_id, creator_user_ext_id, creator_token_ext_id}
+       ) do
     created_by =
       case {creator_user_ext_id, creator_token_ext_id} do
         {nil, nil} -> nil

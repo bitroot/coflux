@@ -489,6 +489,7 @@ CREATE TABLE results (
   value_id INTEGER,
   successor_id INTEGER,
   successor_ref_id INTEGER,
+  retryable INTEGER,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,

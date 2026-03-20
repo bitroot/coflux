@@ -221,13 +221,13 @@ defmodule Coflux.Handlers.Worker do
         [execution_id, error] = message["params"]
 
         if is_recognised_execution?(execution_id, state) do
-          {type, message, frames} = parse_error(error)
+          {type, message, frames, retryable} = parse_error(error)
 
           :ok =
             Orchestration.record_result(
               state.project_id,
               execution_id,
-              {:error, type, message, frames}
+              {:error, type, message, frames, retryable}
             )
 
           {[], state}
@@ -415,7 +415,10 @@ defmodule Coflux.Handlers.Worker do
         nil
 
       [type, message, frames] ->
-        {type, message, parse_frames(frames)}
+        {type, message, parse_frames(frames), nil}
+
+      [type, message, frames, retryable] ->
+        {type, message, parse_frames(frames), retryable}
     end
   end
 
@@ -507,7 +510,8 @@ defmodule Coflux.Handlers.Worker do
 
   defp compose_result(result) do
     case result do
-      {:error, type, message, _frames, nil} -> ["error", type, message]
+      {:error, type, message, _frames, _retry_id, _retryable} -> ["error", type, message]
+      {:error, type, message, _frames, _retry_id} -> ["error", type, message]
       {:value, value} -> ["value", compose_value(value)]
       {:abandoned, nil} -> ["abandoned"]
       :cancelled -> ["cancelled"]

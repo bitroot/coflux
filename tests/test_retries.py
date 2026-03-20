@@ -92,3 +92,48 @@ def test_retry_with_delay(worker):
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
         assert elapsed >= 0.4, f"expected >=0.4s retry delay, got {elapsed:.2f}s"
+
+
+def test_retry_not_retryable(worker):
+    """When retryable=False, no retry is attempted despite retry limit."""
+    targets = [
+        workflow(
+            "test", "non_retryable", retries={"limit": 3, "delay_min_ms": 0, "delay_max_ms": 0}
+        )
+    ]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "non_retryable")
+
+        ex0 = ctx.executor.next_execute()
+        ex0.conn.fail(ex0.execution_id, "ValueError", "bad input", retryable=False)
+
+        # No retry should happen — result should be the error directly
+        result = ctx.result(resp["runId"])
+        assert result["type"] == "error"
+        assert result["error"]["type"] == "ValueError"
+
+
+def test_retry_retryable_true_still_retries(worker):
+    """When retryable=True (default), retries work normally."""
+    targets = [
+        workflow(
+            "test", "retryable", retries={"limit": 1, "delay_min_ms": 0, "delay_max_ms": 0}
+        )
+    ]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "retryable")
+
+        # First attempt: fail with retryable=True (default)
+        ex0 = ctx.executor.next_execute()
+        ex0.conn.fail(ex0.execution_id, "RuntimeError", "transient", retryable=True)
+
+        # Retry should happen
+        ex1 = ctx.executor.next_execute()
+        assert ex1.execution_id != ex0.execution_id
+        ex1.conn.complete(ex1.execution_id, value="ok")
+
+        result = ctx.result(resp["runId"])
+        assert result["type"] == "value"
+        assert result["value"]["data"] == "ok"

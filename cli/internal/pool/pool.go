@@ -38,7 +38,7 @@ type ExecutionHandler interface {
 	// ReportResult reports execution completion
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
-	ReportError(ctx context.Context, executionID string, errorType, message, traceback string) error
+	ReportError(ctx context.Context, executionID string, errorType, message, traceback string, retryable *bool) error
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
 }
@@ -160,7 +160,7 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 	workingDir, err := os.MkdirTemp("", "coflux-exec-*")
 	if err != nil {
 		p.logger.Error("failed to create temp dir for execution", "error", err, "execution_id", executionID)
-		p.handler.ReportError(ctx, executionID, "internal", fmt.Sprintf("failed to create temp dir: %s", err.Error()), "")
+		p.handler.ReportError(ctx, executionID, "internal", fmt.Sprintf("failed to create temp dir: %s", err.Error()), "", nil)
 		p.finishExecution(executionID, exec)
 		p.handler.NotifyTerminated(ctx, executionID)
 		return
@@ -171,7 +171,7 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 	// Send execute command
 	if err := exec.SendExecute(executionID, module, target, arguments, workingDir); err != nil {
 		logger.Error("failed to send execute command", "error", err)
-		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 		os.RemoveAll(workingDir)
 		p.finishExecution(executionID, exec)
 		p.handler.NotifyTerminated(ctx, executionID)
@@ -194,7 +194,7 @@ loop:
 				logger.Debug("aborted executor exit", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
-				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "")
+				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 			}
 			break
 		}
@@ -309,6 +309,7 @@ func (p *Pool) handleExecutionError(ctx context.Context, executionID string, par
 			Type      string `json:"type"`
 			Message   string `json:"message"`
 			Traceback string `json:"traceback"`
+			Retryable *bool  `json:"retryable,omitempty"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(params, &result); err != nil {
@@ -316,7 +317,7 @@ func (p *Pool) handleExecutionError(ctx context.Context, executionID string, par
 		return
 	}
 
-	if err := p.handler.ReportError(ctx, executionID, result.Error.Type, result.Error.Message, result.Error.Traceback); err != nil {
+	if err := p.handler.ReportError(ctx, executionID, result.Error.Type, result.Error.Message, result.Error.Traceback, result.Error.Retryable); err != nil {
 		logger.Error("failed to report error", "error", err)
 	}
 }
