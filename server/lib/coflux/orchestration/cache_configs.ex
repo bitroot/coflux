@@ -40,7 +40,7 @@ defmodule Coflux.Orchestration.CacheConfigs do
 
   defp hash_cache_config(cache) do
     parts = [
-      Utils.encode_params_list(cache.params),
+      Utils.encode_params_list(cache.params) || "",
       if(cache.max_age, do: Integer.to_string(cache.max_age), else: ""),
       cache.namespace || "",
       cache.version || ""
