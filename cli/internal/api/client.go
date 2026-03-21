@@ -9,6 +9,8 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+
+	"github.com/bitroot/coflux/cli/internal/version"
 )
 
 // Client provides HTTP API access to the Coflux server
@@ -310,7 +312,9 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-API-Version", APIVersion)
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		req.Header.Set("X-API-Version", apiVersion)
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -327,6 +331,9 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 	}
 
 	if resp.StatusCode >= 400 {
+		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
+			return err
+		}
 		var errResp struct {
 			Error   string `json:"error"`
 			Message string `json:"message"`
@@ -363,7 +370,9 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Version", APIVersion)
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		req.Header.Set("X-API-Version", apiVersion)
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -380,6 +389,9 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 	}
 
 	if resp.StatusCode >= 400 {
+		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
+			return err
+		}
 		var errResp struct {
 			Error   string `json:"error"`
 			Message string `json:"message"`
@@ -401,5 +413,27 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 		}
 	}
 
+	return nil
+}
+
+// checkVersionMismatch checks if an HTTP error response is a version mismatch
+// and returns a typed VersionMismatchError if so.
+func checkVersionMismatch(statusCode int, body []byte) error {
+	if statusCode != 409 {
+		return nil
+	}
+	var errResp struct {
+		Error   string `json:"error"`
+		Details struct {
+			Server   string `json:"server"`
+			Expected string `json:"expected"`
+		} `json:"details"`
+	}
+	if json.Unmarshal(body, &errResp) == nil && errResp.Error == "version_mismatch" {
+		return &version.VersionMismatchError{
+			ServerVersion: errResp.Details.Server,
+			ClientVersion: version.APIVersion(),
+		}
+	}
 	return nil
 }

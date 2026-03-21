@@ -8,15 +8,13 @@ import (
 	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/config"
+	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-var (
-	version = "dev"
-	cfgFile string
-)
+var cfgFile string
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
@@ -32,7 +30,7 @@ var rootCmd = &cobra.Command{
 
 It supports managing and interacting with the orchestration server, hosting
 workers, and authenticating with Studio.`,
-	Version:       version,
+	Version:       version.Version,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Silence usage after arg validation passes — arg/flag errors

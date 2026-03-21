@@ -79,7 +79,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: go build -ldflags "-X main.version=$VERSION" -o "coflux-${GOOS}-${GOARCH}" ./cmd/coflux
+        run: go build -ldflags "-X github.com/bitroot/coflux/cli/internal/version.Version=$VERSION" -o "coflux-${GOOS}-${GOARCH}" ./cmd/coflux
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -237,15 +237,32 @@ jobs:
         with:
           name: coflux-image
 
+      - name: Derive API version
+        id: api_version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Derive API version: for 0.x.y -> 0.x, for N.x.y (N>0) -> N
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          if [ "$MAJOR" = "0" ]; then
+            echo "api_version=0.${MINOR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "api_version=${MAJOR}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Load, tag, and push image
         if: steps.pushed.outputs.pushed == 'false'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          API_VERSION: ${{ steps.api_version.outputs.api_version }}
         run: |
           gunzip -c coflux-image.tar.gz | docker load
           docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
+          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
           docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       - name: Release

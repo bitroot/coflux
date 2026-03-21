@@ -5,19 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"sync"
 	"time"
 
+	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	// APIVersion is the protocol version for API compatibility
-	// This should match the server's expected version (derived from Python package version 0.8.x)
-	APIVersion = "0.8"
-
 	// Timeouts
 	writeWait  = 10 * time.Second
 	pongWait   = 60 * time.Second
@@ -104,7 +102,9 @@ func (c *Connection) Connect(ctx context.Context) error {
 
 	params := url.Values{}
 	params.Set("workspaceId", c.workspace)
-	params.Set("version", APIVersion)
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		params.Set("version", apiVersion)
+	}
 
 	u := url.URL{
 		Scheme:   scheme,
@@ -123,8 +123,14 @@ func (c *Connection) Connect(ctx context.Context) error {
 
 	c.logger.Debug("connecting to server", "url", u.String())
 
-	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
+		if resp != nil && resp.StatusCode == 409 {
+			defer resp.Body.Close()
+			if mismatchErr := parseVersionMismatch(resp.Body); mismatchErr != nil {
+				return mismatchErr
+			}
+		}
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -463,6 +469,28 @@ func (c *Connection) IsConnected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connected
+}
+
+// parseVersionMismatch attempts to parse a version_mismatch error from a response body.
+func parseVersionMismatch(body io.Reader) error {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil
+	}
+	var errResp struct {
+		Error   string `json:"error"`
+		Details struct {
+			Server   string `json:"server"`
+			Expected string `json:"expected"`
+		} `json:"details"`
+	}
+	if json.Unmarshal(data, &errResp) == nil && errResp.Error == "version_mismatch" {
+		return &version.VersionMismatchError{
+			ServerVersion: errResp.Details.Server,
+			ClientVersion: version.APIVersion(),
+		}
+	}
+	return nil
 }
 
 // failPendingRequests marks connection as disconnected and fails all pending requests

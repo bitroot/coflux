@@ -6,6 +6,8 @@ import json
 import sys
 from typing import Any
 
+from coflux import __version__
+
 
 class Protocol:
     """Handles JSON Lines communication over stdio."""
@@ -75,9 +77,25 @@ def get_protocol() -> Protocol:
     return _protocol
 
 
+def _derive_api_version(version: str) -> str:
+    """Derive the API version from a full semantic version string.
+
+    Pre-1.0: "0.{minor}" (e.g., "0.8.1" -> "0.8")
+    Post-1.0: "{major}" (e.g., "1.2.3" -> "1")
+    """
+    parts = version.split(".")
+    if len(parts) >= 2:
+        major = int(parts[0])
+        minor = int(parts[1])
+        if major == 0:
+            return f"0.{minor}"
+        return str(major)
+    return version
+
+
 def send_ready() -> None:
-    """Send ready notification to indicate executor is ready for work."""
-    get_protocol().send_message("ready")
+    """Send ready notification with protocol version to indicate executor is ready."""
+    get_protocol().send_message("ready", {"version": _derive_api_version(__version__)})
 
 
 def send_execution_result(

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -36,11 +37,13 @@ func init() {
 	serverCmd.Flags().StringVar(&serverImage, "image", getDefaultImage(), "Docker image to run")
 }
 
-// getDefaultImage returns the default Docker image name
+// getDefaultImage returns the default Docker image name.
+// Uses the API version (e.g., "0.9") as the tag, so patch releases
+// are pulled automatically. Users can pin to an exact version with --image.
 func getDefaultImage() string {
-	// Use version if set, otherwise use latest
-	if version != "" && version != "dev" {
-		return fmt.Sprintf("ghcr.io/cofluxlabs/coflux:%s", version)
+	apiVersion := version.APIVersion()
+	if apiVersion != "dev" && apiVersion != "" {
+		return fmt.Sprintf("ghcr.io/cofluxlabs/coflux:%s", apiVersion)
 	}
 	return "ghcr.io/cofluxlabs/coflux:latest"
 }

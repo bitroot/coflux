@@ -9,8 +9,8 @@ def decode_message(line: bytes) -> dict:
     return json.loads(line)
 
 
-def ready_message() -> dict:
-    return {"method": "ready"}
+def ready_message(version="0.9") -> dict:
+    return {"method": "ready", "params": {"version": version}}
 
 
 def execution_result(execution_id, value=None, format="json"):

@@ -23,6 +23,7 @@ import (
 	"github.com/bitroot/coflux/cli/internal/config"
 	logstore "github.com/bitroot/coflux/cli/internal/log"
 	"github.com/bitroot/coflux/cli/internal/pool"
+	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/gorilla/websocket"
 )
 
@@ -316,6 +317,12 @@ func isFatalError(err error) bool {
 		return false
 	}
 
+	// Version mismatch is always fatal
+	var versionErr *version.VersionMismatchError
+	if errors.As(err, &versionErr) {
+		return true
+	}
+
 	// Check for WebSocket close errors with specific reasons
 	var closeErr *websocket.CloseError
 	if ok := errors.As(err, &closeErr); ok {
@@ -328,7 +335,7 @@ func isFatalError(err error) bool {
 
 	// Check for error message patterns (in case wrapped differently)
 	errMsg := err.Error()
-	for _, fatal := range []string{"session_invalid", "project_not_found", "workspace_mismatch"} {
+	for _, fatal := range []string{"session_invalid", "project_not_found", "workspace_mismatch", "version_mismatch"} {
 		if strings.Contains(errMsg, fatal) {
 			return true
 		}
