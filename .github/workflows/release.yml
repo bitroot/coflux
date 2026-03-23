@@ -1,0 +1,354 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      next_version:
+        description: "Next development version (e.g. 0.10.0-dev)"
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pep440_version: ${{ steps.version.outputs.pep440_version }}
+      api_version: ${{ steps.version.outputs.api_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: version
+        shell: python3 {0}
+        run: |
+          import os, re
+          from pathlib import Path
+
+          version = Path("VERSION").read_text().strip()
+          if not version.endswith("-dev"):
+              raise SystemExit(f"VERSION ({version}) does not end with -dev — is this already released?")
+
+          release = version.removesuffix("-dev")
+
+          # Derive PEP 440 version
+          pep440 = release
+
+          # Derive API version
+          parts = release.split(".")
+          major = int(parts[0])
+          minor = int(parts[1])
+          api = f"0.{minor}" if major == 0 else str(major)
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as f:
+              f.write(f"version={release}\n")
+              f.write(f"pep440_version={pep440}\n")
+              f.write(f"api_version={api}\n")
+
+          print(f"Release version: {release}")
+          print(f"PEP 440 version: {pep440}")
+          print(f"API version: {api}")
+
+      - name: Validate next version
+        env:
+          NEXT: ${{ inputs.next_version }}
+        run: |
+          if [[ ! "$NEXT" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev$ ]]; then
+            echo "Error: next version must match X.Y.Z-dev (got: $NEXT)"
+            exit 1
+          fi
+
+  bump-version:
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    outputs:
+      release_sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update version files
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PEP440: ${{ needs.prepare.outputs.pep440_version }}
+        shell: python3 {0}
+        run: |
+          import os, re, tomllib
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          pep440 = os.environ["PEP440"]
+
+          Path("VERSION").write_text(version + "\n")
+
+          pyproject = Path("adapters/python/pyproject.toml")
+          content = pyproject.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]*"',
+              f'version = "{pep440}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          pyproject.write_text(content)
+
+      - name: Commit release version
+        id: commit
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION adapters/python/pyproject.toml
+          git commit -m "Release $VERSION"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Push now so build jobs can check out the release commit.
+      # If tests fail, the release commit will be on main without a tag —
+      # fix the issue and re-run the workflow.
+      - name: Push release commit
+        run: git push
+
+  build-cli:
+    runs-on: ubuntu-latest
+    needs: [prepare, bump-version]
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.release_sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build
+        working-directory: cli
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: go build -ldflags "-X github.com/bitroot/coflux/cli/internal/version.Version=$VERSION" -o "coflux-${GOOS}-${GOARCH}" ./cmd/coflux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coflux-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: cli/coflux-*
+
+  build-server:
+    runs-on: ubuntu-latest
+    needs: [bump-version]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.release_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          load: true
+          tags: coflux:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image
+        run: docker save coflux:ci | gzip > /tmp/coflux-image.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coflux-image
+          path: /tmp/coflux-image.tar.gz
+
+  build-adapter:
+    runs-on: ubuntu-latest
+    needs: [bump-version]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.release_sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Build
+        run: uv build
+        working-directory: adapters/python
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-adapter
+          path: adapters/python/dist/*
+
+  test:
+    runs-on: ubuntu-latest
+    needs: [bump-version, build-cli, build-server]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.release_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coflux-linux-amd64
+          path: cli
+
+      - name: Make CLI executable
+        run: chmod +x cli/coflux-linux-amd64
+
+      - name: Download server image
+        uses: actions/download-artifact@v4
+        with:
+          name: coflux-image
+
+      - name: Load server image
+        run: gunzip -c coflux-image.tar.gz | docker load
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-xdist
+
+      - name: Run E2E tests
+        env:
+          COFLUX_BIN: cli/coflux-linux-amd64
+          COFLUX_IMAGE: coflux:ci
+        run: pytest tests/ -n auto
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [prepare, bump-version, test, build-cli, build-server, build-adapter]
+    concurrency: release-publish
+    environment: pypi
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.release_sha }}
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: coflux-*-*
+          merge-multiple: true
+
+      - name: Download adapter artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-adapter
+          path: adapter-dist
+
+      - name: Download server image
+        uses: actions/download-artifact@v4
+        with:
+          name: coflux-image
+
+      # Docker image
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load, tag, and push image
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          API_VERSION: ${{ needs.prepare.outputs.api_version }}
+        run: |
+          gunzip -c coflux-image.tar.gz | docker load
+          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
+          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
+          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      # PyPI
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: adapter-dist
+
+      # GitHub Release
+      - name: Create GitHub Release
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$VERSION" \
+            --title "Coflux $VERSION" \
+            --generate-notes \
+            artifacts/coflux-*
+
+  bump-dev:
+    runs-on: ubuntu-latest
+    needs: [prepare, publish]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Update to next dev version
+        env:
+          NEXT: ${{ inputs.next_version }}
+        shell: python3 {0}
+        run: |
+          import os, re
+          from pathlib import Path
+
+          next_version = os.environ["NEXT"]
+
+          Path("VERSION").write_text(next_version + "\n")
+
+          # Convert to PEP 440: 0.10.0-dev -> 0.10.0.dev0
+          pep440 = re.sub(r"-dev$", ".dev0", next_version)
+          pyproject = Path("adapters/python/pyproject.toml")
+          content = pyproject.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]*"',
+              f'version = "{pep440}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          pyproject.write_text(content)
+
+      - name: Commit and push
+        env:
+          NEXT: ${{ inputs.next_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION adapters/python/pyproject.toml
+          git commit -m "Begin $NEXT development"
+          git push

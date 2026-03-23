@@ -1,10 +1,11 @@
 FROM elixir:1.18.3 AS mix_build
-WORKDIR /app
+WORKDIR /app/server
 
 RUN mix local.hex --force && \
     mix local.rebar --force
 
-COPY server/mix.exs server/mix.lock server/VERSION ./
+COPY VERSION /app/VERSION
+COPY server/mix.exs server/mix.lock ./
 RUN mix deps.get --only prod
 
 COPY server/ ./
@@ -26,6 +27,6 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 ENV LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8
 
-COPY --from=mix_build /app/_build/prod/rel/coflux ./
+COPY --from=mix_build /app/server/_build/prod/rel/coflux ./
 
 CMD [ "/app/bin/coflux", "start" ]
