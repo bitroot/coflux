@@ -61,6 +61,9 @@ jobs:
               )
           print(f"Versions consistent: {version} / {adapter_version}")
 
+      - name: Lint changelogs
+        run: python3 scripts/lint-changelog.py server/CHANGELOG.md cli/CHANGELOG.md adapters/python/CHANGELOG.md
+
   build-cli:
     runs-on: ubuntu-latest
     strategy:

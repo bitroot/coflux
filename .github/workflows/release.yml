@@ -301,6 +301,11 @@ jobs:
           packages-dir: adapter-dist
 
       # GitHub Release
+      - name: Extract release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/extract-release-notes.py "$VERSION" release-notes.md
+
       - name: Create GitHub Release
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -308,7 +313,7 @@ jobs:
         run: |
           gh release create "v$VERSION" \
             --title "Coflux $VERSION" \
-            --generate-notes \
+            --notes-file release-notes.md \
             artifacts/coflux-*
 
   bump-dev:
