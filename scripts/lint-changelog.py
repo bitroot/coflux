@@ -102,6 +102,16 @@ def lint_changelog(path: Path) -> list[str]:
     if not versions:
         errors.append(f"{path}: no version headings found")
 
+    # Check versions are in descending order
+    for i in range(len(versions) - 1):
+        current = tuple(int(x) for x in versions[i].split("."))
+        previous = tuple(int(x) for x in versions[i + 1].split("."))
+        if current <= previous:
+            errors.append(
+                f"{path}: version {versions[i]} should come after {versions[i + 1]}, "
+                f"not before (versions must be in descending order)"
+            )
+
     return errors
 
 

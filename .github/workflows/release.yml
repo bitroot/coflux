@@ -7,6 +7,10 @@ on:
         description: "Next development version (e.g. 0.10.0-dev)"
         required: true
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -60,6 +64,11 @@ jobs:
             echo "Error: next version must match X.Y.Z-dev (got: $NEXT)"
             exit 1
           fi
+
+      - name: Check changelogs have entries for this version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/extract-release-notes.py "$VERSION" /dev/null
 
   bump-version:
     runs-on: ubuntu-latest
@@ -161,8 +170,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
+          context: .
           load: true
           tags: coflux:ci
           cache-from: type=gha
@@ -309,10 +319,12 @@ jobs:
       - name: Create GitHub Release
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.bump-version.outputs.release_sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "v$VERSION" \
             --title "Coflux $VERSION" \
+            --target "$RELEASE_SHA" \
             --notes-file release-notes.md \
             artifacts/coflux-*
 

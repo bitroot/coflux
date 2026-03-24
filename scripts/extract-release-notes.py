@@ -37,15 +37,23 @@ def main():
     output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 
     sections = []
+    missing = []
     for label, path in CHANGELOGS:
         if not path.exists():
+            missing.append(f"{label} ({path}): file not found")
             continue
         content = extract_section(path, version)
         if content:
             sections.append(f"## {label}\n\n{content}")
+        else:
+            missing.append(f"{label} ({path}): no entry for {version}")
+
+    if missing:
+        for msg in missing:
+            print(f"Warning: {msg}", file=sys.stderr)
 
     if not sections:
-        print(f"No changelog entries found for version {version}", file=sys.stderr)
+        print(f"Error: no changelog entries found for version {version}", file=sys.stderr)
         sys.exit(1)
 
     body = "\n\n".join(sections) + "\n"
