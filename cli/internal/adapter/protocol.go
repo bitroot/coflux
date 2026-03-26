@@ -44,7 +44,7 @@ type CacheConfig struct {
 
 // RetriesConfig describes retry behavior
 type RetriesConfig struct {
-	Limit      *int   `json:"limit,omitempty"`
+	Limit        *int   `json:"limit,omitempty"`
 	BackoffMinMs *int64 `json:"backoff_min_ms,omitempty"`
 	BackoffMaxMs *int64 `json:"backoff_max_ms,omitempty"`
 }
