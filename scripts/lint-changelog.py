@@ -12,12 +12,15 @@ Expected format:
     ## X.Y.Z-1
     ...
 
+A version section may also contain just "No changes." (no categories or items).
+
 Rules:
     - Version headings must be `## X.Y.Z` (valid semver).
     - Category lines must be one of: Enhancements, Fixes, Changes.
     - Items must start with `- `.
     - No empty sections (category with no items).
     - Versions must appear in descending order.
+    - "No changes." sections must not contain categories or items.
 """
 
 import re
@@ -44,6 +47,7 @@ def lint_changelog(path: Path) -> list[str]:
     current_category = None
     category_has_items = True  # no active category yet
     in_version = False
+    no_changes = False  # current section is "No changes."
 
     for i, line in enumerate(lines, 1):
         # Version heading
@@ -54,6 +58,7 @@ def lint_changelog(path: Path) -> list[str]:
             versions.append(m.group(1))
             current_category = None
             category_has_items = True
+            no_changes = False
             in_version = True
             continue
 
@@ -71,6 +76,17 @@ def lint_changelog(path: Path) -> list[str]:
 
         if not in_version:
             errors.append(f"{path}:{i}: content before first version heading")
+            continue
+
+        # "No changes." marker
+        if line == "No changes.":
+            if no_changes or current_category:
+                errors.append(f"{path}:{i}: 'No changes.' must be the only content in a version section")
+            no_changes = True
+            continue
+
+        if no_changes:
+            errors.append(f"{path}:{i}: unexpected content after 'No changes.'")
             continue
 
         # Category line
