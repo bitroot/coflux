@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from .decorators import Target
+from .target import Target, serialize_cache, serialize_defer, serialize_retries
 
 
 def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
@@ -61,36 +61,13 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["wait_for"] = sorted(definition.wait_for)
 
     if definition.cache:
-        cache_def: dict[str, Any] = {}
-        if definition.cache.params is not True:
-            cache_def["params"] = definition.cache.params
-        else:
-            cache_def["params"] = True
-        if definition.cache.max_age is not None:
-            cache_def["max_age_ms"] = definition.cache.max_age
-        if definition.cache.namespace:
-            cache_def["namespace"] = definition.cache.namespace
-        if definition.cache.version:
-            cache_def["version"] = definition.cache.version
-        result["cache"] = cache_def
+        result["cache"] = serialize_cache(definition.cache, definition.parameters)
 
     if definition.retries:
-        retries_def: dict[str, Any] = {}
-        if definition.retries.limit is not None:
-            retries_def["limit"] = definition.retries.limit
-        if definition.retries.backoff[0]:
-            retries_def["backoff_min_ms"] = int(definition.retries.backoff[0])
-        if definition.retries.backoff[1]:
-            retries_def["backoff_max_ms"] = int(definition.retries.backoff[1])
-        result["retries"] = retries_def
+        result["retries"] = serialize_retries(definition.retries)
 
     if definition.defer:
-        defer_def: dict[str, Any] = {}
-        if definition.defer.params is not True:
-            defer_def["params"] = definition.defer.params
-        else:
-            defer_def["params"] = True
-        result["defer"] = defer_def
+        result["defer"] = serialize_defer(definition.defer, definition.parameters)
 
     if definition.delay:
         result["delay"] = int(definition.delay * 1000)  # Convert seconds to milliseconds
