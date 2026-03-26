@@ -78,10 +78,10 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         retries_def: dict[str, Any] = {}
         if definition.retries.limit is not None:
             retries_def["limit"] = definition.retries.limit
-        if definition.retries.delay_min:
-            retries_def["delay_min_ms"] = int(definition.retries.delay_min)
-        if definition.retries.delay_max:
-            retries_def["delay_max_ms"] = int(definition.retries.delay_max)
+        if definition.retries.backoff[0]:
+            retries_def["backoff_min_ms"] = int(definition.retries.backoff[0])
+        if definition.retries.backoff[1]:
+            retries_def["backoff_max_ms"] = int(definition.retries.backoff[1])
         result["retries"] = retries_def
 
     if definition.defer:

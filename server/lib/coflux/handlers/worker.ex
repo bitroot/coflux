@@ -478,8 +478,8 @@ defmodule Coflux.Handlers.Worker do
     if value do
       %{
         limit: Map.get(value, "limit"),
-        delay_min: Map.fetch!(value, "delay_min"),
-        delay_max: Map.fetch!(value, "delay_max")
+        backoff_min: Map.fetch!(value, "backoff_min"),
+        backoff_max: Map.fetch!(value, "backoff_max")
       }
     end
   end

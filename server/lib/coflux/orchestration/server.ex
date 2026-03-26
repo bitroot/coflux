@@ -2151,8 +2151,8 @@ defmodule Coflux.Orchestration.Server do
                                      do: nil,
                                      else: execution.retry_limit
                                    ),
-                                 delay_min: execution.retry_delay_min,
-                                 delay_max: execution.retry_delay_max
+                                 backoff_min: execution.retry_backoff_min,
+                                 backoff_max: execution.retry_backoff_max
                                }
                              ),
                            requires: requires
@@ -4299,8 +4299,8 @@ defmodule Coflux.Orchestration.Server do
             result_retryable?(result) && step.retry_limit == -1 ->
               # Unlimited retries - random delay between min and max
               delay_ms =
-                step.retry_delay_min +
-                  :rand.uniform() * (step.retry_delay_max - step.retry_delay_min)
+                step.retry_backoff_min +
+                  :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
 
               execute_after = System.os_time(:millisecond) + delay_ms
 
@@ -4322,9 +4322,9 @@ defmodule Coflux.Orchestration.Server do
               if consecutive_failures <= step.retry_limit do
                 # TODO: add jitter (within min/max delay)
                 delay_ms =
-                  step.retry_delay_min +
+                  step.retry_backoff_min +
                     (consecutive_failures - 1) / step.retry_limit *
-                      (step.retry_delay_max - step.retry_delay_min)
+                      (step.retry_backoff_max - step.retry_backoff_min)
 
                 execute_after = System.os_time(:millisecond) + delay_ms
 

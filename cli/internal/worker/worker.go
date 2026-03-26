@@ -623,11 +623,11 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		} else {
 			retriesMap["limit"] = nil
 		}
-		if params.Retries.DelayMinMs != nil {
-			retriesMap["delay_min"] = *params.Retries.DelayMinMs
+		if params.Retries.BackoffMinMs != nil {
+			retriesMap["backoff_min"] = *params.Retries.BackoffMinMs
 		}
-		if params.Retries.DelayMaxMs != nil {
-			retriesMap["delay_max"] = *params.Retries.DelayMaxMs
+		if params.Retries.BackoffMaxMs != nil {
+			retriesMap["backoff_max"] = *params.Retries.BackoffMaxMs
 		}
 		retries = retriesMap
 	}
@@ -1470,19 +1470,19 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		var retries any
 		if t.Retries != nil {
 			retriesMap := map[string]any{
-				"delay_min": int64(0),
-				"delay_max": int64(0),
+				"backoff_min": int64(0),
+				"backoff_max": int64(0),
 			}
 			if t.Retries.Limit != nil {
 				retriesMap["limit"] = *t.Retries.Limit
 			} else {
 				retriesMap["limit"] = nil
 			}
-			if t.Retries.DelayMinMs != nil {
-				retriesMap["delay_min"] = *t.Retries.DelayMinMs
+			if t.Retries.BackoffMinMs != nil {
+				retriesMap["backoff_min"] = *t.Retries.BackoffMinMs
 			}
-			if t.Retries.DelayMaxMs != nil {
-				retriesMap["delay_max"] = *t.Retries.DelayMaxMs
+			if t.Retries.BackoffMaxMs != nil {
+				retriesMap["backoff_max"] = *t.Retries.BackoffMaxMs
 			}
 			retries = retriesMap
 		}

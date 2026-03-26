@@ -45,8 +45,7 @@ class Defer(t.NamedTuple):
 
 class Retries(t.NamedTuple):
     limit: int | None = None  # 0 = no retries, None = unlimited
-    delay_min: float = 1      # seconds
-    delay_max: float = 60     # seconds
+    backoff: tuple[float, float] = (1, 60)  # (min, max) seconds
     when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None = None
 
 
@@ -146,16 +145,15 @@ def _parse_retries(
             return None
         case True:
             # Unlimited with sensible defaults (1s-60s backoff)
-            return Retries(None, 1000, 60000)
+            return Retries(None, (1000, 60000))
         case int(limit):
-            return Retries(limit, 0, 0)
-        case Retries(limit, delay_min, delay_max, when):
+            return Retries(limit, (0, 0))
+        case Retries(limit, (backoff_min, backoff_max), when):
             if limit == 0:
                 return None
             return Retries(
                 limit,
-                int(delay_min * 1000),
-                int(delay_max * 1000),
+                (int(backoff_min * 1000), int(backoff_max * 1000)),
                 _normalize_retry_when(when),
             )
 
@@ -350,8 +348,8 @@ class Target(t.Generic[P, T]):
         if self._definition.retries:
             retries_dict = {
                 "limit": self._definition.retries.limit,
-                "delay_min_ms": self._definition.retries.delay_min or None,
-                "delay_max_ms": self._definition.retries.delay_max or None,
+                "backoff_min_ms": self._definition.retries.backoff[0] or None,
+                "backoff_max_ms": self._definition.retries.backoff[1] or None,
             }
 
         # Get memo value (bool or list of indices)

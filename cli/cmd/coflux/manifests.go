@@ -366,19 +366,19 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 		var retries any
 		if t.Retries != nil {
 			retriesMap := map[string]any{
-				"delayMin": int64(0),
-				"delayMax": int64(0),
+				"backoffMin": int64(0),
+				"backoffMax": int64(0),
 			}
 			if t.Retries.Limit != nil {
 				retriesMap["limit"] = *t.Retries.Limit
 			} else {
 				retriesMap["limit"] = nil
 			}
-			if t.Retries.DelayMinMs != nil {
-				retriesMap["delayMin"] = *t.Retries.DelayMinMs
+			if t.Retries.BackoffMinMs != nil {
+				retriesMap["backoffMin"] = *t.Retries.BackoffMinMs
 			}
-			if t.Retries.DelayMaxMs != nil {
-				retriesMap["delayMax"] = *t.Retries.DelayMaxMs
+			if t.Retries.BackoffMaxMs != nil {
+				retriesMap["backoffMax"] = *t.Retries.BackoffMaxMs
 			}
 			retries = retriesMap
 		}
