@@ -204,8 +204,8 @@ defmodule Coflux.Orchestration.Manifests do
       {:ok, rows} ->
         workflows =
           Map.new(rows, fn {name, instruction_id, parameter_set_id, wait_for, cache_config_id,
-                            defer_params, delay, retry_limit, retry_backoff_min, retry_backoff_max,
-                            recurrent, requires_tag_set_id} ->
+                            defer_params, delay, retry_limit, retry_backoff_min,
+                            retry_backoff_max, recurrent, requires_tag_set_id} ->
             {:ok, workflow} =
               build_workflow(
                 db,

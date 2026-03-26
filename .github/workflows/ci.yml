@@ -31,6 +31,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+
+      - name: Check Elixir formatting
+        working-directory: server
+        run: mix format --check-formatted
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
