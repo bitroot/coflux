@@ -34,7 +34,7 @@ class Defer(t.NamedTuple):
 
 class Retries(t.NamedTuple):
     limit: int | None = None  # 0 = no retries, None = unlimited
-    backoff: tuple[float, float] = (1, 60)  # (min, max) seconds
+    backoff: tuple[float | dt.timedelta, float | dt.timedelta] = (1, 60)  # (min, max)
     when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None = None
 
 
@@ -50,7 +50,7 @@ class TargetDefinition(t.NamedTuple):
     wait_for: set[int]
     cache: Cache | None
     defer: Defer | None
-    delay: float
+    delay: float | dt.timedelta
     retries: Retries | None
     recurrent: bool
     memo: list[int] | bool
@@ -153,12 +153,6 @@ def _expand_defer(defer: bool | Defer) -> Defer | None:
     return Defer()
 
 
-def _parse_delay(delay: float | dt.timedelta) -> float:
-    if isinstance(delay, dt.timedelta):
-        return delay.total_seconds()
-    return delay
-
-
 def _parse_memo(
     memo: bool | t.Iterable[str] | str, parameters: list[Parameter]
 ) -> list[int] | bool:
@@ -206,7 +200,7 @@ def _build_definition(
         _parse_wait(wait, parameters_),
         _expand_cache(cache),
         _expand_defer(defer),
-        _parse_delay(delay),
+        delay,
         _expand_retries(retries),
         recurrent,
         _parse_memo(memo, parameters_),
@@ -218,12 +212,10 @@ def _build_definition(
 
 # --- Serialization to wire format ---
 
-def _max_age_ms(max_age: float | dt.timedelta | None) -> int | None:
-    if max_age is None:
-        return None
-    if isinstance(max_age, dt.timedelta):
-        return int(max_age.total_seconds() * 1000)
-    return int(max_age * 1000)
+def _to_ms(value: float | dt.timedelta) -> int:
+    if isinstance(value, dt.timedelta):
+        return int(value.total_seconds() * 1000)
+    return int(value * 1000)
 
 
 def _param_indexes(
@@ -239,9 +231,8 @@ def serialize_cache(cache: Cache, parameters: list[Parameter]) -> dict:
     result: dict[str, t.Any] = {
         "params": _param_indexes(cache.params, parameters),
     }
-    max_age = _max_age_ms(cache.max_age)
-    if max_age is not None:
-        result["max_age_ms"] = max_age
+    if cache.max_age is not None:
+        result["max_age_ms"] = _to_ms(cache.max_age)
     if cache.namespace:
         result["namespace"] = cache.namespace
     if cache.version:
@@ -257,8 +248,8 @@ def serialize_retries(retries: Retries) -> dict:
     result: dict[str, t.Any] = {}
     if retries.limit is not None:
         result["limit"] = retries.limit
-    backoff_min_ms = int(retries.backoff[0] * 1000)
-    backoff_max_ms = int(retries.backoff[1] * 1000)
+    backoff_min_ms = _to_ms(retries.backoff[0])
+    backoff_max_ms = _to_ms(retries.backoff[1])
     if backoff_min_ms:
         result["backoff_min_ms"] = backoff_min_ms
     if backoff_max_ms:
@@ -353,7 +344,7 @@ class Target(t.Generic[P, T]):
             cache=cache_dict,
             defer=defer_dict,
             memo=memo_val,
-            delay=self._definition.delay if self._definition.delay else None,
+            delay=_to_ms(self._definition.delay) if self._definition.delay else None,
             retries=retries_dict,
             recurrent=self._definition.recurrent,
             requires=self._definition.requires,

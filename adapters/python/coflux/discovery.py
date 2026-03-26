@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from .target import Target, serialize_cache, serialize_defer, serialize_retries
+from .target import Target, _to_ms, serialize_cache, serialize_defer, serialize_retries
 
 
 def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
@@ -70,7 +70,7 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["defer"] = serialize_defer(definition.defer, definition.parameters)
 
     if definition.delay:
-        result["delay"] = int(definition.delay * 1000)  # Convert seconds to milliseconds
+        result["delay"] = _to_ms(definition.delay)
 
     if definition.memo:
         result["memo"] = definition.memo
