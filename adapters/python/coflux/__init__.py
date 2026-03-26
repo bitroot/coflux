@@ -11,7 +11,7 @@ import datetime as dt
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
-from .decorators import task, workflow, stub, Target, Retries
+from .decorators import task, workflow, stub, Target, Cache, Defer, Retries
 from .errors import ExecutionError
 from .models import Asset, AssetEntry, AssetMetadata, Execution
 from .state import get_context
@@ -30,6 +30,8 @@ __all__ = [
     "Target",
     "Execution",
     "ExecutionError",
+    "Cache",
+    "Defer",
     "Retries",
     "Asset",
     "AssetEntry",

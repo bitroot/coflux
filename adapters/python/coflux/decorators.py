@@ -33,14 +33,14 @@ class Parameter(t.NamedTuple):
 
 
 class Cache(t.NamedTuple):
-    params: list[int] | t.Literal[True]
-    max_age: int | None
-    namespace: str | None
-    version: str | None
+    max_age: float | dt.timedelta | None = None  # seconds
+    params: t.Iterable[str] | str | None = None
+    namespace: str | None = None
+    version: str | None = None
 
 
 class Defer(t.NamedTuple):
-    params: list[int] | t.Literal[True]
+    params: t.Iterable[str] | str | None = None
 
 
 class Retries(t.NamedTuple):
@@ -94,33 +94,36 @@ def _parse_wait(
     return set(_get_param_indexes(parameters, wait))
 
 
+def _parse_max_age(max_age: float | dt.timedelta | None) -> int | None:
+    if max_age is None:
+        return None
+    if isinstance(max_age, dt.timedelta):
+        return int(max_age.total_seconds() * 1000)
+    return int(max_age * 1000)
+
+
 def _parse_cache(
-    cache: bool | float | dt.timedelta,
-    cache_params: t.Iterable[str] | str | None,
-    cache_namespace: str | None,
-    cache_version: str | None,
+    cache: bool | float | dt.timedelta | Cache,
     parameters: list[Parameter],
 ) -> Cache | None:
     if not cache:
         return None
-    return Cache(
-        (
-            True
-            if cache_params is None
-            else _get_param_indexes(parameters, cache_params)
-        ),
-        (
-            int(cache * 1000)
-            if isinstance(cache, (int, float)) and not isinstance(cache, bool)
-            else (
-                int(cache.total_seconds() * 1000)
-                if isinstance(cache, dt.timedelta)
-                else None
+    match cache:
+        case Cache(max_age, params, namespace, version):
+            return Cache(
+                _parse_max_age(max_age),
+                True if params is None else _get_param_indexes(parameters, params),
+                namespace,
+                version,
             )
-        ),
-        cache_namespace,
-        cache_version,
-    )
+        case _:
+            # bool or float or timedelta — treat as max_age shorthand
+            return Cache(
+                _parse_max_age(None if isinstance(cache, bool) else cache),
+                True,
+                None,
+                None,
+            )
 
 
 def _normalize_retry_when(
@@ -159,15 +162,19 @@ def _parse_retries(
 
 
 def _parse_defer(
-    defer: bool,
-    defer_params: t.Iterable[str] | str | None,
+    defer: bool | Defer,
     parameters: list[Parameter],
 ) -> Defer | None:
     if not defer:
         return None
-    return Defer(
-        (True if defer_params is None else _get_param_indexes(parameters, defer_params))
-    )
+    match defer:
+        case Defer(params):
+            return Defer(
+                True if params is None else _get_param_indexes(parameters, params),
+            )
+        case _:
+            # bool shorthand
+            return Defer(True)
 
 
 def _parse_delay(delay: float | dt.timedelta) -> float:
@@ -188,14 +195,10 @@ def _build_definition(
     type: TargetType,
     fn: t.Callable,
     wait: bool | t.Iterable[str] | str,
-    cache: bool | float | dt.timedelta,
-    cache_params: t.Iterable[str] | str | None,
-    cache_namespace: str | None,
-    cache_version: str | None,
+    cache: bool | float | dt.timedelta | Cache,
     retries: int | bool | Retries,
     recurrent: bool,
-    defer: bool,
-    defer_params: t.Iterable[str] | str | None,
+    defer: bool | Defer,
     delay: float | dt.timedelta,
     memo: bool | t.Iterable[str] | str,
     requires: dict[str, str | bool | list[str]] | None,
@@ -210,8 +213,8 @@ def _build_definition(
         type,
         parameters_,
         _parse_wait(wait, parameters_),
-        _parse_cache(cache, cache_params, cache_namespace, cache_version, parameters_),
-        _parse_defer(defer, defer_params, parameters_),
+        _parse_cache(cache, parameters_),
+        _parse_defer(defer, parameters_),
         _parse_delay(delay),
         _parse_retries(retries),
         recurrent,
@@ -263,14 +266,10 @@ class Target(t.Generic[P, T]):
         module: str | None = None,
         name: str | None = None,
         wait: bool | t.Iterable[str] | str = False,
-        cache: bool | float | dt.timedelta = False,
-        cache_params: t.Iterable[str] | str | None = None,
-        cache_namespace: str | None = None,
-        cache_version: str | None = None,
+        cache: bool | float | dt.timedelta | Cache = False,
         retries: int | bool | Retries = 0,
         recurrent: bool = False,
-        defer: bool = False,
-        defer_params: t.Iterable[str] | str | None = None,
+        defer: bool | Defer = False,
         delay: float | dt.timedelta = 0,
         memo: bool | t.Iterable[str] | str = False,
         requires: dict[str, str | bool | list[str]] | None = None,
@@ -284,13 +283,9 @@ class Target(t.Generic[P, T]):
             fn,
             wait,
             cache,
-            cache_params,
-            cache_namespace,
-            cache_version,
             retries,
             recurrent,
             defer,
-            defer_params,
             delay,
             memo,
             requires,
@@ -381,14 +376,10 @@ def task(
     *,
     name: str | None = None,
     wait: bool | t.Iterable[str] | str = False,
-    cache: bool | float | dt.timedelta = False,
-    cache_params: t.Iterable[str] | str | None = None,
-    cache_namespace: str | None = None,
-    cache_version: str | None = None,
+    cache: bool | float | dt.timedelta | Cache = False,
     retries: int | bool | Retries = 0,
     recurrent: bool = False,
-    defer: bool = False,
-    defer_params: t.Iterable[str] | str | None = None,
+    defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     memo: bool | t.Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
@@ -401,13 +392,9 @@ def task(
             name=name,
             wait=wait,
             cache=cache,
-            cache_params=cache_params,
-            cache_namespace=cache_namespace,
-            cache_version=cache_version,
             retries=retries,
             recurrent=recurrent,
             defer=defer,
-            defer_params=defer_params,
             delay=delay,
             memo=memo,
             requires=requires,
@@ -420,14 +407,10 @@ def workflow(
     *,
     name: str | None = None,
     wait: bool | t.Iterable[str] | str = False,
-    cache: bool | float | dt.timedelta = False,
-    cache_params: t.Iterable[str] | str | None = None,
-    cache_namespace: str | None = None,
-    cache_version: str | None = None,
+    cache: bool | float | dt.timedelta | Cache = False,
     retries: int | bool | Retries = 0,
     recurrent: bool = False,
-    defer: bool = False,
-    defer_params: t.Iterable[str] | str | None = None,
+    defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     requires: dict[str, str | bool | list[str]] | None = None,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
@@ -439,13 +422,9 @@ def workflow(
             name=name,
             wait=wait,
             cache=cache,
-            cache_params=cache_params,
-            cache_namespace=cache_namespace,
-            cache_version=cache_version,
             retries=retries,
             recurrent=recurrent,
             defer=defer,
-            defer_params=defer_params,
             delay=delay,
             requires=requires,
         )
@@ -459,14 +438,10 @@ def stub(
     name: str | None = None,
     type: t.Literal["workflow", "task"] = "task",
     wait: bool | t.Iterable[str] | str = False,
-    cache: bool | float | dt.timedelta = False,
-    cache_params: t.Iterable[str] | str | None = None,
-    cache_namespace: str | None = None,
-    cache_version: str | None = None,
+    cache: bool | float | dt.timedelta | Cache = False,
     retries: int | bool | Retries = 0,
     recurrent: bool = False,
-    defer: bool = False,
-    defer_params: t.Iterable[str] | str | None = None,
+    defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     memo: bool | t.Iterable[str] = False,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
@@ -479,13 +454,9 @@ def stub(
             name=name,
             wait=wait,
             cache=cache,
-            cache_params=cache_params,
-            cache_namespace=cache_namespace,
-            cache_version=cache_version,
             retries=retries,
             recurrent=recurrent,
             defer=defer,
-            defer_params=defer_params,
             delay=delay,
             memo=memo,
             is_stub=True,
