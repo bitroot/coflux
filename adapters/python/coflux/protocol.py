@@ -83,6 +83,8 @@ def _derive_api_version(version: str) -> str:
     Pre-1.0: "0.{minor}" (e.g., "0.8.1" -> "0.8")
     Post-1.0: "{major}" (e.g., "1.2.3" -> "1")
     """
+    if version == "dev" or not version:
+        return "dev"
     parts = version.split(".")
     if len(parts) >= 2:
         major = int(parts[0])

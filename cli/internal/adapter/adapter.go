@@ -173,7 +173,7 @@ func (e *Executor) WaitReady(ctx context.Context) error {
 			return fmt.Errorf("failed to parse ready params: %w", err)
 		}
 		expected := version.APIVersion()
-		if expected != "dev" && readyParams.Version != expected {
+		if expected != "dev" && readyParams.Version != "dev" && readyParams.Version != expected {
 			return fmt.Errorf(
 				"adapter version mismatch: CLI expects protocol version %s, but the adapter reports %s — update the coflux Python package",
 				expected, readyParams.Version,

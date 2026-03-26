@@ -19,7 +19,7 @@ from .state import get_context
 try:
     __version__ = _pkg_version("coflux")
 except PackageNotFoundError:
-    __version__ = "0.0.0"
+    __version__ = "dev"
 
 __all__ = [
     # Decorators
