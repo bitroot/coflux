@@ -2,10 +2,6 @@ name: Release
 
 on:
   workflow_dispatch:
-    inputs:
-      next_version:
-        description: "Next development version (e.g. 0.10.0-dev)"
-        required: true
 
 concurrency:
   group: release
@@ -22,6 +18,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       pep440_version: ${{ steps.version.outputs.pep440_version }}
       api_version: ${{ steps.version.outputs.api_version }}
+      next_version: ${{ steps.next.outputs.next_version }}
+      next_pep440: ${{ steps.next.outputs.next_pep440 }}
+      target_branch: ${{ steps.next.outputs.target_branch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +28,7 @@ jobs:
         id: version
         shell: python3 {0}
         run: |
-          import os, re
+          import os
           from pathlib import Path
 
           version = Path("VERSION").read_text().strip()
@@ -56,14 +55,11 @@ jobs:
           print(f"PEP 440 version: {pep440}")
           print(f"API version: {api}")
 
-      - name: Validate next version
-        env:
-          NEXT: ${{ inputs.next_version }}
+      - name: Determine next dev version
+        id: next
         run: |
-          if [[ ! "$NEXT" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev$ ]]; then
-            echo "Error: next version must match X.Y.Z-dev (got: $NEXT)"
-            exit 1
-          fi
+          echo "target_branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          python3 scripts/next-dev-version.py "${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Check changelogs have entries for this version
         env:
@@ -75,6 +71,7 @@ jobs:
     needs: [prepare]
     outputs:
       release_sha: ${{ steps.commit.outputs.sha }}
+      ci_branch: ${{ steps.commit.outputs.ci_branch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -102,22 +99,20 @@ jobs:
           )
           pyproject.write_text(content)
 
-      - name: Commit release version
+      - name: Commit release version to CI branch
         id: commit
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          ci_branch="ci/release-$VERSION"
+          git checkout -b "$ci_branch"
           git add VERSION adapters/python/pyproject.toml
           git commit -m "Release $VERSION"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      # Push now so build jobs can check out the release commit.
-      # If tests fail, the release commit will be on main without a tag —
-      # fix the issue and re-run the workflow.
-      - name: Push release commit
-        run: git push
+          echo "ci_branch=$ci_branch" >> "$GITHUB_OUTPUT"
+          git push -u origin "$ci_branch"
 
   build-cli:
     runs-on: ubuntu-latest
@@ -251,9 +246,29 @@ jobs:
           COFLUX_IMAGE: coflux:ci
         run: pytest tests/ -n auto
 
+  finalize:
+    runs-on: ubuntu-latest
+    needs: [prepare, bump-version, test]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Fast-forward target branch to release commit
+        env:
+          RELEASE_SHA: ${{ needs.bump-version.outputs.release_sha }}
+          CI_BRANCH: ${{ needs.bump-version.outputs.ci_branch }}
+        run: |
+          git merge --ff-only "$RELEASE_SHA"
+          git push
+          git push origin --delete "$CI_BRANCH"
+
   publish:
     runs-on: ubuntu-latest
-    needs: [prepare, bump-version, test, build-cli, build-server, build-adapter]
+    needs: [prepare, bump-version, finalize, build-cli, build-server, build-adapter]
     concurrency: release-publish
     environment: pypi
     permissions:
@@ -331,30 +346,32 @@ jobs:
   bump-dev:
     runs-on: ubuntu-latest
     needs: [prepare, publish]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.target_branch }}
 
       - name: Update to next dev version
         env:
-          NEXT: ${{ inputs.next_version }}
+          NEXT: ${{ needs.prepare.outputs.next_version }}
+          NEXT_PEP440: ${{ needs.prepare.outputs.next_pep440 }}
         shell: python3 {0}
         run: |
           import os, re
           from pathlib import Path
 
           next_version = os.environ["NEXT"]
+          next_pep440 = os.environ["NEXT_PEP440"]
 
           Path("VERSION").write_text(next_version + "\n")
 
-          # Convert to PEP 440: 0.10.0-dev -> 0.10.0.dev0
-          pep440 = re.sub(r"-dev$", ".dev0", next_version)
           pyproject = Path("adapters/python/pyproject.toml")
           content = pyproject.read_text()
           content = re.sub(
               r'^version\s*=\s*"[^"]*"',
-              f'version = "{pep440}"',
+              f'version = "{next_pep440}"',
               content,
               flags=re.MULTILINE,
           )
@@ -362,7 +379,7 @@ jobs:
 
       - name: Commit and push
         env:
-          NEXT: ${{ inputs.next_version }}
+          NEXT: ${{ needs.prepare.outputs.next_version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
