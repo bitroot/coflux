@@ -99,8 +99,8 @@ defmodule Coflux.Topics.Workflow do
     if retries do
       %{
         limit: retries.limit,
-        delayMin: retries.delay_min,
-        delayMax: retries.delay_max
+        backoffMin: retries.backoff_min,
+        backoffMax: retries.backoff_max
       }
     end
   end

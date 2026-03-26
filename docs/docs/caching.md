@@ -67,20 +67,28 @@ This property is generally desirable, but it means that if the first task fails,
 
 ## Cache parameters
 
-By default, all parameters are considered for a cache match, but if needed specific parameters can be specified. For example:
+By default, all parameters are considered for a cache match, but if needed specific parameters can be specified using the `Cache` class. For example:
 
 ```python
-@cf.task(cache=True, cache_params=["product_id"])
+@cf.task(cache=cf.Cache(params=["product_id"]))
 def fetch_product(product_id, url):
     ...
 ```
 
 In this case, only the `product_id` parameter will be used - a different `url` won't affect the cache lookup.
 
+A maximum age can also be specified on the `Cache` object:
+
+```python
+@cf.task(cache=cf.Cache(max_age=600, params=["product_id"]))
+def fetch_product(product_id, url):
+    ...
+```
+
 :::note
 The names of arguments can be changed without affecting the cache - this is because the names are translated to indexes.
 
-Additionally, if the order of parameters needs to be changed, the cache can be maintained by specifying (or rearranging) the `cache_params`. In the following three versions of `my_task` the addition of a parameter, and then rearranging, won't effect the cache:
+Additionally, if the order of parameters needs to be changed, the cache can be maintained by specifying (or rearranging) the `params`. In the following three versions of `my_task` the addition of a parameter, and then rearranging, won't effect the cache:
 
 ```python
 # before change
@@ -90,13 +98,13 @@ def my_task(a, b):
 ```
 
 ```python
-@cf.task(cache=True, cache_params=["a", "b"])
+@cf.task(cache=cf.Cache(params=["a", "b"]))
 def my_task(a, b, c):
     # ...
 ```
 
 ```python
-@cf.task(cache=True, cache_params=["a", "b2"])
+@cf.task(cache=cf.Cache(params=["a", "b2"]))
 def my_task(c, b2, a):
     # ...
 ```
@@ -107,7 +115,7 @@ def my_task(c, b2, a):
 Each cache key is considered within a namespace. By default this namespace consists of the module name and the task name (in the format `module:target`). In some cases it might be necessary to override this namespace. For example, if you need to rename a function (or module), but you want to retain the cache:
 
 ```python
-@cf.task(cache=True, cache_namespace="example1.workflows:task_name")
+@cf.task(cache=cf.Cache(namespace="example1.workflows:task_name"))
 def new_task_name():
     ...
 ```
@@ -115,21 +123,21 @@ def new_task_name():
 Two task can share the same namespace. In this case, calling either task (with the same argument) will resolve to the same cached result (if present):
 
 ```python
-@cf.task(cache=True, cache_namespace="my_namespace")
+@cf.task(cache=cf.Cache(namespace="my_namespace"))
 def task_a(a):
     ...
 
-@cf.task(cache=True, cache_namespace="my_namespace")
+@cf.task(cache=cf.Cache(namespace="my_namespace"))
 def task_b(b):
     ...
 ```
 
 ## Cache versions
 
-When the implementation of a task changes, it may be desirable to reset the cache. This can be achieved by setting a `cache_version`:
+When the implementation of a task changes, it may be desirable to reset the cache. This can be achieved by setting a version on the `Cache` object:
 
 ```python
-@cf.task(cache=True, cache_version="v2")
+@cf.task(cache=cf.Cache(version="v2"))
 def my_task():
     # ...
 ```

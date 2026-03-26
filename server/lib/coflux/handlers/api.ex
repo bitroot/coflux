@@ -1019,11 +1019,11 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         # limit can be nil (unlimited) or an integer
-        # delay_min and delay_max default to 0 if not provided (database requires NOT NULL)
+        # backoff_min and backoff_max default to 0 if not provided (database requires NOT NULL)
         with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
-             {:ok, delay_min} <- parse_integer(Map.get(value, "delayMin"), optional: true),
-             {:ok, delay_max} <- parse_integer(Map.get(value, "delayMax"), optional: true) do
-          {:ok, %{limit: limit, delay_min: delay_min || 0, delay_max: delay_max || 0}}
+             {:ok, backoff_min} <- parse_integer(Map.get(value, "backoffMin"), optional: true),
+             {:ok, backoff_max} <- parse_integer(Map.get(value, "backoffMax"), optional: true) do
+          {:ok, %{limit: limit, backoff_min: backoff_min || 0, backoff_max: backoff_max || 0}}
         end
 
       true ->

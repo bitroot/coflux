@@ -128,7 +128,7 @@ defmodule Coflux.Orchestration.Epoch do
                   SELECT
                     id, number, run_id, parent_id, module, target, type, priority,
                     wait_for, cache_config_id, cache_key, defer_key, memo_key,
-                    retry_limit, retry_delay_min, retry_delay_max, recurrent, delay,
+                    retry_limit, retry_backoff_min, retry_backoff_max, recurrent, delay,
                     requires_tag_set_id, created_at
                   FROM steps
                   WHERE run_id = ?1
@@ -141,8 +141,8 @@ defmodule Coflux.Orchestration.Epoch do
                 Enum.reduce(steps, {%{}, %{}}, fn {old_step_id, number, _run_id, step_parent_id,
                                                    module, target, type, priority, wait_for,
                                                    cache_config_id, cache_key, defer_key,
-                                                   memo_key, retry_limit, retry_delay_min,
-                                                   retry_delay_max, recurrent, delay,
+                                                   memo_key, retry_limit, retry_backoff_min,
+                                                   retry_backoff_max, recurrent, delay,
                                                    requires_tag_set_id, step_created_at},
                                                   {step_acc, exec_acc} ->
                   # steps.parent_id is same-run internal — strict remap
@@ -164,8 +164,8 @@ defmodule Coflux.Orchestration.Epoch do
                       defer_key: if(defer_key, do: {:blob, defer_key}),
                       memo_key: if(memo_key, do: {:blob, memo_key}),
                       retry_limit: retry_limit,
-                      retry_delay_min: retry_delay_min,
-                      retry_delay_max: retry_delay_max,
+                      retry_backoff_min: retry_backoff_min,
+                      retry_backoff_max: retry_backoff_max,
                       recurrent: recurrent,
                       delay: delay,
                       requires_tag_set_id:
@@ -1201,7 +1201,7 @@ defmodule Coflux.Orchestration.Epoch do
             """
             SELECT name, parameter_set_id, instruction_id, wait_for,
               cache_config_id, defer_params, delay, retry_limit,
-              retry_delay_min, retry_delay_max, recurrent, requires_tag_set_id
+              retry_backoff_min, retry_backoff_max, recurrent, requires_tag_set_id
             FROM workflows
             WHERE manifest_id = ?1
             """,
@@ -1209,7 +1209,7 @@ defmodule Coflux.Orchestration.Epoch do
           )
 
         Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay,
-                                 retry_limit, retry_delay_min, retry_delay_max, recurrent,
+                                 retry_limit, retry_backoff_min, retry_backoff_max, recurrent,
                                  rts_id} ->
           {:ok, _} =
             insert_one(target_db, :workflows, %{
@@ -1222,8 +1222,8 @@ defmodule Coflux.Orchestration.Epoch do
               defer_params: defer_params,
               delay: delay,
               retry_limit: retry_limit,
-              retry_delay_min: retry_delay_min,
-              retry_delay_max: retry_delay_max,
+              retry_backoff_min: retry_backoff_min,
+              retry_backoff_max: retry_backoff_max,
               recurrent: recurrent,
               requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id)
             })

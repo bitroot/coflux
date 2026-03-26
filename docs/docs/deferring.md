@@ -30,10 +30,10 @@ Deferring can also be useful without specifying an explicit delay in the case wh
 
 ## Defer parameters
 
-Similarly to how caching is configured, specific parameters can be specified for use with deferring, if needed:
+Similarly to how caching is configured, specific parameters can be specified for use with deferring, if needed, using the `Defer` class:
 
 ```python
-@cf.task(delay=60, defer=True, defer_params=["user_id", "document_id"])
+@cf.task(delay=60, defer=cf.Defer(params=["user_id", "document_id"]))
 def send_notification(user_id, document_id, update):
     ...
 ```

@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from .decorators import Target
+from .target import Target, _to_ms, serialize_cache, serialize_defer, serialize_retries
 
 
 def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
@@ -25,13 +25,15 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
         try:
             module = importlib.import_module(module_name)
         except ImportError as e:
-            print(f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr)
+            print(
+                f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr
+            )
             continue
 
-        # Scan module attributes for Target instances
+        # Scan module attributes for Target instances (excluding stubs)
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
-            if isinstance(attr, Target):
+            if isinstance(attr, Target) and not attr.definition.is_stub:
                 target_def = _build_target_definition(attr, module_name)
                 targets.append(target_def)
 
@@ -61,39 +63,16 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["wait_for"] = sorted(definition.wait_for)
 
     if definition.cache:
-        cache_def: dict[str, Any] = {}
-        if definition.cache.params is not True:
-            cache_def["params"] = definition.cache.params
-        else:
-            cache_def["params"] = True
-        if definition.cache.max_age is not None:
-            cache_def["max_age_ms"] = definition.cache.max_age
-        if definition.cache.namespace:
-            cache_def["namespace"] = definition.cache.namespace
-        if definition.cache.version:
-            cache_def["version"] = definition.cache.version
-        result["cache"] = cache_def
+        result["cache"] = serialize_cache(definition.cache, definition.parameters)
 
     if definition.retries:
-        retries_def: dict[str, Any] = {}
-        if definition.retries.limit is not None:
-            retries_def["limit"] = definition.retries.limit
-        if definition.retries.delay_min:
-            retries_def["delay_min_ms"] = int(definition.retries.delay_min)
-        if definition.retries.delay_max:
-            retries_def["delay_max_ms"] = int(definition.retries.delay_max)
-        result["retries"] = retries_def
+        result["retries"] = serialize_retries(definition.retries)
 
     if definition.defer:
-        defer_def: dict[str, Any] = {}
-        if definition.defer.params is not True:
-            defer_def["params"] = definition.defer.params
-        else:
-            defer_def["params"] = True
-        result["defer"] = defer_def
+        result["defer"] = serialize_defer(definition.defer, definition.parameters)
 
     if definition.delay:
-        result["delay"] = int(definition.delay * 1000)  # Convert seconds to milliseconds
+        result["delay"] = _to_ms(definition.delay)
 
     if definition.memo:
         result["memo"] = definition.memo
@@ -103,9 +82,6 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
 
     if definition.recurrent:
         result["recurrent"] = True
-
-    if definition.is_stub:
-        result["is_stub"] = True
 
     if definition.instruction:
         result["instruction"] = definition.instruction

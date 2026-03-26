@@ -9,7 +9,7 @@ def test_retry_on_error(worker):
     """First attempt fails, retry succeeds. Run result is the success value."""
     targets = [
         workflow(
-            "test", "flaky", retries={"limit": 1, "delay_min_ms": 0, "delay_max_ms": 0}
+            "test", "flaky", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
         )
     ]
 
@@ -34,7 +34,7 @@ def test_retry_limit_exhausted(worker):
     """All retry attempts fail. After the limit, run result is the final error."""
     targets = [
         workflow(
-            "test", "doomed", retries={"limit": 1, "delay_min_ms": 0, "delay_max_ms": 0}
+            "test", "doomed", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
         )
     ]
 
@@ -58,7 +58,7 @@ def test_retry_limit_exhausted(worker):
 
 
 def test_retry_with_delay(worker):
-    """Retry respects delay_min_ms timing between attempts."""
+    """Retry respects backoff_min_ms timing between attempts."""
     targets = [
         workflow("test", "main"),
         task("test", "flaky_task"),
@@ -74,7 +74,7 @@ def test_retry_with_delay(worker):
             ex0.execution_id,
             "test", "flaky_task",
             [],
-            retries={"limit": 1, "delay_min_ms": 500, "delay_max_ms": 500},
+            retries={"limit": 1, "backoff_min_ms": 500, "backoff_max_ms": 500},
         )
 
         # First attempt: fail
@@ -98,7 +98,7 @@ def test_retry_not_retryable(worker):
     """When retryable=False, no retry is attempted despite retry limit."""
     targets = [
         workflow(
-            "test", "non_retryable", retries={"limit": 3, "delay_min_ms": 0, "delay_max_ms": 0}
+            "test", "non_retryable", retries={"limit": 3, "backoff_min_ms": 0, "backoff_max_ms": 0}
         )
     ]
 
@@ -118,7 +118,7 @@ def test_retry_retryable_true_still_retries(worker):
     """When retryable=True (default), retries work normally."""
     targets = [
         workflow(
-            "test", "retryable", retries={"limit": 1, "delay_min_ms": 0, "delay_max_ms": 0}
+            "test", "retryable", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
         )
     ]
 
