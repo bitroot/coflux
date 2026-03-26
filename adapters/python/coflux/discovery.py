@@ -28,10 +28,10 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
             print(f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr)
             continue
 
-        # Scan module attributes for Target instances
+        # Scan module attributes for Target instances (excluding stubs)
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
-            if isinstance(attr, Target):
+            if isinstance(attr, Target) and not attr.definition.is_stub:
                 target_def = _build_target_definition(attr, module_name)
                 targets.append(target_def)
 
@@ -80,9 +80,6 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
 
     if definition.recurrent:
         result["recurrent"] = True
-
-    if definition.is_stub:
-        result["is_stub"] = True
 
     if definition.instruction:
         result["instruction"] = definition.instruction
