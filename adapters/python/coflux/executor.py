@@ -22,8 +22,7 @@ def _format_filtered_traceback(exc: Exception) -> str:
     """Format a traceback string with Coflux-internal frames removed."""
     frames = traceback.extract_tb(exc.__traceback__)
     filtered = [
-        f for f in frames
-        if not os.path.abspath(f.filename).startswith(_COFLUX_PKG_DIR)
+        f for f in frames if not os.path.abspath(f.filename).startswith(_COFLUX_PKG_DIR)
     ]
     if not filtered:
         filtered = list(frames)
@@ -33,7 +32,13 @@ def _format_filtered_traceback(exc: Exception) -> str:
     return "".join(lines)
 
 
-def execute_target(execution_id: str, module_name: str, target_name: str, arguments: list[dict[str, Any]], working_dir: str | None = None) -> None:
+def execute_target(
+    execution_id: str,
+    module_name: str,
+    target_name: str,
+    arguments: list[dict[str, Any]],
+    working_dir: str | None = None,
+) -> None:
     """Execute a target with the given arguments."""
     original_dir = os.getcwd()
     try:
@@ -50,7 +55,11 @@ def execute_target(execution_id: str, module_name: str, target_name: str, argume
         deserialized_args = [deserialize_value(arg) for arg in arguments]
 
         # Set up execution context
-        set_context(ExecutorContext(execution_id, working_dir=Path(working_dir) if working_dir else None))
+        set_context(
+            ExecutorContext(
+                execution_id, working_dir=Path(working_dir) if working_dir else None
+            )
+        )
 
         # Call the target function with output capture
         # Note: We call the underlying function, not the Target wrapper

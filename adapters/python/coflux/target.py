@@ -42,7 +42,12 @@ class Retries:
     limit: int | None = None
     _: dataclasses.KW_ONLY
     backoff: tuple[float | dt.timedelta, float | dt.timedelta] = (1, 60)
-    when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None = None
+    when: (
+        type[BaseException]
+        | tuple[type[BaseException], ...]
+        | t.Callable[[BaseException], bool]
+        | None
+    ) = None
 
 
 class Parameter(t.NamedTuple):
@@ -121,17 +126,24 @@ def _expand_cache(cache: bool | float | dt.timedelta | Cache) -> Cache | None:
 
 
 def _normalize_retry_when(
-    when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None,
+    when: type[BaseException]
+    | tuple[type[BaseException], ...]
+    | t.Callable[[BaseException], bool]
+    | None,
 ) -> t.Callable[[BaseException], bool] | None:
     if when is None:
         return None
     if isinstance(when, type) and issubclass(when, BaseException):
         return lambda e, _cls=when: isinstance(e, _cls)
-    if isinstance(when, tuple) and all(isinstance(c, type) and issubclass(c, BaseException) for c in when):
+    if isinstance(when, tuple) and all(
+        isinstance(c, type) and issubclass(c, BaseException) for c in when
+    ):
         return lambda e, _classes=when: isinstance(e, _classes)
     if callable(when):
         return when
-    raise TypeError(f"Invalid 'when' argument: expected exception type(s) or callable, got {type(when).__name__}")
+    raise TypeError(
+        f"Invalid 'when' argument: expected exception type(s) or callable, got {type(when).__name__}"
+    )
 
 
 def _expand_retries(retries: int | bool | Retries) -> Retries | None:
@@ -217,6 +229,7 @@ def _build_definition(
 
 
 # --- Serialization to wire format ---
+
 
 def _to_ms(value: float | dt.timedelta) -> int:
     if isinstance(value, dt.timedelta):
@@ -328,14 +341,28 @@ class Target(t.Generic[P, T]):
         serialized_args = [serialize_value(arg) for arg in args]
 
         # Use only the declared wait_for from the decorator
-        wait_for_val = sorted(self._definition.wait_for) if self._definition.wait_for else None
+        wait_for_val = (
+            sorted(self._definition.wait_for) if self._definition.wait_for else None
+        )
 
         # Serialize config objects to wire format
         parameters = self._definition.parameters
 
-        cache_dict = serialize_cache(self._definition.cache, parameters) if self._definition.cache else None
-        defer_dict = serialize_defer(self._definition.defer, parameters) if self._definition.defer else None
-        retries_dict = serialize_retries(self._definition.retries) if self._definition.retries else None
+        cache_dict = (
+            serialize_cache(self._definition.cache, parameters)
+            if self._definition.cache
+            else None
+        )
+        defer_dict = (
+            serialize_defer(self._definition.defer, parameters)
+            if self._definition.defer
+            else None
+        )
+        retries_dict = (
+            serialize_retries(self._definition.retries)
+            if self._definition.retries
+            else None
+        )
 
         # Get memo value (bool or list of indices)
         memo_val = self._definition.memo if self._definition.memo else None

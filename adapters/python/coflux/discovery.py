@@ -25,7 +25,9 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
         try:
             module = importlib.import_module(module_name)
         except ImportError as e:
-            print(f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr)
+            print(
+                f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr
+            )
             continue
 
         # Scan module attributes for Target instances (excluding stubs)

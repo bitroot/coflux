@@ -163,7 +163,11 @@ class ExecutorContext:
             if not path.is_absolute():
                 path = base_dir / path
             if path.is_file():
-                rel_path = str(path.relative_to(base_dir)) if base_dir in path.parents or path.parent == base_dir else path.name
+                rel_path = (
+                    str(path.relative_to(base_dir))
+                    if base_dir in path.parents or path.parent == base_dir
+                    else path.name
+                )
                 paths_to_upload.append((rel_path, path))
         elif isinstance(entries, list):
             for entry in entries:
@@ -171,7 +175,11 @@ class ExecutorContext:
                 if not path.is_absolute():
                     path = base_dir / path
                 if path.is_file():
-                    rel_path = str(path.relative_to(base_dir)) if base_dir in path.parents or path.parent == base_dir else path.name
+                    rel_path = (
+                        str(path.relative_to(base_dir))
+                        if base_dir in path.parents or path.parent == base_dir
+                        else path.name
+                    )
                     paths_to_upload.append((rel_path, path))
         elif isinstance(entries, dict):
             if at is not None:
@@ -350,4 +358,6 @@ class ExecutorContext:
                 self._pending_requests[msg["id"]] = msg
             else:
                 # Unexpected message during wait
-                raise RuntimeError(f"Unexpected message while waiting for response: {msg}")
+                raise RuntimeError(
+                    f"Unexpected message while waiting for response: {msg}"
+                )

@@ -47,6 +47,13 @@ jobs:
             exit 1
           fi
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Check Python formatting
+        working-directory: adapters/python
+        run: uvx ruff format --check .
+
       - name: Check version consistency
         shell: python3 {0}
         run: |

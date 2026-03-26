@@ -102,20 +102,30 @@ def _encode_value(
             return {"type": "ref", "index": len(references) - 1}
         elif isinstance(v, Asset):
             m = v.metadata
-            references.append(["asset", v.id, m.name if m else None, m.total_count if m else None, m.total_size if m else None])
+            references.append(
+                [
+                    "asset",
+                    v.id,
+                    m.name if m else None,
+                    m.total_count if m else None,
+                    m.total_size if m else None,
+                ]
+            )
             return {"type": "ref", "index": len(references) - 1}
         elif HAS_PYDANTIC and isinstance(v, pydantic.BaseModel):
             model_class = v.__class__
             model_fqn = f"{model_class.__module__}.{model_class.__name__}"
             json_data = v.model_dump_json().encode()
             path = write_temp_file(json_data)
-            references.append([
-                "fragment",
-                "json",
-                path,
-                len(json_data),
-                {"model": model_fqn},
-            ])
+            references.append(
+                [
+                    "fragment",
+                    "json",
+                    path,
+                    len(json_data),
+                    {"model": model_fqn},
+                ]
+            )
             return {"type": "ref", "index": len(references) - 1}
         else:
             # Serialize with pickle and write to temp file as fragment
@@ -124,13 +134,15 @@ def _encode_value(
                 pickle.dump(v, buffer)
                 data = buffer.getvalue()
                 path = write_temp_file(data)
-                references.append([
-                    "fragment",
-                    "pickle",
-                    path,  # file path; CLI uploads and replaces with blob key
-                    len(data),
-                    {"type": str(type(v).__name__)},
-                ])
+                references.append(
+                    [
+                        "fragment",
+                        "pickle",
+                        path,  # file path; CLI uploads and replaces with blob key
+                        len(data),
+                        {"type": str(type(v).__name__)},
+                    ]
+                )
                 return {"type": "ref", "index": len(references) - 1}
             except Exception:
                 return repr(v)

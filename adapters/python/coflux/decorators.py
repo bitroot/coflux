@@ -24,6 +24,7 @@ def task(
     requires: dict[str, str | bool | list[str]] | None = None,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
     """Decorator for defining a task."""
+
     def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
         return Target(
             fn,
@@ -54,6 +55,7 @@ def workflow(
     requires: dict[str, str | bool | list[str]] | None = None,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
     """Decorator for defining a workflow."""
+
     def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
         return Target(
             fn,
@@ -85,6 +87,7 @@ def stub(
     memo: bool | t.Iterable[str] = False,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
     """Decorator for defining a stub (external reference)."""
+
     def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
         return Target(
             fn,
