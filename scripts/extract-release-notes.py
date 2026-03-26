@@ -11,10 +11,12 @@ import re
 import sys
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 CHANGELOGS = [
-    ("Server", Path("server/CHANGELOG.md")),
-    ("CLI", Path("cli/CHANGELOG.md")),
-    ("Python Adapter", Path("adapters/python/CHANGELOG.md")),
+    ("Server", _REPO_ROOT / "server/CHANGELOG.md"),
+    ("CLI", _REPO_ROOT / "cli/CHANGELOG.md"),
+    ("Python Adapter", _REPO_ROOT / "adapters/python/CHANGELOG.md"),
 ]
 
 

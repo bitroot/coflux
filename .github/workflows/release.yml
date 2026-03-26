@@ -262,13 +262,14 @@ jobs:
           RELEASE_SHA: ${{ needs.bump-version.outputs.release_sha }}
           CI_BRANCH: ${{ needs.bump-version.outputs.ci_branch }}
         run: |
+          cleanup() { git push origin --delete "$CI_BRANCH" 2>/dev/null || true; }
+          trap cleanup EXIT
           git merge --ff-only "$RELEASE_SHA"
           git push
-          git push origin --delete "$CI_BRANCH"
 
   publish:
     runs-on: ubuntu-latest
-    needs: [prepare, bump-version, finalize, build-cli, build-server, build-adapter]
+    needs: [prepare, bump-version, finalize, build-adapter]
     concurrency: release-publish
     environment: pypi
     permissions:
