@@ -59,6 +59,7 @@ defmodule Coflux.Topics.Run do
         cacheConfig: build_cache_config(step.cache_config),
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
+        retries: build_retries(step.retries),
         createdAt: step.created_at,
         arguments: Enum.map(step.arguments, &build_value/1),
         requires: step.requires,
@@ -209,6 +210,7 @@ defmodule Coflux.Topics.Run do
              cacheConfig: build_cache_config(step.cache_config),
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
+             retries: build_retries(step),
              createdAt: step.created_at,
              arguments: Enum.map(step.arguments, &build_value/1),
              requires: step.requires,
@@ -350,6 +352,28 @@ defmodule Coflux.Topics.Run do
 
   defp build_child({step_number, attempt, group_id}, external_run_id) do
     %{stepId: "#{external_run_id}:#{step_number}", attempt: attempt, groupId: group_id}
+  end
+
+  # From notification map (retries opt from worker)
+  defp build_retries(nil), do: nil
+
+  defp build_retries(%{limit: limit, backoff_min: backoff_min, backoff_max: backoff_max}) do
+    %{limit: limit, backoffMin: backoff_min, backoffMax: backoff_max}
+  end
+
+  # From Step struct
+  defp build_retries(%{retry_limit: 0}), do: nil
+
+  defp build_retries(%{
+         retry_limit: retry_limit,
+         retry_backoff_min: retry_backoff_min,
+         retry_backoff_max: retry_backoff_max
+       }) do
+    %{
+      limit: if(retry_limit == -1, do: nil, else: retry_limit),
+      backoffMin: retry_backoff_min,
+      backoffMax: retry_backoff_max
+    }
   end
 
   defp build_cache_config(cache_config) do

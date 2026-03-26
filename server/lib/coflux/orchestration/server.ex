@@ -1092,6 +1092,7 @@ defmodule Coflux.Orchestration.Server do
 
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
+        retries = Keyword.get(opts, :retries)
         delay = Keyword.get(opts, :delay, 0)
         execute_after = if delay > 0, do: created_at + delay
         requires = Keyword.get(opts, :requires) || %{}
@@ -1122,6 +1123,7 @@ defmodule Coflux.Orchestration.Server do
                  cache_config: cache,
                  cache_key: cache_key,
                  memo_key: memo_key,
+                 retries: retries,
                  created_at: created_at,
                  arguments: arguments,
                  requires: requires
@@ -3728,6 +3730,9 @@ defmodule Coflux.Orchestration.Server do
              if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
            cache_key: step.cache_key,
            memo_key: step.memo_key,
+           retry_limit: step.retry_limit,
+           retry_backoff_min: step.retry_backoff_min,
+           retry_backoff_max: step.retry_backoff_max,
            created_at: step.created_at,
            arguments: arguments,
            requires: requires,
