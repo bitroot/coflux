@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import functools
 import inspect
@@ -21,20 +22,26 @@ TargetType = t.Literal["workflow", "task"]
 Requires = dict[str, list[str]]
 
 
-class Cache(t.NamedTuple):
-    max_age: float | dt.timedelta | None = None  # seconds
+@dataclasses.dataclass(frozen=True)
+class Cache:
+    max_age: float | dt.timedelta | None = None
+    _: dataclasses.KW_ONLY
     params: t.Iterable[str] | str | None = None
     namespace: str | None = None
     version: str | None = None
 
 
-class Defer(t.NamedTuple):
+@dataclasses.dataclass(frozen=True)
+class Defer:
+    _: dataclasses.KW_ONLY
     params: t.Iterable[str] | str | None = None
 
 
-class Retries(t.NamedTuple):
-    limit: int | None = None  # 0 = no retries, None = unlimited
-    backoff: tuple[float | dt.timedelta, float | dt.timedelta] = (1, 60)  # (min, max)
+@dataclasses.dataclass(frozen=True)
+class Retries:
+    limit: int | None = None
+    _: dataclasses.KW_ONLY
+    backoff: tuple[float | dt.timedelta, float | dt.timedelta] = (1, 60)
     when: type[BaseException] | tuple[type[BaseException], ...] | t.Callable[[BaseException], bool] | None = None
 
 
@@ -128,21 +135,20 @@ def _normalize_retry_when(
 
 
 def _expand_retries(retries: int | bool | Retries) -> Retries | None:
-    match retries:
-        case False | 0:
+    if retries is False or retries == 0:
+        return None
+    if retries is True:
+        return Retries()
+    if isinstance(retries, int):
+        return Retries(limit=retries, backoff=(0, 0))
+    if isinstance(retries, Retries):
+        if retries.limit == 0:
             return None
-        case True:
-            return Retries()
-        case int(limit):
-            return Retries(limit=limit, backoff=(0, 0))
-        case Retries(limit, _, when):
-            if limit == 0:
-                return None
-            return Retries(
-                retries.limit,
-                retries.backoff,
-                _normalize_retry_when(when),
-            )
+        return Retries(
+            limit=retries.limit,
+            backoff=retries.backoff,
+            when=_normalize_retry_when(retries.when),
+        )
 
 
 def _expand_defer(defer: bool | Defer) -> Defer | None:
