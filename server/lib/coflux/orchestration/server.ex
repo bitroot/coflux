@@ -4324,11 +4324,11 @@ defmodule Coflux.Orchestration.Server do
                 |> Enum.take_while(&(&1 in [0, 2]))
                 |> Enum.count()
 
-              if consecutive_failures <= step.retry_limit do
+              if consecutive_failures < step.retry_limit do
                 # TODO: add jitter (within min/max delay)
                 delay_ms =
                   step.retry_backoff_min +
-                    (consecutive_failures - 1) / step.retry_limit *
+                    consecutive_failures / max(step.retry_limit - 1, 1) *
                       (step.retry_backoff_max - step.retry_backoff_min)
 
                 execute_after = System.os_time(:millisecond) + delay_ms
