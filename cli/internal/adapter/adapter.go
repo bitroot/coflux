@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/bitroot/coflux/cli/internal/version"
 )
 
 // Adapter is the interface for language adapters.
@@ -145,7 +147,8 @@ func (e *Executor) readLoop() {
 	}
 }
 
-// WaitReady waits for the executor to send the ready message
+// WaitReady waits for the executor to send the ready message and validates
+// the adapter's protocol version against the CLI's API version.
 func (e *Executor) WaitReady(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -154,12 +157,27 @@ func (e *Executor) WaitReady(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("executor closed before ready")
 		}
-		method, _, _, err := ParseMessage(msg)
+		method, _, params, err := ParseMessage(msg)
 		if err != nil {
 			return fmt.Errorf("failed to parse ready message: %w", err)
 		}
 		if method != "ready" {
 			return fmt.Errorf("expected ready message, got %s", method)
+		}
+		// Validate protocol version
+		var readyParams ReadyParams
+		if params == nil {
+			return fmt.Errorf("adapter did not send a protocol version in the ready message — update the coflux Python package")
+		}
+		if err := json.Unmarshal(params, &readyParams); err != nil {
+			return fmt.Errorf("failed to parse ready params: %w", err)
+		}
+		expected := version.APIVersion()
+		if expected != "dev" && readyParams.Version != "dev" && readyParams.Version != expected {
+			return fmt.Errorf(
+				"adapter version mismatch: CLI expects protocol version %s, but the adapter reports %s — update the coflux Python package",
+				expected, readyParams.Version,
+			)
 		}
 		e.mu.Lock()
 		e.ready = true

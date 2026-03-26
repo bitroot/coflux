@@ -1,7 +1,7 @@
 defmodule Coflux.MixProject do
   use Mix.Project
 
-  @version String.trim(File.read!("VERSION"))
+  @version String.trim(File.read!("../VERSION"))
 
   def project do
     [

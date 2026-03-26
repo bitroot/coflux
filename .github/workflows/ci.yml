@@ -5,22 +5,22 @@ on:
     branches:
       - main
     paths:
+      - VERSION
       - server/**
       - cli/**
+      - adapters/python/**
       - tests/**
       - Dockerfile
       - .github/workflows/ci.yml
   pull_request:
     paths:
+      - VERSION
       - server/**
       - cli/**
+      - adapters/python/**
       - tests/**
       - Dockerfile
       - .github/workflows/ci.yml
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   check:
@@ -37,7 +37,7 @@ jobs:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
-      - name: Check formatting
+      - name: Check Go formatting
         working-directory: cli
         run: |
           unformatted=$(gofmt -l .)
@@ -46,6 +46,29 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+      - name: Check version consistency
+        shell: python3 {0}
+        run: |
+          import tomllib, re
+          from pathlib import Path
+
+          version = Path("VERSION").read_text().strip()
+
+          # Convert to PEP 440: 0.9.0-dev -> 0.9.0.dev0
+          pep440 = re.sub(r"-dev$", ".dev0", version)
+          with open("adapters/python/pyproject.toml", "rb") as f:
+              adapter_version = tomllib.load(f)["project"]["version"]
+
+          if pep440 != adapter_version:
+              raise SystemExit(
+                  f"Version mismatch: VERSION is {version} (PEP 440: {pep440}), "
+                  f"but adapters/python/pyproject.toml is {adapter_version}"
+              )
+          print(f"Versions consistent: {version} / {adapter_version}")
+
+      - name: Lint changelogs
+        run: python3 scripts/lint-changelog.py server/CHANGELOG.md cli/CHANGELOG.md adapters/python/CHANGELOG.md
 
   build-cli:
     runs-on: ubuntu-latest
@@ -71,7 +94,7 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "version=$(cat server/VERSION)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Build
         working-directory: cli
@@ -79,7 +102,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: go build -ldflags "-X main.version=$VERSION" -o "coflux-${GOOS}-${GOARCH}" ./cmd/coflux
+        run: go build -ldflags "-X github.com/bitroot/coflux/cli/internal/version.Version=$VERSION" -o "coflux-${GOOS}-${GOARCH}" ./cmd/coflux
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -99,8 +122,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
+          context: .
           load: true
           tags: coflux:ci
           cache-from: type=gha
@@ -114,6 +138,27 @@ jobs:
         with:
           name: coflux-image
           path: /tmp/coflux-image.tar.gz
+
+  build-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Build
+        run: uv build
+        working-directory: adapters/python
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-adapter
+          path: adapters/python/dist/*
 
   test:
     runs-on: ubuntu-latest
@@ -155,104 +200,3 @@ jobs:
           COFLUX_BIN: cli/coflux-linux-amd64
           COFLUX_IMAGE: coflux:ci
         run: pytest tests/ -n auto
-
-  release-cli:
-    if: github.ref == 'refs/heads/main' && github.repository == 'bitroot/coflux'
-    runs-on: ubuntu-latest
-    needs: [test]
-    concurrency: ci-release-cli
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        id: version
-        run: echo "version=$(cat server/VERSION)" >> "$GITHUB_OUTPUT"
-
-      - name: Check released
-        id: check
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "cli/$VERSION" > /dev/null 2>&1; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "released=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download artifacts
-        if: steps.check.outputs.released == 'false'
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: coflux-*-*
-          merge-multiple: true
-
-      - name: Release
-        if: steps.check.outputs.released == 'false'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "cli/$VERSION" \
-            --title "CLI ($VERSION)" \
-            artifacts/coflux-*
-
-  release-server:
-    if: github.ref == 'refs/heads/main' && github.repository == 'bitroot/coflux'
-    runs-on: ubuntu-latest
-    needs: [test]
-    concurrency: ci-release-server
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        id: version
-        run: echo "version=$(cat server/VERSION)" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check pushed
-        id: pushed
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set +e
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
-          echo "pushed=$(if [ $? -eq 0 ]; then echo "true"; else echo "false"; fi)" >> "$GITHUB_OUTPUT"
-
-      - name: Download server image
-        if: steps.pushed.outputs.pushed == 'false'
-        uses: actions/download-artifact@v4
-        with:
-          name: coflux-image
-
-      - name: Load, tag, and push image
-        if: steps.pushed.outputs.pushed == 'false'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          gunzip -c coflux-image.tar.gz | docker load
-          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
-          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-
-      - name: Release
-        if: steps.pushed.outputs.pushed == 'false'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create server/$VERSION \
-            --title "Server ($VERSION)"

@@ -258,12 +258,11 @@ defmodule Coflux.Orchestration.Manifests do
           name,
           hash_parameter_set(workflow.parameters),
           Integer.to_string(Utils.encode_params_set(workflow.wait_for)),
-          # TODO: fix (workflow.cache.params being true gets encoded to "" as well as not set) - also below/elsewhere
-          if(workflow.cache, do: Utils.encode_params_list(workflow.cache.params), else: ""),
+          if(workflow.cache, do: Utils.encode_params_list(workflow.cache.params) || "", else: "-"),
           if(workflow.cache[:max_age], do: Integer.to_string(workflow.cache.max_age), else: ""),
           if(workflow.cache[:namespace], do: workflow.cache.namespace, else: ""),
           if(workflow.cache[:version], do: workflow.cache.version, else: ""),
-          if(workflow.defer, do: Utils.encode_params_list(workflow.defer.params), else: ""),
+          if(workflow.defer, do: Utils.encode_params_list(workflow.defer.params) || "", else: "-"),
           Integer.to_string(workflow.delay),
           if(workflow.retries,
             do:

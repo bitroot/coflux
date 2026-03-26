@@ -96,7 +96,13 @@ type ResolveResult struct {
 
 // ReadyMessage is sent by executor when it's ready for work
 type ReadyMessage struct {
-	Method string `json:"method"` // "ready"
+	Method string       `json:"method"` // "ready"
+	Params *ReadyParams `json:"params,omitempty"`
+}
+
+// ReadyParams contains the ready message parameters
+type ReadyParams struct {
+	Version string `json:"version"`
 }
 
 // ExecutionResultMessage is sent when execution completes successfully

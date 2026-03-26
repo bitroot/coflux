@@ -1,3 +1,31 @@
+## 0.9.0
+
+Enhancements:
+
+- Adds authentication to worker connections and blob/log endpoints.
+- Adds support for project-level tokens and Studio authentication.
+- Introduces epochs for managing data retention.
+- Supports conditional retries on tasks.
+- Supports cancelling executions across workspaces.
+- Returns API version in the discover endpoint for client compatibility validation.
+- Automatically stops idle orchestration servers to reduce resource usage.
+- Workspaces are auto-created on first worker connection.
+
+Fixes:
+
+- Fixes idempotency key handling for duplicate run submissions.
+- Fixes manifest hashing for consistent change detection.
+- Fixes result delivery for suspended executions.
+- Makes argument waiting recursive for deeply nested dependencies.
+
+Changes:
+
+- Removes the bundled frontend (use Coflux Studio instead).
+- Replaces sensors and checkpoints with recurrent targets.
+- Renames 'spaces' back to 'workspaces'.
+- Removes namespaces in favour of a simplified project model.
+- Reworks ID generation for shorter, URL-friendly identifiers.
+
 ## 0.8.1
 
 Enhancements:

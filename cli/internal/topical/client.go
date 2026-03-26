@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 
+	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/coder/websocket"
 	topical "github.com/joefreeman/topical/client_go"
 )
@@ -16,7 +18,12 @@ func Connect(ctx context.Context, host string, secure bool, token string) (*topi
 	if secure {
 		scheme = "wss"
 	}
-	url := fmt.Sprintf("%s://%s/topics", scheme, host)
+	wsURL := fmt.Sprintf("%s://%s/topics", scheme, host)
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		params := url.Values{}
+		params.Set("version", apiVersion)
+		wsURL += "?" + params.Encode()
+	}
 
 	opts := []topical.Option{
 		topical.WithReconnect(true),
@@ -29,5 +36,5 @@ func Connect(ctx context.Context, host string, secure bool, token string) (*topi
 		}))
 	}
 
-	return topical.Connect(ctx, url, opts...)
+	return topical.Connect(ctx, wsURL, opts...)
 }

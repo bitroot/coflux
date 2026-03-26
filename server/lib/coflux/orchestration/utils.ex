@@ -1,7 +1,7 @@
 defmodule Coflux.Orchestration.Utils do
   def encode_params_list(params) do
     case params do
-      true -> ""
+      true -> "*"
       false -> nil
       nil -> nil
       params -> Enum.map_join(params, ",", &Integer.to_string/1)
@@ -11,7 +11,7 @@ defmodule Coflux.Orchestration.Utils do
   def decode_params_list(value) do
     case value do
       nil -> false
-      "" -> true
+      "*" -> true
       value -> value |> String.split(",") |> Enum.map(&String.to_integer/1)
     end
   end

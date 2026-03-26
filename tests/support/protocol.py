@@ -1,4 +1,20 @@
 import json
+from pathlib import Path
+
+_VERSION_FILE = Path(__file__).resolve().parents[2] / "VERSION"
+
+
+def _default_api_version() -> str:
+    """Derive the API version from the VERSION file (same logic as the CLI and adapter)."""
+    text = _VERSION_FILE.read_text().strip().removesuffix("-dev")
+    parts = text.split(".")
+    if len(parts) >= 2:
+        major = int(parts[0])
+        minor = int(parts[1])
+        if major == 0:
+            return f"0.{minor}"
+        return str(major)
+    return text
 
 
 def encode_message(msg: dict) -> bytes:
@@ -9,8 +25,10 @@ def decode_message(line: bytes) -> dict:
     return json.loads(line)
 
 
-def ready_message() -> dict:
-    return {"method": "ready"}
+def ready_message(version=None) -> dict:
+    if version is None:
+        version = _default_api_version()
+    return {"method": "ready", "params": {"version": version}}
 
 
 def execution_result(execution_id, value=None, format="json"):
