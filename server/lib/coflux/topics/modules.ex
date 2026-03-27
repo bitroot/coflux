@@ -11,36 +11,39 @@ defmodule Coflux.Topics.Modules do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    {:ok, manifests, executions, ref} =
-      Orchestration.subscribe_modules(project_id, workspace_id, self())
+    case Orchestration.subscribe_modules(project_id, workspace_id, self()) do
+      {:ok, manifests, executions, ref} ->
+        value =
+          Map.new(manifests, fn {module, workflows} ->
+            result = %{
+              workflows: Map.keys(workflows),
+              executing: 0,
+              scheduled: 0,
+              nextDueAt: nil
+            }
 
-    value =
-      Map.new(manifests, fn {module, workflows} ->
-        result = %{
-          workflows: Map.keys(workflows),
-          executing: 0,
-          scheduled: 0,
-          nextDueAt: nil
-        }
+            result =
+              case Map.fetch(executions, module) do
+                {:ok, {executing, scheduled}} ->
+                  next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
 
-        result =
-          case Map.fetch(executions, module) do
-            {:ok, {executing, scheduled}} ->
-              next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
+                  result
+                  |> Map.put(:executing, MapSet.size(executing))
+                  |> Map.put(:scheduled, map_size(scheduled))
+                  |> Map.put(:nextDueAt, next_due_at)
 
-              result
-              |> Map.put(:executing, MapSet.size(executing))
-              |> Map.put(:scheduled, map_size(scheduled))
-              |> Map.put(:nextDueAt, next_due_at)
+                :error ->
+                  result
+              end
 
-            :error ->
-              result
-          end
+            {module, result}
+          end)
 
-        {module, result}
-      end)
+        {:ok, Topic.new(value, %{ref: ref, executions: executions})}
 
-    {:ok, Topic.new(value, %{ref: ref, executions: executions})}
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
+    end
   end
 
   def handle_info({:topic, _ref, notifications}, topic) do

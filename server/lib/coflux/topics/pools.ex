@@ -11,12 +11,13 @@ defmodule Coflux.Topics.Pools do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    {:ok, pools, ref} =
-      Orchestration.subscribe_pools(project_id, workspace_id, self())
+    case Orchestration.subscribe_pools(project_id, workspace_id, self()) do
+      {:ok, pools, ref} ->
+        {:ok, Topic.new(build_value(pools), %{ref: ref})}
 
-    value = build_value(pools)
-
-    {:ok, Topic.new(value, %{ref: ref})}
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
+    end
   end
 
   def handle_info({:topic, _ref, notifications}, topic) do

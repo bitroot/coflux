@@ -13,30 +13,31 @@ defmodule Coflux.Topics.Module do
     module = Map.fetch!(params, :module)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    {:ok, executions, ref} =
-      Orchestration.subscribe_module(project_id, module, workspace_id, self())
+    case Orchestration.subscribe_module(project_id, module, workspace_id, self()) do
+      {:ok, executions, ref} ->
+        value =
+          Map.new(executions, fn {target_name, external_run_id, step_number, attempt, execute_after,
+                                  created_at, assigned_at} ->
+            execution_id = "#{external_run_id}:#{step_number}:#{attempt}"
 
-    value =
-      Map.new(executions, fn {target_name, external_run_id, step_number, attempt, execute_after,
-                              created_at, assigned_at} ->
-        execution_id = "#{external_run_id}:#{step_number}:#{attempt}"
+            {execution_id,
+             %{
+               target: target_name,
+               runId: external_run_id,
+               stepId: "#{external_run_id}:#{step_number}",
+               stepNumber: step_number,
+               attempt: attempt,
+               executeAfter: execute_after,
+               createdAt: created_at,
+               assignedAt: assigned_at
+             }}
+          end)
 
-        {execution_id,
-         %{
-           target: target_name,
-           runId: external_run_id,
-           stepId: "#{external_run_id}:#{step_number}",
-           stepNumber: step_number,
-           attempt: attempt,
-           executeAfter: execute_after,
-           createdAt: created_at,
-           assignedAt: assigned_at
-         }}
-      end)
+        {:ok, Topic.new(value, %{ref: ref})}
 
-    topic = Topic.new(value, %{ref: ref})
-
-    {:ok, topic}
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
+    end
   end
 
   def handle_info({:topic, _ref, notifications}, topic) do
