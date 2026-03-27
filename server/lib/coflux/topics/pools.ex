@@ -49,12 +49,22 @@ defmodule Coflux.Topics.Pools do
   defp build_launcher(launcher) do
     type_fields =
       case launcher.type do
-        :docker -> Map.take(launcher, [:image])
-        :process -> Map.take(launcher, [:cli, :cwd])
+        :docker ->
+          %{type: "docker", image: launcher.image}
+          |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
+
+        :process ->
+          %{type: "process", cli: launcher.cli}
+          |> maybe_put(:cwd, Map.get(launcher, :cwd))
       end
 
-    common_fields = Map.take(launcher, [:adapter])
-
-    Map.merge(%{type: launcher.type}, Map.merge(type_fields, common_fields))
+    type_fields
+    |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+    |> maybe_put(:adapter, Map.get(launcher, :adapter))
+    |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
+    |> maybe_put(:env, Map.get(launcher, :env))
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

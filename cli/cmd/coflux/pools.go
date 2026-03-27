@@ -155,6 +155,9 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if adapter := getStringSlice(launcher, "adapter"); len(adapter) > 0 {
 			fmt.Printf("Adapter: %s\n", strings.Join(adapter, " "))
 		}
+		if concurrency := getFloat64(launcher, "concurrency"); concurrency > 0 {
+			fmt.Printf("Concurrency: %d\n", int(concurrency))
+		}
 		if env, ok := launcher["env"].(map[string]any); ok && len(env) > 0 {
 			fmt.Printf("Environment:\n")
 			for k, v := range env {
@@ -446,6 +449,7 @@ func formatMillis(ms int64) string {
 func hasCommonLauncherFlags() bool {
 	return poolsUpdateServerHost != "" || poolsUpdateNoServerHost ||
 		poolsUpdateAdapter != nil || poolsUpdateNoAdapter ||
+		poolsUpdateConcurrency > 0 || poolsUpdateNoConcurrency ||
 		poolsUpdateEnv != nil || poolsUpdateNoEnv
 }
 
@@ -459,6 +463,11 @@ func applyCommonLauncherFlags(launcher map[string]any) {
 		launcher["adapter"] = poolsUpdateAdapter
 	} else if poolsUpdateNoAdapter {
 		delete(launcher, "adapter")
+	}
+	if poolsUpdateConcurrency > 0 {
+		launcher["concurrency"] = poolsUpdateConcurrency
+	} else if poolsUpdateNoConcurrency {
+		delete(launcher, "concurrency")
 	}
 	if poolsUpdateEnv != nil {
 		env := make(map[string]any)
@@ -501,20 +510,22 @@ func getStringSlice(m map[string]any, key string) []string {
 
 // pools update
 var (
-	poolsUpdateModules      []string
-	poolsUpdateProvides     []string
-	poolsUpdateDockerImage  string
-	poolsUpdateDockerHost   string
-	poolsUpdateNoDockerHost bool
-	poolsUpdateProcessCli      string
-	poolsUpdateProcessCwd      string
-	poolsUpdateNoProcessCwd    bool
-	poolsUpdateServerHost      string
-	poolsUpdateNoServerHost    bool
-	poolsUpdateAdapter         []string
-	poolsUpdateNoAdapter       bool
-	poolsUpdateEnv             []string
-	poolsUpdateNoEnv           bool
+	poolsUpdateModules       []string
+	poolsUpdateProvides      []string
+	poolsUpdateDockerImage   string
+	poolsUpdateDockerHost    string
+	poolsUpdateNoDockerHost  bool
+	poolsUpdateProcessCli    string
+	poolsUpdateProcessCwd    string
+	poolsUpdateNoProcessCwd  bool
+	poolsUpdateServerHost    string
+	poolsUpdateNoServerHost  bool
+	poolsUpdateAdapter       []string
+	poolsUpdateNoAdapter     bool
+	poolsUpdateConcurrency   int
+	poolsUpdateNoConcurrency bool
+	poolsUpdateEnv           []string
+	poolsUpdateNoEnv         bool
 )
 
 var poolsUpdateCmd = &cobra.Command{
@@ -537,12 +548,15 @@ func init() {
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoAdapter, "no-adapter", false, "Unset adapter (use worker default)")
+	poolsUpdateCmd.Flags().IntVar(&poolsUpdateConcurrency, "concurrency", 0, "Max concurrent executions per worker")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoConcurrency, "no-concurrency", false, "Unset concurrency (use worker default)")
 	poolsUpdateCmd.Flags().StringArrayVar(&poolsUpdateEnv, "env", nil, "Environment variable (e.g., --env KEY=VALUE)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoEnv, "no-env", false, "Clear all custom environment variables")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-cwd", "no-process-cwd")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("adapter", "no-adapter")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("concurrency", "no-concurrency")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("env", "no-env")
 	// Process and Docker flags are mutually exclusive
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-cli")

@@ -155,7 +155,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		w.logger.Debug("creating session", "workspace", w.cfg.Workspace)
 		provides := config.ParseProvides(w.cfg.Worker.Provides)
 		var err error
-		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, w.cfg.Worker.Concurrency)
+		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
@@ -292,8 +292,8 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 		errCh <- conn.Run(ctx)
 	}()
 
-	// Declare targets via WebSocket (now that write loop is running)
-	if err := conn.Notify("declare_targets", targets); err != nil {
+	// Declare targets and concurrency via WebSocket (now that write loop is running)
+	if err := conn.Notify("declare_targets", targets, w.cfg.Worker.Concurrency); err != nil {
 		return true, err
 	}
 

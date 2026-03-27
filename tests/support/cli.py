@@ -162,7 +162,7 @@ def logs_get(
 
 def pools_update(
     name, modules=None, provides=None, process_cli=None, process_cwd=None,
-    docker_image=None, adapter=None, env=None, host=None, workspace="default",
+    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
 ):
     args = ["pools", "update", name]
     if modules:
@@ -179,6 +179,8 @@ def pools_update(
         args.extend(["--docker-image", docker_image])
     if adapter:
         args.extend(["--adapter", ",".join(adapter)])
+    if concurrency:
+        args.extend(["--concurrency", str(concurrency)])
     if env:
         for k, v in env.items():
             args.extend(["--env", f"{k}={v}"])

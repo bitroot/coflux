@@ -87,12 +87,13 @@ defmodule Coflux.Handlers.Worker do
 
     case message["request"] do
       "declare_targets" ->
-        [targets] = message["params"]
+        [targets, concurrency] = message["params"]
 
         case Orchestration.declare_targets(
                state.project_id,
                state.session_id,
-               parse_targets(targets)
+               parse_targets(targets),
+               concurrency
              ) do
           :ok ->
             {[], state}

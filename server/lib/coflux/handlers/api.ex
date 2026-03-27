@@ -499,15 +499,13 @@ defmodule Coflux.Handlers.Api do
            req,
            %{workspace_id: "workspaceId"},
            %{
-             provides: {"provides", &parse_tag_set/1},
-             concurrency: {"concurrency", &parse_integer(&1, optional: true)}
+             provides: {"provides", &parse_tag_set/1}
            }
          ) do
       {:ok, arguments, req} ->
         opts =
           [
-            provides: arguments[:provides],
-            concurrency: arguments[:concurrency]
+            provides: arguments[:provides]
           ]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
@@ -794,6 +792,7 @@ defmodule Coflux.Handlers.Api do
   defp parse_common_launcher_fields(launcher, value) do
     server_host = Map.get(value, "serverHost")
     adapter = Map.get(value, "adapter")
+    concurrency = Map.get(value, "concurrency")
     env = Map.get(value, "env")
 
     cond do
@@ -803,6 +802,9 @@ defmodule Coflux.Handlers.Api do
       not is_nil(adapter) and
           (not is_list(adapter) or adapter == [] or
              Enum.any?(adapter, &(not is_binary(&1)))) ->
+        {:error, :invalid}
+
+      not is_nil(concurrency) and (not is_integer(concurrency) or concurrency < 1) ->
         {:error, :invalid}
 
       not is_nil(env) and not is_map(env) ->
@@ -819,6 +821,10 @@ defmodule Coflux.Handlers.Api do
           if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
 
         launcher = if adapter, do: Map.put(launcher, :adapter, adapter), else: launcher
+
+        launcher =
+          if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
+
         launcher = if env, do: Map.put(launcher, :env, env), else: launcher
         {:ok, launcher}
     end

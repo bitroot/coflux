@@ -104,6 +104,7 @@ defmodule Coflux.Topics.Pool do
     base
     |> maybe_put(:serverHost, Map.get(launcher, :server_host))
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
+    |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
     |> maybe_put(:env, Map.get(launcher, :env))
   end
 

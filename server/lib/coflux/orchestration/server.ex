@@ -203,7 +203,7 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         active_sessions,
         state,
-        fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id, concurrency,
+        fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
             activation_timeout, reconnection_timeout, secret_hash, created_at, activated_at},
            state ->
           provides =
@@ -226,7 +226,7 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            concurrency: concurrency,
+            concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
             worker_id: worker_id,
@@ -818,7 +818,6 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:create_session, workspace_external_id, access, opts}, _from, state) do
     provides = Keyword.get(opts, :provides, %{})
-    concurrency = Keyword.get(opts, :concurrency, 0)
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
     reconnection_timeout =
@@ -828,7 +827,6 @@ defmodule Coflux.Orchestration.Server do
            require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
-        concurrency: concurrency,
         activation_timeout: activation_timeout,
         reconnection_timeout: reconnection_timeout,
         created_by: access[:principal_id]
@@ -844,7 +842,7 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            concurrency: concurrency,
+            concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
             worker_id: nil,
@@ -972,10 +970,13 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:declare_targets, external_id, targets}, _from, state) do
+  def handle_call({:declare_targets, external_id, targets, concurrency}, _from, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
-    state = assign_targets(state, targets, session_id)
+    state =
+      state
+      |> assign_targets(targets, session_id)
+      |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -5122,6 +5123,12 @@ defmodule Coflux.Orchestration.Server do
       case Map.get(launcher, :adapter) do
         nil -> base
         adapter -> Map.put(base, "COFLUX_WORKER_ADAPTER", Enum.join(adapter, ","))
+      end
+
+    base =
+      case Map.get(launcher, :concurrency) do
+        nil -> base
+        concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
       end
 
     case Map.get(launcher, :env) do

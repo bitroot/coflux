@@ -218,7 +218,6 @@ CREATE TABLE sessions (
   workspace_id INTEGER NOT NULL,
   worker_id INTEGER,
   provides_tag_set_id INTEGER,
-  concurrency INTEGER NOT NULL DEFAULT 0,
   activation_timeout INTEGER,
   reconnection_timeout INTEGER,
   secret_hash BLOB,
