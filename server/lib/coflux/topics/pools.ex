@@ -47,9 +47,14 @@ defmodule Coflux.Topics.Pools do
   end
 
   defp build_launcher(launcher) do
-    case launcher.type do
-      :docker -> Map.take(launcher, [:type, :image])
-      :process -> Map.take(launcher, [:type, :command, :args, :cwd])
-    end
+    type_fields =
+      case launcher.type do
+        :docker -> Map.take(launcher, [:image])
+        :process -> Map.take(launcher, [:cli, :cwd])
+      end
+
+    common_fields = Map.take(launcher, [:adapter])
+
+    Map.merge(%{type: launcher.type}, Map.merge(type_fields, common_fields))
   end
 end

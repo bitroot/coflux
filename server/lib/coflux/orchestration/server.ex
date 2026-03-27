@@ -2373,11 +2373,9 @@ defmodule Coflux.Orchestration.Server do
                   pool.launcher,
                   :launch,
                   [
-                    state.project_id,
-                    state.workspaces[workspace_id].name,
-                    token,
+                    build_launcher_env(state, workspace_id, token, pool.launcher),
                     pool.modules,
-                    Map.delete(pool.launcher, :type)
+                    pool.launcher
                   ],
                   fn state, result ->
                     {data, error} =
@@ -5109,6 +5107,27 @@ defmodule Coflux.Orchestration.Server do
     state
     |> callback.(result)
     |> Map.update!(:launcher_tasks, &Map.delete(&1, task_ref))
+  end
+
+  defp build_launcher_env(state, workspace_id, token, launcher) do
+    coflux_host = launcher[:server_host] || Coflux.Config.server_host(state.project_id)
+
+    base = %{
+      "COFLUX_SERVER_HOST" => coflux_host,
+      "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
+      "COFLUX_SESSION" => token
+    }
+
+    base =
+      case Map.get(launcher, :adapter) do
+        nil -> base
+        adapter -> Map.put(base, "COFLUX_WORKER_ADAPTER", Enum.join(adapter, ","))
+      end
+
+    case Map.get(launcher, :env) do
+      nil -> base
+      env -> Map.merge(base, env)
+    end
   end
 
   defp call_launcher(state, launcher, fun, args, callback) do

@@ -160,6 +160,50 @@ def logs_get(
     return result.stdout
 
 
+def pools_update(
+    name, modules=None, provides=None, process_cli=None, process_cwd=None,
+    docker_image=None, adapter=None, env=None, host=None, workspace="default",
+):
+    args = ["pools", "update", name]
+    if modules:
+        for m in modules:
+            args.extend(["--module", m])
+    if provides:
+        for key, values in provides.items():
+            args.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
+    if process_cli:
+        args.extend(["--process-cli", process_cli])
+    if process_cwd:
+        args.extend(["--process-cwd", process_cwd])
+    if docker_image:
+        args.extend(["--docker-image", docker_image])
+    if adapter:
+        args.extend(["--adapter", ",".join(adapter)])
+    if env:
+        for k, v in env.items():
+            args.extend(["--env", f"{k}={v}"])
+    _coflux(*args, host=host, workspace=workspace, output=None)
+
+
+def pools_list(host=None, workspace="default"):
+    result = _coflux("pools", "list", host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def pools_get(name, host=None, workspace="default"):
+    result = _coflux("pools", "get", name, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def pools_delete(name, host=None, workspace="default"):
+    _coflux("pools", "delete", name, host=host, workspace=workspace, output=None)
+
+
+def pools_launches(name, host=None, workspace="default"):
+    result = _coflux("pools", "launches", name, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
 def worker(
     modules,
     adapter,

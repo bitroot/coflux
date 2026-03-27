@@ -90,22 +90,21 @@ defmodule Coflux.Topics.Pool do
   end
 
   defp build_launcher(launcher) do
-    case launcher.type do
-      :docker ->
-        base = %{type: "docker", image: launcher.image}
+    base =
+      case launcher.type do
+        :docker ->
+          %{type: "docker", image: launcher.image}
+          |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
 
-        base
-        |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
-        |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+        :process ->
+          %{type: "process", cli: launcher.cli}
+          |> maybe_put(:cwd, Map.get(launcher, :cwd))
+      end
 
-      :process ->
-        base = %{type: "process", command: launcher.command}
-
-        base
-        |> maybe_put(:args, Map.get(launcher, :args))
-        |> maybe_put(:cwd, Map.get(launcher, :cwd))
-        |> maybe_put(:serverHost, Map.get(launcher, :server_host))
-    end
+    base
+    |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+    |> maybe_put(:adapter, Map.get(launcher, :adapter))
+    |> maybe_put(:env, Map.get(launcher, :env))
   end
 
   defp maybe_put(map, _key, nil), do: map

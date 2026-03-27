@@ -3,9 +3,10 @@ defmodule Coflux.DockerLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(project_id, workspace_name, session_token, modules, config \\ %{}) do
+  def launch(env, modules, config) do
     docker_conn = parse_docker_host(config[:docker_host])
-    coflux_host = config[:server_host] || Coflux.Config.server_host(project_id)
+
+    container_env = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)
 
     with {:ok, %{"Id" => container_id}} <-
            create_container(
@@ -14,11 +15,7 @@ defmodule Coflux.DockerLauncher do
                "Image" => Map.fetch!(config, :image),
                "HostConfig" => %{"NetworkMode" => "host"},
                "Cmd" => modules,
-               "Env" => [
-                 "COFLUX_SERVER_HOST=#{coflux_host}",
-                 "COFLUX_WORKSPACE=#{workspace_name}",
-                 "COFLUX_SESSION=#{session_token}"
-               ]
+               "Env" => container_env
              }
            ),
          :ok <- start_container(docker_conn, container_id) do

@@ -755,7 +755,6 @@ defmodule Coflux.Handlers.Api do
   defp parse_docker_launcher(value) do
     image = Map.get(value, "image")
     docker_host = Map.get(value, "dockerHost")
-    server_host = Map.get(value, "serverHost")
 
     cond do
       not is_binary(image) or String.length(image) > 200 ->
@@ -764,49 +763,63 @@ defmodule Coflux.Handlers.Api do
       not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
         {:error, :invalid}
 
-      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
-        {:error, :invalid}
-
       true ->
         launcher = %{type: :docker, image: image}
 
         launcher =
           if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
 
-        launcher =
-          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
-
         {:ok, launcher}
     end
   end
 
   defp parse_process_launcher(value) do
-    command = Map.get(value, "command")
-    args = Map.get(value, "args", [])
-    server_host = Map.get(value, "serverHost")
+    cli = Map.get(value, "cli")
     cwd = Map.get(value, "cwd")
 
     cond do
-      not is_binary(command) or String.length(command) > 500 ->
-        {:error, :invalid}
-
-      not is_list(args) or Enum.any?(args, &(not is_binary(&1))) ->
-        {:error, :invalid}
-
-      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+      not is_binary(cli) or String.length(cli) > 500 ->
         {:error, :invalid}
 
       not is_nil(cwd) and (not is_binary(cwd) or String.length(cwd) > 500) ->
         {:error, :invalid}
 
       true ->
-        launcher = %{type: :process, command: command, args: args}
+        launcher = %{type: :process, cli: cli}
+        launcher = if cwd, do: Map.put(launcher, :cwd, cwd), else: launcher
+        {:ok, launcher}
+    end
+  end
 
+  defp parse_common_launcher_fields(launcher, value) do
+    server_host = Map.get(value, "serverHost")
+    adapter = Map.get(value, "adapter")
+    env = Map.get(value, "env")
+
+    cond do
+      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+        {:error, :invalid}
+
+      not is_nil(adapter) and
+          (not is_list(adapter) or adapter == [] or
+             Enum.any?(adapter, &(not is_binary(&1)))) ->
+        {:error, :invalid}
+
+      not is_nil(env) and not is_map(env) ->
+        {:error, :invalid}
+
+      not is_nil(env) and
+          Enum.any?(env, fn {k, v} ->
+            not is_binary(k) or not is_binary(v) or String.starts_with?(k, "COFLUX_")
+          end) ->
+        {:error, :invalid}
+
+      true ->
         launcher =
           if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
 
-        launcher = if cwd, do: Map.put(launcher, :cwd, cwd), else: launcher
-
+        launcher = if adapter, do: Map.put(launcher, :adapter, adapter), else: launcher
+        launcher = if env, do: Map.put(launcher, :env, env), else: launcher
         {:ok, launcher}
     end
   end
@@ -821,9 +834,12 @@ defmodule Coflux.Handlers.Api do
             type_atom = String.to_existing_atom(type)
 
             if MapSet.member?(allowed, type_atom) do
-              case type do
-                "docker" -> parse_docker_launcher(value)
-                "process" -> parse_process_launcher(value)
+              with {:ok, launcher} <-
+                     (case type do
+                        "docker" -> parse_docker_launcher(value)
+                        "process" -> parse_process_launcher(value)
+                      end) do
+                parse_common_launcher_fields(launcher, value)
               end
             else
               {:error, :invalid}

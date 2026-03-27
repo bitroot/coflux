@@ -2,31 +2,20 @@ defmodule Coflux.ProcessLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(project_id, workspace_name, session_token, modules, config \\ %{}) do
-    command = Map.fetch!(config, :command)
-    extra_args = Map.get(config, :args, [])
-    coflux_host = config[:server_host] || Coflux.Config.server_host(project_id)
+  def launch(env, modules, config) do
+    cli_path = Map.fetch!(config, :cli)
     cwd = Map.get(config, :cwd)
-
-    args = extra_args ++ modules
-
-    env =
-      Enum.map(
-        %{
-          "COFLUX_SERVER_HOST" => coflux_host,
-          "COFLUX_WORKSPACE" => workspace_name,
-          "COFLUX_SESSION" => session_token
-        },
-        fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end
-      )
 
     # Use `exec` so the shell is replaced by the command, ensuring
     # the port's OS process IS the worker (not a wrapper shell).
-    argv = Enum.map_join([command | args], " ", &shell_escape/1)
+    argv = Enum.map_join([cli_path, "worker" | modules], " ", &shell_escape/1)
     shell_cmd = "exec #{argv}"
 
+    port_env =
+      Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
     port_opts =
-      [:binary, :exit_status, :stderr_to_stdout, {:env, env}, {:args, ["-c", shell_cmd]}] ++
+      [:binary, :exit_status, :stderr_to_stdout, {:env, port_env}, {:args, ["-c", shell_cmd]}] ++
         if(cwd, do: [{:cd, String.to_charlist(cwd)}], else: [])
 
     case DynamicSupervisor.start_child(
@@ -34,7 +23,7 @@ defmodule Coflux.ProcessLauncher do
            {Coflux.ProcessLauncher.Worker, port_opts}
          ) do
       {:ok, pid} ->
-        {:ok, %{pid: pid, command: command}}
+        {:ok, %{pid: pid, cli_path: cli_path}}
 
       {:error, reason} ->
         {:error, "failed to start process: #{inspect(reason)}"}
