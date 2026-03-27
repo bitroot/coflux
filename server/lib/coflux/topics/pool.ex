@@ -97,6 +97,14 @@ defmodule Coflux.Topics.Pool do
         base
         |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
         |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+
+      :process ->
+        base = %{type: "process", command: launcher.command}
+
+        base
+        |> maybe_put(:args, Map.get(launcher, :args))
+        |> maybe_put(:cwd, Map.get(launcher, :cwd))
+        |> maybe_put(:serverHost, Map.get(launcher, :server_host))
     end
   end
 

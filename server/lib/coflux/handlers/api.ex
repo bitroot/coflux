@@ -780,11 +780,43 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_process_launcher(value) do
+    command = Map.get(value, "command")
+    args = Map.get(value, "args", [])
+    server_host = Map.get(value, "serverHost")
+    cwd = Map.get(value, "cwd")
+
+    cond do
+      not is_binary(command) or String.length(command) > 500 ->
+        {:error, :invalid}
+
+      not is_list(args) or Enum.any?(args, &(not is_binary(&1))) ->
+        {:error, :invalid}
+
+      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+        {:error, :invalid}
+
+      not is_nil(cwd) and (not is_binary(cwd) or String.length(cwd) > 500) ->
+        {:error, :invalid}
+
+      true ->
+        launcher = %{type: :process, command: command, args: args}
+
+        launcher =
+          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
+
+        launcher = if cwd, do: Map.put(launcher, :cwd, cwd), else: launcher
+
+        {:ok, launcher}
+    end
+  end
+
   defp parse_launcher(value) do
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
           {:ok, "docker"} -> parse_docker_launcher(value)
+          {:ok, "process"} -> parse_process_launcher(value)
           {:ok, _other} -> {:error, :invalid}
           :error -> {:error, :invalid}
         end

@@ -130,6 +130,10 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	}
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
+	if len(manifest.Targets) == 0 {
+		return fmt.Errorf("no targets found in modules %v", modules)
+	}
+
 	// Register manifests if requested (before connecting)
 	if register {
 		w.logger.Debug("registering manifests")

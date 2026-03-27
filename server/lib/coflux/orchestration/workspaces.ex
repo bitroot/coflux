@@ -672,13 +672,15 @@ defmodule Coflux.Orchestration.Workspaces do
 
   defp encode_launcher_type(type) do
     case type do
-      :docker -> 0
+      :process -> 0
+      :docker -> 1
     end
   end
 
   defp decode_launcher_type(value) do
     case value do
-      0 -> :docker
+      0 -> :process
+      1 -> :docker
     end
   end
 

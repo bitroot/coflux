@@ -49,6 +49,7 @@ defmodule Coflux.Topics.Pools do
   defp build_launcher(launcher) do
     case launcher.type do
       :docker -> Map.take(launcher, [:type, :image])
+      :process -> Map.take(launcher, [:type, :command, :args, :cwd])
     end
   end
 end

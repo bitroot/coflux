@@ -12,6 +12,7 @@ defmodule Coflux.Application do
     children = [
       # TODO: separate launch supervisor per project? (and specify max_children?)
       {Task.Supervisor, name: Coflux.LauncherSupervisor},
+      {DynamicSupervisor, name: Coflux.ProcessLauncher.Supervisor, strategy: :one_for_one},
       Orchestration.Supervisor,
       {Registry, keys: :unique, name: Coflux.Logs.Registry},
       Logs.Supervisor,

@@ -419,6 +419,7 @@ defmodule Coflux.Orchestration.Server do
             |> put_in([Access.key(:workspaces), workspace_id], workspace)
             |> put_in([Access.key(:workspace_names), workspace.name], workspace_id)
             |> put_in([Access.key(:workspace_external_ids), workspace.external_id], workspace_id)
+            |> put_in([Access.key(:pools), workspace_id], %{})
             |> notify_listeners(
               :workspaces,
               {:workspace, workspace_id,
@@ -1751,7 +1752,7 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:subscribe_pool, workspace_external_id, pool_name, pid}, _from, state) do
     case resolve_workspace_external_id(state, workspace_external_id) do
       {:ok, workspace_id} ->
-        pool = Map.get(state.pools[workspace_id], pool_name)
+        pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
         {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
 
         # TODO: include 'active' workers that aren't in this (potentially limited) list
@@ -2280,11 +2281,28 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       if Enum.any?(unassigned) do
-        latest_pool_launch_at =
+        # Track the most recent worker creation per pool, and which pools
+        # already have a worker that isn't ready to accept work.  We skip
+        # launching for pools that have a worker still pending activation
+        # or that activated but hasn't registered any targets yet (e.g.
+        # due to a misconfigured command or working directory).
+        {latest_pool_launch_at, pools_with_pending_worker} =
           state.workers
           |> Map.values()
-          |> Enum.reduce(%{}, fn worker, latest ->
-            Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
+          |> Enum.reduce({%{}, MapSet.new()}, fn worker, {latest, pending} ->
+            latest =
+              Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
+
+            pending =
+              with session_id when not is_nil(session_id) <- worker.session_id,
+                   {:ok, session} <- Map.fetch(state.sessions, session_id),
+                   false <- session.activated_at != nil and Enum.any?(session.targets) do
+                MapSet.put(pending, worker.pool_id)
+              else
+                _ -> pending
+              end
+
+            {latest, pending}
           end)
 
         unassigned
@@ -2301,13 +2319,14 @@ defmodule Coflux.Orchestration.Server do
           end)
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq()
+          |> Enum.reject(&MapSet.member?(pools_with_pending_worker, &1))
           |> Enum.filter(&(now - Map.get(latest_pool_launch_at, &1, 0) > 10_000))
           |> Enum.reduce(state, fn pool_id, state ->
             case Workers.create_worker(state.db, pool_id) do
               {:ok, worker_id, worker_external_id, created_at} ->
                 {pool_name, pool} =
                   Enum.find(
-                    state.pools[workspace_id],
+                    Map.get(state.pools, workspace_id, %{}),
                     &(elem(&1, 1).id == pool_id)
                   )
 
@@ -5096,6 +5115,7 @@ defmodule Coflux.Orchestration.Server do
     module =
       case launcher.type do
         :docker -> Coflux.DockerLauncher
+        :process -> Coflux.ProcessLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)
@@ -5132,6 +5152,14 @@ defmodule Coflux.Orchestration.Server do
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
     state = Map.update!(state, :worker_external_ids, &Map.delete(&1, worker.external_id))
+
+    # Expire the worker's session so it can't reconnect to a deactivated worker.
+    state =
+      if worker.session_id && Map.has_key?(state.sessions, worker.session_id) do
+        remove_session(state, worker.session_id)
+      else
+        state
+      end
 
     notify_listeners(
       state,
