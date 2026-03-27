@@ -5,26 +5,49 @@ import os
 import signal
 import subprocess
 import time
+import urllib.request
 from contextlib import contextmanager
 
 from . import cli
 from .executor import Executor
 from .manifest import manifest
+from .server import SUPER_TOKEN
 
 ADAPTER_SCRIPT = os.path.join(os.path.dirname(__file__), "adapter.py")
 
 
-def poll_result(run_id, host, workspace="default", timeout=15):
+def poll_result(run_id, host, workspace="default", timeout=15, interval=0.1, max_interval=1.0):
     """Poll for a run result until it completes or times out."""
     deadline = time.time() + timeout
-    interval = 0.1
+    last_error = None
     while time.time() < deadline:
         try:
             return cli.runs_result(run_id, host=host, workspace=workspace)
-        except (subprocess.CalledProcessError, json.JSONDecodeError):
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            last_error = e
             time.sleep(interval)
-            interval = min(interval * 2, 1.0)
-    raise TimeoutError(f"run {run_id} did not complete within {timeout}s")
+            interval = min(interval * 2, max_interval)
+    raise TimeoutError(
+        f"run {run_id} did not complete within {timeout}s"
+        f" (last error: {last_error})"
+    )
+
+
+def api_post(port, project_id, path, token=None):
+    """POST to a server management API endpoint."""
+    if token is None:
+        token = SUPER_TOKEN
+    url = f"http://{project_id}.localhost:{port}/api/{path}"
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    urllib.request.urlopen(req, timeout=10)
 
 
 @contextmanager

@@ -1,12 +1,11 @@
 """Tests for asset persistence and retrieval."""
 
 import os
-import tempfile
 
 from support.manifest import task, workflow
 
 
-def test_persist_and_get_asset(worker):
+def test_persist_and_get_asset(worker, tmp_path):
     """Executor persists a file as an asset, then retrieves it in another step."""
     targets = [
         workflow("test", "main"),
@@ -26,14 +25,13 @@ def test_persist_and_get_asset(worker):
         ex1 = ctx.executor.next_execute()
 
         # Create a temp file to persist as an asset
-        fd, tmp_path = tempfile.mkstemp(suffix=".txt")
-        with open(fd, "w") as f:
-            f.write("hello asset")
+        asset_file = tmp_path / "asset.txt"
+        asset_file.write_text("hello asset")
 
         # Persist the file as an asset
         asset_result = ex1.conn.persist_asset(
             ex1.execution_id,
-            [tmp_path],
+            [str(asset_file)],
             metadata={"name": "my_asset"},
         )
         assert "asset_id" in asset_result
@@ -65,10 +63,6 @@ def test_persist_and_get_asset(worker):
 
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
-
-        # Clean up
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
 
 def test_asset_inspect_and_download(worker, tmp_path):

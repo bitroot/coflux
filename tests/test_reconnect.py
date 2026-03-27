@@ -7,7 +7,6 @@ import support.cli as cli
 from support.helpers import managed_worker, poll_result
 from support.manifest import workflow
 from support.proxy import TCPProxy
-from support.server import ManagedServer
 
 
 def test_result_buffered_on_disconnect(server, tmp_path):
@@ -81,39 +80,30 @@ def test_error_buffered_on_disconnect(server, tmp_path):
         proxy.close()
 
 
-def test_result_buffered_across_server_restart(tmp_path):
+def test_result_buffered_across_server_restart(isolated_server, tmp_path):
     """Result completed while server is down is delivered after server restart."""
-    project_id = f"test-{uuid.uuid4().hex[:12]}"
+    server, host, project_id = isolated_server
     targets = [workflow("test", "my_workflow")]
 
-    server = ManagedServer(str(tmp_path / "data"))
-    server.start()
+    with managed_worker(targets, host, tmp_path) as executor:
+        resp = cli.submit("test/my_workflow", host=host)
+        run_id = resp["runId"]
 
-    try:
-        host = f"{project_id}.localhost:{server.port}"
-        cli.workspaces_create("default", host=host)
+        ex = executor.next_execute()
+        assert ex.target == "my_workflow"
 
-        with managed_worker(targets, host, tmp_path) as executor:
-            resp = cli.submit("test/my_workflow", host=host)
-            run_id = resp["runId"]
-
-            ex = executor.next_execute()
-            assert ex.target == "my_workflow"
-
-            # Kill server
-            server.stop()
-            time.sleep(0.5)
-
-            # Complete execution while server is down
-            ex.conn.complete(ex.execution_id, value=42)
-
-            # Restart server — same port, same data directory
-            server.start()
-
-            # Worker reconnects, server restores session from DB,
-            # sends execution IDs, worker flushes buffered result
-            result = poll_result(run_id, host, timeout=20)
-            assert result["type"] == "value"
-            assert result["value"]["data"] == 42
-    finally:
+        # Kill server
         server.stop()
+        time.sleep(0.5)
+
+        # Complete execution while server is down
+        ex.conn.complete(ex.execution_id, value=42)
+
+        # Restart server — same port, same data directory
+        server.start()
+
+        # Worker reconnects, server restores session from DB,
+        # sends execution IDs, worker flushes buffered result
+        result = poll_result(run_id, host, timeout=20)
+        assert result["type"] == "value"
+        assert result["value"]["data"] == 42

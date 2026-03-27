@@ -1,12 +1,10 @@
 """Tests for logging and execution groups."""
 
-import json
 import time
-import urllib.request
 
+from support.helpers import api_post
 from support.manifest import task, workflow
 from support.protocol import json_args, log_message, register_group_notification
-from support.server import SUPER_TOKEN
 
 
 def test_log_messages(worker):
@@ -253,17 +251,7 @@ def test_log_display_format(worker):
 
 def _rotate_logs(port, project_id):
     """Force a log partition rotation via the management API."""
-    url = f"http://{project_id}.localhost:{port}/api/rotate_logs"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        data=b"{}",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {SUPER_TOKEN}",
-        },
-    )
-    urllib.request.urlopen(req, timeout=10)
+    api_post(port, project_id, "rotate_logs")
 
 
 def test_logs_across_partition_boundary(worker, server):
