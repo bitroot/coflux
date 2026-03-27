@@ -42,6 +42,10 @@ defmodule Coflux.Config do
     token support. Should be a long random string, kept consistent across restarts.
   - **COFLUX_STUDIO_TEAMS**: Comma-separated list of team IDs allowed for Studio auth
   - **COFLUX_STUDIO_URL**: Studio URL for JWKS (default: https://studio.coflux.com)
+  - **COFLUX_LAUNCHER_TYPES**: Comma-separated list of allowed launcher types
+    (e.g. `"docker"`, `"process"`, `"docker,process"`). Defaults to none (no
+    launcher types enabled). Pools without an enabled launcher type cannot be
+    created or updated.
   """
 
   @doc """
@@ -58,6 +62,7 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_studio_url, parse_studio_url())
     :persistent_term.put(:coflux_super_token_hash, parse_super_token())
     :persistent_term.put(:coflux_secret, parse_secret())
+    :persistent_term.put(:coflux_launcher_types, parse_launcher_types())
     :ok
   end
 
@@ -255,6 +260,35 @@ defmodule Coflux.Config do
       nil -> nil
       "" -> nil
       secret -> secret
+    end
+  end
+
+  @doc """
+  Returns the set of allowed launcher types (e.g. `MapSet<:docker | :process>`).
+
+  Defaults to an empty set (no launcher types enabled). Set via
+  `COFLUX_LAUNCHER_TYPES` as a comma-separated list of type names
+  (e.g. `"docker,process"`).
+  """
+  def launcher_types do
+    :persistent_term.get(:coflux_launcher_types)
+  end
+
+  @valid_launcher_types MapSet.new([:docker, :process])
+
+  defp parse_launcher_types do
+    case System.get_env("COFLUX_LAUNCHER_TYPES") do
+      nil ->
+        MapSet.new()
+
+      value ->
+        value
+        |> String.split(",")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.map(&String.to_existing_atom/1)
+        |> MapSet.new()
+        |> MapSet.intersection(@valid_launcher_types)
     end
   end
 end

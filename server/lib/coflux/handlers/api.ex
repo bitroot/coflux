@@ -812,13 +812,28 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp parse_launcher(value) do
+    allowed = Coflux.Config.launcher_types()
+
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
-          {:ok, "docker"} -> parse_docker_launcher(value)
-          {:ok, "process"} -> parse_process_launcher(value)
-          {:ok, _other} -> {:error, :invalid}
-          :error -> {:error, :invalid}
+          {:ok, type} when type in ["docker", "process"] ->
+            type_atom = String.to_existing_atom(type)
+
+            if MapSet.member?(allowed, type_atom) do
+              case type do
+                "docker" -> parse_docker_launcher(value)
+                "process" -> parse_process_launcher(value)
+              end
+            else
+              {:error, :invalid}
+            end
+
+          {:ok, _other} ->
+            {:error, :invalid}
+
+          :error ->
+            {:error, :invalid}
         end
 
       is_nil(value) ->
