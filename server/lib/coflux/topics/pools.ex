@@ -55,8 +55,7 @@ defmodule Coflux.Topics.Pools do
           |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
 
         :process ->
-          %{type: "process", cli: launcher.cli}
-          |> maybe_put(:cwd, Map.get(launcher, :cwd))
+          %{type: "process", directory: launcher.directory}
       end
 
     type_fields

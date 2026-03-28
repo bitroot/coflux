@@ -772,20 +772,14 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp parse_process_launcher(value) do
-    cli = Map.get(value, "cli")
-    cwd = Map.get(value, "cwd")
+    directory = Map.get(value, "directory")
 
     cond do
-      not is_binary(cli) or String.length(cli) > 500 ->
-        {:error, :invalid}
-
-      not is_nil(cwd) and (not is_binary(cwd) or String.length(cwd) > 500) ->
+      not is_binary(directory) or String.length(directory) > 500 ->
         {:error, :invalid}
 
       true ->
-        launcher = %{type: :process, cli: cli}
-        launcher = if cwd, do: Map.put(launcher, :cwd, cwd), else: launcher
-        {:ok, launcher}
+        {:ok, %{type: :process, directory: directory}}
     end
   end
 

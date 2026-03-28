@@ -3,8 +3,8 @@ defmodule Coflux.ProcessLauncher do
   @log_max_bytes 1024
 
   def launch(env, modules, config) do
-    cli_path = Map.fetch!(config, :cli)
-    cwd = Map.get(config, :cwd)
+    cli_path = Coflux.Config.cli_path()
+    directory = Map.fetch!(config, :directory)
 
     # Use `exec` so the shell is replaced by the command, ensuring
     # the port's OS process IS the worker (not a wrapper shell).
@@ -15,15 +15,15 @@ defmodule Coflux.ProcessLauncher do
       Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
     port_opts =
-      [:binary, :exit_status, :stderr_to_stdout, {:env, port_env}, {:args, ["-c", shell_cmd]}] ++
-        if(cwd, do: [{:cd, String.to_charlist(cwd)}], else: [])
+      [:binary, :exit_status, :stderr_to_stdout, {:env, port_env}, {:args, ["-c", shell_cmd]},
+       {:cd, String.to_charlist(directory)}]
 
     case DynamicSupervisor.start_child(
            Coflux.ProcessLauncher.Supervisor,
            {Coflux.ProcessLauncher.Worker, port_opts}
          ) do
       {:ok, pid} ->
-        {:ok, %{pid: pid, cli_path: cli_path}}
+        {:ok, %{pid: pid}}
 
       {:error, reason} ->
         {:error, "failed to start process: #{inspect(reason)}"}

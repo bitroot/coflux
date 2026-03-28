@@ -46,6 +46,8 @@ defmodule Coflux.Config do
     (e.g. `"docker"`, `"process"`, `"docker,process"`). Defaults to none (no
     launcher types enabled). Pools without an enabled launcher type cannot be
     created or updated.
+  - **COFLUX_CLI_PATH**: Path to the Coflux CLI binary for the process launcher
+    (default: `"coflux"`, assuming the CLI is on PATH).
   """
 
   @doc """
@@ -63,6 +65,7 @@ defmodule Coflux.Config do
     :persistent_term.put(:coflux_super_token_hash, parse_super_token())
     :persistent_term.put(:coflux_secret, parse_secret())
     :persistent_term.put(:coflux_launcher_types, parse_launcher_types())
+    :persistent_term.put(:coflux_cli_path, parse_cli_path())
     :ok
   end
 
@@ -272,6 +275,19 @@ defmodule Coflux.Config do
   """
   def launcher_types do
     :persistent_term.get(:coflux_launcher_types)
+  end
+
+  @doc """
+  Returns the CLI binary path for the process launcher.
+
+  Defaults to `"coflux"` (assumes the CLI is on PATH). Set via `COFLUX_CLI_PATH`.
+  """
+  def cli_path do
+    :persistent_term.get(:coflux_cli_path)
+  end
+
+  defp parse_cli_path do
+    System.get_env("COFLUX_CLI_PATH", "coflux")
   end
 
   @valid_launcher_types MapSet.new([:docker, :process])

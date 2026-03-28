@@ -140,11 +140,8 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if image := getString(launcher, "image"); image != "" {
 			fmt.Printf("Image: %s\n", image)
 		}
-		if cli := getString(launcher, "cli"); cli != "" {
-			fmt.Printf("CLI: %s\n", cli)
-		}
-		if cwd := getString(launcher, "cwd"); cwd != "" {
-			fmt.Printf("Working directory: %s\n", cwd)
+		if dir := getString(launcher, "directory"); dir != "" {
+			fmt.Printf("Directory: %s\n", dir)
 		}
 		if dockerHost := getString(launcher, "dockerHost"); dockerHost != "" {
 			fmt.Printf("Docker host: %s\n", dockerHost)
@@ -515,9 +512,7 @@ var (
 	poolsUpdateDockerImage   string
 	poolsUpdateDockerHost    string
 	poolsUpdateNoDockerHost  bool
-	poolsUpdateProcessCli    string
-	poolsUpdateProcessCwd    string
-	poolsUpdateNoProcessCwd  bool
+	poolsUpdateProcessDir    string
 	poolsUpdateServerHost    string
 	poolsUpdateNoServerHost  bool
 	poolsUpdateAdapter       []string
@@ -541,9 +536,7 @@ func init() {
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessCli, "process-cli", "", "Path to coflux CLI binary (process launcher)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessCwd, "process-cwd", "", "Working directory for process launcher")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoProcessCwd, "no-process-cwd", false, "Unset working directory")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessDir, "process-dir", "", "Directory for process launcher")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
@@ -554,20 +547,13 @@ func init() {
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoEnv, "no-env", false, "Clear all custom environment variables")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-cwd", "no-process-cwd")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("adapter", "no-adapter")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("concurrency", "no-concurrency")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("env", "no-env")
 	// Process and Docker flags are mutually exclusive
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-cli")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-cli")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-cli")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-cwd")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-cwd")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-cwd")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "no-process-cwd")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-process-cwd")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "no-process-cwd")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-dir")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-dir")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-dir")
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -601,18 +587,10 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	if poolsUpdateProvides != nil {
 		pool["provides"] = parseProvides(poolsUpdateProvides)
 	}
-	if poolsUpdateProcessCli != "" || poolsUpdateProcessCwd != "" || poolsUpdateNoProcessCwd {
-		launcher, ok := pool["launcher"].(map[string]any)
-		if !ok || getString(launcher, "type") != "process" {
-			launcher = map[string]any{"type": "process"}
-		}
-		if poolsUpdateProcessCli != "" {
-			launcher["cli"] = poolsUpdateProcessCli
-		}
-		if poolsUpdateProcessCwd != "" {
-			launcher["cwd"] = poolsUpdateProcessCwd
-		} else if poolsUpdateNoProcessCwd {
-			delete(launcher, "cwd")
+	if poolsUpdateProcessDir != "" {
+		launcher := map[string]any{
+			"type":      "process",
+			"directory": poolsUpdateProcessDir,
 		}
 		applyCommonLauncherFlags(launcher)
 		pool["launcher"] = launcher
