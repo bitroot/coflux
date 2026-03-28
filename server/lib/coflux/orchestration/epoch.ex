@@ -676,8 +676,8 @@ defmodule Coflux.Orchestration.Epoch do
       """)
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, old_worker_id, old_tag_set_id,
-                               activation_timeout, reconnection_timeout, secret_hash,
-                               created_at, created_by},
+                               activation_timeout, reconnection_timeout, secret_hash, created_at,
+                               created_by},
                               acc ->
       new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
       new_worker_id = if old_worker_id, do: Map.fetch!(worker_ids, old_worker_id)

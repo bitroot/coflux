@@ -15,8 +15,14 @@ defmodule Coflux.ProcessLauncher do
       Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
     port_opts =
-      [:binary, :exit_status, :stderr_to_stdout, {:env, port_env}, {:args, ["-c", shell_cmd]},
-       {:cd, String.to_charlist(directory)}]
+      [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        {:env, port_env},
+        {:args, ["-c", shell_cmd]},
+        {:cd, String.to_charlist(directory)}
+      ]
 
     case DynamicSupervisor.start_child(
            Coflux.ProcessLauncher.Supervisor,
