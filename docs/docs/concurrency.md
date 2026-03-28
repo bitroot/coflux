@@ -1,8 +1,8 @@
 # Concurrency
 
-By default, when a task is called from another task (or workflow), execution will block while waiting for the called task to complete. This is more intuitive for beginners, and also makes code more portable.
+By default, when a task is called from another task (or workflow) - e.g., with `my_task()` - execution will block while waiting for the called task to complete. This is more intuitive for beginners, and also makes code more portable.
 
-Often, however, you'll want to be able to execute tasks in parallel, and collect the results later on. Or trigger a task without waiting for the result. This can be done by 'submitting' the task (using `.submit(...)`) instead of calling it. This returns an `Execution`, which is a 'future'-like object that can be used to wait for the result (using `.result()`), when needed:
+Often, however, you'll want to be able to execute tasks in parallel, and collect the results later on. Or trigger a task without waiting for the result. This can be done by 'submitting' the task - e.g., with `my_task.submit(...)`. This returns an `Execution` object, which is a 'future'-like object that can be used to wait for the result (using `.result()`), when needed:
 
 ```python
 @cf.task()
@@ -118,4 +118,4 @@ def my_workflow():
     execution.cancel()
 ```
 
-In this case `my_workflow` submits `another_workflow` (causing a separate run to be started), but then cancels it. The effect is the same as if the run had been cancelled in the UI.
+In this case `my_workflow` submits `another_workflow` (causing a separate run to be started), but then cancels it. The effect is the same as if the run had been cancelled in Studio.

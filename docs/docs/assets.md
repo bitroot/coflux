@@ -1,10 +1,10 @@
 # Assets
 
-An asset is a collection of files, which can be shared between tasks and inspected in the UI. Individual files are uploaded to the configured [blob store](/blobs). The listing and metadata are uploaded to the Coflux server.
+An asset is a collection of files, which can be shared between tasks, inspected in Studio, and downloaded with the CLI. Individual files are uploaded to the configured [blob store](/blobs). The listing and metadata are uploaded to the Coflux server.
 
 ## Creating assets
 
-An asset is created by calling `cf.asset()`. This will return an `Asset` object, which can be passed to other tasks (or returned), and then used to restore some or all of the files.
+An asset is created by calling `cf.asset(...)`. This will return an `Asset` object, which can be passed to other tasks (or returned), and then used to restore some or all of the files.
 
 Each execution is started in a temporary directory. By default, `cf.asset()` will collect all files in the directory.
 

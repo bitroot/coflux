@@ -15,7 +15,7 @@ def my_workflow(n: int):
         my_task(i)
 ```
 
-But starting a large number of tasks can make it difficult to navigate the graph in the UI - especially when those tasks are themselves starting other tasks. To make the graphs easier to navigate, Coflux has the concept of _task groups_.
+But starting a large number of tasks can make it difficult to navigate the graph in Studio — especially when those tasks are themselves starting other tasks. To make the graphs easier to navigate, Coflux has the concept of _task groups_.
 
 A group can be created using a context manager:
 
@@ -27,14 +27,14 @@ def my_workflow(n: int):
             my_task(i)
 ```
 
-Now all of the steps will be assigned to the group. In the UI only one step from the group will be displayed at a time.
+Now all of the steps will be assigned to the group. In Studio, only one step from the group will be displayed at a time.
 
 <img src="/img/group.png" alt="A group" width="500" />
 
-The name passed to `cf.group(...)` is optional, and simply serves as a way to label the group in the UI.
+The name passed to `cf.group(...)` is optional, and simply serves as a way to label the group in Studio.
 
 :::note
-Note that steps can be run in parallel by 'submitting' them :
+Note that steps can be run in parallel by 'submitting' them:
 
 ```python
 @cf.workflow()
@@ -70,7 +70,7 @@ Tasks that are called within a group don't need to be the same:
 ```python
 with cf.group("My tasks"):
     for i in range(n):
-        if n % 2 == 0:
+        if i % 2 == 0:
             even_task(i)
         else:
             odd_task(i)

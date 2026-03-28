@@ -4,6 +4,14 @@ Workflows are defined in code, using Python functions, which are decorated to in
 
 The decorators are intended to be unimposing so that functions can be executed outside of Coflux.
 
+## Installing the Python package
+
+The `coflux` Python package provides the decorators and runtime for defining and executing workflows. Install it into the environment that your workflow code will run in:
+
+```bash
+pip install coflux
+```
+
 ## An example
 
 Here's a simple example:
@@ -30,7 +38,7 @@ Workflows are defined in _modules_. Typically these are Python modules, but they
 Put the workflow above into `hello.py`.
 
 :::tip
-The docstring of a workflow will be available in the UI when running a workflow. This is a great place to explain what the workflow does.
+The docstring of a workflow will be available in Studio when running a workflow. This is a great place to explain what the workflow does.
 :::
 
 Before coming back to more advanced features, let's see how to get this workflow running...

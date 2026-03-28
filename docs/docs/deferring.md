@@ -19,7 +19,7 @@ Delaying tasks is useful in combination with 'deferring' as a way to de-duplicat
 For example, you might want to be able to send a notification to a user to notify of them of updates to a document. If there are lots of updates to the document within a short period of time, you wouldn't want to send notifications for every change. Instead, you can configure a delay, as above, and enable deferring. This is done by specifying the `defer` option on the task:
 
 ```python
-@cf.task(delay=60, defer=True):
+@cf.task(delay=60, defer=True)
 def send_notification(user_id, document_id):
     ...
 ```
@@ -38,4 +38,4 @@ def send_notification(user_id, document_id, update):
     ...
 ```
 
-In this case, subsequent calls for the same user and document would be de-duplicated, even though the update is different each time. Initial calls to `send_notification` would be discarded, in favour of the latest call.
+In this case, subsequent calls for the same user and document would be de-duplicated, even though the update is different each time. Initial calls to `send_notification` would be discarded, in favor of the latest call.

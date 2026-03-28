@@ -88,7 +88,7 @@ def fetch_product(product_id, url):
 :::note
 The names of arguments can be changed without affecting the cache - this is because the names are translated to indexes.
 
-Additionally, if the order of parameters needs to be changed, the cache can be maintained by specifying (or rearranging) the `params`. In the following three versions of `my_task` the addition of a parameter, and then rearranging, won't effect the cache:
+Additionally, if the order of parameters needs to be changed, the cache can be maintained by specifying (or rearranging) the `params`. In the following three versions of `my_task` the addition of a parameter, and then rearranging, won't affect the cache:
 
 ```python
 # before change
@@ -152,7 +152,7 @@ If you need to re-evaluate a task that's cached, you can do so by 're-running' t
 
 ## Cache hit requirements
 
-To summarise, the requirements for a cache hit (i.e., for a previous result to be reused, instead of executing a step) are that:
+To summarize, the requirements for a cache hit (i.e., for a previous result to be reused, instead of executing a step) are that:
 
 1. The result must be in the same workspace, or an ancestral workspace, within the same project.
 2. The result must also have had caching enabled.

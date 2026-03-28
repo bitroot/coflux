@@ -11,7 +11,7 @@ cf.log_info(
 )
 ```
 
-These messages will appear in the web UI like this:
+These messages will appear in Studio like this:
 
 <img src="/img/beer_logs.png" alt="Log messages" width="500" />
 
