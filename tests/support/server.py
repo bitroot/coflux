@@ -74,6 +74,7 @@ class ManagedServer:
             self._start_local(timeout)
 
     def _start_local(self, timeout):
+        cli_path = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
         env = {
             "PATH": os.environ["PATH"],
             "HOME": os.environ.get("HOME", "/tmp"),
@@ -83,6 +84,7 @@ class ManagedServer:
             "COFLUX_REQUIRE_AUTH": "false",
             "COFLUX_LAUNCHER_TYPES": "process,docker",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
+            "COFLUX_CLI_PATH": cli_path,
             **self._extra_env,
         }
         self._proc = subprocess.Popen(

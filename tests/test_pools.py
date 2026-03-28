@@ -5,7 +5,6 @@ worker processes when executions are submitted for matching modules.
 """
 
 import json
-import os
 
 import pytest
 import support.cli as cli
@@ -14,8 +13,6 @@ from support.helpers import ADAPTER_SCRIPT, poll_result
 from support.manifest import manifest, workflow, task
 from support.protocol import json_args
 
-
-_COFLUX_BIN = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
 
 # Launcher-managed workers are slower to start than direct workers.
 _LAUNCH_TIMEOUT = 30  # wait_connections: launcher startup + worker init
@@ -71,7 +68,7 @@ def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides
         pool_name,
         modules=modules,
         provides=provides,
-        process_cli=_COFLUX_BIN,
+        process_dir=str(pool_env["worker_dir"]),
         adapter=["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path],
         host=host,
         **kwargs,
@@ -96,7 +93,7 @@ class TestPoolLifecycle:
 
         pool = cli.pools_get("test-pool", host=host)
         assert pool["launcher"]["type"] == "process"
-        assert pool["launcher"]["cli"] == _COFLUX_BIN
+        assert pool["launcher"]["directory"] == str(pool_env["worker_dir"])
         assert "test" in pool["modules"]
 
     def test_pool_delete(self, pool_env):
@@ -275,7 +272,7 @@ class TestCommonLauncherFields:
         assert pool["launcher"]["env"]["EXTRA"] == "val"
         # Original fields should be preserved
         assert pool["launcher"]["type"] == "process"
-        assert pool["launcher"]["cli"] == _COFLUX_BIN
+        assert pool["launcher"]["directory"] == str(pool_env["worker_dir"])
 
     def test_env_reaches_worker(self, pool_env):
         """Custom env vars set on a pool are visible in the launched worker."""
@@ -314,7 +311,7 @@ class TestCommonLauncherFields:
         cli.pools_update(
             "env-worker-pool",
             modules=["test"],
-            process_cli=_COFLUX_BIN,
+            process_dir=str(worker_dir),
             adapter=["python3", wrapper_script, "--manifest", manifest_path, "--socket", socket_path],
             env={"TEST_POOL_VAR": "pool-env-works"},
             host=host,

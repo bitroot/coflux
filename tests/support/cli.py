@@ -161,7 +161,7 @@ def logs_get(
 
 
 def pools_update(
-    name, modules=None, provides=None, process_cli=None, process_cwd=None,
+    name, modules=None, provides=None, process_dir=None,
     docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
 ):
     args = ["pools", "update", name]
@@ -171,10 +171,8 @@ def pools_update(
     if provides:
         for key, values in provides.items():
             args.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
-    if process_cli:
-        args.extend(["--process-cli", process_cli])
-    if process_cwd:
-        args.extend(["--process-cwd", process_cwd])
+    if process_dir:
+        args.extend(["--process-dir", process_dir])
     if docker_image:
         args.extend(["--docker-image", docker_image])
     if adapter:

@@ -5114,7 +5114,7 @@ defmodule Coflux.Orchestration.Server do
     coflux_host = launcher[:server_host] || Coflux.Config.server_host(state.project_id)
 
     base = %{
-      "COFLUX_SERVER_HOST" => coflux_host,
+      "COFLUX_HOST" => coflux_host,
       "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
       "COFLUX_SESSION" => token
     }
