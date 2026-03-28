@@ -28,6 +28,9 @@ defmodule Coflux.Topics.Pool do
 
       {:error, :not_found} ->
         {:error, :not_found}
+
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
     end
   end
 
