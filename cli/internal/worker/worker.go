@@ -113,7 +113,7 @@ func (w *Worker) requireConn() (*api.Connection, error) {
 // Run starts the worker
 func (w *Worker) Run(ctx context.Context, modules []string, register bool) error {
 	// Create API client
-	w.client = api.NewClient(w.cfg.Server.Host, w.cfg.IsSecure(), w.cfg.Server.Token)
+	w.client = api.NewClient(w.cfg.Host, w.cfg.IsSecure(), w.cfg.Token)
 
 	// Resolve workspace name to external ID
 	workspaceID, err := w.resolveWorkspaceID(ctx)
@@ -265,7 +265,7 @@ func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[st
 func (w *Worker) runConnection(ctx context.Context, targets map[string]map[string][]string) (bool, error) {
 	// Create new connection
 	conn := api.NewConnection(
-		w.cfg.Server.Host,
+		w.cfg.Host,
 		w.cfg.IsSecure(),
 		w.workspaceID,
 		w.sessionID,
@@ -301,9 +301,9 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	hasExecutions := len(w.executions) > 0
 	w.mu.RUnlock()
 	if hasExecutions {
-		w.logger.Info("reconnected", "host", w.cfg.Server.Host)
+		w.logger.Info("reconnected", "host", w.cfg.Host)
 	} else {
-		w.logger.Info("connected", "host", w.cfg.Server.Host)
+		w.logger.Info("connected", "host", w.cfg.Host)
 	}
 
 	// Start heartbeat for this connection

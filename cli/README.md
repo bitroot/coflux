@@ -86,13 +86,11 @@ coflux blobs get <key>
 Create a `coflux.toml` file (or use `coflux setup`):
 
 ```toml
+host = "localhost:7777"
+# token = "your-token"  # or use --token flag
 workspace = "default"
 modules = ["myapp.workflows", "myapp.tasks"]
 concurrency = 8
-
-[server]
-host = "localhost:7777"
-# token = "your-token"  # or use --token flag
 
 [blobs]
 threshold = 200  # bytes, values larger stored as blobs
