@@ -71,9 +71,9 @@ func init() {
 func getDefaultImage() string {
 	apiVersion := version.APIVersion()
 	if apiVersion != "dev" && apiVersion != "" {
-		return fmt.Sprintf("ghcr.io/cofluxlabs/coflux:%s", apiVersion)
+		return fmt.Sprintf("ghcr.io/bitroot/coflux:%s", apiVersion)
 	}
-	return "ghcr.io/cofluxlabs/coflux:latest"
+	return "ghcr.io/bitroot/coflux:latest"
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
