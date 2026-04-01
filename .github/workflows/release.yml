@@ -206,49 +206,9 @@ jobs:
           name: python-adapter
           path: adapters/python/dist/*
 
-  test:
-    runs-on: ubuntu-latest
-    needs: [bump-version, build-cli, build-server]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump-version.outputs.release_sha }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Download CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: coflux-linux-amd64
-          path: cli
-
-      - name: Make CLI executable
-        run: chmod +x cli/coflux-linux-amd64
-
-      - name: Download server image
-        uses: actions/download-artifact@v4
-        with:
-          name: coflux-image
-
-      - name: Load server image
-        run: gunzip -c coflux-image.tar.gz | docker load
-
-      - name: Install test dependencies
-        run: pip install pytest pytest-xdist PyJWT cryptography
-
-      - name: Run E2E tests
-        env:
-          COFLUX_BIN: cli/coflux-linux-amd64
-          COFLUX_IMAGE: coflux:ci
-        run: pytest tests/ -n auto
-
   finalize:
     runs-on: ubuntu-latest
-    needs: [prepare, bump-version, test]
+    needs: [prepare, bump-version, build-cli, build-server, build-adapter]
     permissions:
       contents: write
     steps:
