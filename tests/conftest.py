@@ -1,5 +1,4 @@
 import json
-import subprocess
 import tempfile
 import time
 import uuid
@@ -7,7 +6,7 @@ from contextlib import contextmanager
 
 import pytest
 import support.cli as cli
-from support.helpers import ADAPTER_SCRIPT, managed_worker
+from support.helpers import ADAPTER_SCRIPT, managed_worker, poll_result
 from support.server import ManagedServer
 
 
@@ -39,22 +38,9 @@ class WorkerContext:
 
     def result(self, run_id, timeout=10):
         """Poll for a run result."""
-        deadline = time.time() + timeout
-        last_error = None
-        interval = 0.05
-        while time.time() < deadline:
-            try:
-                return cli.runs_result(run_id, host=self.host, workspace=self.workspace)
-            except (
-                subprocess.CalledProcessError,
-                json.JSONDecodeError,
-            ) as e:
-                last_error = e
-                time.sleep(interval)
-                interval = min(interval * 2, 0.5)
-        raise TimeoutError(
-            f"run {run_id} did not complete within {timeout}s"
-            f" (last error: {last_error})"
+        return poll_result(
+            run_id, self.host, workspace=self.workspace,
+            timeout=timeout, interval=0.05, max_interval=0.5,
         )
 
     def inspect(self, run_id):
@@ -118,24 +104,24 @@ class WorkerContext:
         timeout=5,
     ):
         """Fetch logs, polling until min_entries are available."""
-        deadline = time.time() + timeout if min_entries else 0
+        kwargs = dict(
+            step_attempt=step_attempt,
+            from_ts=from_ts,
+            host=self.host,
+            workspace=self.workspace,
+            json_output=json_output,
+        )
+        if not min_entries:
+            return cli.logs_get(run_id, **kwargs)
+        deadline = time.time() + timeout
         while True:
-            data = cli.logs_get(
-                run_id,
-                step_attempt=step_attempt,
-                from_ts=from_ts,
-                host=self.host,
-                workspace=self.workspace,
-                json_output=json_output,
-            )
-            if not min_entries or time.time() >= deadline:
+            data = cli.logs_get(run_id, **kwargs)
+            if json_output and len(data.get("logs", [])) >= min_entries:
                 return data
-            if json_output:
-                if len(data.get("logs", [])) >= min_entries:
-                    return data
-            else:
-                if data.strip():
-                    return data
+            if not json_output and data.strip():
+                return data
+            if time.time() >= deadline:
+                return data
             time.sleep(0.05)
 
     def run(self, module, target, *arguments):
@@ -197,6 +183,25 @@ def server(request):
 @pytest.fixture
 def project_id():
     return f"test-{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture
+def isolated_server(tmp_path):
+    """A dedicated server + project for tests that need their own server instance.
+
+    Yields ``(server, host, project_id)``.  The default workspace is created
+    automatically.  Tests may call ``server.stop()`` / ``server.start()`` to
+    simulate restarts — the fixture cleans up on exit.
+    """
+    pid = f"test-{uuid.uuid4().hex[:12]}"
+    srv = ManagedServer(str(tmp_path / "data"))
+    srv.start()
+    host = f"{pid}.localhost:{srv.port}"
+    cli.workspaces_create("default", host=host)
+    try:
+        yield srv, host, pid
+    finally:
+        srv.stop()
 
 
 @pytest.fixture

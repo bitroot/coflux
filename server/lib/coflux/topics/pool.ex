@@ -28,6 +28,9 @@ defmodule Coflux.Topics.Pool do
 
       {:error, :not_found} ->
         {:error, :not_found}
+
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
     end
   end
 
@@ -90,14 +93,21 @@ defmodule Coflux.Topics.Pool do
   end
 
   defp build_launcher(launcher) do
-    case launcher.type do
-      :docker ->
-        base = %{type: "docker", image: launcher.image}
+    base =
+      case launcher.type do
+        :docker ->
+          %{type: "docker", image: launcher.image}
+          |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
 
-        base
-        |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
-        |> maybe_put(:serverHost, Map.get(launcher, :server_host))
-    end
+        :process ->
+          %{type: "process", directory: launcher.directory}
+      end
+
+    base
+    |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+    |> maybe_put(:adapter, Map.get(launcher, :adapter))
+    |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
+    |> maybe_put(:env, Map.get(launcher, :env))
   end
 
   defp maybe_put(map, _key, nil), do: map

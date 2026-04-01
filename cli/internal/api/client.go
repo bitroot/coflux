@@ -34,15 +34,12 @@ func NewClient(host string, secure bool, token string) *Client {
 }
 
 // CreateSession creates a new worker session
-func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string, concurrency int) (string, error) {
+func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string) (string, error) {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
 	if provides != nil {
 		body["provides"] = provides
-	}
-	if concurrency > 0 {
-		body["concurrency"] = concurrency
 	}
 
 	var result struct {

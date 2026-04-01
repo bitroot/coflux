@@ -1,4 +1,4 @@
-# Blobs
+# Blob stores
 
 Blob stores are used to store non-trivial amounts of data - this includes execution results, arguments passed to other executions, and asset data.
 
@@ -6,7 +6,7 @@ Separating the storage of data means that the Coflux server doesn't need to have
 
 By default Coflux will use a blob store embedded in the Coflux server, which saves blobs to the filesystem.
 
-This can be configured explicitly in the CLI configuration file (which is used by workers; the configuration file can be initialised with the CLI using `coflux configure`):
+This can be configured explicitly in the CLI configuration file (which is used by workers; the configuration file can be initialized with the CLI using `coflux setup`):
 
 ```toml
 [[blobs.stores]]
@@ -17,7 +17,7 @@ protocol = "http"
 
 ## Blob threshold
 
-To determine when to store data in the blob store, a blob 'threshold' is used. If the serialised data takes more than this number of bytes, the blob store will be used, and a reference to the blob is substituted - otherwise the raw data is sent to the Coflux server. The default threshold is 200 bytes. This can be specified in the configuration file:
+To determine when to store data in the blob store, a blob 'threshold' is used. If the serialized data takes more than this number of bytes, the blob store will be used, and a reference to the blob is substituted - otherwise the raw data is sent to the Coflux server. The default threshold is 200 bytes. This can be specified in the configuration file:
 
 ```toml
 [blobs]
@@ -46,6 +46,6 @@ Multiple blob stores can be configured - the first will be considered the 'prima
 
 This is useful when adding a new store, as the original store can still be read from. Blobs can be manually migrated to the new store, and then the original store can be removed from configuration.
 
-## UI
+## Studio
 
-This configuration is only used by the CLI (e.g., for running workers). To support loading blobs in the UI, stores can be configured from the project settings dialog. Settings entered in the UI (including access keys) are stored in the browser in local storage. When blobs are loaded in the UI, they're cached in the browser in session storage.
+This configuration is only used by the CLI (e.g., for running workers). To support loading blobs in Studio, stores can be configured from the project settings dialog. When blobs are loaded in Studio, they're cached in the browser in session storage.

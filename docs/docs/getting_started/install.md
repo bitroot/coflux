@@ -1,11 +1,19 @@
-# 1. Installing
+# 1. Installing the CLI
 
-Coflux is available as a Python package on PyPI. You can install it using `pip` or similar:
+The quickest way to install the Coflux CLI on macOS or Linux:
 
 ```bash
-pip install coflux
+curl -fsSL https://coflux.com/install.sh | sh
 ```
 
-The package includes the SDK for defining workflows as well as the CLI.
+This detects your OS and architecture, downloads the latest release, and installs the binary to `/usr/local/bin`.
+
+Alternatively, you can download the binary directly from the [GitHub releases](https://github.com/bitroot/coflux/releases) page.
+
+Once installed, verify it's working:
+
+```bash
+coflux --help
+```
 
 Next, we'll start the server...

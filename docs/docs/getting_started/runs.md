@@ -2,31 +2,24 @@
 
 We've defined our workflow, started the Coflux server, and started a worker. The final step is to submit a run of our workflow.
 
-## Using the web UI
-
-We can do this in the web UI:
-
-1. Select the `print_greeting` workflow in the sidebar.
-2. Click the 'Run...' button.
-3. Enter a name (it must be _JSON-encoded_ - e.g., `"Joe"`, in quotes).
-4. Click 'Run'.
-
-In the web UI, you'll see the run graph appear as the run executes.
-
-### Exploring the run
-
-From the graph you can see the relationship between steps. You can also switch to _timeline_ and _logs_ views. And select steps to see details related to the specific step. You should be able to find the result from the `build_greeting` step, and this result being logged by the `print_greeting` step.
-
 ## Using the CLI
 
-You can also submit runs using the CLI:
+Submit a run using the CLI:
 
 ```bash
-coflux submit hello.py print_greeting '"Joe"'
+coflux submit hello/print_greeting '"Joe"'
 ```
 
-(Note the need to triple-quote the argument.)
+The target is specified in the format `module/target`. Arguments are passed as JSON strings (note the need to quote the argument).
 
-## Next steps
+By default, the command waits for the workflow to complete, showing a live-updating tree of step statuses. Use `--no-wait` to submit and exit immediately.
 
-Congratulations on defining and starting your first run. Continue with the documentation or try defining another workflow.
+You can also inspect runs and retrieve results:
+
+```bash
+coflux runs inspect <run-id>
+coflux runs result <run-id>
+coflux logs <run-id>
+```
+
+Next, we can connect from Studio to explore runs in a browser...

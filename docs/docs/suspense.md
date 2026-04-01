@@ -1,14 +1,14 @@
 # Suspense
 
-Suspense is a way of putting the task to sleep - the current execution will be stopped and a new execution will be started, executing _from the beginning of the task_.
+Suspense is a way of putting a task to sleep — the current execution will be stopped and a new execution will be started, executing _from the beginning of the task_.
 
-The suspense can be either _explicit_ or _implicit_. In either case, it's important that it's safe for the code up to the point of suspense can be re-executed - i.e., any side-effects need to be idempotent. (An easy way to achieve this is to ensure that any tasks called by the execution are [memoised](/memoising).)
+The suspense can be either _explicit_ or _implicit_. In either case, it's important that the code up to the point of suspense is safe to re-execute — i.e., any side-effects need to be idempotent. (An easy way to achieve this is to ensure that any tasks called by the execution are [memoized](/memoizing).)
 
 Suspense is useful as a way of freeing up resources used by a waiting execution.
 
 ## Explicit suspense
 
-To explicitly suspend an execution, simply call the `suspend` function, passing either a delay (as a number of seconds, or as a `datetime.timedelta`), or a future timestamp (as a `datetime.datetime`):
+To explicitly suspend an execution, call the `suspend` function, passing either a delay (as a number of seconds, or as a `datetime.timedelta`), or a future timestamp (as a `datetime.datetime`):
 
 ```python
 @cf.workflow()
@@ -47,5 +47,5 @@ with cf.suspense(10):
 ```
 
 :::warning
-It's important that any tasks that are called within the suspense block _or before it_ are [memoised](/memoising) (or cached). Otherwise the task is likely to keep suspending as a new task will be spawned on each execution.
+It's important that any tasks called within the suspense block _or before it_ are [memoized](/memoizing) (or cached). Otherwise the task is likely to keep suspending as a new task will be spawned on each execution.
 :::

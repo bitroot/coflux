@@ -11,14 +11,18 @@ defmodule Coflux.Topics.Sessions do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    {:ok, sessions, ref} = Orchestration.subscribe_sessions(project_id, workspace_id, self())
+    case Orchestration.subscribe_sessions(project_id, workspace_id, self()) do
+      {:ok, sessions, ref} ->
+        sessions =
+          Map.new(sessions, fn {session_external_id, session} ->
+            {session_external_id, build_session(session)}
+          end)
 
-    sessions =
-      Map.new(sessions, fn {session_external_id, session} ->
-        {session_external_id, build_session(session)}
-      end)
+        {:ok, Topic.new(sessions, %{ref: ref})}
 
-    {:ok, Topic.new(sessions, %{ref: ref})}
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
+    end
   end
 
   def handle_info({:topic, _ref, notifications}, topic) do

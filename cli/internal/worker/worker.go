@@ -113,7 +113,7 @@ func (w *Worker) requireConn() (*api.Connection, error) {
 // Run starts the worker
 func (w *Worker) Run(ctx context.Context, modules []string, register bool) error {
 	// Create API client
-	w.client = api.NewClient(w.cfg.Server.Host, w.cfg.IsSecure(), w.cfg.Server.Token)
+	w.client = api.NewClient(w.cfg.Host, w.cfg.IsSecure(), w.cfg.Token)
 
 	// Resolve workspace name to external ID
 	workspaceID, err := w.resolveWorkspaceID(ctx)
@@ -129,6 +129,10 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		return fmt.Errorf("discovery failed: %w", err)
 	}
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
+
+	if len(manifest.Targets) == 0 {
+		return fmt.Errorf("no targets found in modules %v", modules)
+	}
 
 	// Register manifests if requested (before connecting)
 	if register {
@@ -151,7 +155,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		w.logger.Debug("creating session", "workspace", w.cfg.Workspace)
 		provides := config.ParseProvides(w.cfg.Worker.Provides)
 		var err error
-		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, w.cfg.Worker.Concurrency)
+		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
@@ -261,7 +265,7 @@ func (w *Worker) runWithReconnect(ctx context.Context, targets map[string]map[st
 func (w *Worker) runConnection(ctx context.Context, targets map[string]map[string][]string) (bool, error) {
 	// Create new connection
 	conn := api.NewConnection(
-		w.cfg.Server.Host,
+		w.cfg.Host,
 		w.cfg.IsSecure(),
 		w.workspaceID,
 		w.sessionID,
@@ -288,8 +292,8 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 		errCh <- conn.Run(ctx)
 	}()
 
-	// Declare targets via WebSocket (now that write loop is running)
-	if err := conn.Notify("declare_targets", targets); err != nil {
+	// Declare targets and concurrency via WebSocket (now that write loop is running)
+	if err := conn.Notify("declare_targets", targets, w.cfg.Worker.Concurrency); err != nil {
 		return true, err
 	}
 
@@ -297,9 +301,9 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	hasExecutions := len(w.executions) > 0
 	w.mu.RUnlock()
 	if hasExecutions {
-		w.logger.Info("reconnected", "host", w.cfg.Server.Host)
+		w.logger.Info("reconnected", "host", w.cfg.Host)
 	} else {
-		w.logger.Info("connected", "host", w.cfg.Server.Host)
+		w.logger.Info("connected", "host", w.cfg.Host)
 	}
 
 	// Start heartbeat for this connection

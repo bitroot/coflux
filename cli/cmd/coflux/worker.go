@@ -84,7 +84,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	if token == "" && session != "" {
 		token = session
 	}
-	cfg.Server.Token = token
+	cfg.Token = token
 
 	modules := args
 
@@ -133,7 +133,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	// Run worker
 	logger.Info("starting worker",
 		"workspace", cfg.Workspace,
-		"host", cfg.Server.Host,
+		"host", cfg.Host,
 		"modules", modules,
 		"concurrency", cfg.Worker.Concurrency,
 		"register", shouldRegister,
@@ -183,7 +183,7 @@ func runWorkerWithWatch(
 		if err != nil {
 			return fmt.Errorf("failed to refresh token: %w", err)
 		}
-		cfg.Server.Token = token
+		cfg.Token = token
 
 		// Create a cancellable context for this worker run
 		runCtx, runCancel := context.WithCancel(ctx)
@@ -196,7 +196,7 @@ func runWorkerWithWatch(
 			w := worker.New(cfg, cmdAdapter, session, logger)
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,
-				"host", cfg.Server.Host,
+				"host", cfg.Host,
 				"concurrency", cfg.Worker.Concurrency,
 				"register", shouldRegister,
 			)

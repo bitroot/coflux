@@ -203,7 +203,7 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         active_sessions,
         state,
-        fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id, concurrency,
+        fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
             activation_timeout, reconnection_timeout, secret_hash, created_at, activated_at},
            state ->
           provides =
@@ -226,7 +226,7 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            concurrency: concurrency,
+            concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
             worker_id: worker_id,
@@ -419,6 +419,7 @@ defmodule Coflux.Orchestration.Server do
             |> put_in([Access.key(:workspaces), workspace_id], workspace)
             |> put_in([Access.key(:workspace_names), workspace.name], workspace_id)
             |> put_in([Access.key(:workspace_external_ids), workspace.external_id], workspace_id)
+            |> put_in([Access.key(:pools), workspace_id], %{})
             |> notify_listeners(
               :workspaces,
               {:workspace, workspace_id,
@@ -817,7 +818,6 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:create_session, workspace_external_id, access, opts}, _from, state) do
     provides = Keyword.get(opts, :provides, %{})
-    concurrency = Keyword.get(opts, :concurrency, 0)
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
     reconnection_timeout =
@@ -827,7 +827,6 @@ defmodule Coflux.Orchestration.Server do
            require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
-        concurrency: concurrency,
         activation_timeout: activation_timeout,
         reconnection_timeout: reconnection_timeout,
         created_by: access[:principal_id]
@@ -843,7 +842,7 @@ defmodule Coflux.Orchestration.Server do
             queue: [],
             starting: MapSet.new(),
             executing: MapSet.new(),
-            concurrency: concurrency,
+            concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
             worker_id: nil,
@@ -971,10 +970,13 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:declare_targets, external_id, targets}, _from, state) do
+  def handle_call({:declare_targets, external_id, targets, concurrency}, _from, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
-    state = assign_targets(state, targets, session_id)
+    state =
+      state
+      |> assign_targets(targets, session_id)
+      |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -1751,7 +1753,7 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:subscribe_pool, workspace_external_id, pool_name, pid}, _from, state) do
     case resolve_workspace_external_id(state, workspace_external_id) do
       {:ok, workspace_id} ->
-        pool = Map.get(state.pools[workspace_id], pool_name)
+        pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
         {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
 
         # TODO: include 'active' workers that aren't in this (potentially limited) list
@@ -2280,11 +2282,28 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       if Enum.any?(unassigned) do
-        latest_pool_launch_at =
+        # Track the most recent worker creation per pool, and which pools
+        # already have a worker that isn't ready to accept work.  We skip
+        # launching for pools that have a worker still pending activation
+        # or that activated but hasn't registered any targets yet (e.g.
+        # due to a misconfigured command or working directory).
+        {latest_pool_launch_at, pools_with_pending_worker} =
           state.workers
           |> Map.values()
-          |> Enum.reduce(%{}, fn worker, latest ->
-            Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
+          |> Enum.reduce({%{}, MapSet.new()}, fn worker, {latest, pending} ->
+            latest =
+              Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
+
+            pending =
+              with session_id when not is_nil(session_id) <- worker.session_id,
+                   {:ok, session} <- Map.fetch(state.sessions, session_id),
+                   false <- session.activated_at != nil and Enum.any?(session.targets) do
+                MapSet.put(pending, worker.pool_id)
+              else
+                _ -> pending
+              end
+
+            {latest, pending}
           end)
 
         unassigned
@@ -2301,13 +2320,14 @@ defmodule Coflux.Orchestration.Server do
           end)
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq()
+          |> Enum.reject(&MapSet.member?(pools_with_pending_worker, &1))
           |> Enum.filter(&(now - Map.get(latest_pool_launch_at, &1, 0) > 10_000))
           |> Enum.reduce(state, fn pool_id, state ->
             case Workers.create_worker(state.db, pool_id) do
               {:ok, worker_id, worker_external_id, created_at} ->
                 {pool_name, pool} =
                   Enum.find(
-                    state.pools[workspace_id],
+                    Map.get(state.pools, workspace_id, %{}),
                     &(elem(&1, 1).id == pool_id)
                   )
 
@@ -2354,11 +2374,9 @@ defmodule Coflux.Orchestration.Server do
                   pool.launcher,
                   :launch,
                   [
-                    state.project_id,
-                    state.workspaces[workspace_id].name,
-                    token,
+                    build_launcher_env(state, workspace_id, token, pool.launcher),
                     pool.modules,
-                    Map.delete(pool.launcher, :type)
+                    pool.launcher
                   ],
                   fn state, result ->
                     {data, error} =
@@ -5092,10 +5110,38 @@ defmodule Coflux.Orchestration.Server do
     |> Map.update!(:launcher_tasks, &Map.delete(&1, task_ref))
   end
 
+  defp build_launcher_env(state, workspace_id, token, launcher) do
+    coflux_host = launcher[:server_host] || Coflux.Config.server_host(state.project_id)
+
+    base = %{
+      "COFLUX_HOST" => coflux_host,
+      "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
+      "COFLUX_SESSION" => token
+    }
+
+    base =
+      case Map.get(launcher, :adapter) do
+        nil -> base
+        adapter -> Map.put(base, "COFLUX_WORKER_ADAPTER", Enum.join(adapter, ","))
+      end
+
+    base =
+      case Map.get(launcher, :concurrency) do
+        nil -> base
+        concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
+      end
+
+    case Map.get(launcher, :env) do
+      nil -> base
+      env -> Map.merge(base, env)
+    end
+  end
+
   defp call_launcher(state, launcher, fun, args, callback) do
     module =
       case launcher.type do
         :docker -> Coflux.DockerLauncher
+        :process -> Coflux.ProcessLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)
@@ -5132,6 +5178,14 @@ defmodule Coflux.Orchestration.Server do
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
 
     state = Map.update!(state, :worker_external_ids, &Map.delete(&1, worker.external_id))
+
+    # Expire the worker's session so it can't reconnect to a deactivated worker.
+    state =
+      if worker.session_id && Map.has_key?(state.sessions, worker.session_id) do
+        remove_session(state, worker.session_id)
+      else
+        state
+      end
 
     notify_listeners(
       state,

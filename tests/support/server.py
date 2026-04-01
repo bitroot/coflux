@@ -18,14 +18,26 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _wait_for_ready(port, timeout=15):
-    """Wait until the server is accepting HTTP requests."""
+def _wait_for_ready(port, token=None, timeout=15):
+    """Wait until the server is accepting HTTP requests.
+
+    When the server has ``COFLUX_REQUIRE_AUTH=true``, the discover endpoint
+    returns 401 without a token.  We accept any non-connection-error response
+    (including 401) as proof the server is up, but if *token* is supplied we
+    send it so we get a clean 200.
+    """
     url = f"http://127.0.0.1:{port}/api/discover"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            req = urllib.request.Request(url, headers={"Host": f"healthcheck.localhost:{port}"})
+            headers = {"Host": f"healthcheck.localhost:{port}"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(url, headers=headers)
             urllib.request.urlopen(req, timeout=1)
+            return
+        except urllib.error.HTTPError:
+            # Any HTTP response (including 401/403) means the server is up.
             return
         except (urllib.error.URLError, OSError):
             time.sleep(0.1)
@@ -42,14 +54,18 @@ class ManagedServer:
     or via Docker when COFLUX_IMAGE is set (e.g. in CI).
     Auth is disabled so tests don't need tokens for normal operations.
     A super token is configured for management endpoints (rotate, etc.).
+
+    Pass ``extra_env`` to override or extend the default environment
+    variables (e.g. to enable authentication).
     """
 
-    def __init__(self, data_dir, port=None):
+    def __init__(self, data_dir, port=None, extra_env=None):
         self.port = port or _find_free_port()
         self.data_dir = data_dir
         self._proc = None
         self._container = None
         self._image = os.environ.get("COFLUX_IMAGE")
+        self._extra_env = extra_env or {}
 
     def start(self, timeout=30):
         if self._image:
@@ -58,6 +74,7 @@ class ManagedServer:
             self._start_local(timeout)
 
     def _start_local(self, timeout):
+        cli_path = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
         env = {
             "PATH": os.environ["PATH"],
             "HOME": os.environ.get("HOME", "/tmp"),
@@ -65,7 +82,10 @@ class ManagedServer:
             "COFLUX_DATA_DIR": self.data_dir,
             "COFLUX_PUBLIC_HOST": "%.localhost:" + str(self.port),
             "COFLUX_REQUIRE_AUTH": "false",
+            "COFLUX_LAUNCHER_TYPES": "process,docker",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
+            "COFLUX_CLI_PATH": cli_path,
+            **self._extra_env,
         }
         self._proc = subprocess.Popen(
             ["elixir", "-S", "mix", "run", "--no-halt"],

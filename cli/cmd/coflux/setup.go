@@ -118,10 +118,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Get existing values for defaults
 	existingHost := "localhost:7777"
-	if server, ok := existingConfig["server"].(map[string]any); ok {
-		if h, ok := server["host"].(string); ok && h != "" {
-			existingHost = h
-		}
+	if h, ok := existingConfig["host"].(string); ok && h != "" {
+		existingHost = h
 	}
 	existingWorkspace := filepath.Base(mustGetwd())
 	if w, ok := existingConfig["workspace"].(string); ok && w != "" {
@@ -234,10 +232,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update config
-	if existingConfig["server"] == nil {
-		existingConfig["server"] = make(map[string]any)
-	}
-	existingConfig["server"].(map[string]any)["host"] = host
+	existingConfig["host"] = host
 	existingConfig["workspace"] = workspace
 	if len(adapterCmd) > 0 {
 		if existingConfig["worker"] == nil {

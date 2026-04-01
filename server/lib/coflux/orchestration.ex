@@ -107,8 +107,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:create_session, workspace_id, access, opts})
   end
 
-  def declare_targets(project_id, session_id, targets) do
-    call_server(project_id, {:declare_targets, session_id, targets})
+  def declare_targets(project_id, session_id, targets, concurrency) do
+    call_server(project_id, {:declare_targets, session_id, targets, concurrency})
   end
 
   def start_run(project_id, module, target, type, arguments, access \\ nil, opts \\ []) do

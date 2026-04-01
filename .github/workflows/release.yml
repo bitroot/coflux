@@ -311,14 +311,17 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           API_VERSION: ${{ needs.prepare.outputs.api_version }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.target_branch }}
         run: |
           gunzip -c coflux-image.tar.gz | docker load
           docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
           docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
-          docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$API_VERSION
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          if [ "$TARGET_BRANCH" = "main" ]; then
+            docker tag coflux:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          fi
 
       # PyPI
       - name: Publish to PyPI

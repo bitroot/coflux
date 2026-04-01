@@ -15,6 +15,9 @@ defmodule Coflux.Topics.Search do
       {:ok, targets, _ref} ->
         topic = Topical.Topic.new(nil, %{targets: targets})
         {:ok, topic}
+
+      {:error, :workspace_invalid} ->
+        {:error, :not_found}
     end
   end
 

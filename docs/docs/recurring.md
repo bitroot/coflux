@@ -10,7 +10,7 @@ def poll_for_updates():
         process_update.submit(update)
 ```
 
-This continues indefinitely until the run is cancelled.
+This continues indefinitely until the run is cancelled or an error occurs (without a successful retry).
 
 ## Delay
 

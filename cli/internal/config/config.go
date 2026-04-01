@@ -5,6 +5,9 @@ import "strings"
 // Config represents the coflux.toml configuration file.
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
 type Config struct {
+	Host      string       `mapstructure:"host"`
+	Token     string       `mapstructure:"token"`
+	Secure    *bool        `mapstructure:"secure"`
 	Workspace string       `mapstructure:"workspace"`
 	Team      string       `mapstructure:"team"`
 	Server    ServerConfig `mapstructure:"server"`
@@ -15,11 +18,19 @@ type Config struct {
 	Output    string       `mapstructure:"output"`
 }
 
-// ServerConfig holds server connection settings
+// ServerConfig holds settings for running a local server via `coflux server`.
 type ServerConfig struct {
-	Host   string `mapstructure:"host"`
-	Token  string `mapstructure:"token"`
-	Secure *bool  `mapstructure:"secure"`
+	Port           int      `mapstructure:"port"`
+	DataDir        string   `mapstructure:"data_dir"`
+	Image          string   `mapstructure:"image"`
+	Project        string   `mapstructure:"project"`
+	PublicHost     string   `mapstructure:"public_host"`
+	Auth           *bool    `mapstructure:"auth"`
+	SuperToken     string   `mapstructure:"super_token"`
+	SuperTokenHash string   `mapstructure:"super_token_hash"`
+	Secret         string   `mapstructure:"secret"`
+	StudioTeams    []string `mapstructure:"studio_teams"`
+	LauncherTypes  []string `mapstructure:"launcher_types"`
 }
 
 // WorkerConfig holds worker-specific settings
@@ -73,11 +84,11 @@ type LogsConfig struct {
 
 // IsSecure determines if the connection should use TLS
 func (c *Config) IsSecure() bool {
-	if c.Server.Secure != nil {
-		return *c.Server.Secure
+	if c.Secure != nil {
+		return *c.Secure
 	}
 	// Default: localhost uses HTTP, others use HTTPS
-	return !IsLocalhost(c.Server.Host)
+	return !IsLocalhost(c.Host)
 }
 
 // IsLocalhost checks if the host is localhost-like.
@@ -119,7 +130,7 @@ func (c *Config) HTTPURL() string {
 	if c.IsSecure() {
 		scheme = "https"
 	}
-	return scheme + "://" + c.Server.Host
+	return scheme + "://" + c.Host
 }
 
 // WebSocketURL returns the WebSocket URL for the server
@@ -128,5 +139,5 @@ func (c *Config) WebSocketURL() string {
 	if c.IsSecure() {
 		scheme = "wss"
 	}
-	return scheme + "://" + c.Server.Host
+	return scheme + "://" + c.Host
 }

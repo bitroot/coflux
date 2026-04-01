@@ -59,3 +59,47 @@ def critical_task():
 ```
 
 With unlimited retries, each retry uses a random delay between the min and max backoff seconds.
+
+## Retry conditions
+
+By default, retries apply to all errors. The `when` parameter allows you to control which errors trigger a retry — errors that don't match fail immediately without consuming retry attempts.
+
+The condition is evaluated on the worker at the time the exception is raised, so it has access to the full exception object.
+
+### Exception class
+
+Specify a single exception type to only retry on that error:
+
+```python
+@cf.task(retries=cf.Retries(limit=3, when=ConnectionError))
+def call_api():
+    ...
+```
+
+### Tuple of exception classes
+
+Specify multiple exception types as a tuple:
+
+```python
+@cf.task(retries=cf.Retries(limit=3, when=(ConnectionError, TimeoutError)))
+def call_api():
+    ...
+```
+
+### Callback function
+
+For more complex logic, pass a function that receives the exception and returns whether to retry:
+
+```python
+@cf.task(
+    retries=cf.Retries(
+        limit=5,
+        backoff=(1, 30),
+        when=lambda e: getattr(e, "status_code", 0) >= 500,
+    ),
+)
+def call_api():
+    ...
+```
+
+This is useful for distinguishing between transient errors (e.g., 5xx server errors) that are worth retrying and permanent errors (e.g., 4xx client errors) that should fail immediately.

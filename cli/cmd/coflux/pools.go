@@ -140,11 +140,26 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if image := getString(launcher, "image"); image != "" {
 			fmt.Printf("Image: %s\n", image)
 		}
+		if dir := getString(launcher, "directory"); dir != "" {
+			fmt.Printf("Directory: %s\n", dir)
+		}
 		if dockerHost := getString(launcher, "dockerHost"); dockerHost != "" {
 			fmt.Printf("Docker host: %s\n", dockerHost)
 		}
 		if serverHost := getString(launcher, "serverHost"); serverHost != "" {
 			fmt.Printf("Server host: %s\n", serverHost)
+		}
+		if adapter := getStringSlice(launcher, "adapter"); len(adapter) > 0 {
+			fmt.Printf("Adapter: %s\n", strings.Join(adapter, " "))
+		}
+		if concurrency := getFloat64(launcher, "concurrency"); concurrency > 0 {
+			fmt.Printf("Concurrency: %d\n", int(concurrency))
+		}
+		if env, ok := launcher["env"].(map[string]any); ok && len(env) > 0 {
+			fmt.Printf("Environment:\n")
+			for k, v := range env {
+				fmt.Printf("  %s=%s\n", k, v)
+			}
 		}
 	}
 
@@ -428,6 +443,42 @@ func formatMillis(ms int64) string {
 	return t.Format("2006-01-02 15:04:05 UTC")
 }
 
+func hasCommonLauncherFlags() bool {
+	return poolsUpdateServerHost != "" || poolsUpdateNoServerHost ||
+		poolsUpdateAdapter != nil || poolsUpdateNoAdapter ||
+		poolsUpdateConcurrency > 0 || poolsUpdateNoConcurrency ||
+		poolsUpdateEnv != nil || poolsUpdateNoEnv
+}
+
+func applyCommonLauncherFlags(launcher map[string]any) {
+	if poolsUpdateServerHost != "" {
+		launcher["serverHost"] = poolsUpdateServerHost
+	} else if poolsUpdateNoServerHost {
+		delete(launcher, "serverHost")
+	}
+	if poolsUpdateAdapter != nil {
+		launcher["adapter"] = poolsUpdateAdapter
+	} else if poolsUpdateNoAdapter {
+		delete(launcher, "adapter")
+	}
+	if poolsUpdateConcurrency > 0 {
+		launcher["concurrency"] = poolsUpdateConcurrency
+	} else if poolsUpdateNoConcurrency {
+		delete(launcher, "concurrency")
+	}
+	if poolsUpdateEnv != nil {
+		env := make(map[string]any)
+		for _, e := range poolsUpdateEnv {
+			if key, value, ok := strings.Cut(e, "="); ok {
+				env[key] = value
+			}
+		}
+		launcher["env"] = env
+	} else if poolsUpdateNoEnv {
+		delete(launcher, "env")
+	}
+}
+
 func getFloat64(m map[string]any, key string) float64 {
 	if v, ok := m[key]; ok {
 		if f, ok := v.(float64); ok {
@@ -437,15 +488,39 @@ func getFloat64(m map[string]any, key string) float64 {
 	return 0
 }
 
+func getStringSlice(m map[string]any, key string) []string {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	if arr, ok := v.([]any); ok {
+		result := make([]string, 0, len(arr))
+		for _, item := range arr {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
 // pools update
 var (
-	poolsUpdateModules      []string
-	poolsUpdateProvides     []string
-	poolsUpdateDockerImage  string
-	poolsUpdateDockerHost   string
-	poolsUpdateNoDockerHost bool
-	poolsUpdateServerHost   string
-	poolsUpdateNoServerHost bool
+	poolsUpdateModules       []string
+	poolsUpdateProvides      []string
+	poolsUpdateDockerImage   string
+	poolsUpdateDockerHost    string
+	poolsUpdateNoDockerHost  bool
+	poolsUpdateProcessDir    string
+	poolsUpdateServerHost    string
+	poolsUpdateNoServerHost  bool
+	poolsUpdateAdapter       []string
+	poolsUpdateNoAdapter     bool
+	poolsUpdateConcurrency   int
+	poolsUpdateNoConcurrency bool
+	poolsUpdateEnv           []string
+	poolsUpdateNoEnv         bool
 )
 
 var poolsUpdateCmd = &cobra.Command{
@@ -461,10 +536,24 @@ func init() {
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessDir, "process-dir", "", "Directory for process launcher")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
+	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoAdapter, "no-adapter", false, "Unset adapter (use worker default)")
+	poolsUpdateCmd.Flags().IntVar(&poolsUpdateConcurrency, "concurrency", 0, "Max concurrent executions per worker")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoConcurrency, "no-concurrency", false, "Unset concurrency (use worker default)")
+	poolsUpdateCmd.Flags().StringArrayVar(&poolsUpdateEnv, "env", nil, "Environment variable (e.g., --env KEY=VALUE)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoEnv, "no-env", false, "Clear all custom environment variables")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("adapter", "no-adapter")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("concurrency", "no-concurrency")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("env", "no-env")
+	// Process and Docker flags are mutually exclusive
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-dir")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-dir")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-dir")
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -480,7 +569,7 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	workspaceID, err := ensureWorkspaceID(cmd.Context(), client, workspace)
 	if err != nil {
 		return err
 	}
@@ -498,7 +587,14 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	if poolsUpdateProvides != nil {
 		pool["provides"] = parseProvides(poolsUpdateProvides)
 	}
-	if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" || poolsUpdateNoDockerHost || poolsUpdateServerHost != "" || poolsUpdateNoServerHost {
+	if poolsUpdateProcessDir != "" {
+		launcher := map[string]any{
+			"type":      "process",
+			"directory": poolsUpdateProcessDir,
+		}
+		applyCommonLauncherFlags(launcher)
+		pool["launcher"] = launcher
+	} else if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" || poolsUpdateNoDockerHost {
 		launcher, ok := pool["launcher"].(map[string]any)
 		if !ok || getString(launcher, "type") != "docker" {
 			launcher = map[string]any{"type": "docker"}
@@ -511,12 +607,14 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		} else if poolsUpdateNoDockerHost {
 			delete(launcher, "dockerHost")
 		}
-		if poolsUpdateServerHost != "" {
-			launcher["serverHost"] = poolsUpdateServerHost
-		} else if poolsUpdateNoServerHost {
-			delete(launcher, "serverHost")
-		}
+		applyCommonLauncherFlags(launcher)
 		pool["launcher"] = launcher
+	} else if hasCommonLauncherFlags() {
+		// Update common launcher fields on an existing launcher
+		if launcher, ok := pool["launcher"].(map[string]any); ok {
+			applyCommonLauncherFlags(launcher)
+			pool["launcher"] = launcher
+		}
 	}
 
 	if err := client.UpdatePool(cmd.Context(), workspaceID, name, pool); err != nil {

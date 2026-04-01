@@ -24,6 +24,19 @@ type stepState struct {
 	Detail   string
 }
 
+// groupMember records a child step's membership in a group, keyed by the
+// parent execution that defined the group.
+type groupMember struct {
+	parentExecID string // execution ID of the parent
+	groupID      string // group ID within that execution
+	groupName    string // human-readable group name (may be empty)
+}
+
+// groupSummary is a rendered summary line for a collapsed group.
+type groupSummary struct {
+	text string // pre-formatted summary text
+}
+
 // watchRun subscribes to the run topic and renders a live-updating tree of
 // step statuses (TTY only). Waits for all steps to complete. Returns exit code.
 func watchRun(ctx context.Context, host string, secure bool, token string, runID string, workspaceID string) (int, error) {
@@ -146,6 +159,8 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 	// Build current state for every step, and an executionID -> stepID index
 	currentStates := make(map[string]stepState, len(steps))
 	execToStep := map[string]string{} // executionID -> stepID
+	// groupMembers maps child stepID -> groupMember info
+	groupMembers := map[string]groupMember{}
 	for stepID, raw := range steps {
 		stepData, ok := raw.(map[string]any)
 		if !ok {
@@ -156,11 +171,49 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 		parentID, _ := stepData["parentId"].(string)
 		executions, _ := stepData["executions"].(map[string]any)
 
-		// Index all execution IDs for this step
+		// Index all execution IDs for this step, and parse group info
 		for _, execRaw := range executions {
-			if e, ok := execRaw.(map[string]any); ok {
-				if eid, ok := e["executionId"].(string); ok {
-					execToStep[eid] = stepID
+			e, ok := execRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			eid, _ := e["executionId"].(string)
+			if eid != "" {
+				execToStep[eid] = stepID
+			}
+
+			// Parse groups map (groupID -> name) and children array
+			groups, _ := e["groups"].(map[string]any)
+			childrenArr, _ := e["children"].([]any)
+			for _, childRaw := range childrenArr {
+				child, ok := childRaw.(map[string]any)
+				if !ok {
+					continue
+				}
+				childStepID, _ := child["stepId"].(string)
+				if childStepID == "" {
+					continue
+				}
+				// groupId may be a float64 from JSON or nil
+				var gidStr string
+				switch gid := child["groupId"].(type) {
+				case float64:
+					gidStr = fmt.Sprintf("%d", int(gid))
+				case string:
+					gidStr = gid
+				default:
+					continue // no group
+				}
+				groupName := ""
+				if groups != nil {
+					if name, ok := groups[gidStr].(string); ok {
+						groupName = name
+					}
+				}
+				groupMembers[childStepID] = groupMember{
+					parentExecID: eid,
+					groupID:      gidStr,
+					groupName:    groupName,
 				}
 			}
 		}
@@ -208,16 +261,62 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 		sort.Strings(children[k])
 	}
 
-	// Walk tree depth-first to build output lines
+	// Walk tree depth-first to build output lines, collapsing groups
 	type line struct {
-		prefix string
-		stepID string
+		prefix  string
+		stepID  string
+		summary *groupSummary // non-nil for group summary lines
 	}
 	var lines []line
 	var walkChildren func(stepIDs []string, prefix string)
 	walkChildren = func(stepIDs []string, prefix string) {
-		for i, id := range stepIDs {
-			isLast := i == len(stepIDs)-1
+		// Partition children into groups and ungrouped, preserving order.
+		// groupKey = parentExecID + ":" + groupID
+		type groupEntry struct {
+			key     string
+			name    string
+			stepIDs []string
+		}
+		groupMap := map[string]*groupEntry{}
+		var orderedItems []any // either string (stepID) or *groupEntry (first occurrence)
+		for _, id := range stepIDs {
+			gm, inGroup := groupMembers[id]
+			if !inGroup {
+				orderedItems = append(orderedItems, id)
+				continue
+			}
+			key := gm.parentExecID + ":" + gm.groupID
+			if ge, ok := groupMap[key]; ok {
+				ge.stepIDs = append(ge.stepIDs, id)
+			} else {
+				ge = &groupEntry{key: key, name: gm.groupName, stepIDs: []string{id}}
+				groupMap[key] = ge
+				orderedItems = append(orderedItems, ge)
+			}
+		}
+
+		// Flatten to a list of items to render
+		type renderItem struct {
+			stepID string
+			group  *groupEntry // non-nil means this is a group (render first child + summary)
+		}
+		var items []renderItem
+		for _, item := range orderedItems {
+			switch v := item.(type) {
+			case string:
+				items = append(items, renderItem{stepID: v})
+			case *groupEntry:
+				if len(v.stepIDs) == 1 {
+					// Single-member group: render normally
+					items = append(items, renderItem{stepID: v.stepIDs[0]})
+				} else {
+					items = append(items, renderItem{group: v})
+				}
+			}
+		}
+
+		for i, item := range items {
+			isLast := i == len(items)-1
 			var connector, childPrefix string
 			if isLast {
 				connector = prefix + "└─ "
@@ -226,9 +325,26 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 				connector = prefix + "├─ "
 				childPrefix = prefix + "│  "
 			}
-			lines = append(lines, line{prefix: connector, stepID: id})
-			if kids, ok := children[id]; ok {
-				walkChildren(kids, childPrefix)
+
+			if item.group != nil {
+				ge := item.group
+				firstID := ge.stepIDs[0]
+				// Render the group header as a tree layer
+				summaryText := buildGroupSummary(ge.name, ge.stepIDs, currentStates, children)
+				lines = append(lines, line{
+					prefix:  connector,
+					summary: &groupSummary{text: summaryText},
+				})
+				// Render the first child nested under the group
+				lines = append(lines, line{prefix: childPrefix + "└─ ", stepID: firstID})
+				if kids, ok := children[firstID]; ok {
+					walkChildren(kids, childPrefix+"   ")
+				}
+			} else {
+				lines = append(lines, line{prefix: connector, stepID: item.stepID})
+				if kids, ok := children[item.stepID]; ok {
+					walkChildren(kids, childPrefix)
+				}
 			}
 		}
 	}
@@ -254,6 +370,10 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 
 	// Render
 	for _, l := range lines {
+		if l.summary != nil {
+			fmt.Printf("\r%s%s\033[K\n", l.prefix, l.summary.text)
+			continue
+		}
 		st := currentStates[l.stepID]
 		label := ""
 		if st.StepNum != "" && st.Attempt != "" {
@@ -300,6 +420,101 @@ func renderStepTree(data map[string]any, lastRendered map[string]stepState, line
 	return drawn
 }
 
+// buildGroupSummary builds a summary string like:
+// "group_name: 1 of 22 (5 pending, 2 running, 1 error)"
+// The group name is shown in normal text, the counter is dim, and status
+// counts are colored to match their status indicators. Each child's status
+// is its "branch status" — if any descendant is still running/pending, the
+// branch counts as running, regardless of the child's own terminal state.
+func buildGroupSummary(groupName string, stepIDs []string, states map[string]stepState, childrenMap map[string][]string) string {
+	total := len(stepIDs)
+
+	// Count branch statuses
+	counts := map[string]int{}
+	for _, id := range stepIDs {
+		counts[branchStatus(id, states, childrenMap)]++
+	}
+
+	// Build colored status parts (non-completed/non-cached only)
+	statusOrder := []string{"pending", "running", "error", "cancelled", "abandoned", "suspended", "deferred"}
+	var parts []string
+	for _, s := range statusOrder {
+		if c, ok := counts[s]; ok && c > 0 {
+			color := statusColor(s)
+			parts = append(parts, fmt.Sprintf("%s%d %s%s", color, c, s, colorReset))
+		}
+	}
+
+	var summary string
+	if groupName != "" {
+		summary = groupName + " "
+	}
+	summary += colorDim + fmt.Sprintf("1 of %d", total) + colorReset
+	if len(parts) > 0 {
+		summary += " (" + strings.Join(parts, ", ") + ")"
+	}
+
+	return summary
+}
+
+// branchStatus returns the effective status for a step considering all its
+// descendants. Active states (running, pending) take precedence over terminal
+// states so that a branch with a running grandchild under an errored child
+// shows as "running" until all descendants settle.
+func branchStatus(stepID string, states map[string]stepState, childrenMap map[string][]string) string {
+	st, ok := states[stepID]
+	if !ok {
+		return "pending"
+	}
+
+	// Collect this step's status plus all descendant statuses
+	statuses := collectBranchStatuses(stepID, states, childrenMap)
+
+	// Priority: active states first, then terminal failures
+	for _, s := range []string{"running", "pending", "error", "cancelled", "abandoned", "suspended", "deferred"} {
+		for _, status := range statuses {
+			if status == s {
+				return s
+			}
+		}
+	}
+
+	// All completed/cached
+	return st.Status
+}
+
+// collectBranchStatuses recursively collects the status of a step and all its
+// descendants.
+func collectBranchStatuses(stepID string, states map[string]stepState, childrenMap map[string][]string) []string {
+	st, ok := states[stepID]
+	if !ok {
+		return []string{"pending"}
+	}
+	result := []string{st.Status}
+	for _, childID := range childrenMap[stepID] {
+		result = append(result, collectBranchStatuses(childID, states, childrenMap)...)
+	}
+	return result
+}
+
+// statusColor returns the ANSI color code for a given status string.
+func statusColor(status string) string {
+	switch status {
+	case "completed":
+		return colorGreen
+	case "cached":
+		return colorDimGreen
+	case "running":
+		return colorBlue
+	case "error", "abandoned":
+		return colorRed
+	case "cancelled":
+		return colorYellow
+	default:
+		return colorDim
+	}
+}
+
 // statesEqual returns true if two state maps are identical.
 func statesEqual(a, b map[string]stepState) bool {
 	if len(a) != len(b) {
@@ -337,9 +552,24 @@ func latestExecutionStatus(executions map[string]any) (string, string, string) {
 }
 
 // computeExecutionStatus determines the status string, detail, and timestamp
-// for a single execution from its topic data.
+// for a single execution from its topic data. "Spawned" results are unwrapped
+// to show the status of the inner result (matching Studio behaviour).
 func computeExecutionStatus(exec map[string]any) (status, detail string, ts int64) {
 	result, _ := exec["result"].(map[string]any)
+
+	// Unwrap spawned: look through to the inner result. If the spawn is
+	// async and hasn't resolved yet, inner result will be absent — treat
+	// as running (result = nil).
+	if result != nil {
+		if rt, _ := result["type"].(string); rt == "spawned" {
+			inner, ok := result["result"].(map[string]any)
+			if ok {
+				result = inner
+			} else {
+				result = nil
+			}
+		}
+	}
 
 	if result == nil {
 		if exec["assignedAt"] != nil {
@@ -384,15 +614,6 @@ func computeExecutionStatus(exec map[string]any) (status, detail string, ts int6
 		return "cached", "", ts
 	case "deferred":
 		return "deferred", "", ts
-	case "spawned":
-		if execRef, ok := result["execution"].(map[string]any); ok {
-			if eid, ok := execRef["executionId"].(string); ok {
-				if idx := strings.Index(eid, ":"); idx > 0 {
-					detail = eid[:idx]
-				}
-			}
-		}
-		return "spawned", detail, ts
 	default:
 		return resultType, "", ts
 	}
@@ -439,7 +660,7 @@ func checkAllComplete(data map[string]any) (exitCode int, done bool) {
 
 		resultType, _ := result["type"].(string)
 		switch resultType {
-		case "value", "cached":
+		case "value", "cached", "spawned":
 			// ok
 		default:
 			hasFailure = true
@@ -492,7 +713,7 @@ func checkRootComplete(data map[string]any) (exitCode int, done bool) {
 
 		resultType, _ := result["type"].(string)
 		switch resultType {
-		case "value", "cached":
+		case "value", "cached", "spawned":
 			return 0, true
 		default:
 			return 1, true

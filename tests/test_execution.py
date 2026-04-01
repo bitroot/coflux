@@ -1,8 +1,6 @@
 """Tests for core workflow and task execution mechanics."""
 
 import json
-import os
-import tempfile
 
 from support.manifest import task, workflow
 from support.protocol import execution_error, execution_result, json_args
@@ -371,7 +369,7 @@ def test_workflow_calls_workflow(worker):
         assert ctx.result(run_id)["value"]["data"] == "outer done"
 
 
-def test_blob_argument_round_trip(worker):
+def test_blob_argument_round_trip(worker, tmp_path):
     """Large file argument is uploaded as blob and received as file on the other end."""
     targets = [
         workflow("test", "main"),
@@ -386,35 +384,30 @@ def test_blob_argument_round_trip(worker):
 
         # Create a temp file larger than blob threshold (100 bytes)
         content = "x" * 200
-        fd, tmp_path = tempfile.mkstemp(suffix=".json")
-        try:
-            with open(fd, "w") as f:
-                json.dump(content, f)
+        blob_file = tmp_path / "blob_arg.json"
+        blob_file.write_text(json.dumps(content))
 
-            # Submit task with file-type argument
-            file_arg = [{"type": "file", "format": "json", "path": tmp_path}]
-            ref = ex0.conn.submit_task(ex0.execution_id, "test", "process", file_arg)
+        # Submit task with file-type argument
+        file_arg = [{"type": "file", "format": "json", "path": str(blob_file)}]
+        ref = ex0.conn.submit_task(ex0.execution_id, "test", "process", file_arg)
 
-            # Receiving executor should get the argument as a file
-            ex1 = ctx.executor.next_execute()
-            assert ex1.target == "process"
-            assert len(ex1.arguments) == 1
-            assert ex1.arguments[0]["type"] == "file"
-            assert "path" in ex1.arguments[0]
+        # Receiving executor should get the argument as a file
+        ex1 = ctx.executor.next_execute()
+        assert ex1.target == "process"
+        assert len(ex1.arguments) == 1
+        assert ex1.arguments[0]["type"] == "file"
+        assert "path" in ex1.arguments[0]
 
-            # Read the file to verify content survived the blob round-trip
-            with open(ex1.arguments[0]["path"]) as f:
-                received = json.load(f)
-            assert received == content
+        # Read the file to verify content survived the blob round-trip
+        with open(ex1.arguments[0]["path"]) as f:
+            received = json.load(f)
+        assert received == content
 
-            ex1.conn.complete(ex1.execution_id, value="processed")
-            assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == "processed"
+        ex1.conn.complete(ex1.execution_id, value="processed")
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == "processed"
 
-            ex0.conn.complete(ex0.execution_id, value="done")
-            assert ctx.result(run_id)["value"]["data"] == "done"
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"
 
 
 def test_idempotency_same_key_returns_same_run(worker):

@@ -43,8 +43,9 @@ workers, and authenticating with Studio.`,
 func init() {
 	// Set defaults (before config file is read)
 	// Priority: defaults < config file < env vars < flags
-	viper.SetDefault("server.host", "localhost:7777")
+	viper.SetDefault("host", "localhost:7777")
 	viper.SetDefault("workspace", "default")
+	viper.SetDefault("worker.adapter", []string{})
 	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
 	viper.SetDefault("logs.batch_size", 100)
@@ -61,8 +62,8 @@ func init() {
 	rootCmd.PersistentFlags().StringP("output", "o", "", "Output format (json)")
 
 	// Bind flags to viper
-	viper.BindPFlag("server.host", rootCmd.PersistentFlags().Lookup("host"))
-	viper.BindPFlag("server.token", rootCmd.PersistentFlags().Lookup("token"))
+	viper.BindPFlag("host", rootCmd.PersistentFlags().Lookup("host"))
+	viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
 	viper.BindPFlag("team", rootCmd.PersistentFlags().Lookup("team"))
 	viper.BindPFlag("workspace", rootCmd.PersistentFlags().Lookup("workspace"))
 	viper.BindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
@@ -138,17 +139,17 @@ func loadConfig() (*config.Config, error) {
 	}
 
 	// Handle secure flag default (depends on host value)
-	if cfg.Server.Secure == nil {
-		secure := !config.IsLocalhost(cfg.Server.Host)
-		cfg.Server.Secure = &secure
+	if cfg.Secure == nil {
+		secure := !config.IsLocalhost(cfg.Host)
+		cfg.Secure = &secure
 	}
 
 	return cfg, nil
 }
 
-// getHost returns the resolved host with secure detection
+// getHost returns the resolved host
 func getHost() string {
-	return viper.GetString("server.host")
+	return viper.GetString("host")
 }
 
 // getWorkspace returns the resolved workspace
@@ -163,13 +164,13 @@ func getTeam() string {
 
 // getToken returns the resolved token
 func getToken() string {
-	return viper.GetString("server.token")
+	return viper.GetString("token")
 }
 
 // isSecure determines if HTTPS should be used
 func isSecure() bool {
-	if viper.IsSet("server.secure") {
-		return viper.GetBool("server.secure")
+	if viper.IsSet("secure") {
+		return viper.GetBool("secure")
 	}
 	return !config.IsLocalhost(getHost())
 }

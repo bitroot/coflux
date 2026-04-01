@@ -668,7 +668,7 @@ defmodule Coflux.Orchestration.Epoch do
     {:ok, rows} =
       query(old_db, """
         SELECT s.id, s.external_id, s.workspace_id, s.worker_id, s.provides_tag_set_id,
-               s.concurrency, s.activation_timeout, s.reconnection_timeout, s.secret_hash,
+               s.activation_timeout, s.reconnection_timeout, s.secret_hash,
                s.created_at, s.created_by
         FROM sessions AS s
         LEFT JOIN session_expirations AS se ON se.session_id = s.id
@@ -676,8 +676,8 @@ defmodule Coflux.Orchestration.Epoch do
       """)
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, old_worker_id, old_tag_set_id,
-                               concurrency, activation_timeout, reconnection_timeout, secret_hash,
-                               created_at, created_by},
+                               activation_timeout, reconnection_timeout, secret_hash, created_at,
+                               created_by},
                               acc ->
       new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
       new_worker_id = if old_worker_id, do: Map.fetch!(worker_ids, old_worker_id)
@@ -690,7 +690,6 @@ defmodule Coflux.Orchestration.Epoch do
           workspace_id: new_ws_id,
           worker_id: new_worker_id,
           provides_tag_set_id: new_tag_set_id,
-          concurrency: concurrency,
           activation_timeout: activation_timeout,
           reconnection_timeout: reconnection_timeout,
           secret_hash: if(secret_hash, do: {:blob, secret_hash}),
