@@ -238,7 +238,7 @@ jobs:
         run: gunzip -c coflux-image.tar.gz | docker load
 
       - name: Install test dependencies
-        run: pip install pytest pytest-xdist
+        run: pip install pytest pytest-xdist PyJWT cryptography
 
       - name: Run E2E tests
         env:
