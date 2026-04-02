@@ -10,9 +10,21 @@ A worker will:
 
 Importantly, workers can be run locally, automatically watching for code changes, restarting, and registering workflows as needed.
 
-## Set up
+## Run
 
-Use the `setup` command to populate a configuration file (`coflux.toml`). A configuration file isn't necessary, but avoids having to specify configuration manually in the following commands. Run the following command:
+Start a worker with:
+
+```bash
+coflux worker --dev hello
+```
+
+The worker attempts to automatically detect your Python environment. It checks for virtual environments (`.venv/`, `venv/`), package managers (`poetry`, `uv`), and falls back to `uv run --with coflux` or system Python. You can also configure the adapter explicitly with `--adapter` or in `coflux.toml` (see below).
+
+The `--dev` flag (equivalent to specifying `--watch` and `--register`) enables development mode, which watches for code changes, automatically restarts the worker, and registers workflows with the server. Without it, modules need to be registered separately (e.g., using `coflux manifests register`), and the worker would need to be restarted after making code changes.
+
+## Configuration (optional)
+
+Use the `setup` command to populate a configuration file (`coflux.toml`):
 
 ```bash
 coflux setup
@@ -20,14 +32,6 @@ coflux setup
 
 You will be prompted to enter the host (`localhost:7777`), the _workspace_ name, and the adapter command for your Python environment. A workspace is an environment within a project (e.g., `production`, `development/joe`) — see [Concepts](/concepts#workspaces) for more detail. Use `--detect` to auto-detect your Python environment.
 
-## Run
-
-Now the worker can be started. Run the following command:
-
-```bash
-coflux worker --dev hello
-```
-
-The `--dev` flag (equivalent to specifying `--watch` and `--register`) enables development mode, which watches for code changes, automatically restarts the worker, and registers workflows with the server. Without it, modules need to be registered separately (e.g., using `coflux manifests register`), and the worker would need to be restarted after making code changes.
+A configuration file isn't required for getting started, but is useful for customising the host, workspace, adapter, concurrency, and other settings.
 
 Next, let's submit a run...

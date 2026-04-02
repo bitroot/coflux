@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +73,11 @@ func (a *CommandAdapter) Discover(ctx context.Context, modules []string) (*Disco
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("discovery failed: %s", string(exitErr.Stderr))
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if strings.Contains(stderr, "No module named coflux") {
+				return nil, fmt.Errorf("discovery failed: the 'coflux' package does not appear to be installed in this environment")
+			}
+			return nil, fmt.Errorf("discovery failed: %s", stderr)
 		}
 		return nil, fmt.Errorf("failed to run discovery: %w", err)
 	}

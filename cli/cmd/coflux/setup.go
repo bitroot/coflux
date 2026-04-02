@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -85,6 +86,30 @@ func detectAdapters() []AdapterDetection {
 			Name:       "Python (uv)",
 			Command:    []string{"uv", "run", "python", "-m", "coflux"},
 			Confidence: 80,
+		})
+	}
+
+	// Fallback: uv available on PATH (auto-installs coflux via --with)
+	if _, err := exec.LookPath("uv"); err == nil {
+		detections = append(detections, AdapterDetection{
+			Name:       "Python (uv --with coflux)",
+			Command:    []string{"uv", "run", "--with", "coflux", "python", "-m", "coflux"},
+			Confidence: 30,
+		})
+	}
+
+	// Fallback: python available on PATH
+	if _, err := exec.LookPath("python3"); err == nil {
+		detections = append(detections, AdapterDetection{
+			Name:       "Python (system)",
+			Command:    []string{"python3", "-m", "coflux"},
+			Confidence: 20,
+		})
+	} else if _, err := exec.LookPath("python"); err == nil {
+		detections = append(detections, AdapterDetection{
+			Name:       "Python (system)",
+			Command:    []string{"python", "-m", "coflux"},
+			Confidence: 20,
 		})
 	}
 

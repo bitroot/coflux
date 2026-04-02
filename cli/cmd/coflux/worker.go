@@ -93,13 +93,24 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		cfg.Worker.Adapter = workerAdapter
 	}
 
-	// Check adapter is configured
-	if len(cfg.Worker.Adapter) == 0 {
-		return fmt.Errorf("no adapter configured; run 'coflux setup' or add 'worker.adapter' to coflux.toml")
-	}
-
 	// Setup logging
 	logger := getLogger()
+
+	// Auto-detect adapter if not configured
+	if len(cfg.Worker.Adapter) == 0 {
+		detections := detectAdapters()
+		if len(detections) == 0 {
+			return fmt.Errorf("no adapter configured; run 'coflux setup' or add 'worker.adapter' to coflux.toml")
+		}
+		best := detections[0]
+		for _, d := range detections[1:] {
+			if d.Confidence > best.Confidence {
+				best = d
+			}
+		}
+		cfg.Worker.Adapter = best.Command
+		logger.Info("auto-detected adapter", "name", best.Name, "command", strings.Join(best.Command, " "))
+	}
 
 	// Create adapter from config
 	cmdAdapter := adapter.NewCommandAdapter(cfg.Worker.Adapter)
