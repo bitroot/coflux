@@ -48,27 +48,30 @@ func init() {
 	serverCmd.Flags().StringVar(&serverSuperToken, "super-token", "", "Super token (will be hashed)")
 	serverCmd.Flags().StringVar(&serverSuperTokenHash, "super-token-hash", "", "Pre-hashed super token (SHA-256 hex)")
 	serverCmd.Flags().String("secret", "", "Server secret for signing service tokens")
-	serverCmd.Flags().StringSlice("studio-teams", nil, "Team IDs allowed for Studio auth")
-	serverCmd.Flags().StringSlice("launcher-types", nil, "Allowed launcher types (docker, process)")
-	serverCmd.Flags().String("studio-url", "", "Studio URL for browser redirects")
-	serverCmd.Flags().StringSlice("allow-origins", nil, "Allowed CORS origins")
+	serverCmd.Flags().StringSlice("team", nil, "Team IDs allowed for Studio auth")
+	serverCmd.Flags().StringSlice("launcher", nil, "Allowed launcher types (docker, process)")
+	serverCmd.Flags().String("studio-url", "", "Studio URL")
+	serverCmd.Flags().StringSlice("allow-origin", nil, "Allowed CORS origins")
 
 	serverCmd.Flags().MarkHidden("studio-url")
-	serverCmd.Flags().MarkHidden("allow-origins")
+	serverCmd.Flags().MarkHidden("allow-origin")
 
 	serverCmd.MarkFlagsMutuallyExclusive("super-token", "super-token-hash")
 
 	// Bind flags to viper under the server.* namespace
+	// Note: viper keys use plural forms (e.g., studio_teams) to match
+	// config file keys and COFLUX_SERVER_* environment variables,
+	// while CLI flags use singular forms (e.g., --team).
 	viper.BindPFlag("server.port", serverCmd.Flags().Lookup("port"))
 	viper.BindPFlag("server.data_dir", serverCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("server.image", serverCmd.Flags().Lookup("image"))
 	viper.BindPFlag("server.project", serverCmd.Flags().Lookup("project"))
 	viper.BindPFlag("server.public_host", serverCmd.Flags().Lookup("public-host"))
 	viper.BindPFlag("server.secret", serverCmd.Flags().Lookup("secret"))
-	viper.BindPFlag("server.studio_teams", serverCmd.Flags().Lookup("studio-teams"))
-	viper.BindPFlag("server.launcher_types", serverCmd.Flags().Lookup("launcher-types"))
+	viper.BindPFlag("server.studio_teams", serverCmd.Flags().Lookup("team"))
+	viper.BindPFlag("server.launcher_types", serverCmd.Flags().Lookup("launcher"))
 	viper.BindPFlag("server.studio_url", serverCmd.Flags().Lookup("studio-url"))
-	viper.BindPFlag("server.allow_origins", serverCmd.Flags().Lookup("allow-origins"))
+	viper.BindPFlag("server.allow_origins", serverCmd.Flags().Lookup("allow-origin"))
 }
 
 // getDefaultImage returns the default Docker image name.
