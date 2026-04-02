@@ -17,11 +17,11 @@
 
 ## Why Coflux?
 
-- **Plain Python** — Workflows are regular Python functions with decorators. No DSLs, no YAML, no static DAGs.
-- **Low latency** — Millisecond task startup using warm executor processes.
-- **Real-time observability** — Watch workflows execute live in [Coflux Studio](https://studio.coflux.com), with graph visualisation, logs, and results.
-- **Self-hosted** — You run the server; your data stays in your infrastructure.
-- **Workspace inheritance** — Branch production into development workspaces and re-run individual steps with real data.
+- **Plain Python**: workflows are regular Python functions with decorators - no DSLs, no YAML, no static DAGs.
+- **Low latency**: millisecond task startup using warm executor processes.
+- **Real-time observability**: watch workflows execute live using the CLI, or in [Coflux Studio](https://studio.coflux.com), with graph visualisation, logs, and results.
+- **Self-hosted**: you run the server; your data stays in your infrastructure.
+- **Workspace inheritance**: branch production into development workspaces and re-run individual steps with real data.
 
 ## Quick example
 
@@ -136,7 +136,7 @@ def map_reduce(n: int):
 cf.log_info("Processing {count} items for {user}", count=42, user="alice")
 ```
 
-### And more
+### More features
 
 - **Debouncing**: defer execution until a task stops being called (`defer=True`)
 - **Recurrence**: automatically re-execute workflows for polling (`recurrent=True`)
@@ -161,16 +161,13 @@ Use the CLI to start the server:
 coflux server --no-auth --project myproject
 ```
 
-Or run it with Docker:
-
-```bash
-docker run -p 7777:7777 ghcr.io/bitroot/coflux --no-auth --project myproject
-```
+Or [run it with Docker](https://docs.coflux.com/getting_started/server):
 
 ### 3. Create a workflow
 
 ```python
 # myapp/workflows.py
+
 import coflux as cf
 
 @cf.task()
@@ -185,11 +182,12 @@ def hello(name: str):
 ### 4. Start a worker
 
 ```bash
-pip install coflux
 coflux worker --dev myapp.workflows
 ```
 
-The `--dev` flag watches for code changes and automatically restarts the worker.
+The worker attempts to automatically detect your Python environment. If you have [`uv`](https://docs.astral.sh/uv/) installed, the (dependency-less) `coflux` package is installed automatically. Otherwise, install it first with `pip install coflux`.
+
+The `--dev` flag (equivalent to `--watch --register`) watches for code changes and automatically restarts the worker.
 
 ### 5. Submit a run
 
@@ -201,7 +199,7 @@ coflux submit myapp/hello '"world"'
 
 ### 6. Open Studio
 
-Visit [studio.coflux.com](https://studio.coflux.com), enter your server address (`localhost:7777`), and watch your workflow execute in real time.
+Visit [studio.coflux.com](https://studio.coflux.com) and create a project with your server address (`localhost:7777`) - a Studio account isn't required. Submit workflows runs and watch them execute in real time.
 
 ## License
 
