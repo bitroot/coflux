@@ -19,6 +19,8 @@ from .models import Asset, AssetEntry, AssetMetadata, Execution
 from .state import get_context
 
 __all__ = [
+    # Version
+    "__version__",
     # Decorators
     "task",
     "workflow",
