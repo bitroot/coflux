@@ -1,3 +1,11 @@
+## 0.10.0
+
+Enhancements:
+
+- Adds better Docker lifecycle handling with the `server` command.
+- Updates `server` command to set default project ("default").
+- Updates `worker` command to infer adapter (to avoid running `setup`).
+
 ## 0.9.0
 
 First release of the Go CLI, replacing the previous Python-based CLI.
