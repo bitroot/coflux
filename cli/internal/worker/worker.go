@@ -205,11 +205,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	}
 	metricStore := metric.NewHTTPStore(metricURL, metricToken, metricBatchSize, metricFlushInterval, w.logger)
 
-	throttleRate := w.cfg.Metrics.ThrottleRate
-	if throttleRate <= 0 {
-		throttleRate = 10 // default: 10 points per key per second
-	}
-	w.throttle = metric.NewThrottle(metricStore, throttleRate)
+	w.throttle = metric.NewThrottle(metricStore)
 	w.metrics = w.throttle
 	w.tracker = metric.NewTracker(w.logger)
 	defer func() { _ = w.metrics.Close() }()
@@ -1018,6 +1014,11 @@ func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, t
 }
 
 func (w *Worker) DefineMetric(ctx context.Context, executionID string, key string, definition map[string]any) error {
+	if throttle, ok := definition["throttle"].(float64); ok {
+		w.throttle.SetRate(key, throttle)
+	} else {
+		w.throttle.DisableRate(key)
+	}
 	if conn := w.getConn(); conn != nil {
 		return conn.Notify("define_metric", executionID, key, definition)
 	}

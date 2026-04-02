@@ -5,19 +5,24 @@ import (
 	"time"
 )
 
+const DefaultRate = 10.0 // default max points per key per second
+
 // Throttle wraps a Store and rate-limits metric recording per key per execution.
 // Uses a hybrid leading+trailing edge approach:
 //   - First point (or first after quiet period): sent immediately
 //   - Subsequent points within window: buffer last value, send when window closes
 //   - On flush/close: emit any buffered trailing values
+//
+// Each metric key can have its own rate, set via SetRate. Keys without
+// an explicit rate use DefaultRate.
 type Throttle struct {
-	inner    Store
-	window   time.Duration
-	mu       sync.Mutex
-	pending  map[throttleKey]*throttleState
-	closed   bool
-	closeCh  chan struct{}
-	flushMu  sync.Mutex
+	inner   Store
+	mu      sync.Mutex
+	rates   map[string]time.Duration // key -> window duration
+	pending map[throttleKey]*throttleState
+	closed  bool
+	closeCh chan struct{}
+	flushMu sync.Mutex
 }
 
 type throttleKey struct {
@@ -31,16 +36,45 @@ type throttleState struct {
 	timer    *time.Timer
 }
 
+func rateToWindow(rate float64) time.Duration {
+	if rate <= 0 {
+		rate = DefaultRate
+	}
+	return time.Duration(float64(time.Second) / rate)
+}
+
 // NewThrottle creates a throttled store wrapper.
-// rate is max points per key per second (e.g., 10 means 100ms window).
-func NewThrottle(inner Store, rate float64) *Throttle {
-	window := time.Duration(float64(time.Second) / rate)
+func NewThrottle(inner Store) *Throttle {
 	return &Throttle{
 		inner:   inner,
-		window:  window,
+		rates:   make(map[string]time.Duration),
 		pending: make(map[throttleKey]*throttleState),
 		closeCh: make(chan struct{}),
 	}
+}
+
+// SetRate sets the throttle rate for a specific metric key.
+// rate is max points per second (e.g., 10 means 100ms window).
+func (t *Throttle) SetRate(key string, rate float64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rates[key] = rateToWindow(rate)
+}
+
+// DisableRate disables throttling for a specific metric key.
+func (t *Throttle) DisableRate(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rates[key] = 0
+}
+
+// windowFor returns the throttle window for a key.
+// Returns 0 if throttling is disabled for this key.
+func (t *Throttle) windowFor(key string) time.Duration {
+	if w, ok := t.rates[key]; ok {
+		return w
+	}
+	return rateToWindow(DefaultRate)
 }
 
 // Record processes entries through the throttle
@@ -57,6 +91,13 @@ func (t *Throttle) Record(entries []Entry) error {
 	for i := range entries {
 		entry := &entries[i]
 		tk := throttleKey{executionID: entry.ExecutionID, key: entry.Key}
+		window := t.windowFor(entry.Key)
+
+		if window == 0 {
+			// Throttling disabled for this key — pass through
+			toSend = append(toSend, *entry)
+			continue
+		}
 
 		st, exists := t.pending[tk]
 		if !exists {
@@ -68,7 +109,7 @@ func (t *Throttle) Record(entries []Entry) error {
 		}
 
 		elapsed := time.Since(st.lastSent)
-		if elapsed >= t.window {
+		if elapsed >= window {
 			// Quiet period exceeded window — treat as leading edge
 			st.lastSent = time.Now()
 			if st.timer != nil {
@@ -83,7 +124,7 @@ func (t *Throttle) Record(entries []Entry) error {
 			st.trailing = &entryCopy
 
 			if st.timer == nil {
-				remaining := t.window - elapsed
+				remaining := window - elapsed
 				st.timer = time.AfterFunc(remaining, func() {
 					t.flushTrailing(tk)
 				})

@@ -89,6 +89,9 @@ class Metric:
         scale: Optional scale (str or MetricScale). Metrics sharing a named
             scale within a group share a y-axis. Without a scale, each metric
             gets its own y-axis.
+        throttle: Maximum data points per second for this metric. Controls
+            client-side throttling. Defaults to 10. Set to ``None`` to
+            disable throttling.
     """
 
     def __init__(
@@ -97,8 +100,10 @@ class Metric:
         *,
         group: str | MetricGroup | None = None,
         scale: str | MetricScale | None = None,
+        throttle: float | None = 10,
     ):
         self._key = key
+        self._throttle = throttle
         if isinstance(group, str):
             self._group = MetricGroup(group)
         else:
@@ -126,6 +131,8 @@ class Metric:
 
     def _build_definition(self) -> dict[str, Any]:
         definition: dict[str, Any] = {}
+        if self._throttle is not None:
+            definition["throttle"] = self._throttle
         if self._group is not None:
             definition["group"] = self._group.name
             if self._group.units is not None:

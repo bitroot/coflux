@@ -52,7 +52,6 @@ func init() {
 	viper.SetDefault("logs.flush_interval", 0.5)
 	viper.SetDefault("metrics.batch_size", 100)
 	viper.SetDefault("metrics.flush_interval", 0.2)
-	viper.SetDefault("metrics.throttle_rate", 10)
 	viper.SetDefault("log_level", "info")
 
 	// Global flags
