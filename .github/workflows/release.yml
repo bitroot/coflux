@@ -324,7 +324,7 @@ jobs:
 
   bump-dev:
     runs-on: ubuntu-latest
-    needs: [prepare, publish]
+    needs: [prepare, bump-version, publish]
     steps:
       - name: Generate app token
         id: app-token
@@ -336,7 +336,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.target_branch }}
+          fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Update to next dev version
         env:
@@ -366,8 +372,47 @@ jobs:
         env:
           NEXT: ${{ needs.prepare.outputs.next_version }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add VERSION adapters/python/pyproject.toml
           git commit -m "Begin $NEXT development"
           git push
+
+      - name: Create release branch (minor releases only)
+        if: needs.prepare.outputs.target_branch == 'main'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.bump-version.outputs.release_sha }}
+        shell: bash
+        run: |
+          # Derive release branch name (e.g., 0.9.0 -> release/0.9)
+          MINOR="${VERSION%.*}"
+          BRANCH="release/$MINOR"
+
+          # Create release branch from the release commit
+          git checkout -b "$BRANCH" "$RELEASE_SHA"
+
+          # Compute patch dev version (e.g., 0.9.0 -> 0.9.1-dev)
+          PATCH_DEV="${MINOR}.1-dev"
+          PATCH_PEP440="${MINOR}.1.dev0"
+
+          python3 - "$PATCH_DEV" "$PATCH_PEP440" <<'PYEOF'
+          import re, sys
+          from pathlib import Path
+
+          next_version, next_pep440 = sys.argv[1], sys.argv[2]
+
+          Path("VERSION").write_text(next_version + "\n")
+
+          pyproject = Path("adapters/python/pyproject.toml")
+          content = pyproject.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]*"',
+              f'version = "{next_pep440}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          pyproject.write_text(content)
+          PYEOF
+
+          git add VERSION adapters/python/pyproject.toml
+          git commit -m "Begin $PATCH_DEV development"
+          git push -u origin "$BRANCH"
