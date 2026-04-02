@@ -1,3 +1,7 @@
+## 0.9.2
+
+No changes.
+
 ## 0.9.1
 
 Enhancements:
