@@ -2,8 +2,7 @@
 
 Enhancements:
 
-- Adds better Docker lifecycle handling with the `server` command.
-- Updates `server` command to set default project ("default").
+- Updates `server` command to set default project ("default"), and improve Docker lifecycle handling.
 - Updates `worker` command to infer adapter (to avoid running `setup`).
 
 ## 0.9.0
