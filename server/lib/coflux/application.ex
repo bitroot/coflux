@@ -1,7 +1,7 @@
 defmodule Coflux.Application do
   use Application
 
-  alias Coflux.{Config, JwksStore, Orchestration, Logs, Topics}
+  alias Coflux.{Config, JwksStore, Orchestration, Logs, Metrics, Topics}
 
   @impl true
   def start(_type, _args) do
@@ -16,6 +16,8 @@ defmodule Coflux.Application do
       Orchestration.Supervisor,
       {Registry, keys: :unique, name: Coflux.Logs.Registry},
       Logs.Supervisor,
+      {Registry, keys: :unique, name: Coflux.Metrics.Registry},
+      Metrics.Supervisor,
       {Topical, name: Coflux.TopicalRegistry, topics: topics()},
       {Coflux.Web, port: port},
       JwksStore

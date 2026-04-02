@@ -8,19 +8,15 @@ of targets.
 from __future__ import annotations
 
 import datetime as dt
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
+from ._version import __version__
 from .decorators import task, workflow, stub
 from .target import Cache, Defer, Retries
 from .errors import ExecutionError
+from .metric import Metric, MetricGroup, MetricScale, progress
 from .models import Asset, AssetEntry, AssetMetadata, Execution
 from .state import get_context
-
-try:
-    __version__ = _pkg_version("coflux")
-except PackageNotFoundError:
-    __version__ = "dev"
 
 __all__ = [
     # Decorators
@@ -30,6 +26,9 @@ __all__ = [
     # Classes
     "Execution",
     "ExecutionError",
+    "Metric",
+    "MetricGroup",
+    "MetricScale",
     "Cache",
     "Defer",
     "Retries",
@@ -44,6 +43,7 @@ __all__ = [
     "log_info",
     "log_warning",
     "log_error",
+    "progress",
     "asset",
 ]
 

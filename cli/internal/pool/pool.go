@@ -35,6 +35,10 @@ type ExecutionHandler interface {
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
 	// Template is the message template, values contains serialized values (each is ["raw", data, refs] or ["blob", key, size, refs])
 	RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string]*adapter.Value) error
+	// DefineMetric defines a metric for an execution (metadata only)
+	DefineMetric(ctx context.Context, executionID string, key string, definition map[string]any) error
+	// RecordMetric records a metric data point
+	RecordMetric(ctx context.Context, executionID string, key string, value float64, at *float64) error
 	// ReportResult reports execution completion
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
@@ -217,6 +221,12 @@ loop:
 		case "log":
 			p.handleLog(ctx, executionID, params, logger)
 
+		case "define_metric":
+			p.handleDefineMetric(ctx, executionID, params, logger)
+
+		case "metric":
+			p.handleMetric(ctx, executionID, params, logger)
+
 		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob":
 			p.handleRequest(ctx, exec, method, *id, params, logger)
 
@@ -336,6 +346,39 @@ func (p *Pool) handleLog(ctx context.Context, executionID string, params json.Ra
 
 	if err := p.handler.RecordLog(ctx, logMsg.ExecutionID, logMsg.Level, logMsg.Template, logMsg.Values); err != nil {
 		logger.Error("failed to record log", "error", err)
+	}
+}
+
+func (p *Pool) handleDefineMetric(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var msg struct {
+		ExecutionID string         `json:"execution_id"`
+		Key         string         `json:"key"`
+		Definition  map[string]any `json:"definition"`
+	}
+	if err := json.Unmarshal(params, &msg); err != nil {
+		logger.Error("failed to parse define_metric message", "error", err)
+		return
+	}
+
+	if err := p.handler.DefineMetric(ctx, msg.ExecutionID, msg.Key, msg.Definition); err != nil {
+		logger.Error("failed to define metric", "error", err)
+	}
+}
+
+func (p *Pool) handleMetric(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var metricMsg struct {
+		ExecutionID string   `json:"execution_id"`
+		Key         string   `json:"key"`
+		Value       float64  `json:"value"`
+		At          *float64 `json:"at,omitempty"`
+	}
+	if err := json.Unmarshal(params, &metricMsg); err != nil {
+		logger.Error("failed to parse metric message", "error", err)
+		return
+	}
+
+	if err := p.handler.RecordMetric(ctx, metricMsg.ExecutionID, metricMsg.Key, metricMsg.Value, metricMsg.At); err != nil {
+		logger.Error("failed to record metric", "error", err)
 	}
 }
 

@@ -169,6 +169,35 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      "started" ->
+        [execution_id, metadata] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          :ok =
+            Orchestration.execution_started(
+              state.project_id,
+              execution_id,
+              metadata
+            )
+        end
+
+        {[], state}
+
+      "define_metric" ->
+        [execution_id, key, definition] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          :ok =
+            Orchestration.define_metric(
+              state.project_id,
+              execution_id,
+              key,
+              definition
+            )
+        end
+
+        {[], state}
+
       "record_heartbeats" ->
         [executions] = message["params"]
 

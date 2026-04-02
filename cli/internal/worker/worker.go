@@ -22,6 +22,7 @@ import (
 	"github.com/bitroot/coflux/cli/internal/blob"
 	"github.com/bitroot/coflux/cli/internal/config"
 	logstore "github.com/bitroot/coflux/cli/internal/log"
+	"github.com/bitroot/coflux/cli/internal/metric"
 	"github.com/bitroot/coflux/cli/internal/pool"
 	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/gorilla/websocket"
@@ -46,6 +47,9 @@ type Worker struct {
 	pool        *pool.Pool
 	blobs       *blob.Manager
 	logs        logstore.Store
+	metrics     metric.Store
+	tracker     *metric.Tracker
+	throttle    *metric.Throttle
 
 	connMu sync.RWMutex
 	conn   *api.Connection
@@ -184,6 +188,31 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	flushInterval := time.Duration(w.cfg.Logs.FlushInterval * float64(time.Second))
 	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Logs.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
+
+	// Setup metric store
+	metricURL := w.cfg.HTTPURL() + "/metrics"
+	metricToken := w.sessionID
+	if w.cfg.Metrics.Token != nil {
+		metricToken = *w.cfg.Metrics.Token
+	}
+	metricBatchSize := w.cfg.Metrics.BatchSize
+	if metricBatchSize <= 0 {
+		metricBatchSize = 100
+	}
+	metricFlushInterval := time.Duration(w.cfg.Metrics.FlushInterval * float64(time.Second))
+	if metricFlushInterval <= 0 {
+		metricFlushInterval = 500 * time.Millisecond
+	}
+	metricStore := metric.NewHTTPStore(metricURL, metricToken, metricBatchSize, metricFlushInterval, w.logger)
+
+	throttleRate := w.cfg.Metrics.ThrottleRate
+	if throttleRate <= 0 {
+		throttleRate = 10 // default: 10 points per key per second
+	}
+	w.throttle = metric.NewThrottle(metricStore, throttleRate)
+	w.metrics = w.throttle
+	w.tracker = metric.NewTracker(w.logger)
+	defer func() { _ = w.metrics.Close() }()
 
 	// Determine pool size (default to CPU count + 4)
 	poolSize := w.cfg.Worker.Concurrency
@@ -411,15 +440,25 @@ func (w *Worker) handleExecute(params []any) error {
 	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID)
 
 	// Track execution
+	startTime := time.Now()
+	targetKey := moduleName + "/" + targetName
 	w.mu.Lock()
 	w.executions[executionID] = &executionState{
 		status:      "starting",
-		startTime:   time.Now(),
-		target:      moduleName + "/" + targetName,
+		startTime:   startTime,
+		target:      targetKey,
 		runID:       runID,
 		workspaceID: workspaceID,
 	}
 	w.mu.Unlock()
+
+	// Register with metric tracker
+	w.tracker.RegisterExecution(executionID, startTime)
+
+	// Send "started" message
+	if conn := w.getConn(); conn != nil {
+		_ = conn.Notify("started", executionID, map[string]any{})
+	}
 
 	// Convert arguments to adapter format
 	args, err := w.convertArguments(arguments)
@@ -978,6 +1017,42 @@ func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, t
 	return w.logs.Log(entry)
 }
 
+func (w *Worker) DefineMetric(ctx context.Context, executionID string, key string, definition map[string]any) error {
+	if conn := w.getConn(); conn != nil {
+		return conn.Notify("define_metric", executionID, key, definition)
+	}
+	return nil
+}
+
+func (w *Worker) RecordMetric(ctx context.Context, executionID string, key string, value float64, at *float64) error {
+	// Get execution context
+	w.mu.RLock()
+	state, ok := w.executions[executionID]
+	w.mu.RUnlock()
+
+	if !ok {
+		w.logger.Warn("metric for unknown execution", "execution_id", executionID)
+		return nil
+	}
+
+	// Process through tracker (validates at, computes auto-at)
+	resolvedAt, shouldRecord := w.tracker.Process(executionID, key, at)
+	if !shouldRecord {
+		return nil
+	}
+
+	entry := metric.Entry{
+		RunID:       state.runID,
+		ExecutionID: executionID,
+		WorkspaceID: state.workspaceID,
+		Key:         key,
+		Value:       value,
+		At:          resolvedAt,
+	}
+
+	return w.metrics.Record([]metric.Entry{entry})
+}
+
 // convertValueToLogFormat converts an adapter value to the log server format.
 // This is the log equivalent of convertValueToServerFormat — same input format
 // (adapter.Value) but outputs maps instead of tuples for the log HTTP API.
@@ -1336,6 +1411,10 @@ func (w *Worker) trySendTerminated(executionID string) {
 
 // NotifyTerminated is called by the pool after an execution's process has exited.
 func (w *Worker) NotifyTerminated(ctx context.Context, executionID string) error {
+	// Clean up metric tracking for this execution
+	w.tracker.UnregisterExecution(executionID)
+	w.throttle.RemoveExecution(executionID)
+
 	w.mu.Lock()
 	state, ok := w.executions[executionID]
 	if !ok {

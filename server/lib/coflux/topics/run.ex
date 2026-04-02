@@ -99,12 +99,29 @@ defmodule Coflux.Topics.Run do
               {dependency_id, build_dependency(dependency)}
             end),
           children: [],
-          result: nil
+          result: nil,
+          metrics: %{}
         }
       )
     else
       topic
     end
+  end
+
+  defp process_notification(topic, {:metric_defined, execution_external_id, key, definition}) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:metrics, key], %{
+        group: Map.get(definition, "group"),
+        groupUnits: Map.get(definition, "group_units"),
+        groupLower: Map.get(definition, "group_lower"),
+        groupUpper: Map.get(definition, "group_upper"),
+        scale: Map.get(definition, "scale"),
+        units: Map.get(definition, "units"),
+        progress: Map.get(definition, "progress", false),
+        lower: Map.get(definition, "lower"),
+        upper: Map.get(definition, "upper")
+      })
+    end)
   end
 
   defp process_notification(topic, {:group, execution_external_id, group_id, name}) do
@@ -236,7 +253,21 @@ defmodule Coflux.Topics.Run do
                       end),
                     dependencies: build_dependencies(execution.dependencies),
                     children: Enum.map(execution.children, &build_child(&1, run.external_id)),
-                    result: build_result(execution.result, execution.result_created_by)
+                    result: build_result(execution.result, execution.result_created_by),
+                    metrics:
+                      Map.new(execution.metric_definitions, fn {key, def_data} ->
+                        {key, %{
+                          group: def_data.group,
+                          groupUnits: def_data.group_units,
+                          groupLower: def_data.group_lower,
+                          groupUpper: def_data.group_upper,
+                          scale: def_data.scale,
+                          units: def_data.units,
+                          progress: def_data.progress,
+                          lower: def_data.lower,
+                          upper: def_data.upper
+                        }}
+                      end)
                   }}
                end)
            }}

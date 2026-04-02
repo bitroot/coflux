@@ -137,6 +137,14 @@ defmodule Coflux.Orchestration do
     )
   end
 
+  def execution_started(project_id, execution_id, metadata) do
+    call_server(project_id, {:execution_started, execution_id, metadata})
+  end
+
+  def define_metric(project_id, execution_id, key, definition) do
+    call_server(project_id, {:define_metric, execution_id, key, definition})
+  end
+
   def record_heartbeats(project_id, executions, session_id) do
     call_server(project_id, {:record_heartbeats, executions, session_id})
   end

@@ -12,8 +12,9 @@ type Config struct {
 	Team      string       `mapstructure:"team"`
 	Server    ServerConfig `mapstructure:"server"`
 	Worker    WorkerConfig `mapstructure:"worker"`
-	Blobs     BlobsConfig  `mapstructure:"blobs"`
-	Logs      LogsConfig   `mapstructure:"logs"`
+	Blobs     BlobsConfig   `mapstructure:"blobs"`
+	Logs      LogsConfig    `mapstructure:"logs"`
+	Metrics   MetricsConfig `mapstructure:"metrics"`
 	LogLevel  string       `mapstructure:"log_level"`
 	Output    string       `mapstructure:"output"`
 }
@@ -82,6 +83,16 @@ type LogsConfig struct {
 	URL           string  `mapstructure:"url"`
 	BatchSize     int     `mapstructure:"batch_size"`
 	FlushInterval float64 `mapstructure:"flush_interval"`
+}
+
+// MetricsConfig holds metric storage configuration
+type MetricsConfig struct {
+	Type          string  `mapstructure:"type"`
+	Token         *string `mapstructure:"token"`
+	URL           string  `mapstructure:"url"`
+	BatchSize     int     `mapstructure:"batch_size"`
+	FlushInterval float64 `mapstructure:"flush_interval"`
+	ThrottleRate  float64 `mapstructure:"throttle_rate"` // max points per key per second
 }
 
 // IsSecure determines if the connection should use TLS
