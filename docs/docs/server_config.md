@@ -14,7 +14,7 @@ This is a convenience wrapper around `docker run`. Docker must be installed and 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--project` | _(none)_ | Restrict the server to a single project |
+| `--project` | `default` | Restrict the server to a single project |
 | `--public-host` | _(none)_ | Public-facing host (use `%` prefix for subdomain routing) |
 | `--port` | `7777` | Port to run the server on |
 | `--data-dir` | `./data` | Directory for persistent data |
@@ -31,11 +31,13 @@ The server can operate in two modes:
 
 ### Single-project mode
 
-Use `--project` to restrict the server to a single project. All requests are routed to this project regardless of the hostname used to connect:
+By default, the server runs in single-project mode with a project called "default". Use `--project` to choose a different name:
 
 ```bash
 coflux server --project myproject
 ```
+
+All requests are routed to this project regardless of the hostname used to connect.
 
 ### Multi-project mode
 
@@ -55,7 +57,7 @@ The server is configured via environment variables. When using `coflux server`, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COFLUX_PROJECT` | _(none)_ | Restrict to a single project |
+| `COFLUX_PROJECT` | _(none)_ | Restrict to a single project (the CLI defaults to `default`) |
 | `COFLUX_PUBLIC_HOST` | `localhost:PORT` | Public host (use `%` prefix for subdomain routing) |
 | `COFLUX_REQUIRE_AUTH` | `true` | Whether authentication is required |
 | `COFLUX_SUPER_TOKEN_HASH` | _(none)_ | SHA-256 hex hash of the super token |

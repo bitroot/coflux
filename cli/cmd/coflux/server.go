@@ -127,10 +127,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add environment variables for server configuration
-	if project := viper.GetString("server.project"); project != "" {
+	project := viper.GetString("server.project")
+	publicHost := viper.GetString("server.public_host")
+	if project == "" && !strings.HasPrefix(publicHost, "%") {
+		project = "default"
+		fmt.Printf("No project specified, using %q\n", project)
+	}
+	if project != "" {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_PROJECT="+project)
 	}
-	if publicHost := viper.GetString("server.public_host"); publicHost != "" {
+	if publicHost != "" {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_PUBLIC_HOST="+publicHost)
 	}
 	if serverNoAuth {

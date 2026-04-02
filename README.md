@@ -158,7 +158,7 @@ Or download a binary from the [releases page](https://github.com/bitroot/coflux/
 Use the CLI to start the server:
 
 ```bash
-coflux server --no-auth --project myproject
+coflux server --no-auth
 ```
 
 Or [run it with Docker](https://docs.coflux.com/getting_started/server):
