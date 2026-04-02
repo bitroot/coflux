@@ -1,3 +1,7 @@
+## 0.9.1
+
+No changes.
+
 ## 0.9.0
 
 First release of the Go CLI, replacing the previous Python-based CLI.
