@@ -356,6 +356,9 @@ jobs:
           next_version = os.environ["NEXT"]
           next_pep440 = os.environ["NEXT_PEP440"]
 
+          # Strip -dev suffix for changelog heading
+          release_version = next_version.removesuffix("-dev")
+
           Path("VERSION").write_text(next_version + "\n")
 
           pyproject = Path("adapters/python/pyproject.toml")
@@ -368,11 +371,22 @@ jobs:
           )
           pyproject.write_text(content)
 
+          # Add empty changelog sections
+          changelogs = [
+              "server/CHANGELOG.md",
+              "cli/CHANGELOG.md",
+              "adapters/python/CHANGELOG.md",
+          ]
+          for path in changelogs:
+              p = Path(path)
+              content = p.read_text()
+              p.write_text(f"## {release_version}\n\nNo changes.\n\n{content}")
+
       - name: Commit and push
         env:
           NEXT: ${{ needs.prepare.outputs.next_version }}
         run: |
-          git add VERSION adapters/python/pyproject.toml
+          git add VERSION adapters/python/pyproject.toml server/CHANGELOG.md cli/CHANGELOG.md adapters/python/CHANGELOG.md
           git commit -m "Begin $NEXT development"
           git push
 
@@ -399,6 +413,7 @@ jobs:
           from pathlib import Path
 
           next_version, next_pep440 = sys.argv[1], sys.argv[2]
+          release_version = next_version.removesuffix("-dev")
 
           Path("VERSION").write_text(next_version + "\n")
 
@@ -411,8 +426,19 @@ jobs:
               flags=re.MULTILINE,
           )
           pyproject.write_text(content)
+
+          # Add empty changelog sections
+          changelogs = [
+              "server/CHANGELOG.md",
+              "cli/CHANGELOG.md",
+              "adapters/python/CHANGELOG.md",
+          ]
+          for path in changelogs:
+              p = Path(path)
+              content = p.read_text()
+              p.write_text(f"## {release_version}\n\nNo changes.\n\n{content}")
           PYEOF
 
-          git add VERSION adapters/python/pyproject.toml
+          git add VERSION adapters/python/pyproject.toml server/CHANGELOG.md cli/CHANGELOG.md adapters/python/CHANGELOG.md
           git commit -m "Begin $PATCH_DEV development"
           git push -u origin "$BRANCH"
