@@ -179,7 +179,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 	dockerCmd := exec.Command("docker", dockerArgs...)
 	dockerCmd.Stdout = os.Stdout
 	dockerCmd.Stderr = os.Stderr
-	dockerCmd.Stdin = os.Stdin
 
 	if err := dockerCmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
