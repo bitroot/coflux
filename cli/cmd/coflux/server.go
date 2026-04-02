@@ -116,9 +116,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Build docker command
 	dockerArgs := []string{
 		"run",
+		"--rm",
 		"--pull", pullPolicy,
 		"--publish", fmt.Sprintf("%d:7777", port),
 		"--volume", fmt.Sprintf("%s:/data", absDataDir),
+		// Disable Erlang's interactive break handler (Ctrl+C menu).
+		// With --init, tini handles SIGTERM for clean shutdown.
+		"--env", "ERL_FLAGS=+Bd",
 	}
 
 	// Add environment variables for server configuration
