@@ -3,10 +3,12 @@
 Use the CLI to start the server locally:
 
 ```bash
-coflux server --no-auth --project myproject
+coflux server --no-auth
 ```
 
-The `--project` flag configures the server for single-project mode. A _project_ is a top-level unit of isolation — it has its own data, orchestration process, and set of workspaces. The `--no-auth` flag disables authentication, which simplifies getting started. See the [authentication documentation](/authentication) for options for setting up authentication for production use.
+The `--no-auth` flag disables authentication, which simplifies getting started. See the [authentication documentation](/authentication) for options for setting up authentication for production use.
+
+By default, the server uses a project called "default". Use `--project` to choose a different name — a _project_ is a top-level unit of isolation with its own data, orchestration process, and set of workspaces. See [server configuration](/server_config) for more details.
 
 :::note
 The command is a wrapper around `docker run`, so you'll need to have Docker installed and running.
@@ -18,7 +20,6 @@ docker run \
   --pull always \
   -p 7777:7777 \
   -v $(pwd):/data \
-  -e COFLUX_PROJECT=myproject \
   -e COFLUX_REQUIRE_AUTH=false \
   ghcr.io/bitroot/coflux
 ```

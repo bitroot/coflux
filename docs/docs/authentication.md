@@ -7,7 +7,7 @@ By default, the Coflux server requires authentication. There are several authent
 For local development, authentication can be disabled by starting the server with the `--no-auth` flag:
 
 ```bash
-coflux server --no-auth --project myproject
+coflux server --no-auth
 ```
 
 This allows anonymous access to all endpoints. This is not recommended for production use.
@@ -17,7 +17,7 @@ This allows anonymous access to all endpoints. This is not recommended for produ
 A super token provides full access to the server. It is configured when starting the server:
 
 ```bash
-coflux server --super-token "my-secret-token" --project myproject
+coflux server --super-token "my-secret-token"
 ```
 
 The token can then be used with the CLI:
@@ -62,7 +62,7 @@ coflux login
 This requires `COFLUX_STUDIO_TEAMS` to be configured on the server with the allowed team IDs:
 
 ```bash
-coflux server --studio-teams "team-id-1,team-id-2" --project myproject
+coflux server --team team-id-1 --team team-id-2
 ```
 
 To log out:
