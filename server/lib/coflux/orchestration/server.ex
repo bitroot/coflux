@@ -3731,8 +3731,20 @@ defmodule Coflux.Orchestration.Server do
       Enum.group_by(
         run_metric_defs,
         fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
-        fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress, lower, upper} ->
-          {key, %{group: group, group_units: group_units, group_lower: group_lower, group_upper: group_upper, scale: scale, units: units, progress: progress == 1, lower: lower, upper: upper}}
+        fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress, lower,
+            upper} ->
+          {key,
+           %{
+             group: group,
+             group_units: group_units,
+             group_lower: group_lower,
+             group_upper: group_upper,
+             scale: scale,
+             units: units,
+             progress: progress == 1,
+             lower: lower,
+             upper: upper
+           }}
         end
       )
       |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)

@@ -256,17 +256,18 @@ defmodule Coflux.Topics.Run do
                     result: build_result(execution.result, execution.result_created_by),
                     metrics:
                       Map.new(execution.metric_definitions, fn {key, def_data} ->
-                        {key, %{
-                          group: def_data.group,
-                          groupUnits: def_data.group_units,
-                          groupLower: def_data.group_lower,
-                          groupUpper: def_data.group_upper,
-                          scale: def_data.scale,
-                          units: def_data.units,
-                          progress: def_data.progress,
-                          lower: def_data.lower,
-                          upper: def_data.upper
-                        }}
+                        {key,
+                         %{
+                           group: def_data.group,
+                           groupUnits: def_data.group_units,
+                           groupLower: def_data.group_lower,
+                           groupUpper: def_data.group_upper,
+                           scale: def_data.scale,
+                           units: def_data.units,
+                           progress: def_data.progress,
+                           lower: def_data.lower,
+                           upper: def_data.upper
+                         }}
                       end)
                   }}
                end)
