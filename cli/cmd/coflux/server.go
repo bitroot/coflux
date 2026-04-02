@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/spf13/cobra"
@@ -27,9 +29,8 @@ COFLUX_SERVER_* environment variables.
 
 Examples:
   coflux server
-  coflux server --port 8080
-  coflux server --data-dir ./my-data
-  coflux server --super-token mytoken --no-auth`,
+  coflux server --no-auth --project myproject
+  coflux server --super-token mytoken --public-host %.localhost:7777`,
 	RunE: runServer,
 }
 
@@ -49,20 +50,30 @@ func init() {
 	serverCmd.Flags().StringVar(&serverSuperToken, "super-token", "", "Super token (will be hashed)")
 	serverCmd.Flags().StringVar(&serverSuperTokenHash, "super-token-hash", "", "Pre-hashed super token (SHA-256 hex)")
 	serverCmd.Flags().String("secret", "", "Server secret for signing service tokens")
-	serverCmd.Flags().StringSlice("studio-teams", nil, "Team IDs allowed for Studio auth")
-	serverCmd.Flags().StringSlice("launcher-types", nil, "Allowed launcher types (docker, process)")
+	serverCmd.Flags().StringSlice("team", nil, "Team IDs allowed for Studio auth")
+	serverCmd.Flags().StringSlice("launcher", nil, "Allowed launcher types (docker, process)")
+	serverCmd.Flags().String("studio-url", "", "Studio URL")
+	serverCmd.Flags().StringSlice("allow-origin", nil, "Allowed CORS origins")
+
+	serverCmd.Flags().MarkHidden("studio-url")
+	serverCmd.Flags().MarkHidden("allow-origin")
 
 	serverCmd.MarkFlagsMutuallyExclusive("super-token", "super-token-hash")
 
 	// Bind flags to viper under the server.* namespace
+	// Note: viper keys use plural forms (e.g., studio_teams) to match
+	// config file keys and COFLUX_SERVER_* environment variables,
+	// while CLI flags use singular forms (e.g., --team).
 	viper.BindPFlag("server.port", serverCmd.Flags().Lookup("port"))
 	viper.BindPFlag("server.data_dir", serverCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("server.image", serverCmd.Flags().Lookup("image"))
 	viper.BindPFlag("server.project", serverCmd.Flags().Lookup("project"))
 	viper.BindPFlag("server.public_host", serverCmd.Flags().Lookup("public-host"))
 	viper.BindPFlag("server.secret", serverCmd.Flags().Lookup("secret"))
-	viper.BindPFlag("server.studio_teams", serverCmd.Flags().Lookup("studio-teams"))
-	viper.BindPFlag("server.launcher_types", serverCmd.Flags().Lookup("launcher-types"))
+	viper.BindPFlag("server.studio_teams", serverCmd.Flags().Lookup("team"))
+	viper.BindPFlag("server.launcher_types", serverCmd.Flags().Lookup("launcher"))
+	viper.BindPFlag("server.studio_url", serverCmd.Flags().Lookup("studio-url"))
+	viper.BindPFlag("server.allow_origins", serverCmd.Flags().Lookup("allow-origin"))
 }
 
 // getDefaultImage returns the default Docker image name.
@@ -107,16 +118,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Build docker command
 	dockerArgs := []string{
 		"run",
+		"--rm",
 		"--pull", pullPolicy,
 		"--publish", fmt.Sprintf("%d:7777", port),
 		"--volume", fmt.Sprintf("%s:/data", absDataDir),
+		// Disable Erlang's interactive break handler (Ctrl+C menu).
+		"--env", "ERL_FLAGS=+Bd",
 	}
 
 	// Add environment variables for server configuration
-	if project := viper.GetString("server.project"); project != "" {
+	project := viper.GetString("server.project")
+	publicHost := viper.GetString("server.public_host")
+	if project == "" && !strings.HasPrefix(publicHost, "%") {
+		project = "default"
+		fmt.Printf("No project specified, using %q\n", project)
+	}
+	if project != "" {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_PROJECT="+project)
 	}
-	if publicHost := viper.GetString("server.public_host"); publicHost != "" {
+	if publicHost != "" {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_PUBLIC_HOST="+publicHost)
 	}
 	if serverNoAuth {
@@ -148,6 +168,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if types := viper.GetStringSlice("server.launcher_types"); len(types) > 0 {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_LAUNCHER_TYPES="+strings.Join(types, ","))
 	}
+	if studioURL := viper.GetString("server.studio_url"); studioURL != "" {
+		dockerArgs = append(dockerArgs, "--env", "COFLUX_STUDIO_URL="+studioURL)
+	}
+	if origins := viper.GetStringSlice("server.allow_origins"); len(origins) > 0 {
+		dockerArgs = append(dockerArgs, "--env", "COFLUX_ALLOW_ORIGINS="+strings.Join(origins, ","))
+	}
 
 	// Check config-level auth setting (--no-auth flag handled above)
 	if !serverNoAuth {
@@ -163,17 +189,30 @@ func runServer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Starting Coflux server on port %d...\n", port)
 	fmt.Printf("Data directory: %s\n", absDataDir)
 
-	// Run docker
+	// Run docker in its own process group so that Ctrl+C doesn't go
+	// directly to it. Instead, Go catches the signal and sends SIGTERM
+	// to docker, which proxies it to the container for a clean shutdown.
 	dockerCmd := exec.Command("docker", dockerArgs...)
 	dockerCmd.Stdout = os.Stdout
 	dockerCmd.Stderr = os.Stderr
-	dockerCmd.Stdin = os.Stdin
+	dockerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	if err := dockerCmd.Run(); err != nil {
+	if err := dockerCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start docker: %w", err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		dockerCmd.Process.Signal(syscall.SIGTERM)
+	}()
+
+	if err := dockerCmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("failed to run docker: %w", err)
+		return fmt.Errorf("docker exited with error: %w", err)
 	}
 
 	return nil

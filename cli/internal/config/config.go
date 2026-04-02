@@ -30,6 +30,8 @@ type ServerConfig struct {
 	SuperTokenHash string   `mapstructure:"super_token_hash"`
 	Secret         string   `mapstructure:"secret"`
 	StudioTeams    []string `mapstructure:"studio_teams"`
+	StudioURL      string   `mapstructure:"studio_url"`
+	AllowOrigins   []string `mapstructure:"allow_origins"`
 	LauncherTypes  []string `mapstructure:"launcher_types"`
 }
 

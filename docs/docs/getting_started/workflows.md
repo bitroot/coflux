@@ -4,13 +4,13 @@ Workflows are defined in code, using Python functions, which are decorated to in
 
 The decorators are intended to be unimposing so that functions can be executed outside of Coflux.
 
-## Installing the Python package
-
-The `coflux` Python package provides the decorators and runtime for defining and executing workflows. Install it into the environment that your workflow code will run in:
+:::note
+The `coflux` Python package provides the decorators and runtime for defining and executing workflows. If you have [`uv`](https://docs.astral.sh/uv/) installed, the worker will automatically install it when it starts. Otherwise, install it manually:
 
 ```bash
 pip install coflux
 ```
+:::
 
 ## An example
 
