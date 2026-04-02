@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/spf13/cobra"
@@ -121,7 +123,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 		"--publish", fmt.Sprintf("%d:7777", port),
 		"--volume", fmt.Sprintf("%s:/data", absDataDir),
 		// Disable Erlang's interactive break handler (Ctrl+C menu).
-		// With --init, tini handles SIGTERM for clean shutdown.
 		"--env", "ERL_FLAGS=+Bd",
 	}
 
@@ -182,16 +183,30 @@ func runServer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Starting Coflux server on port %d...\n", port)
 	fmt.Printf("Data directory: %s\n", absDataDir)
 
-	// Run docker
+	// Run docker in its own process group so that Ctrl+C doesn't go
+	// directly to it. Instead, Go catches the signal and sends SIGTERM
+	// to docker, which proxies it to the container for a clean shutdown.
 	dockerCmd := exec.Command("docker", dockerArgs...)
 	dockerCmd.Stdout = os.Stdout
 	dockerCmd.Stderr = os.Stderr
+	dockerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	if err := dockerCmd.Run(); err != nil {
+	if err := dockerCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start docker: %w", err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		dockerCmd.Process.Signal(syscall.SIGTERM)
+	}()
+
+	if err := dockerCmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("failed to run docker: %w", err)
+		return fmt.Errorf("docker exited with error: %w", err)
 	}
 
 	return nil
