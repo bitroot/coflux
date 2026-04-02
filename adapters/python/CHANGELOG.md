@@ -1,6 +1,8 @@
 ## 0.10.0
 
-No changes.
+Enhancements:
+
+- Adds support for writing metrics, and writing progress.
 
 ## 0.9.0
 
