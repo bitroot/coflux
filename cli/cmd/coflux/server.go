@@ -27,9 +27,8 @@ COFLUX_SERVER_* environment variables.
 
 Examples:
   coflux server
-  coflux server --port 8080
-  coflux server --data-dir ./my-data
-  coflux server --super-token mytoken --no-auth`,
+  coflux server --no-auth --project myproject
+  coflux server --super-token mytoken --public-host %.localhost:7777`,
 	RunE: runServer,
 }
 
@@ -51,6 +50,11 @@ func init() {
 	serverCmd.Flags().String("secret", "", "Server secret for signing service tokens")
 	serverCmd.Flags().StringSlice("studio-teams", nil, "Team IDs allowed for Studio auth")
 	serverCmd.Flags().StringSlice("launcher-types", nil, "Allowed launcher types (docker, process)")
+	serverCmd.Flags().String("studio-url", "", "Studio URL for browser redirects")
+	serverCmd.Flags().StringSlice("allow-origins", nil, "Allowed CORS origins")
+
+	serverCmd.Flags().MarkHidden("studio-url")
+	serverCmd.Flags().MarkHidden("allow-origins")
 
 	serverCmd.MarkFlagsMutuallyExclusive("super-token", "super-token-hash")
 
@@ -63,6 +67,8 @@ func init() {
 	viper.BindPFlag("server.secret", serverCmd.Flags().Lookup("secret"))
 	viper.BindPFlag("server.studio_teams", serverCmd.Flags().Lookup("studio-teams"))
 	viper.BindPFlag("server.launcher_types", serverCmd.Flags().Lookup("launcher-types"))
+	viper.BindPFlag("server.studio_url", serverCmd.Flags().Lookup("studio-url"))
+	viper.BindPFlag("server.allow_origins", serverCmd.Flags().Lookup("allow-origins"))
 }
 
 // getDefaultImage returns the default Docker image name.
@@ -147,6 +153,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 	if types := viper.GetStringSlice("server.launcher_types"); len(types) > 0 {
 		dockerArgs = append(dockerArgs, "--env", "COFLUX_LAUNCHER_TYPES="+strings.Join(types, ","))
+	}
+	if studioURL := viper.GetString("server.studio_url"); studioURL != "" {
+		dockerArgs = append(dockerArgs, "--env", "COFLUX_STUDIO_URL="+studioURL)
+	}
+	if origins := viper.GetStringSlice("server.allow_origins"); len(origins) > 0 {
+		dockerArgs = append(dockerArgs, "--env", "COFLUX_ALLOW_ORIGINS="+strings.Join(origins, ","))
 	}
 
 	// Check config-level auth setting (--no-auth flag handled above)
