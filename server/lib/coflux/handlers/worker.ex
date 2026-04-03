@@ -317,7 +317,11 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "get_result" ->
-        [execution_id, from_execution_id, timeout_ms] = message["params"]
+        {execution_id, from_execution_id, timeout_ms, suspend} =
+          case message["params"] do
+            [eid, feid, tms, s] -> {eid, feid, tms, s}
+            [eid, feid, tms] -> {eid, feid, tms, true}
+          end
 
         if is_recognised_execution?(from_execution_id, state) do
           case Orchestration.get_result(
@@ -325,6 +329,7 @@ defmodule Coflux.Handlers.Worker do
                  execution_id,
                  from_execution_id,
                  timeout_ms,
+                 suspend,
                  message["id"]
                ) do
             {:ok, result} ->
@@ -568,6 +573,7 @@ defmodule Coflux.Handlers.Worker do
       :cancelled -> ["cancelled"]
       {:timeout, nil} -> ["timeout"]
       :suspended -> ["suspended"]
+      :not_ready -> ["not_ready"]
     end
   end
 

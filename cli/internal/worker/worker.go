@@ -781,12 +781,12 @@ func (w *Worker) processReferences(refs [][]any) ([]any, error) {
 	return result, nil
 }
 
-func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.ResolveResult, error) {
+func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64, suspend *bool) (*adapter.ResolveResult, error) {
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
 	}
-	result, err := conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs)
+	result, err := conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs, suspend)
 	if err != nil {
 		return nil, err
 	}
@@ -859,6 +859,8 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 			return &adapter.ResolveResult{Status: "timeout"}, nil
 		case "suspended":
 			return &adapter.ResolveResult{Status: "suspended"}, nil
+		case "not_ready":
+			return &adapter.ResolveResult{Status: "not_ready"}, nil
 		}
 	}
 

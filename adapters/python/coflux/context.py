@@ -101,6 +101,30 @@ class ExecutorContext:
             raise ExecutionTimeout()
         return deserialize_value(value)
 
+    def poll_execution(self, target_execution_id: str, timeout_ms: int | None = None, default: Any = None) -> Any:
+        """Poll for an execution result without suspending.
+
+        Returns the deserialized result if available, or `default` if not ready.
+        """
+        request_id = protocol.request_resolve_reference(
+            self.execution_id,
+            target_execution_id,
+            timeout_ms=timeout_ms or 0,
+            suspend=False,
+        )
+        value = self._wait_response(request_id)
+        status = value.get("status")
+        if status == "not_ready":
+            return default
+        if status == "error":
+            raise create_execution_error(
+                value.get("error_type", ""),
+                value.get("error_message", ""),
+            )
+        if status == "cancelled":
+            raise ExecutionCancelled()
+        return deserialize_value(value)
+
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
         request_id = protocol.request_get_asset(

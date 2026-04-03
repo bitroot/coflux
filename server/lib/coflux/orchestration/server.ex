@@ -84,7 +84,7 @@ defmodule Coflux.Orchestration.Server do
               # topic -> [notification]
               notifications: %{},
 
-              # execution_external_id -> [{from_execution_external_id, request_id, suspend_at}]
+              # execution_external_id -> [{from_execution_external_id, request_id, expire_at, suspend?}]
               waiting: %{},
 
               # task_ref -> callback
@@ -1506,7 +1506,8 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:get_result, execution_external_id, from_execution_external_id, timeout_ms, request_id},
+        {:get_result, execution_external_id, from_execution_external_id, timeout_ms, suspend,
+         request_id},
         _from,
         state
       ) do
@@ -1563,8 +1564,9 @@ defmodule Coflux.Orchestration.Server do
         {result, state} =
           case resolve_result(state.db, execution_id) do
             {:pending, pending_execution_id} ->
-              state =
-                if timeout_ms == 0 do
+              cond do
+                timeout_ms == 0 && suspend ->
+                  # Immediate suspend
                   {:ok, state} =
                     process_result(
                       state,
@@ -1572,10 +1574,16 @@ defmodule Coflux.Orchestration.Server do
                       {:suspended, nil, [pending_execution_id]}
                     )
 
-                  state
-                else
+                  {:wait, state}
+
+                timeout_ms == 0 ->
+                  # Immediate poll: return not_ready
+                  {{:ok, :not_ready}, state}
+
+                true ->
+                  # Wait for result (with or without timeout)
                   now = System.monotonic_time(:millisecond)
-                  suspend_at = if timeout_ms, do: now + timeout_ms
+                  expire_at = if timeout_ms, do: now + timeout_ms
 
                   # Use the external ID of the *resolved* pending execution as the waiting key.
                   # This is critical for spawned chains: resolve_result follows
@@ -1590,17 +1598,18 @@ defmodule Coflux.Orchestration.Server do
                     update_in(
                       state,
                       [Access.key(:waiting), Access.key(pending_ext_id, [])],
-                      &[{from_execution_external_id, request_id, suspend_at} | &1]
+                      &[{from_execution_external_id, request_id, expire_at, suspend} | &1]
                     )
 
-                  if timeout_ms do
-                    reschedule_next_suspend(state)
-                  else
-                    state
-                  end
-                end
+                  state =
+                    if timeout_ms do
+                      reschedule_next_suspend(state)
+                    else
+                      state
+                    end
 
-              {:wait, state}
+                  {:wait, state}
+              end
 
             {:ok, result} ->
               # Only enrich value results with resolved references (asset metadata, execution metadata)
@@ -2630,30 +2639,67 @@ defmodule Coflux.Orchestration.Server do
     now = System.monotonic_time(:millisecond)
 
     # waiting map now uses external IDs
-    # suspended: from_ext_id -> [dependency_ext_id]
-    suspended =
+    # Collect expired entries, grouped by from_ext_id with their suspend flag
+    {to_suspend, to_notify_not_ready} =
       Enum.reduce(
         state.waiting,
-        %{},
-        fn {execution_ext_id, execution_waiting}, suspended ->
+        {%{}, []},
+        fn {execution_ext_id, execution_waiting}, {to_suspend, to_notify} ->
           Enum.reduce(
             execution_waiting,
-            suspended,
-            fn {from_ext_id, _, suspend_at}, suspended ->
-              if suspend_at && suspend_at <= now do
-                Map.update(suspended, from_ext_id, [execution_ext_id], &[execution_ext_id | &1])
+            {to_suspend, to_notify},
+            fn {from_ext_id, request_id, expire_at, suspend_flag}, {to_suspend, to_notify} ->
+              if expire_at && expire_at <= now do
+                if suspend_flag do
+                  {Map.update(to_suspend, from_ext_id, [execution_ext_id], &[execution_ext_id | &1]),
+                   to_notify}
+                else
+                  {to_suspend, [{from_ext_id, request_id} | to_notify]}
+                end
               else
-                suspended
+                {to_suspend, to_notify}
               end
             end
           )
         end
       )
 
-    # Resolve external IDs to internal for process_result
+    # Remove expired entries from waiting map
+    state =
+      update_in(state, [Access.key(:waiting)], fn waiting ->
+        waiting
+        |> Enum.map(fn {ext_id, entries} ->
+          remaining =
+            Enum.reject(entries, fn {_, _, expire_at, _} ->
+              expire_at && expire_at <= now
+            end)
+
+          {ext_id, remaining}
+        end)
+        |> Enum.reject(fn {_, entries} -> entries == [] end)
+        |> Map.new()
+      end)
+
+    # Handle poll (non-suspend) timeouts: send not_ready response
     state =
       Enum.reduce(
-        suspended,
+        to_notify_not_ready,
+        state,
+        fn {from_ext_id, request_id}, state ->
+          case find_session_for_execution(state, from_ext_id) do
+            {:ok, session_id} ->
+              send_session(state, session_id, {:result, request_id, :not_ready})
+
+            :error ->
+              state
+          end
+        end
+      )
+
+    # Resolve external IDs to internal for process_result (suspend cases)
+    state =
+      Enum.reduce(
+        to_suspend,
         state,
         fn {from_ext_id, dependency_ext_ids}, state ->
           from_execution_id = Map.fetch!(state.execution_ids, from_ext_id)
@@ -5025,10 +5071,10 @@ defmodule Coflux.Orchestration.Server do
       state.waiting
       |> Map.values()
       |> Enum.flat_map(fn execution_waiting ->
-        Enum.map(execution_waiting, fn {_, _, suspend_at} -> suspend_at end)
+        Enum.map(execution_waiting, fn {_, _, expire_at, _} -> expire_at end)
       end)
       |> Enum.reject(&is_nil/1)
-      |> Enum.max(fn -> nil end)
+      |> Enum.min(fn -> nil end)
 
     timer =
       if next_suspend_at do
@@ -5082,7 +5128,7 @@ defmodule Coflux.Orchestration.Server do
             Enum.reduce(
               execution_waiting,
               state,
-              fn {from_ext_id, request_id, _}, state ->
+              fn {from_ext_id, request_id, _, _}, state ->
                 # find_session_for_execution now uses external IDs
                 case find_session_for_execution(state, from_ext_id) do
                   {:ok, session_id} ->
@@ -5128,12 +5174,12 @@ defmodule Coflux.Orchestration.Server do
         {state, []},
         fn {for_ext_id, execution_waiting}, {state, pending} ->
           {removed, remaining} =
-            Enum.split_with(execution_waiting, fn {from_ext_id, _, _} ->
+            Enum.split_with(execution_waiting, fn {from_ext_id, _, _, _} ->
               from_ext_id == execution_ext_id
             end)
 
           pending =
-            Enum.reduce(removed, pending, fn {_, request_id, _}, acc ->
+            Enum.reduce(removed, pending, fn {_, request_id, _, _}, acc ->
               if request_id, do: [request_id | acc], else: acc
             end)
 
