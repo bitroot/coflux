@@ -534,8 +534,8 @@ defmodule Coflux.Handlers.Worker do
     if value do
       %{
         limit: Map.get(value, "limit"),
-        backoff_min: Map.fetch!(value, "backoff_min"),
-        backoff_max: Map.fetch!(value, "backoff_max")
+        backoff_min: Map.get(value, "backoff_min"),
+        backoff_max: Map.get(value, "backoff_max")
       }
     end
   end

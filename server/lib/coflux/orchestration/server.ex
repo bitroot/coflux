@@ -99,6 +99,9 @@ defmodule Coflux.Orchestration.Server do
               # [epoch_id] awaiting Bloom filter build (FIFO)
               index_queue: [],
 
+              # run_external_id -> {root_module, root_target, MapSet of execution_ids}
+              run_workflows: %{},
+
               # execution_id -> MapSet of execution_ids that this execution is waiting on
               pending_dependencies: %{},
 
@@ -305,6 +308,14 @@ defmodule Coflux.Orchestration.Server do
             state
           end)
         end
+      end)
+
+    # Populate run_workflows lookup for all active runs
+    {:ok, active_run_workflows} = Runs.get_active_run_workflows(state.db)
+
+    state =
+      Enum.reduce(active_run_workflows, state, fn {run_ext_id, module, target, _step_number, _attempt, execution_id}, state ->
+        track_run_execution(state, run_ext_id, execution_id, module, target)
       end)
 
     # Initialize pending dependency tracking for existing unassigned executions
@@ -1156,12 +1167,15 @@ defmodule Coflux.Orchestration.Server do
         state =
           if !memo_hit do
             execute_at = execute_after || created_at
+            {root_module, root_target} = get_run_workflow(state, run.external_id) || raise "run_workflows missing entry for run #{run.external_id}"
 
             state =
               state
+              |> track_run_execution(run.external_id, execution_id, root_module, root_target)
               |> notify_listeners(
                 {:modules, ws_ext_id},
-                {:scheduled, module, execution_external_id, execute_at}
+                {:scheduled, {root_module, root_target}, run.external_id, execution_external_id,
+                 execute_at}
               )
               |> notify_listeners(
                 {:module, module, ws_ext_id},
@@ -1704,46 +1718,26 @@ defmodule Coflux.Orchestration.Server do
       {:ok, workspace_id} ->
         {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
 
-        # Collect all external execution IDs that are executing or starting
-        all_executing_ext_ids =
-          state.sessions
-          |> Map.values()
-          |> Enum.reduce(MapSet.new(), fn session, acc ->
-            acc |> MapSet.union(session.executing) |> MapSet.union(session.starting)
-          end)
+        # Get all active executions (both assigned and unassigned) with their root workflow
+        {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
 
-        {:ok, executions} = Runs.get_unassigned_executions(state.db)
-        # TODO: get/include assigned (pending) executions
+        # Build active_runs: {root_module, root_target} -> %{run_ext_id -> MapSet of execution_ext_ids}
+        active_runs =
+          Enum.reduce(active_executions, %{}, fn {run_ext_id, root_module, root_target, step_number, attempt, _execution_id}, active_runs ->
+            ext_id = execution_external_id(run_ext_id, step_number, attempt)
+            key = {root_module, root_target}
 
-        executions =
-          Enum.reduce(executions, %{}, fn execution, executions ->
-            ext_id =
-              execution_external_id(
-                execution.run_external_id,
-                execution.step_number,
-                execution.attempt
-              )
-
-            executions
-            |> Map.put_new(execution.module, {MapSet.new(), %{}})
-            |> Map.update!(execution.module, fn {module_executing, module_scheduled} ->
-              if MapSet.member?(all_executing_ext_ids, ext_id) do
-                {MapSet.put(module_executing, ext_id), module_scheduled}
-              else
-                {module_executing,
-                 Map.put(
-                   module_scheduled,
-                   ext_id,
-                   execution.execute_after || execution.created_at
-                 )}
-              end
+            active_runs
+            |> Map.put_new(key, %{})
+            |> Map.update!(key, fn runs ->
+              Map.update(runs, run_ext_id, MapSet.new([ext_id]), &MapSet.put(&1, ext_id))
             end)
           end)
 
         {:ok, ref, state} =
           add_listener(state, {:modules, workspace_external_id}, pid)
 
-        {:reply, {:ok, manifests, executions, ref}, state}
+        {:reply, {:ok, manifests, active_runs, ref}, state}
     end
   end
 
@@ -2250,6 +2244,7 @@ defmodule Coflux.Orchestration.Server do
         notify_listeners(state, {:run, run_external_id}, {:assigned, assigned_map})
       end)
 
+    # Group by workspace, then by step module (for :module topic notifications)
     assigned_groups =
       assigned
       |> Enum.group_by(fn {execution, _} -> execution.workspace_id end)
@@ -2269,14 +2264,38 @@ defmodule Coflux.Orchestration.Server do
          |> Map.new(fn {k, v} -> {k, MapSet.new(v)} end)}
       end)
 
+    # Group by workspace, then by root workflow (for :modules topic notifications)
+    assigned_by_workflow =
+      assigned
+      |> Enum.group_by(fn {execution, _} -> execution.workspace_id end)
+      |> Map.new(fn {workspace_id, executions} ->
+        {workspace_id,
+         executions
+         |> Enum.group_by(
+           fn {execution, _} ->
+             get_run_workflow(state, execution.run_external_id) || raise "run_workflows missing entry for run #{execution.run_external_id}"
+           end,
+           fn {execution, _} ->
+             {execution.run_external_id,
+              execution_external_id(
+                execution.run_external_id,
+                execution.step_number,
+                execution.attempt
+              )}
+           end
+         )}
+      end)
+
     state =
-      Enum.reduce(assigned_groups, state, fn {workspace_id, workspace_executions}, state ->
+      Enum.reduce(assigned_by_workflow, state, fn {workspace_id, workflow_executions}, state ->
         ws_ext_id = workspace_external_id(state, workspace_id)
 
         all_ext_ids =
-          workspace_executions
+          workflow_executions
           |> Map.values()
-          |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+          |> List.flatten()
+          |> Enum.map(&elem(&1, 1))
+          |> MapSet.new()
 
         queue_executions =
           Enum.reduce(assigned, %{}, fn {execution, assigned_at}, acc ->
@@ -2297,7 +2316,7 @@ defmodule Coflux.Orchestration.Server do
         state
         |> notify_listeners(
           {:modules, ws_ext_id},
-          {:assigned, workspace_executions}
+          {:assigned, workflow_executions}
         )
         |> notify_listeners(
           {:queue, ws_ext_id},
@@ -3193,13 +3212,14 @@ defmodule Coflux.Orchestration.Server do
         state =
           state
           |> put_in([Access.key(:execution_ids), execution_external_id], execution_id)
+          |> track_run_execution(external_run_id, execution_id, module, target_name)
           |> notify_listeners(
             {:workflow, module, target_name, ws_ext_id},
             {:run, external_run_id, created_at, principal}
           )
           |> notify_listeners(
             {:modules, ws_ext_id},
-            {:scheduled, module, execution_external_id, execute_at}
+            {:scheduled, {module, target_name}, external_run_id, execution_external_id, execute_at}
           )
           |> notify_listeners(
             {:module, module, ws_ext_id},
@@ -3245,7 +3265,15 @@ defmodule Coflux.Orchestration.Server do
            created_by
          ) do
       {:ok, execution_id, attempt, created_at} ->
-        {:ok, {run_module, run_target}} = Runs.get_run_target(state.db, run.id)
+        {run_module, run_target} =
+          case get_run_workflow(state, run.external_id) do
+            {_, _} = workflow -> workflow
+            nil ->
+              {:ok, workflow} = Runs.get_run_target(state.db, run.id)
+              workflow
+          end
+
+        state = track_run_execution(state, run.external_id, execution_id, run_module, run_target)
 
         execute_at = execute_after || created_at
 
@@ -3291,7 +3319,8 @@ defmodule Coflux.Orchestration.Server do
           )
           |> notify_listeners(
             {:modules, ws_ext_id},
-            {:scheduled, step.module, execution_external_id, execute_at}
+            {:scheduled, {run_module, run_target}, run.external_id, execution_external_id,
+             execute_at}
           )
           |> notify_listeners(
             {:module, step.module, ws_ext_id},
@@ -4142,6 +4171,40 @@ defmodule Coflux.Orchestration.Server do
     "#{run_external_id}:#{step_number}:#{attempt}"
   end
 
+  defp track_run_execution(state, run_ext_id, execution_id, root_module, root_target) do
+    Map.update!(state, :run_workflows, fn rw ->
+      Map.update(rw, run_ext_id, {root_module, root_target, MapSet.new([execution_id])}, fn {m, t, ids} ->
+        {m, t, MapSet.put(ids, execution_id)}
+      end)
+    end)
+  end
+
+  defp untrack_run_execution(state, run_ext_id, execution_id) do
+    case Map.fetch(state.run_workflows, run_ext_id) do
+      {:ok, {m, t, ids}} ->
+        remaining = MapSet.delete(ids, execution_id)
+
+        state =
+          if MapSet.size(remaining) == 0 do
+            Map.update!(state, :run_workflows, &Map.delete(&1, run_ext_id))
+          else
+            put_in(state, [Access.key(:run_workflows), run_ext_id], {m, t, remaining})
+          end
+
+        {{m, t}, state}
+
+      :error ->
+        {nil, state}
+    end
+  end
+
+  defp get_run_workflow(state, run_ext_id) do
+    case Map.fetch(state.run_workflows, run_ext_id) do
+      {:ok, {m, t, _}} -> {m, t}
+      :error -> nil
+    end
+  end
+
   defp parse_execution_external_id(external_id) do
     case String.split(external_id, ":") do
       [run_external_id, step_number_s, attempt_s] ->
@@ -4372,10 +4435,19 @@ defmodule Coflux.Orchestration.Server do
                 state
             end
           end)
-          |> notify_listeners(
-            {:modules, ws_ext_id},
-            {:completed, module, execution_external_id}
-          )
+          |> then(fn state ->
+            case untrack_run_execution(state, r, execution_id) do
+              {{root_module, root_target}, state} ->
+                notify_listeners(
+                  state,
+                  {:modules, ws_ext_id},
+                  {:completed, {root_module, root_target}, r, execution_external_id}
+                )
+
+              {nil, state} ->
+                state
+            end
+          end)
           |> notify_listeners(
             {:module, module, ws_ext_id},
             {:completed, execution_external_id}

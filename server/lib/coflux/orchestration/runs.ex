@@ -808,6 +808,29 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
+  def get_active_run_workflows(db, workspace_id \\ nil) do
+    {where, params} =
+      if workspace_id do
+        {"WHERE res.created_at IS NULL AND e.workspace_id = ?1", {workspace_id}}
+      else
+        {"WHERE res.created_at IS NULL", {}}
+      end
+
+    query(
+      db,
+      """
+      SELECT r.external_id, root_s.module, root_s.target, s.number, e.attempt, e.id
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = s.run_id
+      INNER JOIN steps AS root_s ON root_s.run_id = r.id AND root_s.parent_id IS NULL
+      LEFT JOIN results AS res ON res.execution_id = e.id
+      #{where}
+      """,
+      params
+    )
+  end
+
   def get_run_steps(db, run_id) do
     query(
       db,
