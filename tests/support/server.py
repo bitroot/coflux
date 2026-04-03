@@ -5,8 +5,8 @@ import os
 import socket
 import subprocess
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 import uuid
 
 _SERVER_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "server")

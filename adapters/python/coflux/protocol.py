@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from coflux import __version__
+from ._version import __version__
 
 
 class Protocol:
@@ -342,6 +342,52 @@ def send_register_group(
             "name": name,
         },
     )
+
+
+def send_define_metric(
+    execution_id: str,
+    key: str,
+    definition: dict[str, Any],
+) -> None:
+    """Send a metric definition to the server.
+
+    Args:
+        execution_id: The execution this metric belongs to.
+        key: Metric key name.
+        definition: Definition dict with group/scale/units/progress/lower/upper.
+    """
+    get_protocol().send_message(
+        "define_metric",
+        {
+            "execution_id": execution_id,
+            "key": key,
+            "definition": definition,
+        },
+    )
+
+
+def send_metric(
+    execution_id: str,
+    key: str,
+    value: float,
+    at: float | None = None,
+) -> None:
+    """Send a metric data point.
+
+    Args:
+        execution_id: The execution this metric belongs to.
+        key: Metric key name.
+        value: Metric value (float).
+        at: Optional x-axis value. If None, the Go worker uses time-since-execution-start.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "key": key,
+        "value": value,
+    }
+    if at is not None:
+        params["at"] = at
+    get_protocol().send_message("metric", params)
 
 
 def receive_message() -> dict[str, Any] | None:

@@ -1,6 +1,8 @@
 ## 0.10.0
 
-No changes.
+Enhancements:
+
+- Adds support for storing metrics and their definitions.
 
 ## 0.9.0
 

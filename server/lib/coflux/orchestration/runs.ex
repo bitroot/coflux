@@ -85,6 +85,56 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  def define_metric(db, execution_id, key, opts \\ %{}) do
+    now = current_timestamp()
+
+    insert_one(
+      db,
+      :metrics,
+      %{
+        execution_id: execution_id,
+        key: key,
+        group: Map.get(opts, "group"),
+        group_units: Map.get(opts, "group_units"),
+        group_lower: Map.get(opts, "group_lower"),
+        group_upper: Map.get(opts, "group_upper"),
+        scale: Map.get(opts, "scale"),
+        units: Map.get(opts, "units"),
+        progress: if(Map.get(opts, "progress", false), do: 1, else: 0),
+        lower: Map.get(opts, "lower"),
+        upper: Map.get(opts, "upper"),
+        created_at: now
+      },
+      on_conflict: "DO NOTHING"
+    )
+  end
+
+  def get_metric_definitions(db, execution_id) do
+    query(
+      db,
+      """
+      SELECT key, "group", group_units, group_lower, group_upper, scale, units, progress, lower, upper
+      FROM metrics
+      WHERE execution_id = ?1
+      """,
+      {execution_id}
+    )
+  end
+
+  def get_run_metric_definitions(db, run_id) do
+    query(
+      db,
+      """
+      SELECT e.id, m.key, m."group", m.group_units, m.group_lower, m.group_upper, m.scale, m.units, m.progress, m.lower, m.upper
+      FROM metrics AS m
+      INNER JOIN executions AS e ON e.id = m.execution_id
+      INNER JOIN steps AS s ON s.id = e.step_id
+      WHERE s.run_id = ?1
+      """,
+      {run_id}
+    )
+  end
+
   def get_workspace_id_for_execution(db, execution_id) do
     case query_one(
            db,

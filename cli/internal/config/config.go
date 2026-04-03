@@ -5,17 +5,18 @@ import "strings"
 // Config represents the coflux.toml configuration file.
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
 type Config struct {
-	Host      string       `mapstructure:"host"`
-	Token     string       `mapstructure:"token"`
-	Secure    *bool        `mapstructure:"secure"`
-	Workspace string       `mapstructure:"workspace"`
-	Team      string       `mapstructure:"team"`
-	Server    ServerConfig `mapstructure:"server"`
-	Worker    WorkerConfig `mapstructure:"worker"`
-	Blobs     BlobsConfig  `mapstructure:"blobs"`
-	Logs      LogsConfig   `mapstructure:"logs"`
-	LogLevel  string       `mapstructure:"log_level"`
-	Output    string       `mapstructure:"output"`
+	Host      string        `mapstructure:"host"`
+	Token     string        `mapstructure:"token"`
+	Secure    *bool         `mapstructure:"secure"`
+	Workspace string        `mapstructure:"workspace"`
+	Team      string        `mapstructure:"team"`
+	Server    ServerConfig  `mapstructure:"server"`
+	Worker    WorkerConfig  `mapstructure:"worker"`
+	Blobs     BlobsConfig   `mapstructure:"blobs"`
+	Logs      LogsConfig    `mapstructure:"logs"`
+	Metrics   MetricsConfig `mapstructure:"metrics"`
+	LogLevel  string        `mapstructure:"log_level"`
+	Output    string        `mapstructure:"output"`
 }
 
 // ServerConfig holds settings for running a local server via `coflux server`.
@@ -77,6 +78,15 @@ type BlobStoreConfig struct {
 
 // LogsConfig holds log storage configuration
 type LogsConfig struct {
+	Type          string  `mapstructure:"type"`
+	Token         *string `mapstructure:"token"`
+	URL           string  `mapstructure:"url"`
+	BatchSize     int     `mapstructure:"batch_size"`
+	FlushInterval float64 `mapstructure:"flush_interval"`
+}
+
+// MetricsConfig holds metric storage configuration
+type MetricsConfig struct {
 	Type          string  `mapstructure:"type"`
 	Token         *string `mapstructure:"token"`
 	URL           string  `mapstructure:"url"`

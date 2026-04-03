@@ -32,6 +32,9 @@ class ExecutorContext:
         self._pending_requests: dict[int, Any] = {}
         self._groups: list[str | None] = []
         self._working_dir = working_dir or Path.cwd()
+        self._defined_metrics: dict[str, dict] = {}
+        self._defined_scales: dict[str, dict] = {}
+        self._defined_groups: dict[str, dict] = {}
 
     def submit_execution(
         self,

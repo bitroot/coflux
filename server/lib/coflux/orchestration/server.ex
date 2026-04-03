@@ -1292,6 +1292,42 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:execution_started, _external_execution_id, _metadata}, _from, state) do
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:define_metric, external_execution_id, key, definition}, _from, state) do
+    state =
+      case Map.fetch(state.execution_ids, external_execution_id) do
+        {:ok, execution_id} ->
+          {:ok, _} = Runs.define_metric(state.db, execution_id, key, definition)
+
+          # Notify the run topic
+          case Runs.get_execution_run_id(state.db, execution_id) do
+            {:ok, run_id} ->
+              case Runs.get_run_by_id(state.db, run_id) do
+                {:ok, run} ->
+                  notify_listeners(
+                    state,
+                    {:run, run.external_id},
+                    {:metric_defined, external_execution_id, key, definition}
+                  )
+
+                _ ->
+                  state
+              end
+
+            _ ->
+              state
+          end
+
+        :error ->
+          state
+      end
+
+    {:reply, :ok, state}
+  end
+
   def handle_call({:record_heartbeats, executions, external_session_id}, _from, state) do
     # TODO: handle execution statuses?
     case Map.fetch(state.session_ids, external_session_id) do
@@ -3689,6 +3725,29 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
+    {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
+
+    metric_definitions_by_execution =
+      Enum.group_by(
+        run_metric_defs,
+        fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
+        fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress, lower,
+            upper} ->
+          {key,
+           %{
+             group: group,
+             group_units: group_units,
+             group_lower: group_lower,
+             group_upper: group_upper,
+             scale: scale,
+             units: units,
+             progress: progress == 1,
+             lower: lower,
+             upper: upper
+           }}
+        end
+      )
+      |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
 
     cache_configs =
       steps
@@ -3816,7 +3875,8 @@ defmodule Coflux.Orchestration.Server do
                   dependencies: dependencies,
                   result: result,
                   result_created_by: result_created_by,
-                  children: Map.get(run_children, execution_id, [])
+                  children: Map.get(run_children, execution_id, []),
+                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{})
                 }}
              end)
          }}
