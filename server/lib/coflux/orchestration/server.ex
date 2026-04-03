@@ -2651,8 +2651,12 @@ defmodule Coflux.Orchestration.Server do
             fn {from_ext_id, request_id, expire_at, suspend_flag}, {to_suspend, to_notify} ->
               if expire_at && expire_at <= now do
                 if suspend_flag do
-                  {Map.update(to_suspend, from_ext_id, [execution_ext_id], &[execution_ext_id | &1]),
-                   to_notify}
+                  {Map.update(
+                     to_suspend,
+                     from_ext_id,
+                     [execution_ext_id],
+                     &[execution_ext_id | &1]
+                   ), to_notify}
                 else
                   {to_suspend, [{from_ext_id, request_id} | to_notify]}
                 end

@@ -101,7 +101,12 @@ class ExecutorContext:
             raise ExecutionTimeout()
         return deserialize_value(value)
 
-    def poll_execution(self, target_execution_id: str, timeout_ms: int | None = None, default: Any = None) -> Any:
+    def poll_execution(
+        self,
+        target_execution_id: str,
+        timeout_ms: int | None = None,
+        default: Any = None,
+    ) -> Any:
         """Poll for an execution result without suspending.
 
         Returns the deserialized result if available, or `default` if not ready.
