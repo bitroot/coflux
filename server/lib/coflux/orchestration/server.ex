@@ -4419,7 +4419,7 @@ defmodule Coflux.Orchestration.Server do
                 )
 
               state =
-                if execution_ext_id, do: cleanup_execution(state, execution_ext_id), else: state
+                if execution_ext_id, do: abort_execution(state, execution_ext_id), else: state
 
               {retry_id, state}
 

@@ -99,6 +99,14 @@ class ExecutorContext:
             raise ExecutionCancelled()
         if status == "timeout":
             raise ExecutionTimeout()
+        if status == "suspended":
+            # The server has suspended this execution and will abort us.
+            # Block until the CLI kills this process.
+            while protocol.receive_message() is not None:
+                pass
+            raise SystemExit(0)
+        if status is not None:
+            raise RuntimeError(f"Unexpected resolve status: {status}")
         return deserialize_value(value)
 
     def poll_execution(
@@ -128,6 +136,8 @@ class ExecutorContext:
             )
         if status == "cancelled":
             raise ExecutionCancelled()
+        if status is not None:
+            raise RuntimeError(f"Unexpected poll status: {status}")
         return deserialize_value(value)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:

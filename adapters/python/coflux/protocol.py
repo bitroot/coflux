@@ -230,8 +230,7 @@ def request_resolve_reference(
     }
     if timeout_ms is not None:
         params["timeout_ms"] = timeout_ms
-    if not suspend:
-        params["suspend"] = False
+    params["suspend"] = suspend
     return get_protocol().send_request("resolve_reference", params)
 
 
