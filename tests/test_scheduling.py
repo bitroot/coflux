@@ -481,8 +481,8 @@ def test_cancel_across_multiple_spawns(worker):
         assert result["type"] == "cancelled"
 
 
-def test_poll_returns_not_ready_when_pending(worker):
-    """Polling a pending execution returns not_ready without suspending."""
+def test_poll_returns_none_when_pending(worker):
+    """Polling a pending execution returns None without suspending."""
     targets = [
         workflow("test", "main"),
         task("test", "slow"),
@@ -499,9 +499,9 @@ def test_poll_returns_not_ready_when_pending(worker):
         ex1 = ctx.executor.next_execute()
         assert ex1.target == "slow"
 
-        # Poll should return not_ready (task hasn't completed)
+        # Poll should return None (task hasn't completed)
         result = ex0.conn.poll(ex0.execution_id, ref)
-        assert result == {"status": "not_ready"}
+        assert result is None
 
         # Complete the task
         ex1.conn.complete(ex1.execution_id, value=42)
@@ -540,8 +540,8 @@ def test_poll_returns_value_when_ready(worker):
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
-def test_poll_with_timeout_waits_then_returns_not_ready(worker):
-    """Poll with a timeout waits for the specified duration before returning not_ready."""
+def test_poll_with_timeout_waits_then_returns_none(worker):
+    """Poll with a timeout waits for the specified duration before returning None."""
     targets = [
         workflow("test", "main"),
         task("test", "slow"),
@@ -560,7 +560,7 @@ def test_poll_with_timeout_waits_then_returns_not_ready(worker):
         start = time.time()
         result = ex0.conn.poll(ex0.execution_id, ref, timeout_ms=500)
         elapsed = time.time() - start
-        assert result == {"status": "not_ready"}
+        assert result is None
         assert elapsed >= 0.4, f"expected >=0.4s wait, got {elapsed:.2f}s"
 
         # Complete the task and resolve normally

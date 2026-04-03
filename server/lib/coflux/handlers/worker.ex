@@ -332,6 +332,9 @@ defmodule Coflux.Handlers.Worker do
                  suspend,
                  message["id"]
                ) do
+            {:ok, nil} ->
+              {[success_message(message["id"], nil)], state}
+
             {:ok, result} ->
               {[success_message(message["id"], compose_result(result))], state}
 
@@ -418,6 +421,10 @@ defmodule Coflux.Handlers.Worker do
          timeout
        ])
      ], state}
+  end
+
+  def websocket_info({:result, request_id, nil}, state) do
+    {[success_message(request_id, nil)], state}
   end
 
   def websocket_info({:result, request_id, result}, state) do
@@ -573,7 +580,6 @@ defmodule Coflux.Handlers.Worker do
       :cancelled -> ["cancelled"]
       {:timeout, nil} -> ["timeout"]
       :suspended -> ["suspended"]
-      :not_ready -> ["not_ready"]
     end
   end
 

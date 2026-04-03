@@ -453,6 +453,8 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		resolved, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs, req.Suspend)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "resolve_error", Message: err.Error()}
+		} else if resolved == nil {
+			// No result available (poll timeout) — result stays nil, sent as JSON null
 		} else {
 			switch resolved.Status {
 			case "value":
@@ -469,8 +471,6 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 				result = map[string]any{"status": "timeout"}
 			case "suspended":
 				result = map[string]any{"status": "suspended"}
-			case "not_ready":
-				result = map[string]any{"status": "not_ready"}
 			}
 		}
 

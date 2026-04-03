@@ -1586,8 +1586,8 @@ defmodule Coflux.Orchestration.Server do
                   {:wait, state}
 
                 timeout_ms == 0 ->
-                  # Immediate poll: return not_ready
-                  {{:ok, :not_ready}, state}
+                  # Immediate poll: no result available
+                  {{:ok, nil}, state}
 
                 true ->
                   # Wait for result (with or without timeout)
@@ -2640,7 +2640,7 @@ defmodule Coflux.Orchestration.Server do
         |> Map.new()
       end)
 
-    # Handle poll (non-suspend) timeouts: send not_ready response
+    # Handle poll (non-suspend) timeouts: send nil result (no result available)
     state =
       Enum.reduce(
         to_notify_not_ready,
@@ -2648,7 +2648,7 @@ defmodule Coflux.Orchestration.Server do
         fn {from_ext_id, request_id}, state ->
           case find_session_for_execution(state, from_ext_id) do
             {:ok, session_id} ->
-              send_session(state, session_id, {:result, request_id, :not_ready})
+              send_session(state, session_id, {:result, request_id, nil})
 
             :error ->
               state
@@ -4418,8 +4418,14 @@ defmodule Coflux.Orchestration.Server do
                   dependency_ids: dependency_ids
                 )
 
+              # Only abort if this is a server-initiated suspension (has dependencies).
+              # For explicit suspends (empty deps), the executor completes on its own.
               state =
-                if execution_ext_id, do: abort_execution(state, execution_ext_id), else: state
+                if execution_ext_id && dependency_ids != [] do
+                  abort_execution(state, execution_ext_id)
+                else
+                  state
+                end
 
               {retry_id, state}
 

@@ -126,9 +126,9 @@ class ExecutorContext:
             suspend=False,
         )
         value = self._wait_response(request_id)
-        status = value.get("status")
-        if status == "not_ready":
+        if value is None:
             return default
+        status = value.get("status")
         if status == "error":
             raise create_execution_error(
                 value.get("error_type", ""),
