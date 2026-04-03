@@ -22,6 +22,7 @@ def task(
     delay: float | dt.timedelta = 0,
     memo: bool | t.Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
+    timeout: float | dt.timedelta | None = None,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
     """Decorator for defining a task."""
 
@@ -38,6 +39,7 @@ def task(
             delay=delay,
             memo=memo,
             requires=requires,
+            timeout=timeout,
         )
 
     return decorator
@@ -53,6 +55,7 @@ def workflow(
     defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     requires: dict[str, str | bool | list[str]] | None = None,
+    timeout: float | dt.timedelta | None = None,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
     """Decorator for defining a workflow."""
 
@@ -68,6 +71,7 @@ def workflow(
             defer=defer,
             delay=delay,
             requires=requires,
+            timeout=timeout,
         )
 
     return decorator

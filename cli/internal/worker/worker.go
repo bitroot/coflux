@@ -433,7 +433,16 @@ func (w *Worker) handleExecute(params []any) error {
 	runID := getString(params[4])
 	workspaceID := getString(params[5])
 
-	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID)
+	// Optional timeout_ms (7th param)
+	var timeoutMs *int64
+	if len(params) > 6 && params[6] != nil {
+		if v, ok := params[6].(float64); ok {
+			ms := int64(v)
+			timeoutMs = &ms
+		}
+	}
+
+	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID, "timeout_ms", timeoutMs)
 
 	// Track execution
 	startTime := time.Now()
@@ -472,7 +481,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
@@ -683,7 +692,13 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		targetType = "task"
 	}
 
-	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires
+	// Timeout is already in milliseconds from the adapter
+	var timeout any
+	if params.Timeout != nil {
+		timeout = *params.Timeout
+	}
+
+	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -703,6 +718,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		retries,            // retries
 		params.Recurrent,   // recurrent
 		params.Requires,    // requires
+		timeout,            // timeout
 	)
 	if err != nil {
 		return nil, err
@@ -840,6 +856,8 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 			}, nil
 		case "cancelled":
 			return &adapter.ResolveResult{Status: "cancelled"}, nil
+		case "timeout":
+			return &adapter.ResolveResult{Status: "timeout"}, nil
 		case "suspended":
 			return &adapter.ResolveResult{Status: "suspended"}, nil
 		}
@@ -1294,6 +1312,26 @@ func (w *Worker) ReportError(ctx context.Context, executionID string, errorType,
 	return nil
 }
 
+func (w *Worker) ReportTimeout(ctx context.Context, executionID string) error {
+	// Buffer the timeout on the execution state
+	w.mu.Lock()
+	state, ok := w.executions[executionID]
+	if ok {
+		state.pendingNotify = "put_timeout"
+		state.pendingValue = nil
+		elapsed := time.Since(state.startTime).Round(time.Millisecond)
+		w.logger.Info("execution timed out", "execution_id", executionID, "target", state.target, "elapsed", elapsed)
+	}
+	w.mu.Unlock()
+
+	if !ok {
+		return nil
+	}
+
+	w.trySendResult(executionID)
+	return nil
+}
+
 // convertValueToServerFormat converts an adapter value to server wire format.
 // Applies blob threshold and uploads fragment references. Should be called outside of any lock.
 func (w *Worker) convertValueToServerFormat(v *adapter.Value) (any, error) {
@@ -1583,6 +1621,12 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			instruction = *t.Instruction
 		}
 
+		// Build timeout (nil if not set)
+		var timeout any
+		if t.Timeout != nil {
+			timeout = *t.Timeout
+		}
+
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
 			"waitFor":     waitFor,
@@ -1591,6 +1635,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"delay":       delay,
 			"retries":     retries,
 			"recurrent":   t.Recurrent,
+			"timeout":     timeout,
 			"requires":    requires,
 			"instruction": instruction,
 		}

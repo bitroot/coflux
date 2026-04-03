@@ -373,6 +373,7 @@ defmodule Coflux.Handlers.Api do
              delay: {"delay", &parse_integer(&1, optional: true)},
              retries: {"retries", &parse_retries/1},
              recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
+             timeout: {"timeout", &parse_integer(&1, optional: true)},
              requires: {"requires", &parse_tag_set/1},
              idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)}
            }
@@ -392,6 +393,7 @@ defmodule Coflux.Handlers.Api do
                delay: arguments[:delay] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
+               timeout: arguments[:timeout],
                requires: arguments[:requires],
                idempotency_key: arguments[:idempotency_key]
              ) do
@@ -1103,6 +1105,7 @@ defmodule Coflux.Handlers.Api do
            {:ok, delay} <- parse_integer(Map.get(value, "delay")),
            {:ok, retries} <- parse_retries(Map.get(value, "retries")),
            {:ok, recurrent} <- parse_boolean(Map.get(value, "recurrent"), optional: true),
+           {:ok, timeout} <- parse_integer(Map.get(value, "timeout"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, instruction} <-
              parse_string(
@@ -1119,6 +1122,7 @@ defmodule Coflux.Handlers.Api do
            delay: delay,
            retries: retries,
            recurrent: recurrent == true,
+           timeout: timeout,
            requires: requires,
            instruction: instruction
          }}

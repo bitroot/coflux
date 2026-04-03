@@ -342,6 +342,13 @@ defmodule Coflux.Topics.Run do
       :cancelled ->
         %{type: "cancelled", createdBy: created_by}
 
+      {:timeout, retry} ->
+        %{
+          type: "timeout",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
+
       {:suspended, successor} ->
         %{
           type: "suspended",

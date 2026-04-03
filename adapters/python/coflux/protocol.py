@@ -183,6 +183,7 @@ def request_submit_execution(
     retries: dict[str, Any] | None = None,
     recurrent: bool = False,
     requires: dict[str, list[str]] | None = None,
+    timeout: int | None = None,
 ) -> int:
     """Request to submit a child execution."""
     params: dict[str, Any] = {
@@ -211,6 +212,8 @@ def request_submit_execution(
         params["recurrent"] = recurrent
     if requires:
         params["requires"] = requires
+    if timeout is not None:
+        params["timeout"] = timeout
     return get_protocol().send_request("submit_execution", params)
 
 

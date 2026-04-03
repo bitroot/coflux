@@ -414,3 +414,68 @@ def test_cancel_execution_externally(worker):
         # Verify the execute message never arrives
         with pytest.raises(TimeoutError):
             ctx.executor.next_execute(timeout=1)
+
+
+def test_cancel_across_spawn(worker):
+    """Cancelling a workflow also cancels a child workflow it spawned."""
+    targets = [
+        workflow("test", "outer"),
+        workflow("test", "inner"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "outer")
+        run_id = resp["runId"]
+
+        # Outer workflow starts
+        ex0 = ctx.executor.next_execute()
+
+        # Outer spawns inner workflow
+        ex0.conn.submit_workflow(ex0.execution_id, "test", "inner", [])
+
+        # Inner workflow starts
+        ctx.executor.next_execute()
+
+        # Cancel the outer execution externally
+        ctx.cancel(resp["executionId"])
+
+        # Run result should be cancelled
+        result = ctx.result(run_id)
+        assert result["type"] == "cancelled"
+
+
+def test_cancel_across_multiple_spawns(worker):
+    """Cancelling a workflow propagates through multiple levels of spawned workflows."""
+    targets = [
+        workflow("test", "top"),
+        workflow("test", "middle"),
+        task("test", "leaf"),
+    ]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "top")
+        run_id = resp["runId"]
+
+        # Top workflow starts
+        ex0 = ctx.executor.next_execute()
+
+        # Top spawns middle workflow
+        ref_mid = ex0.conn.submit_workflow(ex0.execution_id, "test", "middle", [])
+
+        # Middle workflow starts
+        ex1 = ctx.executor.next_execute()
+        assert ex1.target == "middle"
+
+        # Middle spawns leaf task
+        ex1.conn.submit_task(ex1.execution_id, "test", "leaf", [])
+
+        # Leaf task starts
+        ex2 = ctx.executor.next_execute()
+        assert ex2.target == "leaf"
+
+        # Cancel the top execution externally
+        ctx.cancel(resp["executionId"])
+
+        # Run result should be cancelled
+        result = ctx.result(run_id)
+        assert result["type"] == "cancelled"

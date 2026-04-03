@@ -133,7 +133,10 @@ defmodule Coflux.Handlers.Worker do
           retries,
           recurrent,
           requires
+          | rest
         ] = message["params"]
+
+        timeout = List.first(rest)
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
@@ -151,7 +154,8 @@ defmodule Coflux.Handlers.Worker do
                  delay: delay || 0,
                  retries: parse_retries(retries),
                  recurrent: recurrent == true,
-                 requires: requires
+                 requires: requires,
+                 timeout: timeout
                ) do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
@@ -258,6 +262,22 @@ defmodule Coflux.Handlers.Worker do
               state.project_id,
               execution_id,
               {:error, type, message, frames, retryable}
+            )
+
+          {[], state}
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "put_timeout" ->
+        [execution_id | _] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          :ok =
+            Orchestration.record_result(
+              state.project_id,
+              execution_id,
+              :timeout
             )
 
           {[], state}
@@ -375,7 +395,7 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
-         workspace_external_id},
+         workspace_external_id, timeout},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
@@ -389,7 +409,8 @@ defmodule Coflux.Handlers.Worker do
          target,
          arguments,
          run_id,
-         workspace_external_id
+         workspace_external_id,
+         timeout
        ])
      ], state}
   end
@@ -545,6 +566,7 @@ defmodule Coflux.Handlers.Worker do
       {:value, value} -> ["value", compose_value(value)]
       {:abandoned, nil} -> ["abandoned"]
       :cancelled -> ["cancelled"]
+      {:timeout, nil} -> ["timeout"]
       :suspended -> ["suspended"]
     end
   end

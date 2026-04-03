@@ -51,6 +51,7 @@ class ExecutorContext:
         retries: dict[str, Any] | None = None,
         recurrent: bool = False,
         requires: dict[str, list[str]] | None = None,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 
@@ -74,6 +75,7 @@ class ExecutorContext:
             retries=retries,
             recurrent=recurrent,
             requires=requires,
+            timeout=timeout,
         )
         return self._wait_response(request_id)
 
@@ -87,11 +89,16 @@ class ExecutorContext:
             timeout_ms=timeout_ms,
         )
         value = self._wait_response(request_id)
-        if value.get("status") == "error":
+        status = value.get("status")
+        if status == "error":
             raise create_execution_error(
                 value.get("error_type", ""),
                 value.get("error_message", ""),
             )
+        if status == "cancelled":
+            raise create_execution_error("coflux.CancelledError", "execution was cancelled")
+        if status == "timeout":
+            raise create_execution_error("coflux.TimeoutError", "execution timed out")
         return deserialize_value(value)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
