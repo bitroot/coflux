@@ -22,6 +22,20 @@ class ExecutionError(Exception):
         super().__init__(message)
 
 
+class CancelledError(ExecutionError):
+    """Raised when a child execution was cancelled."""
+
+    def __init__(self, message: str = "execution was cancelled"):
+        super().__init__(message, error_type="CancelledError", error_message=message)
+
+
+class TimeoutError(ExecutionError):
+    """Raised when a child execution timed out."""
+
+    def __init__(self, message: str = "execution timed out"):
+        super().__init__(message, error_type="TimeoutError", error_message=message)
+
+
 def _resolve_exception_class(qualified_name: str) -> type | None:
     """Attempt to resolve a fully qualified exception type name to a class.
 
