@@ -3,6 +3,8 @@
 Enhancements:
 
 - Adds support for writing metrics, and writing progress.
+- Adds `timeout` parameter to `@task` and `@workflow` decorators.
+- Adds `ExecutionCancelled` and `ExecutionTimeout` exceptions.
 
 ## 0.9.0
 

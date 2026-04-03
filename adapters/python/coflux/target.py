@@ -67,6 +67,7 @@ class TargetDefinition(t.NamedTuple):
     recurrent: bool
     memo: list[int] | bool
     requires: Requires | None
+    timeout: float | dt.timedelta
     instruction: str | None
     is_stub: bool
 
@@ -205,6 +206,7 @@ def _build_definition(
     delay: float | dt.timedelta,
     memo: bool | t.Iterable[str] | str,
     requires: dict[str, str | bool | list[str]] | None,
+    timeout: float | dt.timedelta,
     is_stub: bool,
 ) -> TargetDefinition:
     parameters = inspect.signature(fn).parameters.values()
@@ -223,6 +225,7 @@ def _build_definition(
         recurrent,
         _parse_memo(memo, parameters_),
         _parse_requires(requires),
+        timeout,
         inspect.getdoc(fn),
         is_stub,
     )
@@ -294,6 +297,7 @@ class Target(t.Generic[P, T]):
         delay: float | dt.timedelta = 0,
         memo: bool | t.Iterable[str] | str = False,
         requires: dict[str, str | bool | list[str]] | None = None,
+        timeout: float | dt.timedelta = 0,
         is_stub: bool = False,
     ):
         self._fn = fn
@@ -310,6 +314,7 @@ class Target(t.Generic[P, T]):
             delay,
             memo,
             requires,
+            timeout,
             is_stub,
         )
         functools.update_wrapper(self, fn)
@@ -381,6 +386,7 @@ class Target(t.Generic[P, T]):
             retries=retries_dict,
             recurrent=self._definition.recurrent,
             requires=self._definition.requires,
+            timeout=_to_ms(self._definition.timeout) if self._definition.timeout else 0,
         )
         return Execution(result["execution_id"], result["module"], result["target"])
 

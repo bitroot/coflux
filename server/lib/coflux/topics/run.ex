@@ -60,6 +60,7 @@ defmodule Coflux.Topics.Run do
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
         retries: build_retries(step.retries),
+        timeout: step.timeout,
         createdAt: step.created_at,
         arguments: Enum.map(step.arguments, &build_value/1),
         requires: step.requires,
@@ -228,6 +229,7 @@ defmodule Coflux.Topics.Run do
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
              retries: build_retries(step),
+             timeout: step.timeout,
              createdAt: step.created_at,
              arguments: Enum.map(step.arguments, &build_value/1),
              requires: step.requires,
@@ -341,6 +343,13 @@ defmodule Coflux.Topics.Run do
 
       :cancelled ->
         %{type: "cancelled", createdBy: created_by}
+
+      {:timeout, retry} ->
+        %{
+          type: "timeout",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
 
       {:suspended, successor} ->
         %{

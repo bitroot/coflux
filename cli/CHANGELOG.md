@@ -4,6 +4,7 @@ Enhancements:
 
 - Updates `server` command to set default project ("default"), and improve Docker lifecycle handling.
 - Updates `worker` command to infer adapter (to avoid running `setup`).
+- Adds support for execution timeouts on tasks and workflows.
 
 ## 0.9.0
 

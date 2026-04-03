@@ -13,7 +13,7 @@ from pathlib import Path
 from ._version import __version__
 from .decorators import task, workflow, stub
 from .target import Cache, Defer, Retries
-from .errors import ExecutionError
+from .errors import ExecutionCancelled, ExecutionError, ExecutionTimeout
 from .metric import Metric, MetricGroup, MetricScale, progress
 from .models import Asset, AssetEntry, AssetMetadata, Execution
 from .state import get_context
@@ -28,6 +28,8 @@ __all__ = [
     # Classes
     "Execution",
     "ExecutionError",
+    "ExecutionCancelled",
+    "ExecutionTimeout",
     "Metric",
     "MetricGroup",
     "MetricScale",

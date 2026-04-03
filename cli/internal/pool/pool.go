@@ -43,6 +43,8 @@ type ExecutionHandler interface {
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
 	ReportError(ctx context.Context, executionID string, errorType, message, traceback string, retryable *bool) error
+	// ReportTimeout reports that an execution timed out
+	ReportTimeout(ctx context.Context, executionID string) error
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
 }
@@ -124,7 +126,8 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 
 // Execute runs a target. Uses a warm executor if available, otherwise spawns
 // one on demand. Returns an error if spawning fails (caller should report to server).
-func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument) error {
+// timeoutMs, if > 0, enforces a wall-clock timeout on the execution.
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) error {
 	p.mu.Lock()
 	if p.shutdown {
 		p.mu.Unlock()
@@ -152,12 +155,12 @@ func (p *Pool) Execute(ctx context.Context, executionID, module, target string, 
 	p.mu.Unlock()
 
 	p.wg.Add(1)
-	go p.runExecution(ctx, exec, executionID, module, target, arguments)
+	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs)
 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) {
 	defer p.wg.Done()
 
 	// Create a temporary directory for this execution
@@ -182,11 +185,33 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 		return
 	}
 
+	// Set up timeout: create a derived context that cancels when the timeout fires.
+	// exec.Receive() selects on ctx.Done(), so this will interrupt the blocking read.
+	execCtx := ctx
+	var cancelTimeout context.CancelFunc
+	if timeoutMs > 0 {
+		logger.Debug("timeout configured", "timeout_ms", timeoutMs)
+		execCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+		defer cancelTimeout()
+	}
+	timedOut := false
+
 	// Handle messages until execution completes
 loop:
 	for {
-		msg, err := exec.Receive(ctx)
+		msg, err := exec.Receive(execCtx)
 		if err != nil {
+			// Check if this was a timeout
+			if execCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+				logger.Info("execution timed out", "timeout_ms", timeoutMs)
+				timedOut = true
+				p.mu.Lock()
+				p.aborted[executionID] = true
+				p.mu.Unlock()
+				_ = exec.Close()
+				break
+			}
+
 			// If the execution was aborted by the server (e.g., after suspend),
 			// the process was killed intentionally. Don't report an error —
 			// the server already knows the execution state.
@@ -211,30 +236,37 @@ loop:
 
 		switch method {
 		case "execution_result":
-			p.handleExecutionResult(ctx, executionID, params, logger)
+			p.handleExecutionResult(execCtx, executionID, params, logger)
 			break loop
 
 		case "execution_error":
-			p.handleExecutionError(ctx, executionID, params, logger)
+			p.handleExecutionError(execCtx, executionID, params, logger)
 			break loop
 
 		case "log":
-			p.handleLog(ctx, executionID, params, logger)
+			p.handleLog(execCtx, executionID, params, logger)
 
 		case "define_metric":
-			p.handleDefineMetric(ctx, executionID, params, logger)
+			p.handleDefineMetric(execCtx, executionID, params, logger)
 
 		case "metric":
-			p.handleMetric(ctx, executionID, params, logger)
+			p.handleMetric(execCtx, executionID, params, logger)
 
 		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob":
-			p.handleRequest(ctx, exec, method, *id, params, logger)
+			p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
-			p.handleRegisterGroup(ctx, executionID, params, logger)
+			p.handleRegisterGroup(execCtx, executionID, params, logger)
 
 		default:
 			logger.Warn("unknown message method", "method", method)
+		}
+	}
+
+	// Report timeout to the server if the execution timed out
+	if timedOut {
+		if err := p.handler.ReportTimeout(ctx, executionID); err != nil {
+			logger.Error("failed to report timeout", "error", err)
 		}
 	}
 
@@ -433,6 +465,8 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 				}
 			case "cancelled":
 				result = map[string]any{"status": "cancelled"}
+			case "timeout":
+				result = map[string]any{"status": "timeout"}
 			case "suspended":
 				result = map[string]any{"status": "suspended"}
 			}
@@ -514,6 +548,11 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		}
 	}
 
+	// If the context was cancelled (e.g., execution timed out), don't
+	// bother sending a response — the executor is being killed.
+	if ctx.Err() != nil {
+		return
+	}
 	if err := exec.SendResponse(id, result, errInfo); err != nil {
 		logger.Error("failed to send response", "error", err, "method", method, "id", id)
 	}

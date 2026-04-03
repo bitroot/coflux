@@ -1095,6 +1095,7 @@ defmodule Coflux.Orchestration.Server do
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
         retries = Keyword.get(opts, :retries)
+        timeout = Keyword.get(opts, :timeout, 0)
         delay = Keyword.get(opts, :delay, 0)
         execute_after = if delay > 0, do: created_at + delay
         requires = Keyword.get(opts, :requires) || %{}
@@ -1126,6 +1127,7 @@ defmodule Coflux.Orchestration.Server do
                  cache_key: cache_key,
                  memo_key: memo_key,
                  retries: retries,
+                 timeout: timeout,
                  created_at: created_at,
                  arguments: arguments,
                  requires: requires
@@ -1267,13 +1269,17 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
-    with {:ok, workspace_id, _} <-
+    with {:ok, _workspace_id, _} <-
            require_workspace(state, workspace_external_id, access),
          {:ok, run_ext_id, step_number, attempt} <-
            parse_execution_external_id(execution_external_id),
          {:ok, {execution_id}} <-
            Runs.get_execution_id(state.db, run_ext_id, step_number, attempt) do
-      do_cancel_execution(state, execution_id, workspace_id, access[:principal_id])
+      active_id = resolve_active_execution(state.db, execution_id)
+
+      {:ok, state} = process_result(state, active_id, :cancelled, access[:principal_id])
+      state = flush_notifications(state)
+      {:reply, :ok, state}
     else
       {:error, :invalid_format} ->
         {:reply, {:error, :not_found}, state}
@@ -2162,7 +2168,8 @@ defmodule Coflux.Orchestration.Server do
                         |> send_session(
                           session_id,
                           {:execute, execution_external_id, execution.module, execution.target,
-                           enriched_arguments, execution.run_external_id, workspace_external_id}
+                           enriched_arguments, execution.run_external_id, workspace_external_id,
+                           execution.timeout}
                         )
 
                       {state, [{execution, assigned_at} | assigned], unassigned}
@@ -2784,66 +2791,52 @@ defmodule Coflux.Orchestration.Server do
 
   # Private helper functions
 
-  defp do_cancel_execution(state, execution_id, workspace_id, principal_id) do
-    root_execution_id =
-      case Results.get_result(state.db, execution_id) do
-        {:ok, {{:spawned, spawned_execution_id}, _created_at, _created_by}} ->
-          spawned_execution_id
+  # Follow the spawned result chain to find the currently-active execution.
+  # When execution A spawns B (which spawns C, etc.), we need to find the
+  # execution that doesn't yet have a result.
+  defp resolve_active_execution(db, execution_id) do
+    case Results.get_result(db, execution_id) do
+      {:ok, {{:spawned, successor_id}, _created_at, _created_by}} ->
+        resolve_active_execution(db, successor_id)
 
-        {:ok, _other} ->
-          execution_id
-      end
+      _ ->
+        execution_id
+    end
+  end
 
-    {:ok, executions} = Runs.get_execution_descendants(state.db, root_execution_id)
+  # Cancel all descendant executions of a given execution (excludes the
+  # execution itself). Follows both step parent-child links and spawned
+  # result chains via the recursive CTE in get_execution_descendants.
+  defp cancel_descendants(state, execution_id, workspace_id) do
+    {:ok, executions} = Runs.get_execution_descendants(state.db, execution_id)
 
-    executions =
-      Enum.filter(executions, fn {_exec_id, _module, _assigned_at, _completed_at,
-                                  exec_workspace_id} ->
-        exec_workspace_id == workspace_id
-      end)
-
-    state =
-      Enum.reduce(
-        executions,
-        state,
-        fn {execution_id, module, assigned_at, completed_at, _exec_workspace_id}, state ->
-          if !completed_at do
-            # Only record created_by for the root execution (the one user explicitly cancelled)
-            created_by = if execution_id == root_execution_id, do: principal_id, else: nil
-
-            state =
-              case record_and_notify_result(
-                     state,
-                     execution_id,
-                     :cancelled,
-                     module,
-                     created_by
-                   ) do
-                {:ok, state} -> state
-                {:error, :already_recorded} -> state
-              end
-
-            if assigned_at do
-              # abort_execution now takes external ID
-              case Runs.get_execution_key(state.db, execution_id) do
-                {:ok, {r, s, a}} ->
-                  abort_execution(state, execution_external_id(r, s, a))
-
-                {:error, :not_found} ->
-                  state
-              end
-            else
-              state
-            end
-          else
-            state
+    executions
+    |> Enum.filter(fn {exec_id, _module, _assigned_at, _completed_at, exec_workspace_id} ->
+      exec_id != execution_id && exec_workspace_id == workspace_id
+    end)
+    |> Enum.reduce(state, fn {exec_id, module, assigned_at, completed_at, _}, state ->
+      if !completed_at do
+        state =
+          case record_and_notify_result(state, exec_id, :cancelled, module) do
+            {:ok, state} -> state
+            {:error, :already_recorded} -> state
           end
+
+        if assigned_at do
+          case Runs.get_execution_key(state.db, exec_id) do
+            {:ok, {r, s, a}} ->
+              abort_execution(state, execution_external_id(r, s, a))
+
+            {:error, :not_found} ->
+              state
+          end
+        else
+          state
         end
-      )
-
-    state = flush_notifications(state)
-
-    {:reply, :ok, state}
+      else
+        state
+      end
+    end)
   end
 
   defp require_workspace(state, workspace_external_id, access \\ nil) do
@@ -3296,6 +3289,7 @@ defmodule Coflux.Orchestration.Server do
       {:error, _, _, _, false} -> false
       {:error, _, _, _, _} -> true
       :abandoned -> true
+      :timeout -> true
       _ -> false
     end
   end
@@ -3810,6 +3804,7 @@ defmodule Coflux.Orchestration.Server do
            retry_limit: step.retry_limit,
            retry_backoff_min: step.retry_backoff_min,
            retry_backoff_max: step.retry_backoff_max,
+           timeout: step.timeout,
            created_at: step.created_at,
            arguments: arguments,
            requires: requires,
@@ -4203,6 +4198,7 @@ defmodule Coflux.Orchestration.Server do
       {:value, _} -> true
       {:abandoned, retry_id} -> is_nil(retry_id)
       :cancelled -> true
+      {:timeout, retry_id} -> is_nil(retry_id)
       {:suspended, _} -> false
       {:deferred, _} -> false
       {:cached, _} -> false
@@ -4233,6 +4229,10 @@ defmodule Coflux.Orchestration.Server do
 
       :cancelled ->
         :cancelled
+
+      {:timeout, retry_id} ->
+        retry = if retry_id, do: resolve_execution(db, retry_id)
+        {:timeout, retry}
 
       {:suspended, successor_id} ->
         successor = if successor_id, do: resolve_execution(db, successor_id)
@@ -4345,7 +4345,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp process_result(state, execution_id, result) do
+  defp process_result(state, execution_id, result, created_by \\ nil) do
     case Results.has_result?(state.db, execution_id) do
       {:ok, true} ->
         {:ok, state}
@@ -4399,7 +4399,7 @@ defmodule Coflux.Orchestration.Server do
 
               consecutive_failures =
                 result_types
-                |> Enum.take_while(&(&1 in [0, 2]))
+                |> Enum.take_while(&(&1 in [0, 2, 8]))
                 |> Enum.count()
 
               if consecutive_failures < step.retry_limit do
@@ -4442,6 +4442,9 @@ defmodule Coflux.Orchestration.Server do
             :abandoned ->
               {:abandoned, retry_id}
 
+            :timeout ->
+              {:timeout, retry_id}
+
             {:suspended, _, _} ->
               {:suspended, retry_id}
 
@@ -4454,10 +4457,19 @@ defmodule Coflux.Orchestration.Server do
                  state,
                  execution_id,
                  result,
-                 step.module
+                 step.module,
+                 created_by
                ) do
             {:ok, state} -> state
             {:error, :already_recorded} -> state
+          end
+
+        # Cancel descendant executions for timeouts and cancellations
+        state =
+          if match?({:timeout, _}, result) or result == :cancelled do
+            cancel_descendants(state, execution_id, workspace_id)
+          else
+            state
           end
 
         {:ok, state}
@@ -4476,6 +4488,9 @@ defmodule Coflux.Orchestration.Server do
             resolve_result(db, execution_id)
 
           {:abandoned, execution_id} when not is_nil(execution_id) ->
+            resolve_result(db, execution_id)
+
+          {:timeout, execution_id} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           # In-flight successor (follow chain)

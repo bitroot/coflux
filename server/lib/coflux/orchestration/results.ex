@@ -27,6 +27,9 @@ defmodule Coflux.Orchestration.Results do
           :cancelled ->
             {3, nil, nil, nil, nil, nil}
 
+          {:timeout, retry_id} ->
+            {8, nil, nil, retry_id, nil, nil}
+
           # In-flight deferred (successor still executing)
           {:deferred, defer_id} ->
             {4, nil, nil, defer_id, nil, nil}
@@ -135,6 +138,9 @@ defmodule Coflux.Orchestration.Results do
 
             {3, nil, nil, nil, nil} ->
               :cancelled
+
+            {8, nil, nil, retry_id, nil} ->
+              {:timeout, retry_id}
 
             # Deferred: in-flight (successor_id set) or resolved (ref + value)
             {4, nil, nil, defer_id, nil} ->

@@ -80,6 +80,9 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
     if definition.requires:
         result["requires"] = definition.requires
 
+    if definition.timeout:
+        result["timeout"] = _to_ms(definition.timeout)
+
     if definition.recurrent:
         result["recurrent"] = True
 

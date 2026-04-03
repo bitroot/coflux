@@ -1481,6 +1481,13 @@ defmodule Coflux.Orchestration.Epoch do
         {:ok, {3, nil, nil, nil}} ->
           :cancelled
 
+        # Timeout (follow retry chain if successor_id set)
+        {:ok, {8, nil, successor_id, nil}} when not is_nil(successor_id) ->
+          resolve_result_chain(db, successor_id, visited)
+
+        {:ok, {8, nil, nil, nil}} ->
+          :timeout
+
         # Types 4, 5, 7 already resolved (successor_ref_id + value_id)
         {:ok, {type, value_id, nil, successor_ref_id}}
         when type in [4, 5, 7] and not is_nil(successor_ref_id) and not is_nil(value_id) ->

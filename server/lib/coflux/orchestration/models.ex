@@ -48,6 +48,7 @@ defmodule Coflux.Orchestration.Models do
       :retry_backoff_max,
       :recurrent,
       :delay,
+      :timeout,
       :requires_tag_set_id,
       :created_at
     ]
@@ -78,6 +79,7 @@ defmodule Coflux.Orchestration.Models do
       :retry_limit,
       :retry_backoff_min,
       :retry_backoff_max,
+      :timeout,
       :workspace_id,
       :execute_after,
       :attempt,

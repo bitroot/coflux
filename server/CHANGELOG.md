@@ -3,6 +3,7 @@
 Enhancements:
 
 - Adds support for storing metrics and their definitions.
+- Adds support for execution timeouts on tasks and workflows.
 
 ## 0.9.0
 

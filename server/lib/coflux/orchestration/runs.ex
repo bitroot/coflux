@@ -26,6 +26,7 @@ defmodule Coflux.Orchestration.Runs do
         retry_backoff_max,
         recurrent,
         delay,
+        timeout,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -59,6 +60,7 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_backoff_max,
         s.recurrent,
         s.delay,
+        s.timeout,
         s.requires_tag_set_id,
         s.created_at
       FROM steps AS s
@@ -345,6 +347,7 @@ defmodule Coflux.Orchestration.Runs do
     retries = Keyword.get(opts, :retries)
     recurrent = Keyword.get(opts, :recurrent, false)
     delay = Keyword.get(opts, :delay, 0)
+    timeout = Keyword.get(opts, :timeout, 0)
     requires = Keyword.get(opts, :requires) || %{}
 
     # Calculate execute_after from delay
@@ -414,6 +417,7 @@ defmodule Coflux.Orchestration.Runs do
               if(retries, do: retries.backoff_max, else: 0),
               recurrent,
               delay,
+              timeout,
               requires_tag_set_id,
               now
             )
@@ -577,6 +581,7 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_limit,
         s.retry_backoff_min,
         s.retry_backoff_max,
+        s.timeout,
         e.workspace_id,
         e.execute_after,
         e.attempt,
@@ -685,10 +690,18 @@ defmodule Coflux.Orchestration.Runs do
       WITH RECURSIVE descendants AS (
         SELECT ?1 AS execution_id
         UNION
-        SELECT e.id AS execution_id
+        SELECT edges.child_id AS execution_id
         FROM descendants AS d
-        INNER JOIN steps AS s ON s.parent_id = d.execution_id
-        INNER JOIN executions AS e ON e.step_id = s.id
+        INNER JOIN (
+          SELECT s.parent_id AS parent_id, e.id AS child_id
+          FROM steps AS s
+          INNER JOIN executions AS e ON e.step_id = s.id
+          WHERE s.parent_id IS NOT NULL
+          UNION ALL
+          SELECT r.execution_id AS parent_id, r.successor_id AS child_id
+          FROM results AS r
+          WHERE r.type = 7 AND r.successor_id IS NOT NULL
+        ) AS edges ON edges.parent_id = d.execution_id
       )
       SELECT e.id, s.module, a.created_at, r.created_at, e.workspace_id
       FROM descendants AS d
@@ -817,6 +830,8 @@ defmodule Coflux.Orchestration.Runs do
         retry_backoff_min,
         retry_backoff_max,
         recurrent,
+        delay,
+        timeout,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -1144,6 +1159,7 @@ defmodule Coflux.Orchestration.Runs do
          retry_backoff_max,
          recurrent,
          delay,
+         timeout,
          requires_tag_set_id,
          now
        ) do
@@ -1167,6 +1183,7 @@ defmodule Coflux.Orchestration.Runs do
            retry_backoff_max: retry_backoff_max,
            recurrent: if(recurrent, do: 1, else: 0),
            delay: delay,
+           timeout: timeout,
            requires_tag_set_id: requires_tag_set_id,
            created_at: now
          }) do
