@@ -40,7 +40,7 @@ def transform(data: dict) -> list:
 
 @cf.workflow()
 def my_pipeline(url: str):
-    transform(fetch_data(url))
+    return transform(fetch_data(url))
 ```
 
 Tasks and workflows are just functions — call them directly in tests, or let Coflux orchestrate them across workers.
@@ -161,7 +161,7 @@ Use the CLI to start the server:
 coflux server --no-auth
 ```
 
-Or [run it with Docker](https://docs.coflux.com/getting_started/server):
+Or [run it with Docker](https://docs.coflux.com/getting_started/server).
 
 ### 3. Create a workflow
 
@@ -200,7 +200,3 @@ coflux submit myapp/hello '"world"'
 ### 6. Open Studio
 
 Visit [studio.coflux.com](https://studio.coflux.com) and create a project with your server address (`localhost:7777`) - a Studio account isn't required. Submit workflows runs and watch them execute in real time.
-
-## License
-
-Apache 2.0
