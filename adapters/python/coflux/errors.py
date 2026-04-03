@@ -22,18 +22,18 @@ class ExecutionError(Exception):
         super().__init__(message)
 
 
-class CancelledError(ExecutionError):
+class ExecutionCancelled(Exception):
     """Raised when a child execution was cancelled."""
 
     def __init__(self, message: str = "execution was cancelled"):
-        super().__init__(message, error_type="CancelledError", error_message=message)
+        super().__init__(message)
 
 
-class TimeoutError(ExecutionError):
+class ExecutionTimeout(Exception):
     """Raised when a child execution timed out."""
 
     def __init__(self, message: str = "execution timed out"):
-        super().__init__(message, error_type="TimeoutError", error_message=message)
+        super().__init__(message)
 
 
 def _resolve_exception_class(qualified_name: str) -> type | None:

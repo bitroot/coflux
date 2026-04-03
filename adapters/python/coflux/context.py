@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import protocol
-from .errors import CancelledError, TimeoutError, create_execution_error
+from .errors import ExecutionCancelled, ExecutionTimeout, create_execution_error
 from .models import Asset, AssetEntry, AssetMetadata
 from .serialization import deserialize_value, serialize_value
 
@@ -96,9 +96,9 @@ class ExecutorContext:
                 value.get("error_message", ""),
             )
         if status == "cancelled":
-            raise CancelledError()
+            raise ExecutionCancelled()
         if status == "timeout":
-            raise TimeoutError()
+            raise ExecutionTimeout()
         return deserialize_value(value)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
