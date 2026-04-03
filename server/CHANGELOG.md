@@ -4,6 +4,7 @@ Enhancements:
 
 - Adds support for storing metrics and their definitions.
 - Adds support for execution timeouts on tasks and workflows.
+- Adds `suspend` flag to `get_result` for non-suspending result polling.
 
 ## 0.9.0
 

@@ -10,6 +10,7 @@ from .state import get_context
 
 
 T = t.TypeVar("T")
+D = t.TypeVar("D")
 
 
 class AssetEntry(t.NamedTuple):
@@ -126,6 +127,21 @@ class Execution(t.Generic[T]):
         """Wait for and return the execution result."""
         ctx = get_context()
         return ctx.resolve_execution(self._execution_id)
+
+    @t.overload
+    def poll(self, timeout: float | None = None) -> T | None: ...
+
+    @t.overload
+    def poll(self, timeout: float | None = None, *, default: D) -> T | D: ...
+
+    def poll(self, timeout: float | None = None, default: t.Any = None) -> t.Any:
+        """Poll for the execution result without suspending.
+
+        Returns the result if available, or ``default`` if not ready yet.
+        """
+        ctx = get_context()
+        timeout_ms = int(timeout * 1000) if timeout else None
+        return ctx.poll_execution(self._execution_id, timeout_ms, default=default)
 
     def cancel(self) -> None:
         """Cancel this execution."""

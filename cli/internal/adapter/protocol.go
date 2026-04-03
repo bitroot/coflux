@@ -87,7 +87,7 @@ type ErrorInfo struct {
 }
 
 // ResolveResult represents the outcome of resolving a reference.
-// Status is one of "value", "error", "cancelled", or "suspended".
+// Status is one of "value", "error", "cancelled", "suspended", or "not_ready".
 type ResolveResult struct {
 	Status       string
 	Value        *Value // set when Status == "value"
@@ -197,6 +197,7 @@ type ResolveReferenceParams struct {
 	ExecutionID       string `json:"execution_id"`
 	TargetExecutionID string `json:"target_execution_id"`
 	TimeoutMs         *int64 `json:"timeout_ms,omitempty"`
+	Suspend           *bool  `json:"suspend,omitempty"`
 }
 
 // PersistAssetParams for persist_asset request

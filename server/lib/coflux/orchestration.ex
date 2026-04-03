@@ -157,10 +157,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:record_result, execution_id, result})
   end
 
-  def get_result(project_id, execution_id, from_execution_id, timeout_ms, request_id) do
+  def get_result(project_id, execution_id, from_execution_id, timeout_ms, suspend, request_id) do
     call_server(
       project_id,
-      {:get_result, execution_id, from_execution_id, timeout_ms, request_id}
+      {:get_result, execution_id, from_execution_id, timeout_ms, suspend, request_id}
     )
   end
 

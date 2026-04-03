@@ -5,6 +5,7 @@ Enhancements:
 - Adds support for writing metrics, and writing progress.
 - Adds `timeout` parameter to `@task` and `@workflow` decorators.
 - Adds `ExecutionCancelled` and `ExecutionTimeout` exceptions.
+- Adds `.poll()` method to `Execution` for checking execution results without blocking (or suspending).
 
 ## 0.9.0
 

@@ -17,7 +17,7 @@ type ExecutionHandler interface {
 	// SubmitExecution submits a child execution
 	SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error)
 	// ResolveReference resolves a reference to get its result
-	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64) (*adapter.ResolveResult, error)
+	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64, suspend *bool) (*adapter.ResolveResult, error)
 	// PersistAsset persists files as an asset
 	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
@@ -450,7 +450,7 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		resolved, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs)
+		resolved, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs, req.Suspend)
 		if err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "resolve_error", Message: err.Error()}
 		} else {
@@ -469,6 +469,8 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 				result = map[string]any{"status": "timeout"}
 			case "suspended":
 				result = map[string]any{"status": "suspended"}
+			case "not_ready":
+				result = map[string]any{"status": "not_ready"}
 			}
 		}
 

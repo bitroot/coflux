@@ -221,6 +221,7 @@ def request_resolve_reference(
     execution_id: str,
     target_execution_id: str,
     timeout_ms: int | None = None,
+    suspend: bool = True,
 ) -> int:
     """Request to resolve a reference (get result of another execution)."""
     params: dict[str, Any] = {
@@ -229,6 +230,8 @@ def request_resolve_reference(
     }
     if timeout_ms is not None:
         params["timeout_ms"] = timeout_ms
+    if not suspend:
+        params["suspend"] = False
     return get_protocol().send_request("resolve_reference", params)
 
 
