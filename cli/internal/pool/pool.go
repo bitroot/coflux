@@ -236,27 +236,27 @@ loop:
 
 		switch method {
 		case "execution_result":
-			p.handleExecutionResult(ctx, executionID, params, logger)
+			p.handleExecutionResult(execCtx, executionID, params, logger)
 			break loop
 
 		case "execution_error":
-			p.handleExecutionError(ctx, executionID, params, logger)
+			p.handleExecutionError(execCtx, executionID, params, logger)
 			break loop
 
 		case "log":
-			p.handleLog(ctx, executionID, params, logger)
+			p.handleLog(execCtx, executionID, params, logger)
 
 		case "define_metric":
-			p.handleDefineMetric(ctx, executionID, params, logger)
+			p.handleDefineMetric(execCtx, executionID, params, logger)
 
 		case "metric":
-			p.handleMetric(ctx, executionID, params, logger)
+			p.handleMetric(execCtx, executionID, params, logger)
 
 		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob":
-			p.handleRequest(ctx, exec, method, *id, params, logger)
+			p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
-			p.handleRegisterGroup(ctx, executionID, params, logger)
+			p.handleRegisterGroup(execCtx, executionID, params, logger)
 
 		default:
 			logger.Warn("unknown message method", "method", method)
@@ -548,6 +548,11 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		}
 	}
 
+	// If the context was cancelled (e.g., execution timed out), don't
+	// bother sending a response — the executor is being killed.
+	if ctx.Err() != nil {
+		return
+	}
 	if err := exec.SendResponse(id, result, errInfo); err != nil {
 		logger.Error("failed to send response", "error", err, "method", method, "id", id)
 	}
