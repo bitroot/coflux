@@ -100,6 +100,18 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
+    def poll(self, execution_id, target_execution_id, timeout_ms=0):
+        """Poll for a reference result without suspending.
+
+        Returns the result dict, or {"status": "not_ready"} if not yet available.
+        """
+        msg = protocol.resolve_reference_request(
+            None, execution_id, target_execution_id,
+            timeout_ms=timeout_ms, suspend=False,
+        )
+        resp = self._request(msg)
+        return resp.get("result", resp.get("error"))
+
     def cancel(self, execution_id, target_execution_id):
         """Cancel a child execution."""
         msg = protocol.cancel_execution_request(None, execution_id, target_execution_id)

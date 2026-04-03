@@ -103,14 +103,19 @@ def submit_execution_request(
     return {"id": request_id, "method": "submit_execution", "params": params}
 
 
-def resolve_reference_request(request_id, execution_id, target_execution_id):
+def resolve_reference_request(request_id, execution_id, target_execution_id, timeout_ms=None, suspend=None):
+    params = {
+        "execution_id": execution_id,
+        "target_execution_id": target_execution_id,
+    }
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    if suspend is not None:
+        params["suspend"] = suspend
     return {
         "id": request_id,
         "method": "resolve_reference",
-        "params": {
-            "execution_id": execution_id,
-            "target_execution_id": target_execution_id,
-        },
+        "params": params,
     }
 
 

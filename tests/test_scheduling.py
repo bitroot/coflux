@@ -479,3 +479,125 @@ def test_cancel_across_multiple_spawns(worker):
         # Run result should be cancelled
         result = ctx.result(run_id)
         assert result["type"] == "cancelled"
+
+
+def test_poll_returns_not_ready_when_pending(worker):
+    """Polling a pending execution returns not_ready without suspending."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "slow"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        ref = ex0.conn.submit_task(ex0.execution_id, "test", "slow", json_args(1))
+
+        # Task is dispatched but not yet complete
+        ex1 = ctx.executor.next_execute()
+        assert ex1.target == "slow"
+
+        # Poll should return not_ready (task hasn't completed)
+        result = ex0.conn.poll(ex0.execution_id, ref)
+        assert result == {"status": "not_ready"}
+
+        # Complete the task
+        ex1.conn.complete(ex1.execution_id, value=42)
+
+        # Now resolve should return the value
+        resolved = ex0.conn.resolve(ex0.execution_id, ref)
+        assert resolved["value"] == 42
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_poll_returns_value_when_ready(worker):
+    """Polling an already-completed execution returns the value immediately."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "fast"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        ref = ex0.conn.submit_task(ex0.execution_id, "test", "fast", json_args(1))
+
+        # Complete the task before polling
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=99)
+
+        # Poll with a timeout so the server returns the value once it's processed
+        result = ex0.conn.poll(ex0.execution_id, ref, timeout_ms=5000)
+        assert result["value"] == 99
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_poll_with_timeout_waits_then_returns_not_ready(worker):
+    """Poll with a timeout waits for the specified duration before returning not_ready."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "slow"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        ref = ex0.conn.submit_task(ex0.execution_id, "test", "slow", json_args(1))
+
+        ex1 = ctx.executor.next_execute()
+
+        # Poll with a short timeout -- task is still running
+        start = time.time()
+        result = ex0.conn.poll(ex0.execution_id, ref, timeout_ms=500)
+        elapsed = time.time() - start
+        assert result == {"status": "not_ready"}
+        assert elapsed >= 0.4, f"expected >=0.4s wait, got {elapsed:.2f}s"
+
+        # Complete the task and resolve normally
+        ex1.conn.complete(ex1.execution_id, value=77)
+        resolved = ex0.conn.resolve(ex0.execution_id, ref)
+        assert resolved["value"] == 77
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_poll_with_timeout_returns_value_if_ready_before_timeout(worker):
+    """Poll with a timeout returns the value if it becomes available before the timeout."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "quick"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        ref = ex0.conn.submit_task(ex0.execution_id, "test", "quick", json_args(1))
+
+        ex1 = ctx.executor.next_execute()
+
+        # Complete the task, then poll with a long timeout
+        ex1.conn.complete(ex1.execution_id, value=55)
+
+        start = time.time()
+        result = ex0.conn.poll(ex0.execution_id, ref, timeout_ms=5000)
+        elapsed = time.time() - start
+
+        # Should return with the value well before the 5s timeout
+        assert result["value"] == 55
+        assert elapsed < 2, f"expected fast return, got {elapsed:.2f}s"
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"
