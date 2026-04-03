@@ -830,6 +830,8 @@ defmodule Coflux.Orchestration.Runs do
         retry_backoff_min,
         retry_backoff_max,
         recurrent,
+        delay,
+        timeout,
         requires_tag_set_id,
         created_at
       FROM steps
