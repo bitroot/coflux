@@ -16,10 +16,10 @@ CREATE TABLE metrics (
 );
 
 -- Add timeout column to workflows (for manifest-stored workflow timeouts)
-ALTER TABLE workflows ADD COLUMN timeout INTEGER;
+ALTER TABLE workflows ADD COLUMN timeout INTEGER NOT NULL DEFAULT 0;
 
 -- Add timeout column to steps (for per-step timeout from decorator/submission)
-ALTER TABLE steps ADD COLUMN timeout INTEGER;
+ALTER TABLE steps ADD COLUMN timeout INTEGER NOT NULL DEFAULT 0;
 
 -- Recreate results table to add type 8 (timeout) to CHECK constraint.
 -- SQLite doesn't support ALTER TABLE ... ALTER CONSTRAINT, so we recreate.

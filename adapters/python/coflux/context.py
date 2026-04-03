@@ -51,7 +51,7 @@ class ExecutorContext:
         retries: dict[str, Any] | None = None,
         recurrent: bool = False,
         requires: dict[str, list[str]] | None = None,
-        timeout: int | None = None,
+        timeout: int = 0,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 

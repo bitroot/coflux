@@ -136,7 +136,7 @@ defmodule Coflux.Handlers.Worker do
           | rest
         ] = message["params"]
 
-        timeout = List.first(rest)
+        timeout = List.first(rest) || 0
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(

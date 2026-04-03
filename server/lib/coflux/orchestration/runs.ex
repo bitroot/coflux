@@ -347,7 +347,7 @@ defmodule Coflux.Orchestration.Runs do
     retries = Keyword.get(opts, :retries)
     recurrent = Keyword.get(opts, :recurrent, false)
     delay = Keyword.get(opts, :delay, 0)
-    timeout = Keyword.get(opts, :timeout)
+    timeout = Keyword.get(opts, :timeout, 0)
     requires = Keyword.get(opts, :requires) || %{}
 
     # Calculate execute_after from delay

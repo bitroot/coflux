@@ -23,7 +23,7 @@ type TargetDefinition struct {
 	Memo        any                 `json:"memo,omitempty"`     // true or list of param indices
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
-	Timeout     *int64              `json:"timeout,omitempty"` // timeout in milliseconds
+	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
 	IsStub      bool                `json:"is_stub,omitempty"`
 	Instruction *string             `json:"instruction,omitempty"`
 }
@@ -184,7 +184,7 @@ type SubmitExecutionParams struct {
 	Retries     *RetriesConfig      `json:"retries,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Requires    map[string][]string `json:"requires,omitempty"`
-	Timeout     *int64              `json:"timeout,omitempty"` // timeout in milliseconds
+	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
 }
 
 // SubmitExecutionResult is the response to submit_execution

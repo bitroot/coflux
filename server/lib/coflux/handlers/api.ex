@@ -393,7 +393,7 @@ defmodule Coflux.Handlers.Api do
                delay: arguments[:delay] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
-               timeout: arguments[:timeout],
+               timeout: arguments[:timeout] || 0,
                requires: arguments[:requires],
                idempotency_key: arguments[:idempotency_key]
              ) do
@@ -1122,7 +1122,7 @@ defmodule Coflux.Handlers.Api do
            delay: delay,
            retries: retries,
            recurrent: recurrent == true,
-           timeout: timeout,
+           timeout: timeout || 0,
            requires: requires,
            instruction: instruction
          }}

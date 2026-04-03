@@ -70,7 +70,7 @@ def submit_execution_request(
     defer_config=None,
     recurrent=False,
     wait_for=None,
-    timeout=None,
+    timeout=0,
 ):
     params = {
         "execution_id": execution_id,
@@ -98,7 +98,7 @@ def submit_execution_request(
         params["recurrent"] = True
     if wait_for is not None:
         params["wait_for"] = wait_for
-    if timeout is not None:
+    if timeout:
         params["timeout"] = timeout
     return {"id": request_id, "method": "submit_execution", "params": params}
 

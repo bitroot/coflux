@@ -60,7 +60,7 @@ defmodule Coflux.Orchestration.Manifests do
                           if(workflow.retries, do: workflow.retries.backoff_min, else: 0),
                           if(workflow.retries, do: workflow.retries.backoff_max, else: 0),
                           if(workflow.recurrent, do: 1, else: 0),
-                          workflow[:timeout],
+                          workflow[:timeout] || 0,
                           requires_tag_set_id
                         }
                       end)
@@ -285,7 +285,7 @@ defmodule Coflux.Orchestration.Manifests do
             else: ""
           ),
           if(workflow.recurrent, do: "1", else: "0"),
-          if(workflow[:timeout], do: Integer.to_string(workflow.timeout), else: ""),
+          Integer.to_string(workflow[:timeout] || 0),
           hash_requires(workflow.requires),
           workflow.instruction || ""
         ]

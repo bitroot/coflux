@@ -126,8 +126,8 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 
 // Execute runs a target. Uses a warm executor if available, otherwise spawns
 // one on demand. Returns an error if spawning fails (caller should report to server).
-// timeoutMs, if non-nil, enforces a wall-clock timeout on the execution.
-func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs *int64) error {
+// timeoutMs, if > 0, enforces a wall-clock timeout on the execution.
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) error {
 	p.mu.Lock()
 	if p.shutdown {
 		p.mu.Unlock()
@@ -160,7 +160,7 @@ func (p *Pool) Execute(ctx context.Context, executionID, module, target string, 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs *int64) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) {
 	defer p.wg.Done()
 
 	// Create a temporary directory for this execution
@@ -189,9 +189,9 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 	// exec.Receive() selects on ctx.Done(), so this will interrupt the blocking read.
 	execCtx := ctx
 	var cancelTimeout context.CancelFunc
-	if timeoutMs != nil && *timeoutMs > 0 {
-		logger.Debug("timeout configured", "timeout_ms", *timeoutMs)
-		execCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
+	if timeoutMs > 0 {
+		logger.Debug("timeout configured", "timeout_ms", timeoutMs)
+		execCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 		defer cancelTimeout()
 	}
 	timedOut := false
@@ -203,7 +203,7 @@ loop:
 		if err != nil {
 			// Check if this was a timeout
 			if execCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-				logger.Info("execution timed out", "timeout_ms", *timeoutMs)
+				logger.Info("execution timed out", "timeout_ms", timeoutMs)
 				timedOut = true
 				p.mu.Lock()
 				p.aborted[executionID] = true

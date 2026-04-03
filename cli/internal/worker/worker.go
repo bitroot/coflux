@@ -433,12 +433,11 @@ func (w *Worker) handleExecute(params []any) error {
 	runID := getString(params[4])
 	workspaceID := getString(params[5])
 
-	// Optional timeout_ms (7th param)
-	var timeoutMs *int64
+	// Optional timeout_ms (7th param, 0 = no timeout)
+	var timeoutMs int64
 	if len(params) > 6 && params[6] != nil {
 		if v, ok := params[6].(float64); ok {
-			ms := int64(v)
-			timeoutMs = &ms
+			timeoutMs = int64(v)
 		}
 	}
 
@@ -692,10 +691,10 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		targetType = "task"
 	}
 
-	// Timeout is already in milliseconds from the adapter
+	// Timeout is already in milliseconds from the adapter (0 = no timeout)
 	var timeout any
-	if params.Timeout != nil {
-		timeout = *params.Timeout
+	if params.Timeout > 0 {
+		timeout = params.Timeout
 	}
 
 	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout
@@ -1621,11 +1620,8 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			instruction = *t.Instruction
 		}
 
-		// Build timeout (nil if not set)
-		var timeout any
-		if t.Timeout != nil {
-			timeout = *t.Timeout
-		}
+		// Build timeout (0 = not set, same as delay)
+		timeout := int(t.Timeout)
 
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
