@@ -180,10 +180,6 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_modules, workspace_id, pid})
   end
 
-  def subscribe_module(project_id, module, workspace_id, pid) do
-    call_server(project_id, {:subscribe_module, module, workspace_id, pid})
-  end
-
   def subscribe_queue(project_id, workspace_id, pid) do
     call_server(project_id, {:subscribe_queue, workspace_id, pid})
   end
