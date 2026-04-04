@@ -1278,7 +1278,7 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
-    with {:ok, _workspace_id, _} <-
+    with {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access),
          {:ok, run_ext_id, step_number, attempt} <-
            parse_execution_external_id(execution_external_id),
@@ -1287,6 +1287,7 @@ defmodule Coflux.Orchestration.Server do
       active_id = resolve_active_execution(state.db, execution_id)
 
       {:ok, state} = process_result(state, active_id, :cancelled, access[:principal_id])
+      state = cancel_descendants(state, active_id, workspace_id)
       state = flush_notifications(state)
       {:reply, :ok, state}
     else
