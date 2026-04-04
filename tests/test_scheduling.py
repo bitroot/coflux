@@ -231,12 +231,9 @@ def test_suspend_and_resume(worker):
         # First execute
         ex0 = ctx.executor.next_execute()
 
-        # Suspend (no execute_after = immediate retry)
+        # Suspend (no execute_after = immediate retry).
+        # Server records suspension and aborts the executor.
         ex0.conn.suspend(ex0.execution_id)
-
-        # After suspending, the executor must still complete the execution
-        # (the pool loop waits for execution_result/error before freeing the slot)
-        ex0.conn.complete(ex0.execution_id)
 
         # Second execute (retry after suspend) on fresh connection
         ex1 = ctx.executor.next_execute()
@@ -256,11 +253,11 @@ def test_suspend_with_execute_after(worker):
 
         ex0 = ctx.executor.next_execute()
 
-        # Suspend with execute_after 500ms in the future
+        # Suspend with execute_after 500ms in the future.
+        # Server records suspension and aborts the executor.
         execute_after = int(time.time() * 1000) + 500
         suspend_time = time.time()
         ex0.conn.suspend(ex0.execution_id, execute_after=execute_after)
-        ex0.conn.complete(ex0.execution_id)
 
         # Re-dispatch should not arrive immediately
         with pytest.raises(TimeoutError):
@@ -287,13 +284,11 @@ def test_suspend_twice(worker):
         # First attempt: suspend immediately
         ex0 = ctx.executor.next_execute()
         ex0.conn.suspend(ex0.execution_id)
-        ex0.conn.complete(ex0.execution_id)
 
         # Second attempt: suspend again
         ex1 = ctx.executor.next_execute()
         assert ex1.execution_id != ex0.execution_id
         ex1.conn.suspend(ex1.execution_id)
-        ex1.conn.complete(ex1.execution_id)
 
         # Third attempt: complete normally
         ex2 = ctx.executor.next_execute()

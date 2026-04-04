@@ -1583,8 +1583,6 @@ defmodule Coflux.Orchestration.Server do
                       {:suspended, nil, [pending_execution_id]}
                     )
 
-                  state = abort_execution(state, from_execution_external_id)
-
                   {{:ok, :suspended}, state}
 
                 timeout_ms == 0 ->
@@ -2612,8 +2610,8 @@ defmodule Coflux.Orchestration.Server do
                   {Map.update(
                      to_suspend,
                      from_ext_id,
-                     {request_id, [execution_ext_id]},
-                     fn {req_id, deps} -> {req_id, [execution_ext_id | deps]} end
+                     [execution_ext_id],
+                     &[execution_ext_id | &1]
                    ), to_notify}
                 else
                   {to_suspend, [{from_ext_id, request_id} | to_notify]}
@@ -2626,14 +2624,16 @@ defmodule Coflux.Orchestration.Server do
         end
       )
 
-    # Remove expired entries from waiting map
+    # Remove only non-suspend expired entries from waiting map.
+    # Suspend entries are left for cleanup_execution (inside abort_execution)
+    # to find and respond to.
     state =
       update_in(state, [Access.key(:waiting)], fn waiting ->
         waiting
         |> Enum.map(fn {ext_id, entries} ->
           remaining =
-            Enum.reject(entries, fn {_, _, expire_at, _} ->
-              expire_at && expire_at <= now
+            Enum.reject(entries, fn {_, _, expire_at, suspend_flag} ->
+              expire_at && expire_at <= now && !suspend_flag
             end)
 
           {ext_id, remaining}
@@ -2658,15 +2658,16 @@ defmodule Coflux.Orchestration.Server do
         end
       )
 
-    # Handle suspend timeouts: record suspension, send response, then abort
+    # Handle suspend timeouts: record suspension and abort
+    # (abort_execution → cleanup_execution sends the :suspended response
+    # for any pending requests found in the waiting map)
     state =
       Enum.reduce(
         to_suspend,
         state,
-        fn {from_ext_id, {request_id, dependency_ext_ids}}, state ->
+        fn {from_ext_id, dependency_ext_ids}, state ->
           from_execution_id = Map.fetch!(state.execution_ids, from_ext_id)
 
-          # Resolve dependency IDs to internal (may reference completed executions in old epochs)
           dependency_ids =
             Enum.flat_map(dependency_ext_ids, fn dep_ext_id ->
               case resolve_internal_execution_id(state, dep_ext_id) do
@@ -2678,18 +2679,7 @@ defmodule Coflux.Orchestration.Server do
           {:ok, state} =
             process_result(state, from_execution_id, {:suspended, nil, dependency_ids})
 
-          # Send the suspended response for the pending resolve_reference request
-          # before aborting, so the CLI's request unblocks cleanly
-          state =
-            case find_session_for_execution(state, from_ext_id) do
-              {:ok, session_id} ->
-                send_session(state, session_id, {:result, request_id, :suspended})
-
-              :error ->
-                state
-            end
-
-          abort_execution(state, from_ext_id)
+          state
         end
       )
 
@@ -4411,6 +4401,12 @@ defmodule Coflux.Orchestration.Server do
         {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
 
+        execution_ext_id =
+          case Runs.get_execution_key(state.db, execution_id) do
+            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+            {:error, :not_found} -> nil
+          end
+
         {retry_id, state} =
           cond do
             match?({:suspended, _, _}, result) ->
@@ -4423,6 +4419,13 @@ defmodule Coflux.Orchestration.Server do
                   execute_after: execute_after,
                   dependency_ids: dependency_ids
                 )
+
+              state =
+                if execution_ext_id do
+                  abort_execution(state, execution_ext_id)
+                else
+                  state
+                end
 
               {retry_id, state}
 

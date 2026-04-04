@@ -382,6 +382,10 @@ class ExecutorContext:
             )
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
+        # Suspension confirmed. Block until the server aborts this execution.
+        while protocol.receive_message() is not None:
+            pass
+        raise SystemExit(0)
 
     def _parse_response(self, msg: dict) -> Any:
         """Extract the result from a response message, raising on error."""
