@@ -103,7 +103,7 @@ class ExecutorConnection:
     def poll(self, execution_id, target_execution_id, timeout_ms=0):
         """Poll for a reference result without suspending.
 
-        Returns the result dict, or {"status": "not_ready"} if not yet available.
+        Returns the result dict, or None if not yet available.
         """
         msg = protocol.resolve_reference_request(
             None, execution_id, target_execution_id,

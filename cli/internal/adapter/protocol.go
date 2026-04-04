@@ -76,7 +76,7 @@ type Argument = Value
 // Response is sent from CLI to executor in response to a request
 type Response struct {
 	ID     int        `json:"id"`
-	Result any        `json:"result,omitempty"`
+	Result any        `json:"result"`
 	Error  *ErrorInfo `json:"error,omitempty"`
 }
 
@@ -87,7 +87,8 @@ type ErrorInfo struct {
 }
 
 // ResolveResult represents the outcome of resolving a reference.
-// Status is one of "value", "error", "cancelled", "suspended", or "not_ready".
+// A nil ResolveResult (with nil error) means no result is available yet (poll timeout).
+// Status is one of "value", "error", "cancelled", "timeout", or "suspended".
 type ResolveResult struct {
 	Status       string
 	Value        *Value // set when Status == "value"

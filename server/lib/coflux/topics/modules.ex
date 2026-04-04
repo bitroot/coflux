@@ -12,34 +12,25 @@ defmodule Coflux.Topics.Modules do
     workspace_id = Map.fetch!(params, :workspace_id)
 
     case Orchestration.subscribe_modules(project_id, workspace_id, self()) do
-      {:ok, manifests, executions, ref} ->
+      {:ok, manifests, active_runs, ref} ->
         value =
           Map.new(manifests, fn {module, workflows} ->
-            result = %{
-              workflows: Map.keys(workflows),
-              executing: 0,
-              scheduled: 0,
-              nextDueAt: nil
-            }
+            workflow_map =
+              Map.new(Map.keys(workflows), fn target ->
+                runs =
+                  case Map.fetch(active_runs, {module, target}) do
+                    {:ok, runs_map} -> runs_map |> Map.keys() |> Enum.sort()
+                    :error -> []
+                  end
 
-            result =
-              case Map.fetch(executions, module) do
-                {:ok, {executing, scheduled}} ->
-                  next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
+                {target, %{activeRuns: runs}}
+              end)
 
-                  result
-                  |> Map.put(:executing, MapSet.size(executing))
-                  |> Map.put(:scheduled, map_size(scheduled))
-                  |> Map.put(:nextDueAt, next_due_at)
-
-                :error ->
-                  result
-              end
-
-            {module, result}
+            {module, %{workflows: workflow_map}}
           end)
 
-        {:ok, Topic.new(value, %{ref: ref, executions: executions})}
+        # Internal state: {module, target} -> %{run_ext_id -> MapSet of execution_ext_ids}
+        {:ok, Topic.new(value, %{ref: ref, active_runs: active_runs})}
 
       {:error, :workspace_invalid} ->
         {:error, :not_found}
@@ -61,52 +52,77 @@ defmodule Coflux.Topics.Modules do
     update_manifest(topic, module, manifest)
   end
 
-  defp process_notification(topic, {:scheduled, module, execution_id, execute_at}) do
-    update_executing(topic, module, fn {executing, scheduled} ->
-      scheduled = Map.put(scheduled, execution_id, execute_at)
-      {executing, scheduled}
+  defp process_notification(
+         topic,
+         {:scheduled, {root_module, root_target}, run_ext_id, execution_ext_id, _execute_at}
+       ) do
+    update_active_runs(topic, root_module, root_target, fn runs_map ->
+      Map.update(
+        runs_map,
+        run_ext_id,
+        MapSet.new([execution_ext_id]),
+        &MapSet.put(&1, execution_ext_id)
+      )
     end)
   end
 
-  defp process_notification(topic, {:assigned, executions}) do
-    Enum.reduce(executions, topic, fn {module, execution_ids}, topic ->
-      update_executing(topic, module, fn {executing, scheduled} ->
-        executing = MapSet.union(executing, execution_ids)
-        scheduled = Map.drop(scheduled, MapSet.to_list(execution_ids))
-        {executing, scheduled}
+  defp process_notification(topic, {:assigned, workflow_executions}) do
+    Enum.reduce(workflow_executions, topic, fn {{root_module, root_target}, executions}, topic ->
+      update_active_runs(topic, root_module, root_target, fn runs_map ->
+        Enum.reduce(executions, runs_map, fn {run_ext_id, execution_ext_id}, runs_map ->
+          Map.update(
+            runs_map,
+            run_ext_id,
+            MapSet.new([execution_ext_id]),
+            &MapSet.put(&1, execution_ext_id)
+          )
+        end)
       end)
     end)
   end
 
-  defp process_notification(topic, {:completed, module, execution_id}) do
-    update_executing(topic, module, fn {executing, scheduled} ->
-      executing = MapSet.delete(executing, execution_id)
-      scheduled = Map.delete(scheduled, execution_id)
-      {executing, scheduled}
+  defp process_notification(
+         topic,
+         {:completed, {root_module, root_target}, run_ext_id, execution_ext_id}
+       ) do
+    update_active_runs(topic, root_module, root_target, fn runs_map ->
+      case Map.fetch(runs_map, run_ext_id) do
+        {:ok, execution_ids} ->
+          remaining = MapSet.delete(execution_ids, execution_ext_id)
+
+          if MapSet.size(remaining) == 0 do
+            Map.delete(runs_map, run_ext_id)
+          else
+            Map.put(runs_map, run_ext_id, remaining)
+          end
+
+        :error ->
+          runs_map
+      end
     end)
   end
 
-  defp update_executing(topic, module, fun) do
-    default = {MapSet.new(), %{}}
+  defp update_active_runs(topic, root_module, root_target, fun) do
+    key = {root_module, root_target}
+    default = %{}
 
     topic =
       update_in(
         topic,
-        [Access.key(:state), :executions, Access.key(module, default)],
+        [Access.key(:state), :active_runs, Access.key(key, default)],
         fun
       )
 
-    # Only update topic value for modules that have a manifest registered,
-    # otherwise we'd create an entry with only executing/scheduled/nextDueAt
-    # (missing the workflows key)
-    if Map.has_key?(topic.value, module) do
-      {executing, scheduled} = topic.state.executions[module]
-      next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
+    # Only update topic value for modules/targets that have a manifest registered
+    if get_in(topic.value, [root_module, :workflows]) |> is_map() &&
+         Map.has_key?(topic.value[root_module][:workflows], root_target) do
+      runs_map = topic.state.active_runs[key] || %{}
 
-      topic
-      |> Topic.set([module, :executing], MapSet.size(executing))
-      |> Topic.set([module, :scheduled], map_size(scheduled))
-      |> Topic.set([module, :nextDueAt], next_due_at)
+      Topic.set(
+        topic,
+        [root_module, :workflows, root_target, :activeRuns],
+        runs_map |> Map.keys() |> Enum.sort()
+      )
     else
       topic
     end
@@ -114,18 +130,13 @@ defmodule Coflux.Topics.Modules do
 
   defp update_manifest(topic, module, workflows) do
     if workflows do
-      {executing, scheduled} =
-        Map.get(topic.state.executions, module, {MapSet.new(), %{}})
+      workflow_map =
+        Map.new(Map.keys(workflows), fn target ->
+          runs_map = Map.get(topic.state.active_runs, {module, target}, %{})
+          {target, %{activeRuns: runs_map |> Map.keys() |> Enum.sort()}}
+        end)
 
-      next_due_at = scheduled |> Map.values() |> Enum.min(fn -> nil end)
-
-      topic
-      |> Topic.set([module], %{
-        workflows: Map.keys(workflows),
-        executing: MapSet.size(executing),
-        scheduled: map_size(scheduled),
-        nextDueAt: next_due_at
-      })
+      Topic.set(topic, [module], %{workflows: workflow_map})
     else
       Topic.unset(topic, [], module)
     end

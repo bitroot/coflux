@@ -791,6 +791,11 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 		return nil, err
 	}
 
+	// nil result means the wait expired with no result available (poll timeout)
+	if result == nil {
+		return nil, nil
+	}
+
 	// Result is ["value", value_tuple] or ["error", ...] or ["cancelled"] or ["suspended"]
 	if arr, ok := result.([]any); ok && len(arr) >= 1 {
 		resultType := getString(arr[0])
@@ -859,8 +864,6 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 			return &adapter.ResolveResult{Status: "timeout"}, nil
 		case "suspended":
 			return &adapter.ResolveResult{Status: "suspended"}, nil
-		case "not_ready":
-			return &adapter.ResolveResult{Status: "not_ready"}, nil
 		}
 	}
 

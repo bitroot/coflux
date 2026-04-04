@@ -99,6 +99,14 @@ class ExecutorContext:
             raise ExecutionCancelled()
         if status == "timeout":
             raise ExecutionTimeout()
+        if status == "suspended":
+            # The server has suspended this execution and will abort us.
+            # Block until the CLI kills this process.
+            while protocol.receive_message() is not None:
+                pass
+            raise SystemExit(0)
+        if status is not None:
+            raise RuntimeError(f"Unexpected resolve status: {status}")
         return deserialize_value(value)
 
     def poll_execution(
@@ -118,9 +126,9 @@ class ExecutorContext:
             suspend=False,
         )
         value = self._wait_response(request_id)
-        status = value.get("status")
-        if status == "not_ready":
+        if value is None:
             return default
+        status = value.get("status")
         if status == "error":
             raise create_execution_error(
                 value.get("error_type", ""),
@@ -128,6 +136,8 @@ class ExecutorContext:
             )
         if status == "cancelled":
             raise ExecutionCancelled()
+        if status is not None:
+            raise RuntimeError(f"Unexpected poll status: {status}")
         return deserialize_value(value)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
@@ -372,6 +382,10 @@ class ExecutorContext:
             )
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
+        # Suspension confirmed. Block until the server aborts this execution.
+        while protocol.receive_message() is not None:
+            pass
+        raise SystemExit(0)
 
     def _parse_response(self, msg: dict) -> Any:
         """Extract the result from a response message, raising on error."""

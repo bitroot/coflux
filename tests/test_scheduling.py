@@ -231,12 +231,9 @@ def test_suspend_and_resume(worker):
         # First execute
         ex0 = ctx.executor.next_execute()
 
-        # Suspend (no execute_after = immediate retry)
+        # Suspend (no execute_after = immediate retry).
+        # Server records suspension and aborts the executor.
         ex0.conn.suspend(ex0.execution_id)
-
-        # After suspending, the executor must still complete the execution
-        # (the pool loop waits for execution_result/error before freeing the slot)
-        ex0.conn.complete(ex0.execution_id)
 
         # Second execute (retry after suspend) on fresh connection
         ex1 = ctx.executor.next_execute()
@@ -256,11 +253,11 @@ def test_suspend_with_execute_after(worker):
 
         ex0 = ctx.executor.next_execute()
 
-        # Suspend with execute_after 500ms in the future
+        # Suspend with execute_after 500ms in the future.
+        # Server records suspension and aborts the executor.
         execute_after = int(time.time() * 1000) + 500
         suspend_time = time.time()
         ex0.conn.suspend(ex0.execution_id, execute_after=execute_after)
-        ex0.conn.complete(ex0.execution_id)
 
         # Re-dispatch should not arrive immediately
         with pytest.raises(TimeoutError):
@@ -287,13 +284,11 @@ def test_suspend_twice(worker):
         # First attempt: suspend immediately
         ex0 = ctx.executor.next_execute()
         ex0.conn.suspend(ex0.execution_id)
-        ex0.conn.complete(ex0.execution_id)
 
         # Second attempt: suspend again
         ex1 = ctx.executor.next_execute()
         assert ex1.execution_id != ex0.execution_id
         ex1.conn.suspend(ex1.execution_id)
-        ex1.conn.complete(ex1.execution_id)
 
         # Third attempt: complete normally
         ex2 = ctx.executor.next_execute()
@@ -481,8 +476,8 @@ def test_cancel_across_multiple_spawns(worker):
         assert result["type"] == "cancelled"
 
 
-def test_poll_returns_not_ready_when_pending(worker):
-    """Polling a pending execution returns not_ready without suspending."""
+def test_poll_returns_none_when_pending(worker):
+    """Polling a pending execution returns None without suspending."""
     targets = [
         workflow("test", "main"),
         task("test", "slow"),
@@ -499,9 +494,9 @@ def test_poll_returns_not_ready_when_pending(worker):
         ex1 = ctx.executor.next_execute()
         assert ex1.target == "slow"
 
-        # Poll should return not_ready (task hasn't completed)
+        # Poll should return None (task hasn't completed)
         result = ex0.conn.poll(ex0.execution_id, ref)
-        assert result == {"status": "not_ready"}
+        assert result is None
 
         # Complete the task
         ex1.conn.complete(ex1.execution_id, value=42)
@@ -540,8 +535,8 @@ def test_poll_returns_value_when_ready(worker):
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
-def test_poll_with_timeout_waits_then_returns_not_ready(worker):
-    """Poll with a timeout waits for the specified duration before returning not_ready."""
+def test_poll_with_timeout_waits_then_returns_none(worker):
+    """Poll with a timeout waits for the specified duration before returning None."""
     targets = [
         workflow("test", "main"),
         task("test", "slow"),
@@ -560,7 +555,7 @@ def test_poll_with_timeout_waits_then_returns_not_ready(worker):
         start = time.time()
         result = ex0.conn.poll(ex0.execution_id, ref, timeout_ms=500)
         elapsed = time.time() - start
-        assert result == {"status": "not_ready"}
+        assert result is None
         assert elapsed >= 0.4, f"expected >=0.4s wait, got {elapsed:.2f}s"
 
         # Complete the task and resolve normally

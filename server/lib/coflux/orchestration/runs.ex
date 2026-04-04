@@ -599,36 +599,6 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_module_executions(db, module) do
-    case query(
-           db,
-           """
-           SELECT
-             s.target,
-             r.external_id,
-             s.number,
-             e.attempt,
-             e.execute_after,
-             e.created_at,
-             a.created_at
-           FROM executions AS e
-           INNER JOIN steps AS s ON s.id = e.step_id
-           INNER JOIN runs AS r ON r.id = s.run_id
-           LEFT JOIN assignments AS a ON a.execution_id = e.id
-           LEFT JOIN results AS re ON re.execution_id = e.id
-           WHERE s.module = ?1 AND re.created_at IS NULL
-           """,
-           {module}
-         ) do
-      {:ok, rows} ->
-        {:ok,
-         Enum.map(rows, fn {target, run_external_id, step_number, attempt, execute_after,
-                            created_at, assigned_at} ->
-           {target, run_external_id, step_number, attempt, execute_after, created_at, assigned_at}
-         end)}
-    end
-  end
-
   def get_queue_executions(db, workspace_id) do
     case query(
            db,
@@ -805,6 +775,29 @@ defmodule Coflux.Orchestration.Runs do
       WHERE run_id = ?1 AND parent_id IS NULL
       """,
       {run_id}
+    )
+  end
+
+  def get_active_run_workflows(db, workspace_id \\ nil) do
+    {where, params} =
+      if workspace_id do
+        {"WHERE res.created_at IS NULL AND e.workspace_id = ?1", {workspace_id}}
+      else
+        {"WHERE res.created_at IS NULL", {}}
+      end
+
+    query(
+      db,
+      """
+      SELECT r.external_id, root_s.module, root_s.target, s.number, e.attempt, e.id
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = s.run_id
+      INNER JOIN steps AS root_s ON root_s.run_id = r.id AND root_s.parent_id IS NULL
+      LEFT JOIN results AS res ON res.execution_id = e.id
+      #{where}
+      """,
+      params
     )
   end
 
