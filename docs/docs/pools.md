@@ -49,6 +49,35 @@ coflux pools update mypool \
 |--------|-------------|
 | `--process-dir` | Working directory for the worker process |
 
+#### Kubernetes launcher
+
+Launches workers as Kubernetes Jobs:
+
+```bash
+coflux pools update mypool \
+  --k8s-image myorg/myapp:latest \
+  --k8s-namespace coflux-workers \
+  --server-host coflux-server.coflux.svc:7777
+```
+
+When the Coflux server runs inside Kubernetes, it automatically uses in-cluster authentication. For external servers, provide the API server URL and a bearer token:
+
+```bash
+coflux pools update mypool \
+  --k8s-image myorg/myapp:latest \
+  --k8s-api-server https://my-cluster.example.com:6443 \
+  --k8s-token "$(cat /path/to/token)" \
+  --server-host coflux.example.com:7777
+```
+
+| Option | Description |
+|--------|-------------|
+| `--k8s-image` | Container image to run |
+| `--k8s-namespace` | Kubernetes namespace (default: `default`) |
+| `--k8s-api-server` | Kubernetes API server URL (default: in-cluster) |
+| `--k8s-token` | Bearer token for API authentication |
+| `--k8s-service-account` | Service account for launched pods |
+
 ### Common options
 
 These options apply to all launcher types:

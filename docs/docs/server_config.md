@@ -66,7 +66,7 @@ The server is configured via environment variables. When using `coflux server`, 
 | `COFLUX_STUDIO_URL` | `https://studio.coflux.com` | Studio URL |
 | `COFLUX_DATA_DIR` | `./data` | Data directory path |
 | `COFLUX_ALLOW_ORIGINS` | `https://studio.coflux.com` | Comma-separated CORS origins |
-| `COFLUX_LAUNCHER_TYPES` | _(none)_ | Allowed launcher types (e.g., `docker,process`) |
+| `COFLUX_LAUNCHER_TYPES` | _(none)_ | Allowed launcher types (e.g., `docker,process,kubernetes`) |
 | `COFLUX_CLI_PATH` | `coflux` | CLI binary path for process launcher |
 
 ## Data storage

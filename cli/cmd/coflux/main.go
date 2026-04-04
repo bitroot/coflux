@@ -140,7 +140,12 @@ func loadConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// Handle secure flag default (depends on host value)
+	// Handle secure flag: env var may not unmarshal into *bool correctly,
+	// so check viper directly before falling back to the host-based default.
+	if cfg.Secure == nil && viper.IsSet("secure") {
+		secure := viper.GetBool("secure")
+		cfg.Secure = &secure
+	}
 	if cfg.Secure == nil {
 		secure := !config.IsLocalhost(cfg.Host)
 		cfg.Secure = &secure

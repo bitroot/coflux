@@ -785,14 +785,126 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_kubernetes_launcher(value) do
+    image = Map.get(value, "image")
+    namespace = Map.get(value, "namespace")
+    service_account = Map.get(value, "serviceAccount")
+    api_server = Map.get(value, "apiServer")
+    token = Map.get(value, "token")
+    ca_cert = Map.get(value, "caCert")
+    insecure = Map.get(value, "insecure")
+    image_pull_policy = Map.get(value, "imagePullPolicy")
+    node_selector = Map.get(value, "nodeSelector")
+    tolerations = Map.get(value, "tolerations")
+    image_pull_secrets = Map.get(value, "imagePullSecrets")
+    host_aliases = Map.get(value, "hostAliases")
+    resources = Map.get(value, "resources")
+
+    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
+
+    cond do
+      not is_binary(image) or String.length(image) > 200 ->
+        {:error, :invalid}
+
+      not is_nil(namespace) and (not is_binary(namespace) or String.length(namespace) > 253) ->
+        {:error, :invalid}
+
+      not is_nil(service_account) and
+          (not is_binary(service_account) or String.length(service_account) > 253) ->
+        {:error, :invalid}
+
+      not is_nil(api_server) and (not is_binary(api_server) or String.length(api_server) > 500) ->
+        {:error, :invalid}
+
+      not is_nil(token) and not is_binary(token) ->
+        {:error, :invalid}
+
+      not is_nil(ca_cert) and not is_binary(ca_cert) ->
+        {:error, :invalid}
+
+      not is_nil(insecure) and not is_boolean(insecure) ->
+        {:error, :invalid}
+
+      not is_nil(image_pull_policy) and image_pull_policy not in valid_pull_policies ->
+        {:error, :invalid}
+
+      not is_nil(node_selector) and not is_map(node_selector) ->
+        {:error, :invalid}
+
+      not is_nil(tolerations) and not is_list(tolerations) ->
+        {:error, :invalid}
+
+      not is_nil(image_pull_secrets) and
+          (not is_list(image_pull_secrets) or
+             Enum.any?(image_pull_secrets, &(not is_binary(&1)))) ->
+        {:error, :invalid}
+
+      not is_nil(host_aliases) and not is_list(host_aliases) ->
+        {:error, :invalid}
+
+      not is_nil(resources) and not is_map(resources) ->
+        {:error, :invalid}
+
+      true ->
+        launcher = %{type: :kubernetes, image: image}
+
+        launcher =
+          if namespace, do: Map.put(launcher, :namespace, namespace), else: launcher
+
+        launcher =
+          if service_account,
+            do: Map.put(launcher, :service_account, service_account),
+            else: launcher
+
+        launcher =
+          if api_server, do: Map.put(launcher, :api_server, api_server), else: launcher
+
+        launcher = if token, do: Map.put(launcher, :token, token), else: launcher
+        launcher = if ca_cert, do: Map.put(launcher, :ca_cert, ca_cert), else: launcher
+
+        launcher =
+          if insecure == true, do: Map.put(launcher, :insecure, true), else: launcher
+
+        launcher =
+          if image_pull_policy,
+            do: Map.put(launcher, :image_pull_policy, image_pull_policy),
+            else: launcher
+
+        launcher =
+          if node_selector, do: Map.put(launcher, :node_selector, node_selector), else: launcher
+
+        launcher =
+          if tolerations, do: Map.put(launcher, :tolerations, tolerations), else: launcher
+
+        launcher =
+          if image_pull_secrets,
+            do: Map.put(launcher, :image_pull_secrets, image_pull_secrets),
+            else: launcher
+
+        launcher =
+          if host_aliases,
+            do: Map.put(launcher, :host_aliases, host_aliases),
+            else: launcher
+
+        launcher =
+          if resources, do: Map.put(launcher, :resources, resources), else: launcher
+
+        {:ok, launcher}
+    end
+  end
+
   defp parse_common_launcher_fields(launcher, value) do
     server_host = Map.get(value, "serverHost")
+    server_secure = Map.get(value, "serverSecure")
     adapter = Map.get(value, "adapter")
     concurrency = Map.get(value, "concurrency")
     env = Map.get(value, "env")
 
     cond do
       not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
+        {:error, :invalid}
+
+      not is_nil(server_secure) and not is_boolean(server_secure) ->
         {:error, :invalid}
 
       not is_nil(adapter) and
@@ -816,6 +928,11 @@ defmodule Coflux.Handlers.Api do
         launcher =
           if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
 
+        launcher =
+          if not is_nil(server_secure),
+            do: Map.put(launcher, :server_secure, server_secure),
+            else: launcher
+
         launcher = if adapter, do: Map.put(launcher, :adapter, adapter), else: launcher
 
         launcher =
@@ -832,7 +949,7 @@ defmodule Coflux.Handlers.Api do
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
-          {:ok, type} when type in ["docker", "process"] ->
+          {:ok, type} when type in ["docker", "process", "kubernetes"] ->
             type_atom = String.to_existing_atom(type)
 
             if MapSet.member?(allowed, type_atom) do
@@ -840,6 +957,7 @@ defmodule Coflux.Handlers.Api do
                      (case type do
                         "docker" -> parse_docker_launcher(value)
                         "process" -> parse_process_launcher(value)
+                        "kubernetes" -> parse_kubernetes_launcher(value)
                       end) do
                 parse_common_launcher_fields(launcher, value)
               end

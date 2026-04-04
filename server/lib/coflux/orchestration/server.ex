@@ -986,10 +986,13 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:declare_targets, external_id, targets, concurrency}, _from, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
+    now = System.os_time(:millisecond)
+
     state =
       state
       |> assign_targets(targets, session_id)
       |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
+      |> put_in([Access.key(:sessions), session_id, :last_idle_at], now)
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -2487,6 +2490,9 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {:ok, false, error, logs}} ->
               deactivate_worker(state, worker_id, error, logs)
 
+            {:ok, {:error, reason}} ->
+              deactivate_worker(state, worker_id, "poll_error:#{reason}")
+
             :error ->
               # TODO: ?
               state
@@ -2544,6 +2550,17 @@ defmodule Coflux.Orchestration.Server do
         call_launcher(state, launcher, :stop, [worker.data], fn state, result ->
           case result do
             {:ok, :ok} ->
+              {:ok, stopped_at} =
+                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
+
+              state
+              |> notify_listeners(
+                {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
+                {:worker_stop_result, worker.external_id, stopped_at, nil}
+              )
+
+            {:ok, {:error, _reason}} ->
+              # Stop failed (e.g. connection refused) — treat as stopped
               {:ok, stopped_at} =
                 Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
 
@@ -5268,6 +5285,13 @@ defmodule Coflux.Orchestration.Server do
         concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
       end
 
+    base =
+      case Map.get(launcher, :server_secure) do
+        nil -> base
+        true -> Map.put(base, "COFLUX_SECURE", "true")
+        false -> Map.put(base, "COFLUX_SECURE", "false")
+      end
+
     case Map.get(launcher, :env) do
       nil -> base
       env -> Map.merge(base, env)
@@ -5279,6 +5303,7 @@ defmodule Coflux.Orchestration.Server do
       case launcher.type do
         :docker -> Coflux.DockerLauncher
         :process -> Coflux.ProcessLauncher
+        :kubernetes -> Coflux.KubernetesLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)

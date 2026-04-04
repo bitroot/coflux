@@ -146,9 +146,26 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if dockerHost := getString(launcher, "dockerHost"); dockerHost != "" {
 			fmt.Printf("Docker host: %s\n", dockerHost)
 		}
-		if serverHost := getString(launcher, "serverHost"); serverHost != "" {
-			fmt.Printf("Server host: %s\n", serverHost)
+		if ns := getString(launcher, "namespace"); ns != "" {
+			fmt.Printf("Namespace: %s\n", ns)
 		}
+		if apiServer := getString(launcher, "apiServer"); apiServer != "" {
+			insecure, _ := launcher["insecure"].(bool)
+			if insecure {
+				fmt.Printf("API server: %s (no verify)\n", apiServer)
+			} else {
+				fmt.Printf("API server: %s\n", apiServer)
+			}
+		} else if insecure, ok := launcher["insecure"].(bool); ok && insecure {
+			fmt.Printf("API server: (no verify)\n")
+		}
+		if sa := getString(launcher, "serviceAccount"); sa != "" {
+			fmt.Printf("Service account: %s\n", sa)
+		}
+		if policy := getString(launcher, "imagePullPolicy"); policy != "" {
+			fmt.Printf("Image pull policy: %s\n", policy)
+		}
+		printServerHost(launcher)
 		if adapter := getStringSlice(launcher, "adapter"); len(adapter) > 0 {
 			fmt.Printf("Adapter: %s\n", strings.Join(adapter, " "))
 		}
@@ -443,8 +460,19 @@ func formatMillis(ms int64) string {
 	return t.Format("2006-01-02 15:04:05 UTC")
 }
 
+func hasK8sFlags() bool {
+	return poolsUpdateK8sImage != "" ||
+		poolsUpdateK8sNamespace != "" || poolsUpdateNoK8sNamespace ||
+		poolsUpdateK8sApiServer != "" || poolsUpdateNoK8sApiServer ||
+		poolsUpdateK8sToken != "" || poolsUpdateNoK8sToken ||
+		poolsUpdateK8sServiceAcct != "" || poolsUpdateNoK8sServiceAcct ||
+		poolsUpdateK8sInsecure || poolsUpdateNoK8sInsecure ||
+		poolsUpdateK8sImagePullPolicy != "" || poolsUpdateNoK8sImagePullPolicy
+}
+
 func hasCommonLauncherFlags() bool {
 	return poolsUpdateServerHost != "" || poolsUpdateNoServerHost ||
+		poolsUpdateServerSecure || poolsUpdateServerInsecure ||
 		poolsUpdateAdapter != nil || poolsUpdateNoAdapter ||
 		poolsUpdateConcurrency > 0 || poolsUpdateNoConcurrency ||
 		poolsUpdateEnv != nil || poolsUpdateNoEnv
@@ -455,6 +483,11 @@ func applyCommonLauncherFlags(launcher map[string]any) {
 		launcher["serverHost"] = poolsUpdateServerHost
 	} else if poolsUpdateNoServerHost {
 		delete(launcher, "serverHost")
+	}
+	if poolsUpdateServerSecure {
+		launcher["serverSecure"] = true
+	} else if poolsUpdateServerInsecure {
+		launcher["serverSecure"] = false
 	}
 	if poolsUpdateAdapter != nil {
 		launcher["adapter"] = poolsUpdateAdapter
@@ -507,20 +540,35 @@ func getStringSlice(m map[string]any, key string) []string {
 
 // pools update
 var (
-	poolsUpdateModules       []string
-	poolsUpdateProvides      []string
-	poolsUpdateDockerImage   string
-	poolsUpdateDockerHost    string
-	poolsUpdateNoDockerHost  bool
-	poolsUpdateProcessDir    string
-	poolsUpdateServerHost    string
-	poolsUpdateNoServerHost  bool
-	poolsUpdateAdapter       []string
-	poolsUpdateNoAdapter     bool
-	poolsUpdateConcurrency   int
-	poolsUpdateNoConcurrency bool
-	poolsUpdateEnv           []string
-	poolsUpdateNoEnv         bool
+	poolsUpdateModules              []string
+	poolsUpdateProvides             []string
+	poolsUpdateDockerImage          string
+	poolsUpdateDockerHost           string
+	poolsUpdateNoDockerHost         bool
+	poolsUpdateProcessDir           string
+	poolsUpdateK8sImage             string
+	poolsUpdateK8sNamespace         string
+	poolsUpdateNoK8sNamespace       bool
+	poolsUpdateK8sApiServer         string
+	poolsUpdateNoK8sApiServer       bool
+	poolsUpdateK8sToken             string
+	poolsUpdateNoK8sToken           bool
+	poolsUpdateK8sServiceAcct       string
+	poolsUpdateNoK8sServiceAcct     bool
+	poolsUpdateK8sInsecure          bool
+	poolsUpdateNoK8sInsecure        bool
+	poolsUpdateK8sImagePullPolicy   string
+	poolsUpdateNoK8sImagePullPolicy bool
+	poolsUpdateServerHost           string
+	poolsUpdateNoServerHost         bool
+	poolsUpdateServerSecure         bool
+	poolsUpdateServerInsecure       bool
+	poolsUpdateAdapter              []string
+	poolsUpdateNoAdapter            bool
+	poolsUpdateConcurrency          int
+	poolsUpdateNoConcurrency        bool
+	poolsUpdateEnv                  []string
+	poolsUpdateNoEnv                bool
 )
 
 var poolsUpdateCmd = &cobra.Command{
@@ -537,8 +585,23 @@ func init() {
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessDir, "process-dir", "", "Directory for process launcher")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sImage, "k8s-image", "", "Kubernetes container image")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sNamespace, "k8s-namespace", "", "Kubernetes namespace")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sNamespace, "no-k8s-namespace", false, "Unset Kubernetes namespace (use default)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sApiServer, "k8s-api-server", "", "Kubernetes API server URL")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sApiServer, "no-k8s-api-server", false, "Unset Kubernetes API server (use in-cluster)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sToken, "k8s-token", "", "Kubernetes bearer token")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sToken, "no-k8s-token", false, "Unset Kubernetes token (use in-cluster)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sServiceAcct, "k8s-service-account", "", "Kubernetes service account name")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sServiceAcct, "no-k8s-service-account", false, "Unset Kubernetes service account")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateK8sInsecure, "k8s-insecure", false, "Skip TLS verification for Kubernetes API")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sInsecure, "no-k8s-insecure", false, "Unset insecure (verify TLS)")
+	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sImagePullPolicy, "k8s-image-pull-policy", "", "Kubernetes image pull policy (Always, Never, IfNotPresent)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sImagePullPolicy, "no-k8s-image-pull-policy", false, "Unset image pull policy (use Kubernetes default)")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateServerSecure, "server-secure", false, "Workers connect to server via HTTPS")
+	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateServerInsecure, "server-insecure", false, "Workers connect to server via HTTP")
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoAdapter, "no-adapter", false, "Unset adapter (use worker default)")
 	poolsUpdateCmd.Flags().IntVar(&poolsUpdateConcurrency, "concurrency", 0, "Max concurrent executions per worker")
@@ -547,13 +610,32 @@ func init() {
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoEnv, "no-env", false, "Clear all custom environment variables")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-secure", "server-insecure")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("adapter", "no-adapter")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("concurrency", "no-concurrency")
 	poolsUpdateCmd.MarkFlagsMutuallyExclusive("env", "no-env")
-	// Process and Docker flags are mutually exclusive
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-dir")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-dir")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-dir")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-namespace", "no-k8s-namespace")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-api-server", "no-k8s-api-server")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-token", "no-k8s-token")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-service-account", "no-k8s-service-account")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-insecure", "no-k8s-insecure")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-image-pull-policy", "no-k8s-image-pull-policy")
+	// Launcher type flags are mutually exclusive
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-dir", "k8s-image")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-dir", "k8s-image")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-dir", "k8s-image")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-namespace")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-api-server")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-token")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-service-account")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-namespace")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-api-server")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-token")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-service-account")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-insecure")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-insecure")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-image-pull-policy")
+	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-image-pull-policy")
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -606,6 +688,46 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 			launcher["dockerHost"] = poolsUpdateDockerHost
 		} else if poolsUpdateNoDockerHost {
 			delete(launcher, "dockerHost")
+		}
+		applyCommonLauncherFlags(launcher)
+		pool["launcher"] = launcher
+	} else if hasK8sFlags() {
+		launcher, ok := pool["launcher"].(map[string]any)
+		if !ok || getString(launcher, "type") != "kubernetes" {
+			launcher = map[string]any{"type": "kubernetes"}
+		}
+		if poolsUpdateK8sImage != "" {
+			launcher["image"] = poolsUpdateK8sImage
+		}
+		if poolsUpdateK8sNamespace != "" {
+			launcher["namespace"] = poolsUpdateK8sNamespace
+		} else if poolsUpdateNoK8sNamespace {
+			delete(launcher, "namespace")
+		}
+		if poolsUpdateK8sApiServer != "" {
+			launcher["apiServer"] = poolsUpdateK8sApiServer
+		} else if poolsUpdateNoK8sApiServer {
+			delete(launcher, "apiServer")
+		}
+		if poolsUpdateK8sToken != "" {
+			launcher["token"] = poolsUpdateK8sToken
+		} else if poolsUpdateNoK8sToken {
+			delete(launcher, "token")
+		}
+		if poolsUpdateK8sServiceAcct != "" {
+			launcher["serviceAccount"] = poolsUpdateK8sServiceAcct
+		} else if poolsUpdateNoK8sServiceAcct {
+			delete(launcher, "serviceAccount")
+		}
+		if poolsUpdateK8sInsecure {
+			launcher["insecure"] = true
+		} else if poolsUpdateNoK8sInsecure {
+			delete(launcher, "insecure")
+		}
+		if poolsUpdateK8sImagePullPolicy != "" {
+			launcher["imagePullPolicy"] = poolsUpdateK8sImagePullPolicy
+		} else if poolsUpdateNoK8sImagePullPolicy {
+			delete(launcher, "imagePullPolicy")
 		}
 		applyCommonLauncherFlags(launcher)
 		pool["launcher"] = launcher
@@ -682,6 +804,27 @@ func encodeProvides(provides any) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func printServerHost(launcher map[string]any) {
+	serverHost := getString(launcher, "serverHost")
+	serverSecure, hasSecure := launcher["serverSecure"].(bool)
+	if serverHost == "" && !hasSecure {
+		return
+	}
+	host := serverHost
+	if host == "" {
+		host = "(default)"
+	}
+	if hasSecure {
+		protocol := "http"
+		if serverSecure {
+			protocol = "https"
+		}
+		fmt.Printf("Server host: %s (%s)\n", host, protocol)
+	} else {
+		fmt.Printf("Server host: %s\n", host)
+	}
 }
 
 func parseProvides(args []string) map[string][]string {

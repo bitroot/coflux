@@ -101,10 +101,19 @@ defmodule Coflux.Topics.Pool do
 
         :process ->
           %{type: "process", directory: launcher.directory}
+
+        :kubernetes ->
+          %{type: "kubernetes", image: launcher.image}
+          |> maybe_put(:namespace, Map.get(launcher, :namespace))
+          |> maybe_put(:apiServer, Map.get(launcher, :api_server))
+          |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
+          |> maybe_put(:insecure, Map.get(launcher, :insecure))
+          |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
       end
 
     base
     |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+    |> maybe_put(:serverSecure, Map.get(launcher, :server_secure))
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
     |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
     |> maybe_put(:env, Map.get(launcher, :env))

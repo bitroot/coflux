@@ -674,6 +674,7 @@ defmodule Coflux.Orchestration.Workspaces do
     case type do
       :process -> 0
       :docker -> 1
+      :kubernetes -> 2
     end
   end
 
@@ -681,6 +682,7 @@ defmodule Coflux.Orchestration.Workspaces do
     case value do
       0 -> :process
       1 -> :docker
+      2 -> :kubernetes
     end
   end
 

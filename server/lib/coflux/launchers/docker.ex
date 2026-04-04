@@ -30,10 +30,14 @@ defmodule Coflux.DockerLauncher do
       :ok ->
         case remove_container(docker_conn, container_id) do
           :ok -> :ok
+          {:error, _} -> :ok
         end
 
       {:error, :no_such_container} ->
         :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -52,6 +56,9 @@ defmodule Coflux.DockerLauncher do
 
       {:error, :no_such_container} ->
         {:ok, false, nil, nil}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -93,39 +100,60 @@ defmodule Coflux.DockerLauncher do
           {"http://#{host}:#{port}/#{@docker_api_version}#{path}", []}
       end
 
-    Req.request!(Keyword.merge(conn_opts, [{:method, method}, {:url, url} | opts]))
+    req_opts =
+      Keyword.merge(conn_opts, [{:method, method}, {:url, url}, {:retry, false} | opts])
+
+    case Req.request(req_opts) do
+      {:ok, response} ->
+        {:ok, response}
+
+      {:error, exception} ->
+        {:error, "request_failed:#{Exception.message(exception)}"}
+    end
   end
 
   defp create_container(docker_conn, config) do
-    response = docker_request(docker_conn, :post, "/containers/create", json: config)
+    case docker_request(docker_conn, :post, "/containers/create", json: config) do
+      {:ok, response} ->
+        case response.status do
+          201 -> {:ok, response.body}
+          400 -> {:error, :bad_parameter}
+          404 -> {:error, :no_such_image}
+          409 -> {:error, :conflict}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      201 -> {:ok, response.body}
-      400 -> {:error, :bad_parameter}
-      404 -> {:error, :no_such_image}
-      409 -> {:error, :conflict}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 
   defp start_container(docker_conn, container_id) do
-    response = docker_request(docker_conn, :post, "/containers/#{container_id}/start")
+    case docker_request(docker_conn, :post, "/containers/#{container_id}/start") do
+      {:ok, response} ->
+        case response.status do
+          204 -> :ok
+          304 -> {:error, :container_already_started}
+          404 -> {:error, :no_such_container}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      204 -> :ok
-      304 -> {:error, :container_already_started}
-      404 -> {:error, :no_such_container}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 
   defp inspect_container(docker_conn, container_id) do
-    response = docker_request(docker_conn, :get, "/containers/#{container_id}/json")
+    case docker_request(docker_conn, :get, "/containers/#{container_id}/json") do
+      {:ok, response} ->
+        case response.status do
+          200 -> {:ok, response.body}
+          404 -> {:error, :no_such_container}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      200 -> {:ok, response.body}
-      404 -> {:error, :no_such_container}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -137,15 +165,18 @@ defmodule Coflux.DockerLauncher do
   end
 
   defp container_logs(docker_conn, container_id, tail) do
-    response =
-      docker_request(docker_conn, :get, "/containers/#{container_id}/logs",
-        params: [stdout: true, stderr: true, tail: tail]
-      )
+    case docker_request(docker_conn, :get, "/containers/#{container_id}/logs",
+           params: [stdout: true, stderr: true, tail: tail]
+         ) do
+      {:ok, response} ->
+        case response.status do
+          200 -> {:ok, demux_docker_logs(response.body)}
+          404 -> {:error, :no_such_container}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      200 -> {:ok, demux_docker_logs(response.body)}
-      404 -> {:error, :no_such_container}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -164,34 +195,36 @@ defmodule Coflux.DockerLauncher do
 
   defp demux_docker_logs(_, acc), do: IO.iodata_to_binary(acc)
 
-  defp truncate_bytes(string, max_bytes) when byte_size(string) <= max_bytes, do: string
-
-  defp truncate_bytes(string, max_bytes) do
-    string
-    |> binary_part(byte_size(string) - max_bytes, max_bytes)
-    |> String.replace(~r/^[^\n]*\n/, "")
-  end
+  defdelegate truncate_bytes(string, max_bytes), to: Coflux.Launchers.Utils
 
   defp stop_container(docker_conn, container_id) do
-    response = docker_request(docker_conn, :post, "/containers/#{container_id}/stop")
+    case docker_request(docker_conn, :post, "/containers/#{container_id}/stop") do
+      {:ok, response} ->
+        case response.status do
+          204 -> :ok
+          304 -> :ok
+          404 -> {:error, :no_such_container}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      204 -> :ok
-      304 -> :ok
-      404 -> {:error, :no_such_container}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 
   defp remove_container(docker_conn, container_id) do
-    response = docker_request(docker_conn, :delete, "/containers/#{container_id}")
+    case docker_request(docker_conn, :delete, "/containers/#{container_id}") do
+      {:ok, response} ->
+        case response.status do
+          204 -> :ok
+          400 -> {:error, :bad_parameter}
+          404 -> {:error, :no_such_container}
+          409 -> {:error, :conflict}
+          500 -> {:error, :server_error}
+        end
 
-    case response.status do
-      204 -> :ok
-      400 -> {:error, :bad_parameter}
-      404 -> {:error, :no_such_container}
-      409 -> {:error, :conflict}
-      500 -> {:error, :server_error}
+      {:error, _} = error ->
+        error
     end
   end
 end
