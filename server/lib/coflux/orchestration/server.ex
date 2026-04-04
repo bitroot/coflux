@@ -314,7 +314,9 @@ defmodule Coflux.Orchestration.Server do
     {:ok, active_run_workflows} = Runs.get_active_run_workflows(state.db)
 
     state =
-      Enum.reduce(active_run_workflows, state, fn {run_ext_id, module, target, _step_number, _attempt, execution_id}, state ->
+      Enum.reduce(active_run_workflows, state, fn {run_ext_id, module, target, _step_number,
+                                                   _attempt, execution_id},
+                                                  state ->
         track_run_execution(state, run_ext_id, execution_id, module, target)
       end)
 
@@ -1167,7 +1169,10 @@ defmodule Coflux.Orchestration.Server do
         state =
           if !memo_hit do
             execute_at = execute_after || created_at
-            {root_module, root_target} = get_run_workflow(state, run.external_id) || raise "run_workflows missing entry for run #{run.external_id}"
+
+            {root_module, root_target} =
+              get_run_workflow(state, run.external_id) ||
+                raise "run_workflows missing entry for run #{run.external_id}"
 
             state =
               state
@@ -1719,7 +1724,9 @@ defmodule Coflux.Orchestration.Server do
 
         # Build active_runs: {root_module, root_target} -> %{run_ext_id -> MapSet of execution_ext_ids}
         active_runs =
-          Enum.reduce(active_executions, %{}, fn {run_ext_id, root_module, root_target, step_number, attempt, _execution_id}, active_runs ->
+          Enum.reduce(active_executions, %{}, fn {run_ext_id, root_module, root_target,
+                                                  step_number, attempt, _execution_id},
+                                                 active_runs ->
             ext_id = execution_external_id(run_ext_id, step_number, attempt)
             key = {root_module, root_target}
 
@@ -1736,7 +1743,6 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:ok, manifests, active_runs, ref}, state}
     end
   end
-
 
   def handle_call({:subscribe_queue, workspace_external_id, pid}, _from, state) do
     case resolve_workspace_external_id(state, workspace_external_id) do
@@ -2238,7 +2244,8 @@ defmodule Coflux.Orchestration.Server do
          executions
          |> Enum.group_by(
            fn {execution, _} ->
-             get_run_workflow(state, execution.run_external_id) || raise "run_workflows missing entry for run #{execution.run_external_id}"
+             get_run_workflow(state, execution.run_external_id) ||
+               raise "run_workflows missing entry for run #{execution.run_external_id}"
            end,
            fn {execution, _} ->
              {execution.run_external_id,
@@ -3160,7 +3167,8 @@ defmodule Coflux.Orchestration.Server do
           )
           |> notify_listeners(
             {:modules, ws_ext_id},
-            {:scheduled, {module, target_name}, external_run_id, execution_external_id, execute_at}
+            {:scheduled, {module, target_name}, external_run_id, execution_external_id,
+             execute_at}
           )
           |> notify_listeners(
             {:queue, ws_ext_id},
@@ -3203,7 +3211,9 @@ defmodule Coflux.Orchestration.Server do
       {:ok, execution_id, attempt, created_at} ->
         {run_module, run_target} =
           case get_run_workflow(state, run.external_id) do
-            {_, _} = workflow -> workflow
+            {_, _} = workflow ->
+              workflow
+
             nil ->
               {:ok, workflow} = Runs.get_run_target(state.db, run.id)
               workflow
@@ -4104,7 +4114,8 @@ defmodule Coflux.Orchestration.Server do
 
   defp track_run_execution(state, run_ext_id, execution_id, root_module, root_target) do
     Map.update!(state, :run_workflows, fn rw ->
-      Map.update(rw, run_ext_id, {root_module, root_target, MapSet.new([execution_id])}, fn {m, t, ids} ->
+      Map.update(rw, run_ext_id, {root_module, root_target, MapSet.new([execution_id])}, fn {m, t,
+                                                                                             ids} ->
         {m, t, MapSet.put(ids, execution_id)}
       end)
     end)

@@ -117,7 +117,12 @@ defmodule Coflux.Topics.Modules do
     if get_in(topic.value, [root_module, :workflows]) |> is_map() &&
          Map.has_key?(topic.value[root_module][:workflows], root_target) do
       runs_map = topic.state.active_runs[key] || %{}
-      Topic.set(topic, [root_module, :workflows, root_target, :activeRuns], runs_map |> Map.keys() |> Enum.sort())
+
+      Topic.set(
+        topic,
+        [root_module, :workflows, root_target, :activeRuns],
+        runs_map |> Map.keys() |> Enum.sort()
+      )
     else
       topic
     end
