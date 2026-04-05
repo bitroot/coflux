@@ -231,3 +231,42 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
 
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx_b.result(resp["runId"])["value"]["data"] == "done"
+
+
+def test_run_level_memo_inherited_by_child_tasks(worker):
+    """Workflow with memo=True causes child tasks to be memoised automatically."""
+    targets = [
+        workflow("test", "main", memo=True),
+        task("test", "compute", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+
+        # First submit - task has no memo of its own, inherits from run
+        ref1 = ex0.conn.submit_task(
+            ex0.execution_id,
+            "test", "compute",
+            json_args(10),
+        )
+
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=99)
+
+        assert ex0.conn.resolve(ex0.execution_id, ref1)["value"] == 99
+
+        # Second submit with same args - should reuse (memo inherited from run)
+        ref2 = ex0.conn.submit_task(
+            ex0.execution_id,
+            "test", "compute",
+            json_args(10),
+        )
+
+        # Should resolve from memo hit (no second execute)
+        assert ex0.conn.resolve(ex0.execution_id, ref2)["value"] == 99
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(run_id)["value"]["data"] == "done"

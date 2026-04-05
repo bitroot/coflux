@@ -85,7 +85,7 @@ defmodule Coflux.Orchestration.Epoch do
       case query_one(
              source_db,
              """
-             SELECT id, external_id, parent_ref_id, idempotency_key, requires_tag_set_id, created_at, created_by
+             SELECT id, external_id, parent_ref_id, idempotency_key, requires_tag_set_id, memo, created_at, created_by
              FROM runs
              WHERE external_id = ?1
              """,
@@ -95,8 +95,8 @@ defmodule Coflux.Orchestration.Epoch do
           {:ok, %{}, visited}
 
         {:ok,
-         {old_run_id, ext_id, parent_ref_id, idempotency_key, requires_tag_set_id, created_at,
-          created_by}} ->
+         {old_run_id, ext_id, parent_ref_id, idempotency_key, requires_tag_set_id, memo,
+          created_at, created_by}} ->
           # Check if already exists in target
           case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
             {:ok, {_existing_id}} ->
@@ -116,6 +116,7 @@ defmodule Coflux.Orchestration.Epoch do
                   parent_ref_id: new_parent_ref_id,
                   idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                   requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
+                  memo: memo,
                   created_at: created_at,
                   created_by: ensure_principal(source_db, target_db, created_by)
                 })
@@ -1205,7 +1206,7 @@ defmodule Coflux.Orchestration.Epoch do
             """
             SELECT name, parameter_set_id, instruction_id, wait_for,
               cache_config_id, defer_params, delay, retry_limit,
-              retry_backoff_min, retry_backoff_max, recurrent, requires_tag_set_id
+              retry_backoff_min, retry_backoff_max, recurrent, requires_tag_set_id, memo
             FROM workflows
             WHERE manifest_id = ?1
             """,
@@ -1214,7 +1215,7 @@ defmodule Coflux.Orchestration.Epoch do
 
         Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay,
                                  retry_limit, retry_backoff_min, retry_backoff_max, recurrent,
-                                 rts_id} ->
+                                 rts_id, memo} ->
           {:ok, _} =
             insert_one(target_db, :workflows, %{
               manifest_id: new_id,
@@ -1229,7 +1230,8 @@ defmodule Coflux.Orchestration.Epoch do
               retry_backoff_min: retry_backoff_min,
               retry_backoff_max: retry_backoff_max,
               recurrent: recurrent,
-              requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id)
+              requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id),
+              memo: memo
             })
         end)
 

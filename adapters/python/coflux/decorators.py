@@ -54,6 +54,7 @@ def workflow(
     recurrent: bool = False,
     defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
+    memo: bool = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
 ) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
@@ -70,6 +71,7 @@ def workflow(
             recurrent=recurrent,
             defer=defer,
             delay=delay,
+            memo=memo,
             requires=requires,
             timeout=timeout,
         )

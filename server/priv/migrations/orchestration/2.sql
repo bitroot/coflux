@@ -115,3 +115,9 @@ ALTER TABLE sessions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets O
 
 -- Add requires_tag_set_id to runs (inherited from workflow definition)
 ALTER TABLE runs ADD COLUMN requires_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+
+-- Add memo flag to runs (inherited from workflow definition, applied to child tasks)
+ALTER TABLE runs ADD COLUMN memo INTEGER;
+
+-- Add memo flag to workflows (propagated to child tasks via run)
+ALTER TABLE workflows ADD COLUMN memo INTEGER;

@@ -1641,6 +1641,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"timeout":     timeout,
 			"requires":    requires,
 			"instruction": instruction,
+			"memo":        t.Memo,
 		}
 
 		manifests[t.Module][t.Name] = def

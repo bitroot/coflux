@@ -1146,6 +1146,14 @@ defmodule Coflux.Orchestration.Server do
     cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
     arguments = Enum.map(arguments, &normalize_value(&1))
 
+    # Inherit run-level memo if the step doesn't specify its own
+    opts =
+      if is_nil(Keyword.get(opts, :memo)) and run.memo do
+        Keyword.put(opts, :memo, true)
+      else
+        opts
+      end
+
     case Runs.schedule_step(
            state.db,
            run.id,

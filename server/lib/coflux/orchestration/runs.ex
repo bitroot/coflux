@@ -193,6 +193,7 @@ defmodule Coflux.Orchestration.Runs do
     created_by = Keyword.get(opts, :created_by)
     {requires, opts} = Keyword.pop(opts, :requires)
     requires = requires || %{}
+    memo = Keyword.get(opts, :memo)
     now = current_timestamp()
 
     # TODO: check that 'type' is :workflow?
@@ -212,7 +213,7 @@ defmodule Coflux.Orchestration.Runs do
         end
 
       {:ok, run_id, external_run_id} =
-        insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, now, created_by)
+        insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, memo, now, created_by)
 
       {:ok, schedule} =
         do_schedule_step(
@@ -719,7 +720,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.memo, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -736,7 +737,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.memo, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -1129,7 +1130,15 @@ defmodule Coflux.Orchestration.Runs do
     {:ok, rows1 ++ rows2}
   end
 
-  defp insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, created_at, created_by) do
+  defp insert_run(
+         db,
+         parent_ref_id,
+         idempotency_key,
+         requires_tag_set_id,
+         memo,
+         created_at,
+         created_by
+       ) do
     case generate_external_id(db, :runs, 2, "R") do
       {:ok, external_id} ->
         case insert_one(db, :runs, %{
@@ -1137,6 +1146,7 @@ defmodule Coflux.Orchestration.Runs do
                parent_ref_id: parent_ref_id,
                idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                requires_tag_set_id: requires_tag_set_id,
+               memo: if(memo, do: 1),
                created_at: created_at,
                created_by: created_by
              }) do

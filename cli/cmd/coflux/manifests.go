@@ -405,6 +405,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"recurrent":   t.Recurrent,
 			"requires":    requires,
 			"instruction": instruction,
+			"memo":        t.Memo,
 		}
 
 		manifests[t.Module][t.Name] = def

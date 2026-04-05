@@ -98,6 +98,9 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if requires, ok := workflow["requires"]; ok {
 		options["requires"] = requires
 	}
+	if memo, ok := workflow["memo"]; ok {
+		options["memo"] = memo
+	}
 	if timeout, ok := workflow["timeout"].(float64); ok && timeout > 0 {
 		options["timeout"] = int64(timeout)
 	}
