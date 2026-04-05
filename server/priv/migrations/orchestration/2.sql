@@ -108,3 +108,7 @@ CREATE TABLE pool_states (
 ) STRICT;
 
 CREATE INDEX idx_pool_states_ws_name ON pool_states(workspace_id, pool_name, created_at);
+
+-- Add accepts_tag_set_id to pool_definitions and sessions
+ALTER TABLE pool_definitions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+ALTER TABLE sessions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;

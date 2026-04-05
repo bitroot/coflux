@@ -54,6 +54,7 @@ defmodule Coflux.Topics.Sessions do
       poolName: session.pool_name,
       targets: session.targets,
       provides: session.provides,
+      accepts: session.accepts,
       workerState: session.worker_state
     }
   end

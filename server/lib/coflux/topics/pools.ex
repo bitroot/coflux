@@ -47,6 +47,7 @@ defmodule Coflux.Topics.Pools do
     %{
       modules: pool.modules,
       provides: pool.provides,
+      accepts: Map.get(pool, :accepts, %{}),
       launcher: pool.launcher && build_launcher(pool.launcher),
       state: to_string(Map.get(pool, :state, :active))
     }

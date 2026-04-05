@@ -39,6 +39,7 @@ var (
 	workerConcurrency int
 	workerSession     string
 	workerProvides    []string
+	workerAccepts     []string
 	workerAdapter     []string
 )
 
@@ -49,6 +50,7 @@ func init() {
 	workerCmd.Flags().IntVar(&workerConcurrency, "concurrency", 0, "Number of concurrent executors (default: CPU count + 4)")
 	workerCmd.Flags().StringVar(&workerSession, "session", "", "Session ID (for pool-launched workers)")
 	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu:A100,gpu:H100,region:eu)")
+	workerCmd.Flags().StringSliceVar(&workerAccepts, "accepts", nil, "Tags that executions must have to be scheduled on this worker (e.g., --accepts priority:high)")
 	workerCmd.Flags().StringSliceVar(&workerAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
 }
 
@@ -73,6 +75,11 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	// Append provides from flag to config
 	if len(workerProvides) > 0 {
 		cfg.Worker.Provides = append(cfg.Worker.Provides, workerProvides...)
+	}
+
+	// Append accepts from flag to config
+	if len(workerAccepts) > 0 {
+		cfg.Worker.Accepts = append(cfg.Worker.Accepts, workerAccepts...)
 	}
 
 	// Resolve token (may involve auth flow)

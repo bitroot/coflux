@@ -545,13 +545,15 @@ defmodule Coflux.Handlers.Api do
            req,
            %{workspace_id: "workspaceId"},
            %{
-             provides: {"provides", &parse_tag_set/1}
+             provides: {"provides", &parse_tag_set/1},
+             accepts: {"accepts", &parse_tag_set/1}
            }
          ) do
       {:ok, arguments, req} ->
         opts =
           [
-            provides: arguments[:provides]
+            provides: arguments[:provides],
+            accepts: arguments[:accepts]
           ]
           |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
@@ -1031,6 +1033,7 @@ defmodule Coflux.Handlers.Api do
           [
             {"modules", &parse_modules/1, :modules, []},
             {"provides", &parse_tag_set/1, :provides, %{}},
+            {"accepts", &parse_tag_set/1, :accepts, %{}},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
           {:ok, %{}},

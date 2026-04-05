@@ -483,7 +483,7 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp hash_pool_definition(db, launcher_id, provides_tag_set_id, modules) do
+  defp hash_pool_definition(db, launcher_id, provides_tag_set_id, accepts_tag_set_id, modules) do
     launcher_hash =
       if launcher_id do
         {:ok, {hash}} =
@@ -504,11 +504,22 @@ defmodule Coflux.Orchestration.Workspaces do
         <<0>>
       end
 
+    accepts_tag_set_hash =
+      if accepts_tag_set_id do
+        {:ok, {hash}} =
+          query_one!(db, "SELECT hash FROM tag_sets WHERE id = ?1", {accepts_tag_set_id})
+
+        hash
+      else
+        <<0>>
+      end
+
     data =
       Enum.intersperse(
         [
           launcher_hash,
           tag_set_hash,
+          accepts_tag_set_hash,
           Enum.join(Enum.sort(modules), "\n")
         ],
         0
@@ -520,6 +531,7 @@ defmodule Coflux.Orchestration.Workspaces do
   defp get_or_create_pool_definition(db, pool) do
     modules = Map.get(pool, :modules, [])
     provides = Map.get(pool, :provides, %{})
+    accepts = Map.get(pool, :accepts, %{})
     launcher = Map.get(pool, :launcher)
 
     launcher_id =
@@ -536,7 +548,14 @@ defmodule Coflux.Orchestration.Workspaces do
         end
       end
 
-    hash = hash_pool_definition(db, launcher_id, provides_tag_set_id, modules)
+    accepts_tag_set_id =
+      if accepts && Enum.any?(accepts) do
+        case TagSets.get_or_create_tag_set_id(db, accepts) do
+          {:ok, tag_set_id} -> tag_set_id
+        end
+      end
+
+    hash = hash_pool_definition(db, launcher_id, provides_tag_set_id, accepts_tag_set_id, modules)
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->
@@ -547,6 +566,7 @@ defmodule Coflux.Orchestration.Workspaces do
           insert_one(db, :pool_definitions, %{
             hash: {:blob, hash},
             provides_tag_set_id: provides_tag_set_id,
+            accepts_tag_set_id: accepts_tag_set_id,
             launcher_id: launcher_id
           })
 
@@ -614,13 +634,23 @@ defmodule Coflux.Orchestration.Workspaces do
   defp get_pool_definition(db, pool_definition_id) do
     case query_one(
            db,
-           "SELECT launcher_id, provides_tag_set_id FROM pool_definitions WHERE id = ?1",
+           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id FROM pool_definitions WHERE id = ?1",
            {pool_definition_id}
          ) do
-      {:ok, {launcher_id, provides_tag_set_id}} ->
+      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id}} ->
         provides =
           if provides_tag_set_id do
             case TagSets.get_tag_set(db, provides_tag_set_id) do
+              {:ok, tag_set} ->
+                tag_set
+            end
+          else
+            %{}
+          end
+
+        accepts =
+          if accepts_tag_set_id do
+            case TagSets.get_tag_set(db, accepts_tag_set_id) do
               {:ok, tag_set} ->
                 tag_set
             end
@@ -646,6 +676,7 @@ defmodule Coflux.Orchestration.Workspaces do
         {:ok,
          %{
            provides: provides,
+           accepts: accepts,
            modules: modules,
            launcher: launcher
          }}

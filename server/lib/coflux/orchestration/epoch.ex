@@ -668,20 +668,21 @@ defmodule Coflux.Orchestration.Epoch do
     {:ok, rows} =
       query(old_db, """
         SELECT s.id, s.external_id, s.workspace_id, s.worker_id, s.provides_tag_set_id,
-               s.activation_timeout, s.reconnection_timeout, s.secret_hash,
+               s.accepts_tag_set_id, s.activation_timeout, s.reconnection_timeout, s.secret_hash,
                s.created_at, s.created_by
         FROM sessions AS s
         LEFT JOIN session_expirations AS se ON se.session_id = s.id
         WHERE se.session_id IS NULL
       """)
 
-    Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, old_worker_id, old_tag_set_id,
-                               activation_timeout, reconnection_timeout, secret_hash, created_at,
-                               created_by},
+    Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, old_worker_id, old_provides_tag_set_id,
+                               old_accepts_tag_set_id, activation_timeout, reconnection_timeout,
+                               secret_hash, created_at, created_by},
                               acc ->
       new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
       new_worker_id = if old_worker_id, do: Map.fetch!(worker_ids, old_worker_id)
-      new_tag_set_id = ensure_tag_set(old_db, new_db, old_tag_set_id)
+      new_provides_tag_set_id = ensure_tag_set(old_db, new_db, old_provides_tag_set_id)
+      new_accepts_tag_set_id = ensure_tag_set(old_db, new_db, old_accepts_tag_set_id)
       new_created_by = ensure_principal(old_db, new_db, created_by)
 
       {:ok, new_id} =
@@ -689,7 +690,8 @@ defmodule Coflux.Orchestration.Epoch do
           external_id: ext_id,
           workspace_id: new_ws_id,
           worker_id: new_worker_id,
-          provides_tag_set_id: new_tag_set_id,
+          provides_tag_set_id: new_provides_tag_set_id,
+          accepts_tag_set_id: new_accepts_tag_set_id,
           activation_timeout: activation_timeout,
           reconnection_timeout: reconnection_timeout,
           secret_hash: if(secret_hash, do: {:blob, secret_hash}),
@@ -1253,10 +1255,10 @@ defmodule Coflux.Orchestration.Epoch do
   defp ensure_pool_definition(_source_db, _target_db, nil), do: nil
 
   defp ensure_pool_definition(source_db, target_db, old_id) do
-    {:ok, {hash, launcher_id, provides_tag_set_id}} =
+    {:ok, {hash, launcher_id, provides_tag_set_id, accepts_tag_set_id}} =
       query_one!(
         source_db,
-        "SELECT hash, launcher_id, provides_tag_set_id FROM pool_definitions WHERE id = ?1",
+        "SELECT hash, launcher_id, provides_tag_set_id, accepts_tag_set_id FROM pool_definitions WHERE id = ?1",
         {old_id}
       )
 
@@ -1273,7 +1275,8 @@ defmodule Coflux.Orchestration.Epoch do
           insert_one(target_db, :pool_definitions, %{
             hash: {:blob, hash},
             launcher_id: ensure_launcher(source_db, target_db, launcher_id),
-            provides_tag_set_id: ensure_tag_set(source_db, target_db, provides_tag_set_id)
+            provides_tag_set_id: ensure_tag_set(source_db, target_db, provides_tag_set_id),
+            accepts_tag_set_id: ensure_tag_set(source_db, target_db, accepts_tag_set_id)
           })
 
         # Copy pool_definition_modules

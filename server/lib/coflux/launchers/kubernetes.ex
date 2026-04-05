@@ -327,14 +327,14 @@ defmodule Coflux.KubernetesLauncher do
   end
 
   @terminal_waiting_reasons MapSet.new([
-    "ErrImageNeverPull",
-    "ImagePullBackOff",
-    "InvalidImageName",
-    "CreateContainerConfigError",
-    "PreCreateHookError",
-    "CreateContainerError",
-    "PostStartHookError"
-  ])
+                              "ErrImageNeverPull",
+                              "ImagePullBackOff",
+                              "InvalidImageName",
+                              "CreateContainerConfigError",
+                              "PreCreateHookError",
+                              "CreateContainerError",
+                              "PostStartHookError"
+                            ])
 
   defp check_pod_error(conn, namespace, job_name) do
     path =
@@ -404,5 +404,4 @@ defmodule Coflux.KubernetesLauncher do
         nil
     end
   end
-
 end

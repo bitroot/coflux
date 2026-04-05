@@ -158,8 +158,9 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		// Create new session
 		w.logger.Debug("creating session", "workspace", w.cfg.Workspace)
 		provides := config.ParseProvides(w.cfg.Worker.Provides)
+		accepts := config.ParseProvides(w.cfg.Worker.Accepts)
 		var err error
-		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides)
+		sessionID, err = w.client.CreateSession(ctx, w.workspaceID, provides, accepts)
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}

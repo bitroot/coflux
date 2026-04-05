@@ -54,7 +54,7 @@ defmodule Coflux.Orchestration.Server do
               # ref -> {pid, session_id}
               connections: %{},
 
-              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
+              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
               sessions: %{},
 
               # external_id -> session_id
@@ -207,11 +207,21 @@ defmodule Coflux.Orchestration.Server do
         active_sessions,
         state,
         fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
-            activation_timeout, reconnection_timeout, secret_hash, created_at, activated_at},
+            accepts_tag_set_id, activation_timeout, reconnection_timeout, secret_hash, created_at,
+            activated_at},
            state ->
           provides =
             if provides_tag_set_id do
               case TagSets.get_tag_set(state.db, provides_tag_set_id) do
+                {:ok, tag_set} -> tag_set
+              end
+            else
+              %{}
+            end
+
+          accepts =
+            if accepts_tag_set_id do
+              case TagSets.get_tag_set(state.db, accepts_tag_set_id) do
                 {:ok, tag_set} -> tag_set
               end
             else
@@ -232,6 +242,7 @@ defmodule Coflux.Orchestration.Server do
             concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
+            accepts: accepts,
             worker_id: worker_id,
             last_idle_at: activated_at || created_at,
             activated_at: activated_at,
@@ -891,6 +902,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:create_session, workspace_external_id, access, opts}, _from, state) do
     provides = Keyword.get(opts, :provides, %{})
+    accepts = Keyword.get(opts, :accepts, %{})
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
     reconnection_timeout =
@@ -900,6 +912,7 @@ defmodule Coflux.Orchestration.Server do
            require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
+        accepts: accepts,
         activation_timeout: activation_timeout,
         reconnection_timeout: reconnection_timeout,
         created_by: access[:principal_id]
@@ -918,6 +931,7 @@ defmodule Coflux.Orchestration.Server do
             concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
+            accepts: accepts,
             worker_id: nil,
             last_idle_at: now,
             activated_at: nil,
@@ -2417,8 +2431,11 @@ defmodule Coflux.Orchestration.Server do
                 reconnection_timeout =
                   Map.get(pool, :reconnection_timeout, @default_reconnection_timeout_ms)
 
+                pool_accepts = Map.get(pool, :accepts, %{})
+
                 session_opts = [
                   provides: pool.provides,
+                  accepts: pool_accepts,
                   activation_timeout: activation_timeout,
                   reconnection_timeout: reconnection_timeout
                 ]
@@ -2437,6 +2454,7 @@ defmodule Coflux.Orchestration.Server do
                   concurrency: 0,
                   workspace_id: workspace_id,
                   provides: pool.provides,
+                  accepts: pool_accepts,
                   worker_id: worker_id,
                   last_idle_at: session_now,
                   activated_at: nil,
@@ -4782,6 +4800,19 @@ defmodule Coflux.Orchestration.Server do
     end)
   end
 
+  defp merge_tag_sets(a, b) do
+    Map.merge(a || %{}, b || %{}, fn _key, v1, v2 -> Enum.uniq(v1 ++ v2) end)
+  end
+
+  defp satisfies_accepts?(accepts, requires) do
+    # Worker's accepts tags must all be present in the task's requires tags
+    Enum.all?(accepts, fn {key, accepts_values} ->
+      (requires || %{})
+      |> Map.get(key, [])
+      |> Enum.any?(&(&1 in accepts_values))
+    end)
+  end
+
   # Build the session data map sent to the Sessions topic.
   defp build_session_data(state, session) do
     worker = session.worker_id && Map.get(state.workers, session.worker_id)
@@ -4799,6 +4830,7 @@ defmodule Coflux.Orchestration.Server do
       pool_name: if(worker, do: worker.pool_name),
       targets: targets,
       provides: session.provides,
+      accepts: session.accepts,
       worker_state: if(worker, do: worker.state)
     }
   end
@@ -5143,7 +5175,8 @@ defmodule Coflux.Orchestration.Server do
             !session_at_capacity?(session) &&
             session_active?(session, state) &&
             !session_pool_disabled?(session, state) &&
-            has_requirements?(session.provides, requires)
+            has_requirements?(merge_tag_sets(session.provides, session.accepts), requires) &&
+            satisfies_accepts?(session.accepts, requires)
         end)
 
       if Enum.any?(session_ids) do
@@ -5160,7 +5193,8 @@ defmodule Coflux.Orchestration.Server do
       |> Map.filter(fn {_, pool} ->
         Map.get(pool, :state, :active) != :disabled &&
           pool.launcher && execution.module in pool.modules &&
-          has_requirements?(pool.provides, requires)
+          has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
+          satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
       end)
 
     if Enum.any?(pools) do

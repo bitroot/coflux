@@ -131,6 +131,7 @@ defmodule Coflux.Topics.Pool do
       %{
         modules: pool.modules,
         provides: pool.provides,
+        accepts: Map.get(pool, :accepts, %{}),
         # TODO: include launcher ID?
         launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
         state: to_string(Map.get(pool, :state, :active))

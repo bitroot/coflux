@@ -36,12 +36,15 @@ func NewClient(host string, secure bool, token string, project string) *Client {
 }
 
 // CreateSession creates a new worker session
-func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string) (string, error) {
+func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string, accepts map[string][]string) (string, error) {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
 	if provides != nil {
 		body["provides"] = provides
+	}
+	if accepts != nil {
+		body["accepts"] = accepts
 	}
 
 	var result struct {

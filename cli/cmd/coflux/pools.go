@@ -78,10 +78,11 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 			modules = strings.Join(mods, ",")
 		}
 		provides := encodeProvides(pool["provides"])
-		rows = append(rows, []string{name, launcher, modules, provides})
+		accepts := encodeProvides(pool["accepts"])
+		rows = append(rows, []string{name, launcher, modules, provides, accepts})
 	}
 
-	printTable([]string{"Name", "Launcher", "Modules", "Provides"}, rows)
+	printTable([]string{"Name", "Launcher", "Modules", "Provides", "Accepts"}, rows)
 	return nil
 }
 
@@ -134,6 +135,11 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 	// Provides
 	if provides := encodeProvides(pool["provides"]); provides != "" {
 		fmt.Printf("Provides: %s\n", provides)
+	}
+
+	// Accepts
+	if accepts := encodeProvides(pool["accepts"]); accepts != "" {
+		fmt.Printf("Accepts: %s\n", accepts)
 	}
 
 	// Launcher
@@ -544,6 +550,7 @@ func getStringSlice(m map[string]any, key string) []string {
 var (
 	poolsUpdateModules              []string
 	poolsUpdateProvides             []string
+	poolsUpdateAccepts              []string
 	poolsUpdateDockerImage          string
 	poolsUpdateDockerHost           string
 	poolsUpdateNoDockerHost         bool
@@ -583,6 +590,7 @@ var poolsUpdateCmd = &cobra.Command{
 func init() {
 	poolsUpdateCmd.Flags().StringSliceVarP(&poolsUpdateModules, "module", "m", nil, "Modules to be hosted")
 	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateProvides, "provides", nil, "Features that workers provide")
+	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAccepts, "accepts", nil, "Tags that executions must have to be scheduled on this pool")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
 	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
 	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
@@ -670,6 +678,9 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	}
 	if poolsUpdateProvides != nil {
 		pool["provides"] = parseProvides(poolsUpdateProvides)
+	}
+	if poolsUpdateAccepts != nil {
+		pool["accepts"] = parseProvides(poolsUpdateAccepts)
 	}
 	if poolsUpdateProcessDir != "" {
 		launcher := map[string]any{

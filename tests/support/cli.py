@@ -161,7 +161,7 @@ def logs_get(
 
 
 def pools_update(
-    name, modules=None, provides=None, process_dir=None,
+    name, modules=None, provides=None, accepts=None, process_dir=None,
     docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
 ):
     args = ["pools", "update", name]
@@ -171,6 +171,9 @@ def pools_update(
     if provides:
         for key, values in provides.items():
             args.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
+    if accepts:
+        for key, values in accepts.items():
+            args.extend(["--accepts", ",".join(f"{key}:{v}" for v in values)])
     if process_dir:
         args.extend(["--process-dir", process_dir])
     if docker_image:
@@ -209,6 +212,7 @@ def worker(
     adapter,
     concurrency=1,
     provides=None,
+    accepts=None,
     host=None,
     workspace="default",
     env_vars=None,
@@ -234,6 +238,9 @@ def worker(
     if provides:
         for key, values in provides.items():
             cmd.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
+    if accepts:
+        for key, values in accepts.items():
+            cmd.extend(["--accepts", ",".join(f"{key}:{v}" for v in values)])
     cmd.extend(modules)
     return subprocess.Popen(
         cmd, env=_build_env(env_vars), stdout=subprocess.PIPE, stderr=subprocess.PIPE

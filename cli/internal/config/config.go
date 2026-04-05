@@ -42,6 +42,7 @@ type WorkerConfig struct {
 	Adapter     []string `mapstructure:"adapter"`
 	Concurrency int      `mapstructure:"concurrency"`
 	Provides    []string `mapstructure:"provides"`
+	Accepts     []string `mapstructure:"accepts"`
 }
 
 // ParseProvides converts a flat provides list (e.g., ["gpu:A100", "gpu:H100", "region:eu"])
