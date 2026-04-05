@@ -125,6 +125,20 @@ defmodule Coflux.Orchestration.Sessions do
     )
   end
 
+  def get_assignment_counts(db) do
+    query(
+      db,
+      """
+      SELECT a.session_id, COUNT(*) AS total
+      FROM assignments AS a
+      WHERE NOT EXISTS (
+        SELECT 1 FROM session_expirations se WHERE se.session_id = a.session_id
+      )
+      GROUP BY a.session_id
+      """
+    )
+  end
+
   defp current_timestamp() do
     System.os_time(:millisecond)
   end

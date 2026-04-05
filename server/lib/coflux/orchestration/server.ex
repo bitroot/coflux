@@ -202,6 +202,12 @@ defmodule Coflux.Orchestration.Server do
     # Load active sessions from DB
     {:ok, active_sessions} = Sessions.load_active_sessions(state.db)
 
+    # Load total assignment counts per session for lifetime execution tracking
+    {:ok, assignment_counts} = Sessions.get_assignment_counts(state.db)
+
+    assignment_counts_by_session =
+      Map.new(assignment_counts, fn {session_id, total} -> {session_id, total} end)
+
     state =
       Enum.reduce(
         active_sessions,
@@ -247,7 +253,8 @@ defmodule Coflux.Orchestration.Server do
             last_idle_at: activated_at || created_at,
             activated_at: activated_at,
             activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout
+            reconnection_timeout: reconnection_timeout,
+            total_executions: Map.get(assignment_counts_by_session, session_id, 0)
           }
 
           state =
@@ -936,7 +943,8 @@ defmodule Coflux.Orchestration.Server do
             last_idle_at: now,
             activated_at: nil,
             activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout
+            reconnection_timeout: reconnection_timeout,
+            total_executions: 0
           }
 
           state =
@@ -1017,15 +1025,11 @@ defmodule Coflux.Orchestration.Server do
 
       state =
         case session.worker_id && Map.fetch(state.workers, session.worker_id) do
-          {:ok, worker} ->
-            state
-            |> put_in(
+          {:ok, _worker} ->
+            put_in(
+              state,
               [Access.key(:workers), session.worker_id, Access.key(:session_id)],
               session_id
-            )
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-              {:worker_connected, worker.external_id, true}
             )
 
           _ ->
@@ -1519,7 +1523,7 @@ defmodule Coflux.Orchestration.Server do
           state
           |> notify_listeners(
             {:sessions, workspace_external_id(state, session.workspace_id)},
-            {:executions, session.external_id,
+            {:executing, session.external_id,
              session.starting |> MapSet.union(session.executing) |> Enum.count()}
           )
           |> flush_notifications()
@@ -1578,12 +1582,12 @@ defmodule Coflux.Orchestration.Server do
               end)
 
             session = Map.fetch!(state.sessions, session_id)
-            executions = session.starting |> MapSet.union(session.executing) |> Enum.count()
+            executing = session.starting |> MapSet.union(session.executing) |> Enum.count()
 
             notify_listeners(
               state,
               {:sessions, workspace_external_id(state, session.workspace_id)},
-              {:executions, session.external_id, executions}
+              {:executing, session.external_id, executing}
             )
 
           :error ->
@@ -1889,18 +1893,14 @@ defmodule Coflux.Orchestration.Server do
           Map.new(
             pool_workers,
             fn {worker_id, worker_external_id, starting_at, started_at, start_error, stopping_at,
-                stopped_at, stop_error, deactivated_at, error, logs} ->
+                stopped_at, stop_error, deactivated_at, error, logs, total_executions} ->
               worker = Map.get(state.workers, worker_id)
 
-              connected =
-                if worker do
-                  if worker.session_id do
-                    case Map.fetch(state.sessions, worker.session_id) do
-                      {:ok, session} -> !is_nil(session.connection)
-                      :error -> false
-                    end
-                  else
-                    false
+              session_external_id =
+                if worker && worker.session_id do
+                  case Map.fetch(state.sessions, worker.session_id) do
+                    {:ok, session} -> session.external_id
+                    :error -> nil
                   end
                 end
 
@@ -1917,7 +1917,8 @@ defmodule Coflux.Orchestration.Server do
                  error: error,
                  logs: logs,
                  state: if(worker, do: worker.state),
-                 connected: connected
+                 session_external_id: session_external_id,
+                 total_executions: total_executions
                }}
             end
           )
@@ -2252,12 +2253,43 @@ defmodule Coflux.Orchestration.Server do
                           [Access.key(:sessions), session_id, :starting],
                           &MapSet.put(&1, execution_external_id)
                         )
+                        |> update_in(
+                          [Access.key(:sessions), session_id, :total_executions],
+                          &(&1 + 1)
+                        )
                         |> send_session(
                           session_id,
                           {:execute, execution_external_id, execution.module, execution.target,
                            enriched_arguments, execution.run_external_id, workspace_external_id,
                            execution.timeout}
                         )
+
+                      # Notify sessions topic of updated total
+                      session = Map.fetch!(state.sessions, session_id)
+
+                      state =
+                        notify_listeners(
+                          state,
+                          {:sessions, workspace_external_id},
+                          {:executions, session.external_id, session.total_executions}
+                        )
+
+                      state =
+                        if session.worker_id do
+                          worker = Map.get(state.workers, session.worker_id)
+
+                          if worker do
+                            notify_listeners(
+                              state,
+                              {:pool, workspace_external_id, worker.pool_name},
+                              {:worker_executions, worker.external_id, session.total_executions}
+                            )
+                          else
+                            state
+                          end
+                        else
+                          state
+                        end
 
                       {state, [{execution, assigned_at} | assigned], unassigned}
                   end
@@ -2477,7 +2509,8 @@ defmodule Coflux.Orchestration.Server do
                   last_idle_at: session_now,
                   activated_at: nil,
                   activation_timeout: activation_timeout,
-                  reconnection_timeout: reconnection_timeout
+                  reconnection_timeout: reconnection_timeout,
+                  total_executions: 0
                 }
 
                 state
@@ -2537,7 +2570,7 @@ defmodule Coflux.Orchestration.Server do
                 |> put_in([Access.key(:worker_external_ids), worker_external_id], worker_id)
                 |> notify_listeners(
                   {:pool, workspace_external_id(state, workspace_id), pool_name},
-                  {:worker, worker_id, worker_external_id, created_at}
+                  {:worker, worker_id, worker_external_id, created_at, external_id}
                 )
             end
           end)
@@ -2859,19 +2892,6 @@ defmodule Coflux.Orchestration.Server do
                   {:connected, session.external_id, false}
                 )
 
-              state =
-                if session.worker_id do
-                  worker = Map.fetch!(state.workers, session.worker_id)
-
-                  notify_listeners(
-                    state,
-                    {:pool, workspace_external_id(state, session.workspace_id), worker.pool_name},
-                    {:worker_connected, worker.external_id, false}
-                  )
-                else
-                  state
-                end
-
               state
 
             :error ->
@@ -3159,14 +3179,9 @@ defmodule Coflux.Orchestration.Server do
     state =
       if session.worker_id do
         case Map.fetch(state.workers, session.worker_id) do
-          {:ok, worker} ->
+          {:ok, _worker} ->
             # TODO: check that worker workspace matches session workspace?
-            state
-            |> put_in([Access.key(:workers), session.worker_id, :session_id], nil)
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-              {:worker_connected, worker.external_id, false}
-            )
+            put_in(state, [Access.key(:workers), session.worker_id, :session_id], nil)
 
           :error ->
             state
@@ -4884,13 +4899,14 @@ defmodule Coflux.Orchestration.Server do
 
     %{
       connected: !is_nil(session.connection),
-      executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
+      executing: session.starting |> MapSet.union(session.executing) |> Enum.count(),
       concurrency: session.concurrency,
       pool_name: if(worker, do: worker.pool_name),
       targets: targets,
       provides: session.provides,
       accepts: session.accepts,
-      worker_state: if(worker, do: worker.state)
+      worker_state: if(worker, do: worker.state),
+      executions: session.total_executions
     }
   end
 

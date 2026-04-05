@@ -47,7 +47,10 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:pool, :state], to_string(state))
   end
 
-  defp process_notification(topic, {:worker, _worker_id, worker_external_id, starting_at}) do
+  defp process_notification(
+         topic,
+         {:worker, _worker_id, worker_external_id, starting_at, session_external_id}
+       ) do
     Topic.set(topic, [:workers, worker_external_id], %{
       startingAt: starting_at,
       startedAt: nil,
@@ -57,7 +60,8 @@ defmodule Coflux.Topics.Pool do
       deactivatedAt: nil,
       logs: nil,
       state: :active,
-      connected: nil
+      sessionId: session_external_id,
+      executions: 0
     })
   end
 
@@ -92,8 +96,8 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:workers, worker_external_id, :state], state)
   end
 
-  defp process_notification(topic, {:worker_connected, worker_external_id, connected}) do
-    Topic.set(topic, [:workers, worker_external_id, :connected], connected)
+  defp process_notification(topic, {:worker_executions, worker_external_id, total}) do
+    Topic.set(topic, [:workers, worker_external_id, :executions], total)
   end
 
   defp build_launcher(launcher) do
@@ -151,7 +155,8 @@ defmodule Coflux.Topics.Pool do
       error: worker.error,
       logs: worker.logs,
       state: worker.state,
-      connected: worker.connected
+      sessionId: worker.session_external_id,
+      executions: worker.total_executions
     }
   end
 end

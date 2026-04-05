@@ -42,6 +42,10 @@ defmodule Coflux.Topics.Sessions do
     Topic.set(topic, [session_external_id, :connected], connected)
   end
 
+  defp process_notification(topic, {:executing, session_external_id, executing}) do
+    Topic.set(topic, [session_external_id, :executing], executing)
+  end
+
   defp process_notification(topic, {:executions, session_external_id, executions}) do
     Topic.set(topic, [session_external_id, :executions], executions)
   end
@@ -49,13 +53,14 @@ defmodule Coflux.Topics.Sessions do
   defp build_session(session) do
     %{
       connected: session.connected,
-      executions: session.executions,
+      executing: session.executing,
       concurrency: session.concurrency,
       poolName: session.pool_name,
       targets: session.targets,
       provides: session.provides,
       accepts: session.accepts,
-      workerState: session.worker_state
+      workerState: session.worker_state,
+      executions: session.executions
     }
   end
 end

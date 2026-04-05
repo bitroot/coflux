@@ -170,7 +170,10 @@ defmodule Coflux.Orchestration.Workers do
       db,
       """
       SELECT w.id, w.external_id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
-             d.created_at, d.error, wl.content
+             d.created_at, d.error, wl.content,
+             (SELECT COUNT(*) FROM assignments AS a
+              INNER JOIN sessions AS ses ON ses.id = a.session_id
+              WHERE ses.worker_id = w.id) AS total_executions
       FROM workers AS w
       INNER JOIN pools AS p ON p.id = w.pool_id
       LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
