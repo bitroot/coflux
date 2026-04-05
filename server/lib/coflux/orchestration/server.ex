@@ -662,6 +662,66 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:disable_pool, workspace_external_id, pool_name, access}, _from, state) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      :ok = Workspaces.disable_pool(state.db, workspace_id, pool_name, access[:principal_id])
+
+      state =
+        state
+        |> put_in(
+          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          :disabled
+        )
+        |> notify_listeners(
+          {:pool, workspace_external_id, pool_name},
+          {:state, :disabled}
+        )
+        |> notify_listeners(
+          {:pools, workspace_external_id},
+          {:pool_state, pool_name, :disabled}
+        )
+        |> flush_notifications()
+
+      send(self(), :tick)
+
+      {:reply, :ok, state}
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call({:enable_pool, workspace_external_id, pool_name, access}, _from, state) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      :ok = Workspaces.enable_pool(state.db, workspace_id, pool_name, access[:principal_id])
+
+      state =
+        state
+        |> put_in(
+          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          :active
+        )
+        |> notify_listeners(
+          {:pool, workspace_external_id, pool_name},
+          {:state, :active}
+        )
+        |> notify_listeners(
+          {:pools, workspace_external_id},
+          {:pool_state, pool_name, :active}
+        )
+        |> flush_notifications()
+
+      send(self(), :tick)
+
+      {:reply, :ok, state}
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
   def handle_call({:stop_worker, workspace_external_id, worker_external_id, access}, _from, state) do
     with {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access),
@@ -4702,6 +4762,17 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp session_pool_disabled?(session, state) do
+    if session.worker_id do
+      worker = Map.fetch!(state.workers, session.worker_id)
+      workspace_pools = Map.get(state.pools, session.workspace_id, %{})
+      pool = Map.get(workspace_pools, worker.pool_name)
+      pool != nil && Map.get(pool, :state, :active) == :disabled
+    else
+      false
+    end
+  end
+
   defp has_requirements?(provides, requires) do
     # TODO: case insensitive matching?
     Enum.all?(requires, fn {key, requires_values} ->
@@ -5071,6 +5142,7 @@ defmodule Coflux.Orchestration.Server do
           session.workspace_id == execution.workspace_id && session.connection &&
             !session_at_capacity?(session) &&
             session_active?(session, state) &&
+            !session_pool_disabled?(session, state) &&
             has_requirements?(session.provides, requires)
         end)
 
@@ -5086,7 +5158,8 @@ defmodule Coflux.Orchestration.Server do
       state.pools
       |> Map.get(execution.workspace_id, %{})
       |> Map.filter(fn {_, pool} ->
-        pool.launcher && execution.module in pool.modules &&
+        Map.get(pool, :state, :active) != :disabled &&
+          pool.launcher && execution.module in pool.modules &&
           has_requirements?(pool.provides, requires)
       end)
 

@@ -267,6 +267,50 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "POST", ["disable_pool"], project_id, access) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           pool_name: "poolName"
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.disable_pool(
+               project_id,
+               arguments.workspace_id,
+               arguments.pool_name,
+               access
+             ) do
+          :ok -> :cowboy_req.reply(204, req)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["enable_pool"], project_id, access) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           pool_name: "poolName"
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.enable_pool(
+               project_id,
+               arguments.workspace_id,
+               arguments.pool_name,
+               access
+             ) do
+          :ok -> :cowboy_req.reply(204, req)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, "POST", ["stop_worker"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",

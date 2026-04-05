@@ -219,6 +219,22 @@ func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, p
 	return c.post(ctx, "/api/update_pool", body, nil)
 }
 
+func (c *Client) DisablePool(ctx context.Context, workspaceID, poolName string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+	}
+	return c.post(ctx, "/api/disable_pool", body, nil)
+}
+
+func (c *Client) EnablePool(ctx context.Context, workspaceID, poolName string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+	}
+	return c.post(ctx, "/api/enable_pool", body, nil)
+}
+
 // Tokens API
 
 // ListTokens lists all service tokens

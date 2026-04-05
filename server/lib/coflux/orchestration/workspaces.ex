@@ -74,12 +74,60 @@ defmodule Coflux.Orchestration.Workspaces do
            {workspace_id}
          ) do
       {:ok, rows} ->
+        {:ok, pool_states} = get_pool_states(db, workspace_id)
+
         {:ok,
          Map.new(rows, fn {pool_id, pool_name, pool_definition_id} ->
            {:ok, pool_definition} = get_pool_definition(db, pool_definition_id)
-           {pool_name, Map.put(pool_definition, :id, pool_id)}
+           state = Map.get(pool_states, pool_name, :active)
+           {pool_name, pool_definition |> Map.put(:id, pool_id) |> Map.put(:state, state)}
          end)}
     end
+  end
+
+  def get_pool_states(db, workspace_id) do
+    case query(
+           db,
+           """
+           SELECT ps.pool_name, ps.state
+           FROM pool_states AS ps
+           JOIN (
+               SELECT pool_name, MAX(created_at) AS created_at
+               FROM pool_states
+               WHERE workspace_id = ?1
+               GROUP BY pool_name
+           ) latest ON ps.pool_name = latest.pool_name AND ps.created_at = latest.created_at
+           WHERE ps.workspace_id = ?1
+           """,
+           {workspace_id}
+         ) do
+      {:ok, rows} ->
+        {:ok, Map.new(rows, fn {pool_name, state} -> {pool_name, decode_pool_state(state)} end)}
+    end
+  end
+
+  def disable_pool(db, workspace_id, pool_name, created_by \\ nil) do
+    insert_one(db, :pool_states, %{
+      pool_name: pool_name,
+      workspace_id: workspace_id,
+      state: encode_pool_state(:disabled),
+      created_at: current_timestamp(),
+      created_by: created_by
+    })
+
+    :ok
+  end
+
+  def enable_pool(db, workspace_id, pool_name, created_by \\ nil) do
+    insert_one(db, :pool_states, %{
+      pool_name: pool_name,
+      workspace_id: workspace_id,
+      state: encode_pool_state(:active),
+      created_at: current_timestamp(),
+      created_by: created_by
+    })
+
+    :ok
   end
 
   defp workspace_name_used?(db, workspace_name) do
@@ -667,6 +715,20 @@ defmodule Coflux.Orchestration.Workspaces do
       0 -> :active
       1 -> :paused
       2 -> :archived
+    end
+  end
+
+  defp encode_pool_state(state) do
+    case state do
+      :active -> 0
+      :disabled -> 1
+    end
+  end
+
+  defp decode_pool_state(value) do
+    case value do
+      0 -> :active
+      1 -> :disabled
     end
   end
 

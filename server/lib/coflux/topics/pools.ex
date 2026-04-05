@@ -33,6 +33,10 @@ defmodule Coflux.Topics.Pools do
     end
   end
 
+  defp process_notification(topic, {:pool_state, pool_name, state}) do
+    Topic.set(topic, [pool_name, :state], to_string(state))
+  end
+
   defp build_value(pools) do
     Map.new(pools, fn {key, pool} ->
       {key, build_pool(pool)}
@@ -43,7 +47,8 @@ defmodule Coflux.Topics.Pools do
     %{
       modules: pool.modules,
       provides: pool.provides,
-      launcher: pool.launcher && build_launcher(pool.launcher)
+      launcher: pool.launcher && build_launcher(pool.launcher),
+      state: to_string(Map.get(pool, :state, :active))
     }
   end
 

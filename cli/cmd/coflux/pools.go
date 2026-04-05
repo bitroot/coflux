@@ -20,6 +20,8 @@ func init() {
 	poolsCmd.AddCommand(poolsUpdateCmd)
 	poolsCmd.AddCommand(poolsDeleteCmd)
 	poolsCmd.AddCommand(poolsLaunchesCmd)
+	poolsCmd.AddCommand(poolsDisableCmd)
+	poolsCmd.AddCommand(poolsEnableCmd)
 }
 
 // pools list
@@ -778,6 +780,76 @@ func runPoolsDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Deleted pool '%s'.\n", name)
+	return nil
+}
+
+// pools disable
+var poolsDisableCmd = &cobra.Command{
+	Use:   "disable <name>",
+	Short: "Disable a pool",
+	Long:  `Disable a pool. New executions won't be assigned to this pool's workers, and no new workers will be launched. Existing workers will drain.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPoolsDisable,
+}
+
+func runPoolsDisable(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	if err := client.DisablePool(cmd.Context(), workspaceID, name); err != nil {
+		return err
+	}
+
+	fmt.Printf("Disabled pool '%s'.\n", name)
+	return nil
+}
+
+// pools enable
+var poolsEnableCmd = &cobra.Command{
+	Use:   "enable <name>",
+	Short: "Enable a pool",
+	Long:  `Enable a previously disabled pool. The pool will resume accepting new executions and launching workers.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPoolsEnable,
+}
+
+func runPoolsEnable(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	if err := client.EnablePool(cmd.Context(), workspaceID, name); err != nil {
+		return err
+	}
+
+	fmt.Printf("Enabled pool '%s'.\n", name)
 	return nil
 }
 

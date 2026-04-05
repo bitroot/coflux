@@ -43,6 +43,10 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:pool], build_pool(pool))
   end
 
+  defp process_notification(topic, {:state, state}) do
+    Topic.set(topic, [:pool, :state], to_string(state))
+  end
+
   defp process_notification(topic, {:worker, _worker_id, worker_external_id, starting_at}) do
     Topic.set(topic, [:workers, worker_external_id], %{
       startingAt: starting_at,
@@ -128,7 +132,8 @@ defmodule Coflux.Topics.Pool do
         modules: pool.modules,
         provides: pool.provides,
         # TODO: include launcher ID?
-        launcher: if(pool.launcher, do: build_launcher(pool.launcher))
+        launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
+        state: to_string(Map.get(pool, :state, :active))
       }
     end
   end

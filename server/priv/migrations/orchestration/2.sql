@@ -97,3 +97,14 @@ ALTER TABLE results_new RENAME TO results;
 
 CREATE INDEX idx_results_successor_id ON results(successor_id);
 CREATE INDEX idx_results_successor_ref_id ON results(successor_ref_id);
+
+CREATE TABLE pool_states (
+  pool_name TEXT NOT NULL,
+  workspace_id INTEGER NOT NULL,
+  state INTEGER NOT NULL, -- 0: active, 1: disabled
+  created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_pool_states_ws_name ON pool_states(workspace_id, pool_name, created_at);
