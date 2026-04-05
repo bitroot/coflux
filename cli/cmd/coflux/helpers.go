@@ -44,7 +44,7 @@ func newClient() (*api.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return api.NewClient(getHost(), isSecure(), token), nil
+	return api.NewClient(getHost(), isSecure(), token, getProject()), nil
 }
 
 // requireWorkspace returns the workspace name or an error if not set

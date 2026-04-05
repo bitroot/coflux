@@ -23,7 +23,7 @@ defmodule Coflux.Handlers.Topics.Rest do
         token = get_token(req)
         host = get_host(req)
 
-        with {:ok, project_id} <- resolve_project(host),
+        with {:ok, project_id} <- resolve_project(req),
              {:ok, _access} <- Auth.check(token, project_id, host) do
           opts = Keyword.put(opts, :init, fn _req -> {:ok, %{project: project_id}} end)
           RestHandler.init(req, opts)

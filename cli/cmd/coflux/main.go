@@ -57,6 +57,7 @@ func init() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "coflux.toml", "Path to configuration file")
 	rootCmd.PersistentFlags().StringP("host", "", "", "Server host")
+	rootCmd.PersistentFlags().String("project", "", "Project ID (alternative to subdomain routing)")
 	rootCmd.PersistentFlags().String("token", "", "Authentication token")
 	rootCmd.PersistentFlags().StringP("team", "t", "", "Team ID for Studio authentication")
 	rootCmd.PersistentFlags().StringP("workspace", "w", "", "Workspace name")
@@ -65,6 +66,7 @@ func init() {
 
 	// Bind flags to viper
 	viper.BindPFlag("host", rootCmd.PersistentFlags().Lookup("host"))
+	viper.BindPFlag("project", rootCmd.PersistentFlags().Lookup("project"))
 	viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
 	viper.BindPFlag("team", rootCmd.PersistentFlags().Lookup("team"))
 	viper.BindPFlag("workspace", rootCmd.PersistentFlags().Lookup("workspace"))
@@ -157,6 +159,11 @@ func loadConfig() (*config.Config, error) {
 // getHost returns the resolved host
 func getHost() string {
 	return viper.GetString("host")
+}
+
+// getProject returns the resolved project
+func getProject() string {
+	return viper.GetString("project")
 }
 
 // getWorkspace returns the resolved workspace

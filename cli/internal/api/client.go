@@ -17,11 +17,12 @@ import (
 type Client struct {
 	baseURL string
 	token   string
+	project string
 	client  *http.Client
 }
 
 // NewClient creates a new API client
-func NewClient(host string, secure bool, token string) *Client {
+func NewClient(host string, secure bool, token string, project string) *Client {
 	scheme := "http"
 	if secure {
 		scheme = "https"
@@ -29,6 +30,7 @@ func NewClient(host string, secure bool, token string) *Client {
 	return &Client{
 		baseURL: fmt.Sprintf("%s://%s", scheme, host),
 		token:   token,
+		project: project,
 		client:  &http.Client{},
 	}
 }
@@ -298,6 +300,18 @@ func (c *Client) CaptureTopic(ctx context.Context, path string) (map[string]any,
 
 // HTTP helpers
 
+func (c *Client) setCommonHeaders(req *http.Request) {
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		req.Header.Set("X-API-Version", apiVersion)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.project != "" {
+		req.Header.Set("X-Project", c.project)
+	}
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values, result any) error {
 	reqURL := c.baseURL + path
 	if params != nil {
@@ -309,12 +323,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if apiVersion := version.APIVersion(); apiVersion != "dev" {
-		req.Header.Set("X-API-Version", apiVersion)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.setCommonHeaders(req)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -367,12 +376,7 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if apiVersion := version.APIVersion(); apiVersion != "dev" {
-		req.Header.Set("X-API-Version", apiVersion)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.setCommonHeaders(req)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

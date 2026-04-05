@@ -39,8 +39,8 @@ type groupSummary struct {
 
 // watchRun subscribes to the run topic and renders a live-updating tree of
 // step statuses (TTY only). Waits for all steps to complete. Returns exit code.
-func watchRun(ctx context.Context, host string, secure bool, token string, runID string, workspaceID string) (int, error) {
-	client, err := topicalclient.Connect(ctx, host, secure, token)
+func watchRun(ctx context.Context, host string, secure bool, token string, project string, runID string, workspaceID string) (int, error) {
+	client, err := topicalclient.Connect(ctx, host, secure, token, project)
 	if err != nil {
 		return 1, fmt.Errorf("failed to connect to topics: %w", err)
 	}
@@ -108,8 +108,8 @@ func watchRun(ctx context.Context, host string, secure bool, token string, runID
 // waitForRootResult subscribes to the run topic and waits for the root step's
 // latest execution to have a result. Returns the full run topic data, exit
 // code, and error.
-func waitForRootResult(ctx context.Context, host string, secure bool, token string, runID string, workspaceID string) (map[string]any, int, error) {
-	client, err := topicalclient.Connect(ctx, host, secure, token)
+func waitForRootResult(ctx context.Context, host string, secure bool, token string, project string, runID string, workspaceID string) (map[string]any, int, error) {
+	client, err := topicalclient.Connect(ctx, host, secure, token, project)
 	if err != nil {
 		return nil, 1, fmt.Errorf("failed to connect to topics: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type Callbacks struct {
 type Connection struct {
 	host      string
 	secure    bool
+	project   string
 	workspace string
 	sessionID string
 	logger    *slog.Logger
@@ -60,13 +62,14 @@ type serverMessage struct {
 }
 
 // NewConnection creates a new connection to the server
-func NewConnection(host string, secure bool, workspace, sessionID string, logger *slog.Logger) *Connection {
+func NewConnection(host string, secure bool, project, workspace, sessionID string, logger *slog.Logger) *Connection {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Connection{
 		host:        host,
 		secure:      secure,
+		project:     project,
 		workspace:   workspace,
 		sessionID:   sessionID,
 		logger:      logger,
@@ -121,9 +124,14 @@ func (c *Connection) Connect(ctx context.Context) error {
 		Subprotocols: subprotocols,
 	}
 
+	var headers http.Header
+	if c.project != "" {
+		headers = http.Header{"X-Project": {c.project}}
+	}
+
 	c.logger.Debug("connecting to server", "url", u.String())
 
-	conn, resp, err := dialer.DialContext(ctx, u.String(), nil)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()

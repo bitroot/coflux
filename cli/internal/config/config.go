@@ -6,6 +6,7 @@ import "strings"
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
 type Config struct {
 	Host      string        `mapstructure:"host"`
+	Project   string        `mapstructure:"project"`
 	Token     string        `mapstructure:"token"`
 	Secure    *bool         `mapstructure:"secure"`
 	Workspace string        `mapstructure:"workspace"`

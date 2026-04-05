@@ -269,7 +269,7 @@ func runPoolsLaunchFollow(cmd *cobra.Command, poolName string) error {
 		return err
 	}
 
-	return watchTopics(cmd.Context(), getHost(), isSecure(), token,
+	return watchTopics(cmd.Context(), getHost(), isSecure(), token, getProject(),
 		[]string{"workspaces/" + workspaceID + "/pools/" + poolName},
 		func(data []map[string]any) []string {
 			if data[0] == nil {

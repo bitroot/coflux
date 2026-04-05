@@ -117,7 +117,7 @@ func (w *Worker) requireConn() (*api.Connection, error) {
 // Run starts the worker
 func (w *Worker) Run(ctx context.Context, modules []string, register bool) error {
 	// Create API client
-	w.client = api.NewClient(w.cfg.Host, w.cfg.IsSecure(), w.cfg.Token)
+	w.client = api.NewClient(w.cfg.Host, w.cfg.IsSecure(), w.cfg.Token, w.cfg.Project)
 
 	// Resolve workspace name to external ID
 	workspaceID, err := w.resolveWorkspaceID(ctx)
@@ -186,7 +186,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 		logToken = *w.cfg.Logs.Token
 	}
 	flushInterval := time.Duration(w.cfg.Logs.FlushInterval * float64(time.Second))
-	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Logs.BatchSize, flushInterval, w.logger)
+	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Project, w.cfg.Logs.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
 
 	// Setup metric store
@@ -203,7 +203,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if metricFlushInterval <= 0 {
 		metricFlushInterval = 500 * time.Millisecond
 	}
-	metricStore := metric.NewHTTPStore(metricURL, metricToken, metricBatchSize, metricFlushInterval, w.logger)
+	metricStore := metric.NewHTTPStore(metricURL, metricToken, w.cfg.Project, metricBatchSize, metricFlushInterval, w.logger)
 
 	w.throttle = metric.NewThrottle(metricStore)
 	w.metrics = w.throttle
@@ -292,6 +292,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	conn := api.NewConnection(
 		w.cfg.Host,
 		w.cfg.IsSecure(),
+		w.cfg.Project,
 		w.workspaceID,
 		w.sessionID,
 		w.logger,
@@ -396,7 +397,7 @@ func (w *Worker) createBlobStore(ctx context.Context, cfg config.BlobStoreConfig
 		if cfg.Token != nil {
 			token = *cfg.Token
 		}
-		return blob.NewHTTPStore(url, token), nil
+		return blob.NewHTTPStore(url, token, w.cfg.Project), nil
 	case "s3":
 		return blob.NewS3Store(ctx, cfg.Bucket, cfg.Prefix, cfg.Region)
 	default:
@@ -416,7 +417,7 @@ func (w *Worker) createBlobStores(ctx context.Context, sessionToken string) []bl
 	}
 	// Default to HTTP store at server
 	if len(stores) == 0 {
-		stores = append(stores, blob.NewHTTPStore(w.cfg.HTTPURL()+"/blobs", sessionToken))
+		stores = append(stores, blob.NewHTTPStore(w.cfg.HTTPURL()+"/blobs", sessionToken, w.cfg.Project))
 	}
 	return stores
 }

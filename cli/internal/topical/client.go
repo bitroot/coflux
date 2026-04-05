@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 
 	"github.com/bitroot/coflux/cli/internal/version"
@@ -13,7 +14,7 @@ import (
 
 // Connect establishes a Topical WebSocket connection to the Coflux server.
 // Authentication uses the bearer token subprotocol convention.
-func Connect(ctx context.Context, host string, secure bool, token string) (*topical.Client, error) {
+func Connect(ctx context.Context, host string, secure bool, token string, project string) (*topical.Client, error) {
 	scheme := "ws"
 	if secure {
 		scheme = "wss"
@@ -29,11 +30,19 @@ func Connect(ctx context.Context, host string, secure bool, token string) (*topi
 		topical.WithReconnect(true),
 	}
 
+	dialOpts := &websocket.DialOptions{}
+
 	if token != "" {
 		encoded := base64.RawURLEncoding.EncodeToString([]byte(token))
-		opts = append(opts, topical.WithDialOptions(&websocket.DialOptions{
-			Subprotocols: []string{fmt.Sprintf("bearer.%s", encoded), "v1"},
-		}))
+		dialOpts.Subprotocols = []string{fmt.Sprintf("bearer.%s", encoded), "v1"}
+	}
+
+	if project != "" {
+		dialOpts.HTTPHeader = http.Header{"X-Project": {project}}
+	}
+
+	if len(dialOpts.Subprotocols) > 0 || dialOpts.HTTPHeader != nil {
+		opts = append(opts, topical.WithDialOptions(dialOpts))
 	}
 
 	return topical.Connect(ctx, wsURL, opts...)

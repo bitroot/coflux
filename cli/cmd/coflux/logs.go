@@ -216,7 +216,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	lc := logclient.NewClient(baseURL, token)
+	lc := logclient.NewClient(baseURL, token, getProject())
 
 	if logsFollow {
 		return runLogsFollow(cmd, lc, params, labelMap)

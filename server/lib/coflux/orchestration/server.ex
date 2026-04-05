@@ -5269,6 +5269,7 @@ defmodule Coflux.Orchestration.Server do
 
     base = %{
       "COFLUX_HOST" => coflux_host,
+      "COFLUX_PROJECT" => state.project_id,
       "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
       "COFLUX_SESSION" => token
     }

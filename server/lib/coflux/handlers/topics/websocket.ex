@@ -8,8 +8,8 @@ defmodule Coflux.Handlers.Topics.WebSocket do
   The client should request protocols like: ["bearer.dG9rZW4=", "v1"]
   The server echoes back "v1" on successful auth.
 
-  The project is determined by COFLUX_PROJECT (if set) or extracted from the
-  subdomain (if COFLUX_PUBLIC_HOST starts with %).
+  The project is determined by COFLUX_PROJECT (if set), extracted from the
+  subdomain (if COFLUX_PUBLIC_HOST starts with %), or from the X-Project header.
   """
 
   import Coflux.Handlers.Utils
@@ -26,7 +26,7 @@ defmodule Coflux.Handlers.Topics.WebSocket do
 
     host = get_host(req)
 
-    with {:ok, project_id} <- resolve_project(host),
+    with {:ok, project_id} <- resolve_project(req),
          {:ok, req} <- authenticate(req, protocols, project_id, host) do
       context = %{project: project_id}
       opts = Keyword.put(opts, :init, fn _req -> {:ok, context} end)

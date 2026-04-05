@@ -126,7 +126,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// -o json: wait for root step, print full run snapshot as JSON
 	if isOutput("json") {
-		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -141,7 +141,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// TTY: live tree display, wait for all steps
 	if term.IsTerminal(int(os.Stdout.Fd())) {
-		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -153,7 +153,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// Non-TTY: print run ID, wait for root step silently
 	fmt.Println(result.RunID)
-	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 	if err != nil {
 		return err
 	}

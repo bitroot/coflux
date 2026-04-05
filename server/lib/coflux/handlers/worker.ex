@@ -8,8 +8,8 @@ defmodule Coflux.Handlers.Worker do
   The client should request protocols like: ["session.dG9rZW4=", "v1"]
   The server echoes back "v1" on successful auth.
 
-  The project is determined by COFLUX_PROJECT (if set) or extracted from the
-  subdomain (if COFLUX_PUBLIC_HOST starts with %).
+  The project is determined by COFLUX_PROJECT (if set), extracted from the
+  subdomain (if COFLUX_PUBLIC_HOST starts with %), or from the X-Project header.
   """
 
   import Coflux.Handlers.Utils
@@ -25,9 +25,7 @@ defmodule Coflux.Handlers.Worker do
 
     case Version.check(expected_version) do
       :ok ->
-        host = get_host(req)
-
-        case resolve_project(host) do
+        case resolve_project(req) do
           {:ok, project_id} ->
             workspace_id = get_query_param(qs, "workspaceId")
             session_token = extract_session_token(protocols)

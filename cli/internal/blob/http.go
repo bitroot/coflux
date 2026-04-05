@@ -13,14 +13,16 @@ import (
 type HTTPStore struct {
 	baseURL string
 	token   string
+	project string
 	client  *http.Client
 }
 
 // NewHTTPStore creates a new HTTP blob store
-func NewHTTPStore(baseURL string, token string) *HTTPStore {
+func NewHTTPStore(baseURL string, token string, project string) *HTTPStore {
 	return &HTTPStore{
 		baseURL: baseURL,
 		token:   token,
+		project: project,
 		client:  &http.Client{},
 	}
 }
@@ -34,6 +36,9 @@ func (s *HTTPStore) Get(key string) (io.ReadCloser, error) {
 	}
 	if s.token != "" {
 		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if s.project != "" {
+		req.Header.Set("X-Project", s.project)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -71,6 +76,9 @@ func (s *HTTPStore) Put(reader io.Reader) (string, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if s.token != "" {
 		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if s.project != "" {
+		req.Header.Set("X-Project", s.project)
 	}
 
 	resp, err := s.client.Do(req)
