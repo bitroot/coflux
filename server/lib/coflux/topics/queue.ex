@@ -15,13 +15,24 @@ defmodule Coflux.Topics.Queue do
       {:ok, executions, tag_sets, dependencies, ref} ->
         value =
           Map.new(executions, fn {module, target, run_external_id, step_number, attempt,
-                                  execute_after, created_at, assigned_at, requires_tag_set_id} ->
+                                  execute_after, created_at, assigned_at,
+                                  step_requires_tag_set_id, run_requires_tag_set_id} ->
             execution_id = "#{run_external_id}:#{step_number}:#{attempt}"
 
-            requires =
-              if requires_tag_set_id,
-                do: Map.fetch!(tag_sets, requires_tag_set_id),
+            run_requires =
+              if run_requires_tag_set_id,
+                do: Map.fetch!(tag_sets, run_requires_tag_set_id),
                 else: %{}
+
+            step_requires =
+              if step_requires_tag_set_id,
+                do: Map.fetch!(tag_sets, step_requires_tag_set_id),
+                else: %{}
+
+            requires =
+              run_requires
+              |> Map.merge(step_requires)
+              |> Map.reject(fn {_key, values} -> values == [] end)
 
             {execution_id,
              %{

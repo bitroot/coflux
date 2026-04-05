@@ -210,6 +210,7 @@ defmodule Coflux.Topics.Run do
     %{
       createdAt: run.created_at,
       createdBy: build_principal(run.created_by),
+      requires: run.requires,
       parent: if(parent, do: build_execution(parent)),
       steps:
         steps

@@ -85,7 +85,7 @@ defmodule Coflux.Orchestration.Epoch do
       case query_one(
              source_db,
              """
-             SELECT id, external_id, parent_ref_id, idempotency_key, created_at, created_by
+             SELECT id, external_id, parent_ref_id, idempotency_key, requires_tag_set_id, created_at, created_by
              FROM runs
              WHERE external_id = ?1
              """,
@@ -94,7 +94,9 @@ defmodule Coflux.Orchestration.Epoch do
         {:ok, nil} ->
           {:ok, %{}, visited}
 
-        {:ok, {old_run_id, ext_id, parent_ref_id, idempotency_key, created_at, created_by}} ->
+        {:ok,
+         {old_run_id, ext_id, parent_ref_id, idempotency_key, requires_tag_set_id, created_at,
+          created_by}} ->
           # Check if already exists in target
           case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
             {:ok, {_existing_id}} ->
@@ -113,6 +115,7 @@ defmodule Coflux.Orchestration.Epoch do
                   external_id: ext_id,
                   parent_ref_id: new_parent_ref_id,
                   idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
+                  requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
                   created_at: created_at,
                   created_by: ensure_principal(source_db, target_db, created_by)
                 })

@@ -191,6 +191,7 @@ defmodule Coflux.Orchestration.Runs do
     idempotency_key = Keyword.get(opts, :idempotency_key)
     parent_id = Keyword.get(opts, :parent_id)
     created_by = Keyword.get(opts, :created_by)
+    {requires, opts} = Keyword.pop(opts, :requires, %{})
     now = current_timestamp()
 
     # TODO: check that 'type' is :workflow?
@@ -202,8 +203,15 @@ defmodule Coflux.Orchestration.Runs do
           ref_id
         end
 
+      requires_tag_set_id =
+        if Enum.any?(requires) do
+          case TagSets.get_or_create_tag_set_id(db, requires) do
+            {:ok, tag_set_id} -> tag_set_id
+          end
+        end
+
       {:ok, run_id, external_run_id} =
-        insert_run(db, parent_ref_id, idempotency_key, now, created_by)
+        insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, now, created_by)
 
       {:ok, schedule} =
         do_schedule_step(
@@ -578,6 +586,7 @@ defmodule Coflux.Orchestration.Runs do
         s.defer_key,
         s.parent_id,
         s.requires_tag_set_id,
+        run.requires_tag_set_id AS run_requires_tag_set_id,
         s.retry_limit,
         s.retry_backoff_min,
         s.retry_backoff_max,
@@ -612,7 +621,8 @@ defmodule Coflux.Orchestration.Runs do
              e.execute_after,
              e.created_at,
              a.created_at,
-             s.requires_tag_set_id
+             s.requires_tag_set_id,
+             r.requires_tag_set_id
            FROM executions AS e
            INNER JOIN steps AS s ON s.id = e.step_id
            INNER JOIN runs AS r ON r.id = s.run_id
@@ -708,7 +718,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -725,7 +735,7 @@ defmodule Coflux.Orchestration.Runs do
     query_one(
       db,
       """
-      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.created_at,
+      SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.created_at,
              p.user_external_id AS created_by_user_external_id,
              t.external_id AS created_by_token_external_id
       FROM runs AS r
@@ -1118,13 +1128,14 @@ defmodule Coflux.Orchestration.Runs do
     {:ok, rows1 ++ rows2}
   end
 
-  defp insert_run(db, parent_ref_id, idempotency_key, created_at, created_by) do
+  defp insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, created_at, created_by) do
     case generate_external_id(db, :runs, 2, "R") do
       {:ok, external_id} ->
         case insert_one(db, :runs, %{
                external_id: external_id,
                parent_ref_id: parent_ref_id,
                idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
+               requires_tag_set_id: requires_tag_set_id,
                created_at: created_at,
                created_by: created_by
              }) do

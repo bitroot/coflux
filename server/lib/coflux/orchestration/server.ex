@@ -1188,7 +1188,21 @@ defmodule Coflux.Orchestration.Server do
         timeout = Keyword.get(opts, :timeout, 0)
         delay = Keyword.get(opts, :delay, 0)
         execute_after = if delay > 0, do: created_at + delay
-        requires = Keyword.get(opts, :requires) || %{}
+        step_requires = Keyword.get(opts, :requires) || %{}
+
+        run_requires =
+          if run.requires_tag_set_id do
+            case TagSets.get_tag_set(state.db, run.requires_tag_set_id) do
+              {:ok, tag_set} -> tag_set
+            end
+          else
+            %{}
+          end
+
+        requires =
+          run_requires
+          |> Map.merge(step_requires)
+          |> Map.reject(fn {_key, values} -> values == [] end)
 
         execution_external_id = execution_external_id(run.external_id, step_number, attempt)
 
@@ -1220,7 +1234,7 @@ defmodule Coflux.Orchestration.Server do
                  timeout: timeout,
                  created_at: created_at,
                  arguments: arguments,
-                 requires: requires
+                 requires: step_requires
                }, ws_ext_id}
             )
             |> notify_listeners(
@@ -1832,7 +1846,7 @@ defmodule Coflux.Orchestration.Server do
         # Resolve tag sets, de-duplicating by ID
         tag_sets =
           executions
-          |> Enum.map(&elem(&1, 8))
+          |> Enum.flat_map(fn row -> [elem(row, 8), elem(row, 9)] end)
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq()
           |> Map.new(fn tag_set_id ->
@@ -2135,7 +2149,7 @@ defmodule Coflux.Orchestration.Server do
 
     tag_sets =
       executions_due
-      |> Enum.map(& &1.requires_tag_set_id)
+      |> Enum.flat_map(&[&1.requires_tag_set_id, &1.run_requires_tag_set_id])
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
       |> Enum.reduce(%{}, fn tag_set_id, tag_sets ->
@@ -2199,9 +2213,11 @@ defmodule Coflux.Orchestration.Server do
                 {state, assigned, unassigned}
               else
                 requires =
-                  if execution.requires_tag_set_id,
-                    do: Map.fetch!(tag_sets, execution.requires_tag_set_id),
-                    else: %{}
+                  effective_requires(
+                    tag_sets,
+                    execution.run_requires_tag_set_id,
+                    execution.requires_tag_set_id
+                  )
 
                 if execution.type == :task || !execution.parent_id do
                   case choose_session(state, execution, requires) do
@@ -2405,9 +2421,11 @@ defmodule Coflux.Orchestration.Server do
           executions
           |> Enum.map(fn execution ->
             requires =
-              if execution.requires_tag_set_id,
-                do: Map.fetch!(tag_sets, execution.requires_tag_set_id),
-                else: %{}
+              effective_requires(
+                tag_sets,
+                execution.run_requires_tag_set_id,
+                execution.requires_tag_set_id
+              )
 
             choose_pool(state, execution, requires)
           end)
@@ -3337,13 +3355,26 @@ defmodule Coflux.Orchestration.Server do
         state =
           register_pending_dependencies(state, execution_id, pending_dependencies)
 
-        requires =
+        step_requires =
           if step.requires_tag_set_id do
-            {:ok, requires} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
-            requires
+            {:ok, tag_set} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
+            tag_set
           else
             %{}
           end
+
+        run_requires =
+          if run.requires_tag_set_id do
+            {:ok, tag_set} = TagSets.get_tag_set(state.db, run.requires_tag_set_id)
+            tag_set
+          else
+            %{}
+          end
+
+        requires =
+          run_requires
+          |> Map.merge(step_requires)
+          |> Map.reject(fn {_key, values} -> values == [] end)
 
         execution_external_id =
           execution_external_id(run.external_id, step.number, attempt)
@@ -3828,6 +3859,17 @@ defmodule Coflux.Orchestration.Server do
       if run.parent_ref_id do
         resolve_execution_ref(db, run.parent_ref_id)
       end
+
+    run_requires =
+      if run.requires_tag_set_id do
+        case TagSets.get_tag_set(db, run.requires_tag_set_id) do
+          {:ok, tag_set} -> tag_set
+        end
+      else
+        %{}
+      end
+
+    run = Map.put(run, :requires, run_requires)
 
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
@@ -4802,6 +4844,23 @@ defmodule Coflux.Orchestration.Server do
 
   defp merge_tag_sets(a, b) do
     Map.merge(a || %{}, b || %{}, fn _key, v1, v2 -> Enum.uniq(v1 ++ v2) end)
+  end
+
+  # Merge run-level requires with step-level requires (child overrides per key).
+  defp effective_requires(tag_sets, run_requires_tag_set_id, step_requires_tag_set_id) do
+    run_requires =
+      if run_requires_tag_set_id,
+        do: Map.fetch!(tag_sets, run_requires_tag_set_id),
+        else: %{}
+
+    step_requires =
+      if step_requires_tag_set_id,
+        do: Map.fetch!(tag_sets, step_requires_tag_set_id),
+        else: %{}
+
+    run_requires
+    |> Map.merge(step_requires)
+    |> Map.reject(fn {_key, values} -> values == [] end)
   end
 
   defp satisfies_accepts?(accepts, requires) do

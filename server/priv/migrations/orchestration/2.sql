@@ -112,3 +112,6 @@ CREATE INDEX idx_pool_states_ws_name ON pool_states(workspace_id, pool_name, cre
 -- Add accepts_tag_set_id to pool_definitions and sessions
 ALTER TABLE pool_definitions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
 ALTER TABLE sessions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+
+-- Add requires_tag_set_id to runs (inherited from workflow definition)
+ALTER TABLE runs ADD COLUMN requires_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;

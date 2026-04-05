@@ -7,6 +7,7 @@ defmodule Coflux.Orchestration.Models do
       :external_id,
       :parent_ref_id,
       :idempotency_key,
+      :requires_tag_set_id,
       :created_at,
       :created_by
     ]
@@ -76,6 +77,7 @@ defmodule Coflux.Orchestration.Models do
       :defer_key,
       :parent_id,
       :requires_tag_set_id,
+      :run_requires_tag_set_id,
       :retry_limit,
       :retry_backoff_min,
       :retry_backoff_max,

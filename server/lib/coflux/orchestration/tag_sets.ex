@@ -16,8 +16,9 @@ defmodule Coflux.Orchestration.TagSets do
                 db,
                 :tag_set_items,
                 {:tag_set_id, :key, :value},
-                Enum.flat_map(tags, fn {key, values} ->
-                  Enum.map(values, &{tag_set_id, key, &1})
+                Enum.flat_map(tags, fn
+                  {key, []} -> [{tag_set_id, key, ""}]
+                  {key, values} -> Enum.map(values, &{tag_set_id, key, &1})
                 end)
               )
 
@@ -34,8 +35,9 @@ defmodule Coflux.Orchestration.TagSets do
          ) do
       {:ok, rows} ->
         {:ok,
-         Enum.reduce(rows, %{}, fn {key, value}, result ->
-           Map.update(result, key, [value], &[value | &1])
+         Enum.reduce(rows, %{}, fn
+           {key, ""}, result -> Map.put_new(result, key, [])
+           {key, value}, result -> Map.update(result, key, [value], &[value | &1])
          end)}
     end
   end
