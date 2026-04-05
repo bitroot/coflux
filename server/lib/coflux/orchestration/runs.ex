@@ -191,7 +191,8 @@ defmodule Coflux.Orchestration.Runs do
     idempotency_key = Keyword.get(opts, :idempotency_key)
     parent_id = Keyword.get(opts, :parent_id)
     created_by = Keyword.get(opts, :created_by)
-    {requires, opts} = Keyword.pop(opts, :requires, %{})
+    {requires, opts} = Keyword.pop(opts, :requires)
+    requires = requires || %{}
     now = current_timestamp()
 
     # TODO: check that 'type' is :workflow?

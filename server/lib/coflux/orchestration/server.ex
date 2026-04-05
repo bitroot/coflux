@@ -4880,7 +4880,7 @@ defmodule Coflux.Orchestration.Server do
 
   defp satisfies_accepts?(accepts, requires) do
     # Worker's accepts tags must all be present in the task's requires tags
-    Enum.all?(accepts, fn {key, accepts_values} ->
+    Enum.all?(accepts || %{}, fn {key, accepts_values} ->
       (requires || %{})
       |> Map.get(key, [])
       |> Enum.any?(&(&1 in accepts_values))
