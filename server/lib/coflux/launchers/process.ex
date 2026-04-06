@@ -31,8 +31,8 @@ defmodule Coflux.ProcessLauncher do
       {:ok, pid} ->
         {:ok, %{pid: pid}}
 
-      {:error, reason} ->
-        {:error, "failed to start process: #{inspect(reason)}"}
+      {:error, _reason} ->
+        {:error, "launch_process_failed"}
     end
   end
 

@@ -21,7 +21,7 @@ defmodule Coflux.DockerLauncher do
          :ok <- start_container(docker_conn, container_id) do
       {:ok, %{container: container_id, docker_conn: docker_conn}}
     else
-      {:error, reason} -> {:error, Atom.to_string(reason)}
+      {:error, reason} -> {:error, normalize_launch_error(reason)}
     end
   end
 
@@ -107,8 +107,8 @@ defmodule Coflux.DockerLauncher do
       {:ok, response} ->
         {:ok, response}
 
-      {:error, exception} ->
-        {:error, "request_failed:#{Exception.message(exception)}"}
+      {:error, _exception} ->
+        {:error, :request_failed}
     end
   end
 
@@ -182,6 +182,15 @@ defmodule Coflux.DockerLauncher do
 
   # Docker multiplexed stream format: each frame has an 8-byte header
   # [stream_type(1), padding(3), size(4, big-endian)] followed by the payload.
+  defp normalize_launch_error(:bad_parameter), do: "launch_bad_parameter"
+  defp normalize_launch_error(:no_such_image), do: "launch_image_not_found"
+  defp normalize_launch_error(:conflict), do: "launch_conflict"
+  defp normalize_launch_error(:server_error), do: "launch_server_error"
+  defp normalize_launch_error(:container_already_started), do: "launch_container_exists"
+  defp normalize_launch_error(:no_such_container), do: "launch_container_not_found"
+  defp normalize_launch_error(:request_failed), do: "launch_request_failed"
+  defp normalize_launch_error(_), do: "launch_request_failed"
+
   defp demux_docker_logs(data) when is_binary(data) do
     demux_docker_logs(data, [])
   end

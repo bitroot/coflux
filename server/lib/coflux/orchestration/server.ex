@@ -2664,7 +2664,7 @@ defmodule Coflux.Orchestration.Server do
                       case result do
                         {:ok, {:ok, data}} -> {data, nil}
                         {:ok, {:error, error}} -> {nil, error}
-                        :error -> {nil, "launcher_crashed"}
+                        :error -> {nil, "launch_crashed"}
                       end
 
                     {:ok, started_at} =
@@ -2752,8 +2752,8 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {:ok, false, error, logs}} ->
               deactivate_worker(state, worker_id, error, logs)
 
-            {:ok, {:error, reason}} ->
-              deactivate_worker(state, worker_id, "poll_error:#{reason}")
+            {:ok, {:error, _reason}} ->
+              deactivate_worker(state, worker_id, "poll_error")
 
             :error ->
               # TODO: ?

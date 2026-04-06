@@ -48,7 +48,7 @@ defmodule Coflux.KubernetesLauncher do
         "namespace" => namespace,
         "labels" => %{
           "app.kubernetes.io/managed-by" => "coflux",
-          "coflux.io/component" => "worker"
+          "coflux.com/component" => "worker"
         }
       },
       "spec" => %{
@@ -58,7 +58,7 @@ defmodule Coflux.KubernetesLauncher do
           "metadata" => %{
             "labels" => %{
               "app.kubernetes.io/managed-by" => "coflux",
-              "coflux.io/component" => "worker",
+              "coflux.com/component" => "worker",
               "job-name" => job_name
             }
           },
@@ -74,7 +74,7 @@ defmodule Coflux.KubernetesLauncher do
         {:ok, %{job_name: name, namespace: namespace, k8s_conn: conn}}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, normalize_launch_error(reason)}
     end
   end
 
@@ -118,10 +118,29 @@ defmodule Coflux.KubernetesLauncher do
       {:error, :not_found} ->
         {:ok, false, nil, nil}
 
-      {:error, reason} ->
-        {:ok, false, "k8s_error:#{reason}", nil}
+      {:error, _reason} ->
+        {:ok, false, "k8s_error", nil}
     end
   end
+
+  # --- Error normalization ---
+
+  defp normalize_launch_error(:not_found), do: "launch_not_found"
+  defp normalize_launch_error(:conflict), do: "launch_conflict"
+  defp normalize_launch_error(:unprocessable_entity), do: "launch_invalid"
+  defp normalize_launch_error(:unauthorized), do: "launch_unauthorized"
+  defp normalize_launch_error(:forbidden), do: "launch_forbidden"
+  defp normalize_launch_error(:request_failed), do: "launch_request_failed"
+  defp normalize_launch_error(_), do: "launch_api_error"
+
+  defp normalize_pod_error("ErrImageNeverPull"), do: "image_pull_error"
+  defp normalize_pod_error("ImagePullBackOff"), do: "image_pull_error"
+  defp normalize_pod_error("InvalidImageName"), do: "image_pull_error"
+  defp normalize_pod_error("CreateContainerConfigError"), do: "container_config_error"
+  defp normalize_pod_error("CreateContainerError"), do: "container_config_error"
+  defp normalize_pod_error("PreCreateHookError"), do: "container_hook_error"
+  defp normalize_pod_error("PostStartHookError"), do: "container_hook_error"
+  defp normalize_pod_error(_), do: "container_config_error"
 
   # --- Connection ---
 
@@ -176,16 +195,20 @@ defmodule Coflux.KubernetesLauncher do
             {:error, :conflict}
 
           422 ->
-            message = get_in(response.body, ["message"]) || "unprocessable_entity"
-            {:error, message}
+            {:error, :unprocessable_entity}
 
-          status ->
-            message = get_in(response.body, ["message"]) || "http_#{status}"
-            {:error, message}
+          401 ->
+            {:error, :unauthorized}
+
+          403 ->
+            {:error, :forbidden}
+
+          _status ->
+            {:error, :api_error}
         end
 
-      {:error, exception} ->
-        {:error, "request_failed:#{Exception.message(exception)}"}
+      {:error, _exception} ->
+        {:error, :request_failed}
     end
   end
 
@@ -322,7 +345,9 @@ defmodule Coflux.KubernetesLauncher do
   defp get_failure_reason(conditions) do
     case Enum.find(conditions, &(&1["type"] == "Failed" && &1["status"] == "True")) do
       nil -> "job_failed"
-      condition -> condition["reason"] || "job_failed"
+      %{"reason" => "DeadlineExceeded"} -> "job_deadline_exceeded"
+      %{"reason" => "BackoffLimitExceeded"} -> "job_backoff_exceeded"
+      _ -> "job_failed"
     end
   end
 
@@ -346,9 +371,9 @@ defmodule Coflux.KubernetesLauncher do
 
         case find_terminal_waiting(container_statuses) do
           nil -> :ok
-          {reason, nil} -> {:error, reason, nil}
-          {reason, ""} -> {:error, reason, nil}
-          {reason, message} -> {:error, reason, message}
+          {reason, nil} -> {:error, normalize_pod_error(reason), nil}
+          {reason, ""} -> {:error, normalize_pod_error(reason), nil}
+          {reason, message} -> {:error, normalize_pod_error(reason), message}
         end
 
       _ ->
