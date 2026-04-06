@@ -185,7 +185,7 @@ defmodule Coflux.Orchestration.Server do
       workspaces
       |> Map.keys()
       |> Enum.reduce(%{}, fn workspace_id, pools ->
-        {:ok, workspace_pools} = Workspaces.get_workspace_pools(state.db, workspace_id)
+        {:ok, workspace_pools, _hash} = Workspaces.get_workspace_pools(state.db, workspace_id)
         Map.put(pools, workspace_id, workspace_pools)
       end)
 
@@ -278,6 +278,20 @@ defmodule Coflux.Orchestration.Server do
           end
         end
       )
+
+    # Deactivate orphaned workers that have no launch result (data: nil) and
+    # no associated session. These were created but the server crashed before
+    # a session could be created for them, so nothing will ever connect.
+    # Workers that DO have a session are left alone — the session's activation
+    # timeout will handle cleanup if the launched process never connects.
+    state =
+      state.workers
+      |> Enum.filter(fn {_worker_id, worker} ->
+        is_nil(worker.data) && is_nil(worker.session_id)
+      end)
+      |> Enum.reduce(state, fn {worker_id, _worker}, state ->
+        deactivate_worker(state, worker_id, "server_restarted")
+      end)
 
     # Restore pending assignments into session state instead of abandoning them.
     # Workers will reconnect and report via heartbeats which executions they're
@@ -631,8 +645,8 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:get_pools, workspace_external_id}, _from, state) do
     with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id) do
       case Workspaces.get_workspace_pools(state.db, workspace_id) do
-        {:ok, pools} ->
-          {:reply, {:ok, pools}, state}
+        {:ok, pools, hash} ->
+          {:reply, {:ok, pools, hash}, state}
       end
     else
       {:error, error} ->
@@ -640,39 +654,150 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:update_pool, workspace_external_id, pool_name, pool, access}, _from, state) do
+  def handle_call(
+        {:update_pools, workspace_external_id, desired_pools, expected_hash, access},
+        _from,
+        state
+      ) do
     with {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access) do
-      case Workspaces.update_pool(state.db, workspace_id, pool_name, pool, access[:principal_id]) do
-        {:ok, pool_id} ->
+      case Workspaces.update_pools(
+             state.db,
+             workspace_id,
+             desired_pools,
+             expected_hash,
+             access[:principal_id]
+           ) do
+        {:ok, changed_pool_names} ->
+          # Drain workers only for pools that actually changed
+          state =
+            state.workers
+            |> Enum.reduce(state, fn {worker_id, worker}, state ->
+              if worker.state == :active &&
+                   MapSet.member?(changed_pool_names, worker.pool_name) do
+                update_worker_state(state, worker_id, :draining, workspace_id, worker.pool_name)
+              else
+                state
+              end
+            end)
+
+          # Update in-memory pools (reload from DB to include :id and :state)
+          ws_ext_id = workspace_external_id(state, workspace_id)
+
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          state =
+            put_in(state, [Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+
+          # Send notifications only for changed pools
+          state =
+            Enum.reduce(changed_pool_names, state, fn name, state ->
+              pool = Map.get(updated_pools, name)
+
+              state
+              |> notify_listeners({:pool, ws_ext_id, name}, {:updated, pool})
+              |> notify_listeners({:pools, ws_ext_id}, {:pool, name, pool})
+            end)
+
+          state = flush_notifications(state)
+
+          {:reply, :ok, state}
+
+        {:error, :conflict} ->
+          {:reply, {:error, :conflict}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call(
+        {:create_pool, workspace_external_id, pool_name, pool, access},
+        _from,
+        state
+      ) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      case Workspaces.create_pool(
+             state.db,
+             workspace_id,
+             pool_name,
+             pool,
+             access[:principal_id]
+           ) do
+        {:ok, _pool_id} ->
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          ws_ext_id = workspace_external_id(state, workspace_id)
+          pool = Map.get(updated_pools, pool_name)
+
+          state =
+            state
+            |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
+            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
+            |> flush_notifications()
+
+          {:reply, :ok, state}
+
+        {:error, :already_exists} ->
+          {:reply, {:error, :already_exists}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call(
+        {:update_pool, workspace_external_id, pool_name, pool_patch, access},
+        _from,
+        state
+      ) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      case Workspaces.update_pool(
+             state.db,
+             workspace_id,
+             pool_name,
+             pool_patch,
+             access[:principal_id]
+           ) do
+        {:ok, _pool_id} ->
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
               if worker.state == :active && worker.pool_name == pool_name do
-                # TODO: only if pool has meaningfully changed?
                 update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
               else
                 state
               end
             end)
-            |> update_in([Access.key(:pools), Access.key(workspace_id, %{})], fn pools ->
-              if pool do
-                Map.put(pools, pool_name, Map.put(pool, :id, pool_id))
-              else
-                Map.delete(pools, pool_name)
-              end
-            end)
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, workspace_id), pool_name},
-              {:updated, pool}
-            )
-            |> notify_listeners(
-              {:pools, workspace_external_id(state, workspace_id)},
-              {:pool, pool_name, pool}
-            )
+
+          # Reload pools from DB to get the merged result with :id and :state
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          ws_ext_id = workspace_external_id(state, workspace_id)
+          pool = Map.get(updated_pools, pool_name)
+
+          state =
+            state
+            |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
+            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
             |> flush_notifications()
 
           {:reply, :ok, state}
+
+        {:error, :not_found} ->
+          {:reply, {:error, :not_found}, state}
+
+        {:error, :type_change} ->
+          {:reply, {:error, :type_change}, state}
       end
     else
       {:error, error} ->
@@ -3187,9 +3312,14 @@ defmodule Coflux.Orchestration.Server do
     state =
       if session.worker_id do
         case Map.fetch(state.workers, session.worker_id) do
-          {:ok, _worker} ->
-            # TODO: check that worker workspace matches session workspace?
-            put_in(state, [Access.key(:workers), session.worker_id, :session_id], nil)
+          {:ok, worker} ->
+            if is_nil(worker.data) do
+              # Worker never got a launch result — the launch was in-flight when
+              # the server crashed. Deactivate it so it doesn't sit forever.
+              deactivate_worker(state, session.worker_id, "launch_incomplete")
+            else
+              put_in(state, [Access.key(:workers), session.worker_id, :session_id], nil)
+            end
 
           :error ->
             state

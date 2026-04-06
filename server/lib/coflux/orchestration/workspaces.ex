@@ -57,31 +57,47 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
+  defp get_latest_pool_rows(db, workspace_id) do
+    query(
+      db,
+      """
+      SELECT p.id, p.name, p.pool_definition_id
+      FROM pools AS p
+      JOIN (
+          SELECT name, MAX(id) AS id
+          FROM pools
+          WHERE workspace_id = ?1
+          GROUP BY name
+      ) latest ON p.id = latest.id
+      WHERE p.workspace_id = ?1 AND p.pool_definition_id IS NOT NULL
+      ORDER BY p.name
+      """,
+      {workspace_id}
+    )
+  end
+
   def get_workspace_pools(db, workspace_id) do
-    case query(
-           db,
-           """
-           SELECT p.id, p.name, p.pool_definition_id
-           FROM pools AS p
-           JOIN (
-               SELECT name, MAX(created_at) AS created_at
-               FROM pools
-               WHERE workspace_id = ?1
-               GROUP BY name
-           ) latest ON p.name = latest.name AND p.created_at = latest.created_at
-           WHERE p.workspace_id = ?1 AND p.pool_definition_id IS NOT NULL
-           """,
-           {workspace_id}
-         ) do
+    case get_latest_pool_rows(db, workspace_id) do
       {:ok, rows} ->
         {:ok, pool_states} = get_pool_states(db, workspace_id)
 
-        {:ok,
-         Map.new(rows, fn {pool_id, pool_name, pool_definition_id} ->
-           {:ok, pool_definition} = get_pool_definition(db, pool_definition_id)
-           state = Map.get(pool_states, pool_name, :active)
-           {pool_name, pool_definition |> Map.put(:id, pool_id) |> Map.put(:state, state)}
-         end)}
+        hash =
+          :crypto.hash(
+            :sha256,
+            Enum.map_join(rows, <<0>>, fn {_pool_id, name, def_id} ->
+              "#{name}:#{def_id}"
+            end)
+          )
+          |> Base.encode16(case: :lower)
+
+        pools =
+          Map.new(rows, fn {pool_id, pool_name, pool_definition_id} ->
+            {:ok, pool_definition} = get_pool_definition(db, pool_definition_id)
+            state = Map.get(pool_states, pool_name, :active)
+            {pool_name, pool_definition |> Map.put(:id, pool_id) |> Map.put(:state, state)}
+          end)
+
+        {:ok, pools, hash}
     end
   end
 
@@ -128,6 +144,57 @@ defmodule Coflux.Orchestration.Workspaces do
     })
 
     :ok
+  end
+
+  def update_pools(db, workspace_id, desired_pools, expected_hash, created_by \\ nil) do
+    with_transaction(db, fn ->
+      {:ok, current_pools, current_hash} = get_workspace_pools(db, workspace_id)
+
+      if expected_hash != nil and current_hash != expected_hash do
+        {:error, :conflict}
+      else
+        now = current_timestamp()
+
+        current_pool_names = MapSet.new(Map.keys(current_pools))
+        desired_pool_names = MapSet.new(Map.keys(desired_pools))
+
+        # Delete pools not in desired set
+        pools_to_delete = MapSet.difference(current_pool_names, desired_pool_names)
+
+        Enum.each(pools_to_delete, fn pool_name ->
+          insert_workspace_pool(db, workspace_id, pool_name, nil, now, created_by)
+        end)
+
+        # Create/update pools in desired set
+        changed_pool_names =
+          Enum.reduce(desired_pools, pools_to_delete, fn {pool_name, pool}, changed ->
+            {:ok, pool_definition_id} = get_or_create_pool_definition(db, pool)
+
+            existing_definition_id =
+              case get_latest_pool(db, workspace_id, pool_name) do
+                {:ok, {_, def_id}} -> def_id
+                {:ok, nil} -> nil
+              end
+
+            if pool_definition_id != existing_definition_id do
+              insert_workspace_pool(
+                db,
+                workspace_id,
+                pool_name,
+                pool_definition_id,
+                now,
+                created_by
+              )
+
+              MapSet.put(changed, pool_name)
+            else
+              changed
+            end
+          end)
+
+        {:ok, changed_pool_names}
+      end
+    end)
   end
 
   defp workspace_name_used?(db, workspace_name) do
@@ -359,33 +426,157 @@ defmodule Coflux.Orchestration.Workspaces do
     end)
   end
 
-  def update_pool(db, workspace_id, pool_name, pool, created_by \\ nil) do
-    # TODO: validate pool (check launcher is specified)
-
+  # Creates a new pool. Returns {:error, :already_exists} if the pool already exists.
+  # The pool argument is a full pool definition (not a patch).
+  def create_pool(db, workspace_id, pool_name, pool, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
-      pool_definition_id =
-        if pool do
+      case get_latest_pool(db, workspace_id, pool_name) do
+        {:ok, {_existing_pool_id, _existing_pool_definition_id}} ->
+          {:error, :already_exists}
+
+        {:ok, nil} ->
           {:ok, pool_definition_id} = get_or_create_pool_definition(db, pool)
-          pool_definition_id
-        end
-
-      {existing_pool_id, existing_pool_definition_id} =
-        case get_latest_pool(db, workspace_id, pool_name) do
-          {:ok, {existing_pool_id, existing_pool_definition_id}} ->
-            {existing_pool_id, existing_pool_definition_id}
-
-          {:ok, nil} ->
-            {nil, nil}
-        end
-
-      if pool_definition_id != existing_pool_definition_id do
-        insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, now, created_by)
-      else
-        {:ok, existing_pool_id}
+          insert_workspace_pool(db, workspace_id, pool_name, pool_definition_id, now, created_by)
       end
     end)
+  end
+
+  # Accepts a patch map (partial update). Keys present in the patch are applied;
+  # keys with the value :unset are removed; keys absent from the patch are left
+  # unchanged. When pool is nil, the pool is deleted.
+  # Returns {:error, :not_found} if the pool doesn't exist.
+  # Returns {:error, :type_change} if the patch tries to change the launcher type.
+  def update_pool(db, workspace_id, pool_name, pool_patch, created_by \\ nil) do
+    with_transaction(db, fn ->
+      now = current_timestamp()
+
+      case get_latest_pool(db, workspace_id, pool_name) do
+        {:ok, nil} ->
+          {:error, :not_found}
+
+        {:ok, {existing_pool_id, existing_pool_definition_id}} ->
+          existing =
+            if existing_pool_definition_id do
+              {:ok, def} = get_pool_definition(db, existing_pool_definition_id)
+              def
+            else
+              %{modules: [], provides: %{}, accepts: %{}, launcher: nil}
+            end
+
+          # Check for type change in launcher patch
+          with :ok <- check_launcher_type_change(existing, pool_patch) do
+            pool =
+              if pool_patch do
+                apply_pool_patch(existing, pool_patch)
+              end
+
+            pool_definition_id =
+              if pool do
+                {:ok, pool_definition_id} = get_or_create_pool_definition(db, pool)
+                pool_definition_id
+              end
+
+            if pool_definition_id != existing_pool_definition_id do
+              insert_workspace_pool(
+                db,
+                workspace_id,
+                pool_name,
+                pool_definition_id,
+                now,
+                created_by
+              )
+            else
+              {:ok, existing_pool_id}
+            end
+          end
+      end
+    end)
+  end
+
+  defp check_launcher_type_change(existing, pool_patch) do
+    case pool_patch do
+      %{launcher: launcher_patch} when is_map(launcher_patch) ->
+        case Map.fetch(launcher_patch, :type) do
+          {:ok, new_type} ->
+            existing_type = get_in(existing, [:launcher, :type])
+
+            if existing_type != nil and new_type != existing_type do
+              {:error, :type_change}
+            else
+              :ok
+            end
+
+          :error ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp apply_pool_patch(existing, patch) do
+    existing
+    |> apply_patch_field(patch, :modules)
+    |> apply_patch_field(patch, :provides)
+    |> apply_patch_field(patch, :accepts)
+    |> apply_launcher_patch(patch)
+  end
+
+  defp apply_patch_field(pool, patch, field) do
+    case Map.fetch(patch, field) do
+      {:ok, :unset} -> Map.delete(pool, field)
+      {:ok, value} -> Map.put(pool, field, value)
+      :error -> pool
+    end
+  end
+
+  defp apply_launcher_patch(pool, patch) do
+    case Map.fetch(patch, :launcher) do
+      {:ok, :unset} ->
+        Map.put(pool, :launcher, nil)
+
+      {:ok, nil} ->
+        Map.put(pool, :launcher, nil)
+
+      {:ok, launcher_patch} ->
+        existing_launcher = pool[:launcher] || %{}
+
+        # Apply each field from the patch, with special handling for :env merging
+        new_launcher =
+          Enum.reduce(launcher_patch, existing_launcher, fn
+            {:env, :unset}, acc ->
+              Map.delete(acc, :env)
+
+            {:env, env_patch}, acc when is_map(env_patch) ->
+              existing_env = Map.get(acc, :env, %{})
+
+              merged_env =
+                Enum.reduce(env_patch, existing_env, fn
+                  {k, :unset}, env -> Map.delete(env, k)
+                  {k, v}, env -> Map.put(env, k, v)
+                end)
+
+              if merged_env == %{} do
+                Map.delete(acc, :env)
+              else
+                Map.put(acc, :env, merged_env)
+              end
+
+            {key, :unset}, acc ->
+              Map.delete(acc, key)
+
+            {key, value}, acc ->
+              Map.put(acc, key, value)
+          end)
+
+        Map.put(pool, :launcher, new_launcher)
+
+      :error ->
+        pool
+    end
   end
 
   defp is_valid_name?(name) do
@@ -594,6 +785,20 @@ defmodule Coflux.Orchestration.Workspaces do
   defp build_launcher(type, config) do
     config = Jason.decode!(config, keys: :atoms)
     type = decode_launcher_type(type)
+
+    # The env map keys must remain strings (they are OS environment variable
+    # names), but Jason.decode!(keys: :atoms) atomises everything.  Convert
+    # them back so that ProcessLauncher / build_launcher_env can use them
+    # directly with String.to_charlist/1.
+    config =
+      case Map.get(config, :env) do
+        env when is_map(env) and map_size(env) > 0 ->
+          Map.put(config, :env, Map.new(env, fn {k, v} -> {to_string(k), v} end))
+
+        _ ->
+          config
+      end
+
     Map.put(config, :type, type)
   end
 

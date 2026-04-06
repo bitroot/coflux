@@ -1,12 +1,22 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
+	"github.com/bitroot/coflux/cli/internal/api"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var poolsCmd = &cobra.Command{
@@ -17,11 +27,14 @@ var poolsCmd = &cobra.Command{
 func init() {
 	poolsCmd.AddCommand(poolsListCmd)
 	poolsCmd.AddCommand(poolsGetCmd)
+	poolsCmd.AddCommand(poolsCreateCmd)
 	poolsCmd.AddCommand(poolsUpdateCmd)
 	poolsCmd.AddCommand(poolsDeleteCmd)
 	poolsCmd.AddCommand(poolsLaunchesCmd)
 	poolsCmd.AddCommand(poolsDisableCmd)
 	poolsCmd.AddCommand(poolsEnableCmd)
+	poolsCmd.AddCommand(poolsExportCmd)
+	poolsCmd.AddCommand(poolsImportCmd)
 }
 
 // pools list
@@ -468,58 +481,6 @@ func formatMillis(ms int64) string {
 	return t.Format("2006-01-02 15:04:05 UTC")
 }
 
-func hasK8sFlags() bool {
-	return poolsUpdateK8sImage != "" ||
-		poolsUpdateK8sNamespace != "" || poolsUpdateNoK8sNamespace ||
-		poolsUpdateK8sApiServer != "" || poolsUpdateNoK8sApiServer ||
-		poolsUpdateK8sToken != "" || poolsUpdateNoK8sToken ||
-		poolsUpdateK8sServiceAcct != "" || poolsUpdateNoK8sServiceAcct ||
-		poolsUpdateK8sInsecure || poolsUpdateNoK8sInsecure ||
-		poolsUpdateK8sImagePullPolicy != "" || poolsUpdateNoK8sImagePullPolicy
-}
-
-func hasCommonLauncherFlags() bool {
-	return poolsUpdateServerHost != "" || poolsUpdateNoServerHost ||
-		poolsUpdateServerSecure || poolsUpdateServerInsecure ||
-		poolsUpdateAdapter != nil || poolsUpdateNoAdapter ||
-		poolsUpdateConcurrency > 0 || poolsUpdateNoConcurrency ||
-		poolsUpdateEnv != nil || poolsUpdateNoEnv
-}
-
-func applyCommonLauncherFlags(launcher map[string]any) {
-	if poolsUpdateServerHost != "" {
-		launcher["serverHost"] = poolsUpdateServerHost
-	} else if poolsUpdateNoServerHost {
-		delete(launcher, "serverHost")
-	}
-	if poolsUpdateServerSecure {
-		launcher["serverSecure"] = true
-	} else if poolsUpdateServerInsecure {
-		launcher["serverSecure"] = false
-	}
-	if poolsUpdateAdapter != nil {
-		launcher["adapter"] = poolsUpdateAdapter
-	} else if poolsUpdateNoAdapter {
-		delete(launcher, "adapter")
-	}
-	if poolsUpdateConcurrency > 0 {
-		launcher["concurrency"] = poolsUpdateConcurrency
-	} else if poolsUpdateNoConcurrency {
-		delete(launcher, "concurrency")
-	}
-	if poolsUpdateEnv != nil {
-		env := make(map[string]any)
-		for _, e := range poolsUpdateEnv {
-			if key, value, ok := strings.Cut(e, "="); ok {
-				env[key] = value
-			}
-		}
-		launcher["env"] = env
-	} else if poolsUpdateNoEnv {
-		delete(launcher, "env")
-	}
-}
-
 func getFloat64(m map[string]any, key string) float64 {
 	if v, ok := m[key]; ok {
 		if f, ok := v.(float64); ok {
@@ -546,106 +507,311 @@ func getStringSlice(m map[string]any, key string) []string {
 	return nil
 }
 
+// pools create
+
+var poolsCreateCmd = &cobra.Command{
+	Use:   "create <name>",
+	Short: "Create a pool",
+	Long: `Create a new pool with the specified launcher type and configuration.
+
+Use --type to specify the launcher type (kubernetes, docker, or process).
+Use --set to set field values. Values are parsed as JSON if valid, otherwise
+treated as strings.
+
+Examples:
+  coflux pools create my-pool --type kubernetes --set image=foo:latest --set namespace=default
+  coflux pools create my-pool --type docker --set image=myapp:v1 --modules mod1,mod2
+  coflux pools create my-pool --type process --set directory=/app --set concurrency=5`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPoolsCreate,
+}
+
 // pools update
-var (
-	poolsUpdateModules              []string
-	poolsUpdateProvides             []string
-	poolsUpdateAccepts              []string
-	poolsUpdateDockerImage          string
-	poolsUpdateDockerHost           string
-	poolsUpdateNoDockerHost         bool
-	poolsUpdateProcessDir           string
-	poolsUpdateK8sImage             string
-	poolsUpdateK8sNamespace         string
-	poolsUpdateNoK8sNamespace       bool
-	poolsUpdateK8sApiServer         string
-	poolsUpdateNoK8sApiServer       bool
-	poolsUpdateK8sToken             string
-	poolsUpdateNoK8sToken           bool
-	poolsUpdateK8sServiceAcct       string
-	poolsUpdateNoK8sServiceAcct     bool
-	poolsUpdateK8sInsecure          bool
-	poolsUpdateNoK8sInsecure        bool
-	poolsUpdateK8sImagePullPolicy   string
-	poolsUpdateNoK8sImagePullPolicy bool
-	poolsUpdateServerHost           string
-	poolsUpdateNoServerHost         bool
-	poolsUpdateServerSecure         bool
-	poolsUpdateServerInsecure       bool
-	poolsUpdateAdapter              []string
-	poolsUpdateNoAdapter            bool
-	poolsUpdateConcurrency          int
-	poolsUpdateNoConcurrency        bool
-	poolsUpdateEnv                  []string
-	poolsUpdateNoEnv                bool
-)
 
 var poolsUpdateCmd = &cobra.Command{
 	Use:   "update <name>",
 	Short: "Update a pool",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runPoolsUpdate,
+	Long: `Update an existing pool's configuration.
+
+Use --set to set field values and --unset to clear them. Values are parsed as
+JSON if valid, otherwise treated as strings.
+
+Examples:
+  coflux pools update my-pool --set image=foo:latest
+  coflux pools update my-pool --set insecure=true --set concurrency=5
+  coflux pools update my-pool --set env.MY_VAR=hello --unset env.OLD_VAR
+  coflux pools update my-pool --unset imagePullPolicy
+  coflux pools update my-pool --modules mod1,mod2`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPoolsUpdate,
 }
 
 func init() {
-	poolsUpdateCmd.Flags().StringSliceVarP(&poolsUpdateModules, "module", "m", nil, "Modules to be hosted")
-	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateProvides, "provides", nil, "Features that workers provide")
-	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAccepts, "accepts", nil, "Tags that executions must have to be scheduled on this pool")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerImage, "docker-image", "", "Docker image")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateDockerHost, "docker-host", "", "Docker host")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoDockerHost, "no-docker-host", false, "Unset Docker host (use default socket)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateProcessDir, "process-dir", "", "Directory for process launcher")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sImage, "k8s-image", "", "Kubernetes container image")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sNamespace, "k8s-namespace", "", "Kubernetes namespace")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sNamespace, "no-k8s-namespace", false, "Unset Kubernetes namespace (use default)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sApiServer, "k8s-api-server", "", "Kubernetes API server URL")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sApiServer, "no-k8s-api-server", false, "Unset Kubernetes API server (use in-cluster)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sToken, "k8s-token", "", "Kubernetes bearer token")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sToken, "no-k8s-token", false, "Unset Kubernetes token (use in-cluster)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sServiceAcct, "k8s-service-account", "", "Kubernetes service account name")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sServiceAcct, "no-k8s-service-account", false, "Unset Kubernetes service account")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateK8sInsecure, "k8s-insecure", false, "Skip TLS verification for Kubernetes API")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sInsecure, "no-k8s-insecure", false, "Unset insecure (verify TLS)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateK8sImagePullPolicy, "k8s-image-pull-policy", "", "Kubernetes image pull policy (Always, Never, IfNotPresent)")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoK8sImagePullPolicy, "no-k8s-image-pull-policy", false, "Unset image pull policy (use Kubernetes default)")
-	poolsUpdateCmd.Flags().StringVar(&poolsUpdateServerHost, "server-host", "", "Coflux server host (overrides server default)")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoServerHost, "no-server-host", false, "Unset server host (use server default)")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateServerSecure, "server-secure", false, "Workers connect to server via HTTPS")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateServerInsecure, "server-insecure", false, "Workers connect to server via HTTP")
-	poolsUpdateCmd.Flags().StringSliceVar(&poolsUpdateAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoAdapter, "no-adapter", false, "Unset adapter (use worker default)")
-	poolsUpdateCmd.Flags().IntVar(&poolsUpdateConcurrency, "concurrency", 0, "Max concurrent executions per worker")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoConcurrency, "no-concurrency", false, "Unset concurrency (use worker default)")
-	poolsUpdateCmd.Flags().StringArrayVar(&poolsUpdateEnv, "env", nil, "Environment variable (e.g., --env KEY=VALUE)")
-	poolsUpdateCmd.Flags().BoolVar(&poolsUpdateNoEnv, "no-env", false, "Clear all custom environment variables")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "no-docker-host")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-host", "no-server-host")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("server-secure", "server-insecure")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("adapter", "no-adapter")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("concurrency", "no-concurrency")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("env", "no-env")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-namespace", "no-k8s-namespace")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-api-server", "no-k8s-api-server")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-token", "no-k8s-token")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-service-account", "no-k8s-service-account")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-insecure", "no-k8s-insecure")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("k8s-image-pull-policy", "no-k8s-image-pull-policy")
-	// Launcher type flags are mutually exclusive
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "process-dir", "k8s-image")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-host", "process-dir", "k8s-image")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("no-docker-host", "process-dir", "k8s-image")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-namespace")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-api-server")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-token")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-service-account")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-namespace")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-api-server")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-token")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-service-account")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-insecure")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-insecure")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("docker-image", "k8s-image-pull-policy")
-	poolsUpdateCmd.MarkFlagsMutuallyExclusive("process-dir", "k8s-image-pull-policy")
+	// pools create flags
+	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process)")
+	_ = poolsCreateCmd.MarkFlagRequired("type")
+	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
+	poolsCreateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsCreateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
+	poolsCreateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
+
+	// pools update flags
+	poolsUpdateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
+	poolsUpdateCmd.Flags().StringArray("unset", nil, "Unset a field")
+	poolsUpdateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsUpdateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
+	poolsUpdateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
+	poolsUpdateCmd.Flags().Bool("no-provides", false, "Clear provides")
+	poolsUpdateCmd.Flags().Bool("no-accepts", false, "Clear accepts")
+}
+
+// parseSetValue parses the value part of a --set flag.
+// Tries JSON parsing first, falls back to string.
+func parseSetValue(s string) any {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err == nil {
+		return v
+	}
+	return s
+}
+
+// poolTopLevelFields lists field names that are pool-level (not launcher-level).
+var poolTopLevelFields = map[string]bool{
+	"modules":  true,
+	"provides": true,
+	"accepts":  true,
+}
+
+// launcherFields lists valid launcher field names.
+var launcherFields = map[string]bool{
+	"image": true, "dockerHost": true, "directory": true,
+	"namespace": true, "serviceAccount": true, "apiServer": true,
+	"token": true, "caCert": true, "insecure": true,
+	"imagePullPolicy": true, "nodeSelector": true, "tolerations": true,
+	"imagePullSecrets": true, "hostAliases": true, "resources": true,
+	"serverHost": true, "serverSecure": true, "adapter": true,
+	"concurrency": true, "env": true,
+}
+
+// isValidFieldName checks if a field name (possibly with env. prefix) is valid.
+func isValidFieldName(name string) bool {
+	if poolTopLevelFields[name] || launcherFields[name] {
+		return true
+	}
+	if base, _, ok := strings.Cut(name, "."); ok {
+		return base == "env"
+	}
+	return false
+}
+
+// poolFieldOp represents a single set or unset operation.
+type poolFieldOp struct {
+	action string // "set" or "unset"
+	key    string
+	value  any // only for "set"
+}
+
+// collectFieldOps builds an ordered list of field operations from os.Args,
+// processing convenience flags (--modules, --provides, --accepts, --no-provides,
+// --no-accepts) alongside --set/--unset in the order they appear on the command line.
+func collectFieldOps(cmd *cobra.Command) ([]poolFieldOp, error) {
+	var ops []poolFieldOp
+
+	// Build a map from flag to its parsed values for quick lookup
+	setValues, _ := cmd.Flags().GetStringArray("set")
+	unsetValues, _ := cmd.Flags().GetStringArray("unset")
+	setIdx := 0
+	unsetIdx := 0
+
+	modulesValues, _ := cmd.Flags().GetStringSlice("modules")
+	providesValues, _ := cmd.Flags().GetStringSlice("provides")
+	acceptsValues, _ := cmd.Flags().GetStringSlice("accepts")
+
+	// Walk os.Args to determine command-line order of flags
+	args := os.Args
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// Normalize: handle --flag=value and --flag value forms
+		flagName := ""
+		switch {
+		case strings.HasPrefix(arg, "--set="):
+			flagName = "set"
+		case arg == "--set" && i+1 < len(args):
+			flagName = "set"
+		case strings.HasPrefix(arg, "--unset="):
+			flagName = "unset"
+		case arg == "--unset" && i+1 < len(args):
+			flagName = "unset"
+		case strings.HasPrefix(arg, "--modules=") || arg == "--modules":
+			flagName = "modules"
+		case strings.HasPrefix(arg, "--provides=") || arg == "--provides":
+			flagName = "provides"
+		case strings.HasPrefix(arg, "--accepts=") || arg == "--accepts":
+			flagName = "accepts"
+		case arg == "--no-provides":
+			flagName = "no-provides"
+		case arg == "--no-accepts":
+			flagName = "no-accepts"
+		default:
+			continue
+		}
+
+		switch flagName {
+		case "set":
+			if setIdx < len(setValues) {
+				kv := setValues[setIdx]
+				setIdx++
+				key, val, hasVal := strings.Cut(kv, "=")
+				if !hasVal {
+					return nil, fmt.Errorf("invalid --set value %q: must be key=value", kv)
+				}
+				if !isValidFieldName(key) {
+					return nil, fmt.Errorf("unknown field %q", key)
+				}
+				ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
+			}
+			// Skip next arg if it was --set value (not --set=value)
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+		case "unset":
+			if unsetIdx < len(unsetValues) {
+				key := unsetValues[unsetIdx]
+				unsetIdx++
+				if !isValidFieldName(key) {
+					return nil, fmt.Errorf("unknown field %q", key)
+				}
+				ops = append(ops, poolFieldOp{action: "unset", key: key})
+			}
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+		case "modules":
+			ops = append(ops, poolFieldOp{action: "set", key: "modules", value: toAnySlice(modulesValues)})
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+		case "provides":
+			ops = append(ops, poolFieldOp{action: "set", key: "provides", value: parseProvides(providesValues)})
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+		case "accepts":
+			ops = append(ops, poolFieldOp{action: "set", key: "accepts", value: parseProvides(acceptsValues)})
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+		case "no-provides":
+			ops = append(ops, poolFieldOp{action: "unset", key: "provides"})
+		case "no-accepts":
+			ops = append(ops, poolFieldOp{action: "unset", key: "accepts"})
+		}
+	}
+
+	return ops, nil
+}
+
+// toAnySlice converts []string to []any for JSON serialization.
+func toAnySlice(ss []string) []any {
+	result := make([]any, len(ss))
+	for i, s := range ss {
+		result[i] = s
+	}
+	return result
+}
+
+// applyOps applies field operations to build pool and launcher maps.
+// Returns the pool map (which may contain a "launcher" sub-map).
+func applyOps(ops []poolFieldOp, includeLauncher bool) map[string]any {
+	pool := make(map[string]any)
+	launcher := make(map[string]any)
+	hasLauncher := false
+
+	for _, op := range ops {
+		base, sub, hasSub := strings.Cut(op.key, ".")
+
+		if poolTopLevelFields[op.key] {
+			// Pool-level field
+			if op.action == "set" {
+				pool[op.key] = op.value
+			} else {
+				pool[op.key] = nil
+			}
+		} else if hasSub && base == "env" {
+			// env.KEY operations: merge into env sub-map
+			hasLauncher = true
+			env, ok := launcher["env"].(map[string]any)
+			if !ok {
+				env = make(map[string]any)
+			}
+			if op.action == "set" {
+				env[sub] = op.value
+			} else {
+				env[sub] = nil
+			}
+			launcher["env"] = env
+		} else {
+			// Launcher-level field
+			hasLauncher = true
+			if op.action == "set" {
+				launcher[op.key] = op.value
+			} else {
+				launcher[op.key] = nil
+			}
+		}
+	}
+
+	if hasLauncher && includeLauncher {
+		pool["launcher"] = launcher
+	}
+
+	return pool
+}
+
+func runPoolsCreate(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := ensureWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	launcherType, _ := cmd.Flags().GetString("type")
+
+	// Collect and validate field operations
+	ops, err := collectFieldOps(cmd)
+	if err != nil {
+		return err
+	}
+
+	// Build the pool definition
+	pool := applyOps(ops, true)
+
+	// Ensure launcher exists and set type
+	launcher, ok := pool["launcher"].(map[string]any)
+	if !ok {
+		launcher = make(map[string]any)
+	}
+	launcher["type"] = launcherType
+	pool["launcher"] = launcher
+
+	if err := client.CreatePool(cmd.Context(), workspaceID, name, pool); err != nil {
+		return err
+	}
+
+	fmt.Printf("Created pool '%s'.\n", name)
+	return nil
 }
 
 func runPoolsUpdate(cmd *cobra.Command, args []string) error {
@@ -666,91 +832,18 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Get existing pool
-	pool, _ := client.GetPool(cmd.Context(), workspaceID, name)
-	if pool == nil {
-		pool = make(map[string]any)
+	// Collect and validate field operations
+	ops, err := collectFieldOps(cmd)
+	if err != nil {
+		return err
 	}
 
-	// Apply updates
-	if poolsUpdateModules != nil {
-		pool["modules"] = poolsUpdateModules
+	if len(ops) == 0 {
+		return fmt.Errorf("no changes specified; use --set, --unset, or convenience flags")
 	}
-	if poolsUpdateProvides != nil {
-		pool["provides"] = parseProvides(poolsUpdateProvides)
-	}
-	if poolsUpdateAccepts != nil {
-		pool["accepts"] = parseProvides(poolsUpdateAccepts)
-	}
-	if poolsUpdateProcessDir != "" {
-		launcher := map[string]any{
-			"type":      "process",
-			"directory": poolsUpdateProcessDir,
-		}
-		applyCommonLauncherFlags(launcher)
-		pool["launcher"] = launcher
-	} else if poolsUpdateDockerImage != "" || poolsUpdateDockerHost != "" || poolsUpdateNoDockerHost {
-		launcher, ok := pool["launcher"].(map[string]any)
-		if !ok || getString(launcher, "type") != "docker" {
-			launcher = map[string]any{"type": "docker"}
-		}
-		if poolsUpdateDockerImage != "" {
-			launcher["image"] = poolsUpdateDockerImage
-		}
-		if poolsUpdateDockerHost != "" {
-			launcher["dockerHost"] = poolsUpdateDockerHost
-		} else if poolsUpdateNoDockerHost {
-			delete(launcher, "dockerHost")
-		}
-		applyCommonLauncherFlags(launcher)
-		pool["launcher"] = launcher
-	} else if hasK8sFlags() {
-		launcher, ok := pool["launcher"].(map[string]any)
-		if !ok || getString(launcher, "type") != "kubernetes" {
-			launcher = map[string]any{"type": "kubernetes"}
-		}
-		if poolsUpdateK8sImage != "" {
-			launcher["image"] = poolsUpdateK8sImage
-		}
-		if poolsUpdateK8sNamespace != "" {
-			launcher["namespace"] = poolsUpdateK8sNamespace
-		} else if poolsUpdateNoK8sNamespace {
-			delete(launcher, "namespace")
-		}
-		if poolsUpdateK8sApiServer != "" {
-			launcher["apiServer"] = poolsUpdateK8sApiServer
-		} else if poolsUpdateNoK8sApiServer {
-			delete(launcher, "apiServer")
-		}
-		if poolsUpdateK8sToken != "" {
-			launcher["token"] = poolsUpdateK8sToken
-		} else if poolsUpdateNoK8sToken {
-			delete(launcher, "token")
-		}
-		if poolsUpdateK8sServiceAcct != "" {
-			launcher["serviceAccount"] = poolsUpdateK8sServiceAcct
-		} else if poolsUpdateNoK8sServiceAcct {
-			delete(launcher, "serviceAccount")
-		}
-		if poolsUpdateK8sInsecure {
-			launcher["insecure"] = true
-		} else if poolsUpdateNoK8sInsecure {
-			delete(launcher, "insecure")
-		}
-		if poolsUpdateK8sImagePullPolicy != "" {
-			launcher["imagePullPolicy"] = poolsUpdateK8sImagePullPolicy
-		} else if poolsUpdateNoK8sImagePullPolicy {
-			delete(launcher, "imagePullPolicy")
-		}
-		applyCommonLauncherFlags(launcher)
-		pool["launcher"] = launcher
-	} else if hasCommonLauncherFlags() {
-		// Update common launcher fields on an existing launcher
-		if launcher, ok := pool["launcher"].(map[string]any); ok {
-			applyCommonLauncherFlags(launcher)
-			pool["launcher"] = launcher
-		}
-	}
+
+	// Build the patch (only includes fields that were explicitly set/unset)
+	pool := applyOps(ops, true)
 
 	if err := client.UpdatePool(cmd.Context(), workspaceID, name, pool); err != nil {
 		return err
@@ -759,6 +852,9 @@ func runPoolsUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Updated pool '%s'.\n", name)
 	return nil
 }
+
+// Ensure pflag is used (for the import).
+var _ pflag.Value
 
 // pools delete
 var poolsDeleteCmd = &cobra.Command{
@@ -864,6 +960,274 @@ func runPoolsEnable(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// pools export
+
+var poolsExportOutput string
+var poolsExportOnly []string
+
+var poolsExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export pool configuration",
+	Long:  `Export all pool configurations for the workspace as TOML. Writes to stdout by default.`,
+	RunE:  runPoolsExport,
+}
+
+func init() {
+	poolsExportCmd.Flags().StringVarP(&poolsExportOutput, "output", "o", "", "Output file (default: stdout)")
+	poolsExportCmd.Flags().StringSliceVar(&poolsExportOnly, "only", nil, "Export only named pools")
+}
+
+func runPoolsExport(cmd *cobra.Command, args []string) error {
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
+	if err != nil {
+		return err
+	}
+
+	pools := result.Pools
+
+	// Filter by --only if specified
+	if len(poolsExportOnly) > 0 {
+		onlySet := make(map[string]bool)
+		for _, name := range poolsExportOnly {
+			onlySet[name] = true
+		}
+		for name := range pools {
+			if !onlySet[name] {
+				delete(pools, name)
+			}
+		}
+	}
+
+	tomlPools := make(map[string]any)
+	for name, pool := range pools {
+		tomlPools[name] = apiPoolToTOML(pool)
+	}
+
+	doc := map[string]any{
+		"pools": tomlPools,
+	}
+
+	var buf bytes.Buffer
+	encoder := toml.NewEncoder(&buf)
+	if err := encoder.Encode(doc); err != nil {
+		return fmt.Errorf("failed to encode TOML: %w", err)
+	}
+
+	if poolsExportOutput != "" {
+		if err := os.WriteFile(poolsExportOutput, buf.Bytes(), 0644); err != nil {
+			return fmt.Errorf("failed to write file: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Exported %d pool(s) to %s\n", len(pools), poolsExportOutput)
+	} else {
+		fmt.Print(buf.String())
+	}
+
+	return nil
+}
+
+// pools import
+
+var (
+	poolsImportDryRun bool
+	poolsImportYes    bool
+	poolsImportOnly   []string
+)
+
+var poolsImportCmd = &cobra.Command{
+	Use:   "import [file]",
+	Short: "Import pool configuration",
+	Long: `Import pool configuration from a TOML file (or stdin if no file is given).
+
+This is a declarative operation: pools in the file are created or updated,
+and pools not in the file are deleted. Use --only to restrict the scope
+to specific pools.
+
+Examples:
+  coflux pools import pools.toml
+  coflux pools import pools.toml --dry-run
+  coflux pools import pools.toml --yes
+  coflux pools import pools.toml --only gpu-workers,batch
+  cat pools.toml | coflux pools import --yes`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runPoolsImport,
+}
+
+func init() {
+	poolsImportCmd.Flags().BoolVar(&poolsImportDryRun, "dry-run", false, "Show changes without applying")
+	poolsImportCmd.Flags().BoolVar(&poolsImportYes, "yes", false, "Skip confirmation prompt")
+	poolsImportCmd.Flags().StringSliceVar(&poolsImportOnly, "only", nil, "Only apply changes to named pools")
+}
+
+func runPoolsImport(cmd *cobra.Command, args []string) error {
+	// Determine source: positional arg or stdin
+	fromStdin := len(args) == 0
+	if fromStdin && !poolsImportYes && !poolsImportDryRun {
+		return fmt.Errorf("--yes or --dry-run is required when reading from stdin")
+	}
+
+	// Read TOML file
+	var tomlData []byte
+	var err error
+	if fromStdin {
+		tomlData, err = io.ReadAll(os.Stdin)
+	} else {
+		tomlData, err = os.ReadFile(args[0])
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var doc struct {
+		Pools map[string]any `toml:"pools"`
+	}
+	if err := toml.Unmarshal(tomlData, &doc); err != nil {
+		return fmt.Errorf("failed to parse TOML: %w", err)
+	}
+	if doc.Pools == nil {
+		doc.Pools = make(map[string]any)
+	}
+
+	// Convert TOML pools to API format
+	desiredPools := make(map[string]map[string]any)
+	for name, raw := range doc.Pools {
+		pool, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid pool configuration for '%s'", name)
+		}
+		desiredPools[name] = tomlPoolToAPI(pool)
+	}
+
+	// Connect and get current state
+	workspace, err := requireWorkspace()
+	if err != nil {
+		return err
+	}
+
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceID(cmd.Context(), client, workspace)
+	if err != nil {
+		return err
+	}
+
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
+	if err != nil {
+		return err
+	}
+
+	currentPools := result.Pools
+
+	// Apply --only scoping: merge desired (for named pools) with current (for everything else)
+	if len(poolsImportOnly) > 0 {
+		onlySet := make(map[string]bool)
+		for _, name := range poolsImportOnly {
+			onlySet[name] = true
+		}
+
+		merged := make(map[string]map[string]any)
+		// Keep all current pools that are out of scope
+		for name, pool := range currentPools {
+			if !onlySet[name] {
+				merged[name] = pool
+			}
+		}
+		// Add desired pools that are in scope
+		for name, pool := range desiredPools {
+			if onlySet[name] {
+				merged[name] = pool
+			}
+		}
+		desiredPools = merged
+	}
+
+	// Compute and display diff
+	changes := computePoolChanges(currentPools, desiredPools)
+
+	if len(changes) == 0 {
+		fmt.Println("No changes.")
+		return nil
+	}
+
+	printPoolChanges(changes, currentPools, desiredPools)
+
+	if poolsImportDryRun {
+		return nil
+	}
+
+	// Confirm
+	if !poolsImportYes {
+		fmt.Print("\nApply these changes? [y/N] ")
+		reader := bufio.NewReader(os.Stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		line = strings.TrimSpace(strings.ToLower(line))
+		if line != "y" && line != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+	}
+
+	// Apply
+	if err := client.UpdatePools(cmd.Context(), workspaceID, desiredPools, result.ETag); err != nil {
+		if errors.Is(err, api.ErrConflict) {
+			return fmt.Errorf("pool configuration has changed since plan was generated, re-run to see updated plan")
+		}
+		return err
+	}
+
+	// Summarize
+	var created, updated, deleted, replaced int
+	for _, c := range changes {
+		switch c.action {
+		case "create":
+			created++
+		case "update":
+			updated++
+		case "delete":
+			deleted++
+		case "replace":
+			replaced++
+		}
+	}
+
+	var parts []string
+	if created > 0 {
+		parts = append(parts, fmt.Sprintf("%d created", created))
+	}
+	if updated > 0 {
+		parts = append(parts, fmt.Sprintf("%d updated", updated))
+	}
+	if replaced > 0 {
+		parts = append(parts, fmt.Sprintf("%d replaced", replaced))
+	}
+	if deleted > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", deleted))
+	}
+	fmt.Printf("Applied: %s.\n", strings.Join(parts, ", "))
+
+	return nil
+}
+
 // Helper functions
 
 func encodeProvides(provides any) string {
@@ -929,4 +1293,484 @@ func parseProvides(args []string) map[string][]string {
 		}
 	}
 	return result
+}
+
+// TOML <-> API conversion
+
+// camelCase to snake_case mapping for launcher fields
+var camelToSnake = map[string]string{
+	"dockerHost":       "docker_host",
+	"serverHost":       "server_host",
+	"serverSecure":     "server_secure",
+	"serviceAccount":   "service_account",
+	"apiServer":        "api_server",
+	"imagePullPolicy":  "image_pull_policy",
+	"imagePullSecrets": "image_pull_secrets",
+	"hostAliases":      "host_aliases",
+	"nodeSelector":     "node_selector",
+	"caCert":           "ca_cert",
+}
+
+var snakeToCamel map[string]string
+
+func init() {
+	snakeToCamel = make(map[string]string, len(camelToSnake))
+	for k, v := range camelToSnake {
+		snakeToCamel[v] = k
+	}
+}
+
+func apiPoolToTOML(pool map[string]any) map[string]any {
+	result := make(map[string]any)
+
+	if modules, ok := pool["modules"]; ok {
+		result["modules"] = modules
+	}
+	if provides, ok := pool["provides"]; ok {
+		result["provides"] = provides
+	}
+	if accepts, ok := pool["accepts"]; ok {
+		result["accepts"] = accepts
+	}
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		result["launcher"] = apiLauncherToTOML(launcher)
+	}
+	return result
+}
+
+func apiLauncherToTOML(launcher map[string]any) map[string]any {
+	result := make(map[string]any)
+	for k, v := range launcher {
+		if snakeKey, ok := camelToSnake[k]; ok {
+			result[snakeKey] = v
+		} else {
+			result[k] = v
+		}
+	}
+	return result
+}
+
+func tomlPoolToAPI(pool map[string]any) map[string]any {
+	result := make(map[string]any)
+
+	if modules, ok := pool["modules"]; ok {
+		result["modules"] = toStringSlice(modules)
+	}
+	if provides, ok := pool["provides"]; ok {
+		result["provides"] = toStringSliceMap(provides)
+	}
+	if accepts, ok := pool["accepts"]; ok {
+		result["accepts"] = toStringSliceMap(accepts)
+	}
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		result["launcher"] = tomlLauncherToAPI(launcher)
+	}
+	return result
+}
+
+func tomlLauncherToAPI(launcher map[string]any) map[string]any {
+	result := make(map[string]any)
+	for k, v := range launcher {
+		if camelKey, ok := snakeToCamel[k]; ok {
+			result[camelKey] = v
+		} else {
+			result[k] = v
+		}
+	}
+	// Ensure concurrency is an integer (TOML int64 → JSON number)
+	if c, ok := result["concurrency"]; ok {
+		if i, ok := c.(int64); ok {
+			result["concurrency"] = int(i)
+		}
+	}
+	return result
+}
+
+// toStringSlice converts a TOML array to []string for the API
+func toStringSlice(v any) []string {
+	switch val := v.(type) {
+	case []any:
+		result := make([]string, 0, len(val))
+		for _, item := range val {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	case []string:
+		return val
+	default:
+		return nil
+	}
+}
+
+// toStringSliceMap converts TOML map values to map[string][]string
+func toStringSliceMap(v any) map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]any)
+	for k, val := range m {
+		result[k] = toStringSlice(val)
+	}
+	return result
+}
+
+// Diff computation
+
+type poolChange struct {
+	name   string
+	action string // "create", "delete", "update", "replace"
+}
+
+func computePoolChanges(current, desired map[string]map[string]any) []poolChange {
+	var changes []poolChange
+
+	// Collect all pool names
+	names := make(map[string]bool)
+	for name := range current {
+		names[name] = true
+	}
+	for name := range desired {
+		names[name] = true
+	}
+
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+
+	for _, name := range sorted {
+		cur, inCurrent := current[name]
+		des, inDesired := desired[name]
+
+		if !inCurrent && inDesired {
+			changes = append(changes, poolChange{name: name, action: "create"})
+		} else if inCurrent && !inDesired {
+			changes = append(changes, poolChange{name: name, action: "delete"})
+		} else if inCurrent && inDesired {
+			if poolsEqual(cur, des) {
+				continue
+			}
+			// Check if launcher type changed → replace
+			curType := getLauncherType(cur)
+			desType := getLauncherType(des)
+			if curType != "" && desType != "" && curType != desType {
+				changes = append(changes, poolChange{name: name, action: "replace"})
+			} else {
+				changes = append(changes, poolChange{name: name, action: "update"})
+			}
+		}
+	}
+
+	return changes
+}
+
+func getLauncherType(pool map[string]any) string {
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		if t, ok := launcher["type"].(string); ok {
+			return t
+		}
+	}
+	return ""
+}
+
+func poolsEqual(a, b map[string]any) bool {
+	aj, _ := json.Marshal(normalizeForComparison(a))
+	bj, _ := json.Marshal(normalizeForComparison(b))
+	return string(aj) == string(bj)
+}
+
+// normalizeForComparison normalizes a pool config for comparison.
+// Removes empty/nil values and sorts maps for consistent JSON output.
+func normalizeForComparison(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		result := make(map[string]any)
+		for k, v := range val {
+			nv := normalizeForComparison(v)
+			if !isEmptyValue(nv) {
+				result[k] = nv
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	case []any:
+		result := make([]any, len(val))
+		for i, item := range val {
+			result[i] = normalizeForComparison(item)
+		}
+		return result
+	case []string:
+		// Convert to []any for consistent handling
+		result := make([]any, len(val))
+		for i, s := range val {
+			result[i] = s
+		}
+		return result
+	case int64:
+		return float64(val)
+	case int:
+		return float64(val)
+	default:
+		return v
+	}
+}
+
+func isEmptyValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map, reflect.Slice:
+		return rv.Len() == 0
+	case reflect.String:
+		return rv.String() == ""
+	}
+	return false
+}
+
+// Diff display
+
+func printPoolChanges(changes []poolChange, current, desired map[string]map[string]any) {
+	for _, c := range changes {
+		switch c.action {
+		case "create":
+			fmt.Printf("\n  %s+ %s%s (create)\n", colorGreen, c.name, colorReset)
+			printPoolConfig(desired[c.name], "    ", colorGreen)
+
+		case "delete":
+			fmt.Printf("\n  %s- %s%s (delete)\n", colorRed, c.name, colorReset)
+			printPoolConfig(current[c.name], "    ", colorRed)
+
+		case "replace":
+			fmt.Printf("\n  %s~ %s%s (replace — launcher type changed)\n", colorYellow, c.name, colorReset)
+			fmt.Printf("    %sBefore:%s\n", colorRed, colorReset)
+			printPoolConfig(current[c.name], "      ", colorRed)
+			fmt.Printf("    %sAfter:%s\n", colorGreen, colorReset)
+			printPoolConfig(desired[c.name], "      ", colorGreen)
+
+		case "update":
+			fmt.Printf("\n  %s~ %s%s (update)\n", colorYellow, c.name, colorReset)
+			printFieldDiffs(current[c.name], desired[c.name], "    ")
+		}
+	}
+	fmt.Println()
+}
+
+func printPoolConfig(pool map[string]any, indent, color string) {
+	if modules := getAnySlice(pool, "modules"); len(modules) > 0 {
+		fmt.Printf("%s%smodules: %s%s\n", indent, color, formatSlice(modules), colorReset)
+	}
+	if provides, ok := pool["provides"].(map[string]any); ok && len(provides) > 0 {
+		fmt.Printf("%s%sprovides: %s%s\n", indent, color, formatTagSet(provides), colorReset)
+	}
+	if accepts, ok := pool["accepts"].(map[string]any); ok && len(accepts) > 0 {
+		fmt.Printf("%s%saccepts: %s%s\n", indent, color, formatTagSet(accepts), colorReset)
+	}
+	if launcher, ok := pool["launcher"].(map[string]any); ok {
+		for _, key := range sortedKeys(launcher) {
+			fmt.Printf("%s%slauncher.%s: %s%s\n", indent, color, key, formatValue(launcher[key]), colorReset)
+		}
+	}
+}
+
+func printFieldDiffs(before, after map[string]any, indent string) {
+	// Collect all top-level field paths and compare
+	type fieldDiff struct {
+		path      string
+		before    any
+		after     any
+		isChanged bool
+	}
+
+	var diffs []fieldDiff
+
+	// Compare simple fields
+	for _, field := range []string{"modules", "provides", "accepts"} {
+		bv := before[field]
+		av := after[field]
+		bj, _ := json.Marshal(normalizeForComparison(bv))
+		aj, _ := json.Marshal(normalizeForComparison(av))
+		if string(bj) != string(aj) {
+			diffs = append(diffs, fieldDiff{path: field, before: bv, after: av, isChanged: true})
+		}
+	}
+
+	// Compare launcher fields individually
+	bLauncher, _ := before["launcher"].(map[string]any)
+	aLauncher, _ := after["launcher"].(map[string]any)
+	if bLauncher != nil || aLauncher != nil {
+		if bLauncher == nil {
+			bLauncher = make(map[string]any)
+		}
+		if aLauncher == nil {
+			aLauncher = make(map[string]any)
+		}
+
+		// For env, node_selector — diff per key
+		allLauncherKeys := make(map[string]bool)
+		for k := range bLauncher {
+			allLauncherKeys[k] = true
+		}
+		for k := range aLauncher {
+			allLauncherKeys[k] = true
+		}
+
+		sortedLKeys := make([]string, 0, len(allLauncherKeys))
+		for k := range allLauncherKeys {
+			sortedLKeys = append(sortedLKeys, k)
+		}
+		sort.Strings(sortedLKeys)
+
+		for _, k := range sortedLKeys {
+			bv := bLauncher[k]
+			av := aLauncher[k]
+
+			// For map fields (env, nodeSelector, etc.), diff per key
+			bMap, bIsMap := bv.(map[string]any)
+			aMap, aIsMap := av.(map[string]any)
+			if bIsMap || aIsMap {
+				if bMap == nil {
+					bMap = make(map[string]any)
+				}
+				if aMap == nil {
+					aMap = make(map[string]any)
+				}
+				allSubKeys := make(map[string]bool)
+				for sk := range bMap {
+					allSubKeys[sk] = true
+				}
+				for sk := range aMap {
+					allSubKeys[sk] = true
+				}
+				sortedSubKeys := make([]string, 0, len(allSubKeys))
+				for sk := range allSubKeys {
+					sortedSubKeys = append(sortedSubKeys, sk)
+				}
+				sort.Strings(sortedSubKeys)
+
+				for _, sk := range sortedSubKeys {
+					sbv := bMap[sk]
+					sav := aMap[sk]
+					if !valuesEqual(sbv, sav) {
+						diffs = append(diffs, fieldDiff{
+							path:      "launcher." + k + "." + sk,
+							before:    sbv,
+							after:     sav,
+							isChanged: true,
+						})
+					}
+				}
+			} else if !valuesEqual(bv, av) {
+				diffs = append(diffs, fieldDiff{
+					path:      "launcher." + k,
+					before:    bv,
+					after:     av,
+					isChanged: true,
+				})
+			}
+		}
+	}
+
+	for _, d := range diffs {
+		if d.before == nil {
+			fmt.Printf("%s%s+ %s: %s%s\n", indent, colorGreen, d.path, formatValue(d.after), colorReset)
+		} else if d.after == nil {
+			fmt.Printf("%s%s- %s: %s%s\n", indent, colorRed, d.path, formatValue(d.before), colorReset)
+		} else {
+			fmt.Printf("%s%s~ %s: %s -> %s%s\n", indent, colorYellow, d.path, formatValue(d.before), formatValue(d.after), colorReset)
+		}
+	}
+}
+
+func valuesEqual(a, b any) bool {
+	aj, _ := json.Marshal(normalizeForComparison(a))
+	bj, _ := json.Marshal(normalizeForComparison(b))
+	return string(aj) == string(bj)
+}
+
+func formatValue(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case bool:
+		return fmt.Sprintf("%v", val)
+	case float64:
+		if val == float64(int(val)) {
+			return fmt.Sprintf("%d", int(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case int64:
+		return fmt.Sprintf("%d", val)
+	case int:
+		return fmt.Sprintf("%d", val)
+	case []any:
+		return formatSlice(val)
+	case []string:
+		items := make([]any, len(val))
+		for i, s := range val {
+			items[i] = s
+		}
+		return formatSlice(items)
+	case map[string]any:
+		return formatMap(val)
+	case nil:
+		return "(none)"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func formatSlice(items []any) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%v", item))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func formatMap(m map[string]any) string {
+	keys := sortedKeys(m)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, m[k]))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func formatTagSet(tags map[string]any) string {
+	keys := sortedKeys(tags)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if vals, ok := tags[k].([]any); ok {
+			var vs []string
+			for _, v := range vals {
+				vs = append(vs, fmt.Sprintf("%v", v))
+			}
+			parts = append(parts, k+":"+strings.Join(vs, ","))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func getAnySlice(m map[string]any, key string) []any {
+	if v, ok := m[key].([]any); ok {
+		return v
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

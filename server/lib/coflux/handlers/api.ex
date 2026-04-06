@@ -243,11 +243,36 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp handle(req, "POST", ["update_pool"], project_id, access) do
+  defp handle(req, "POST", ["create_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
            pool_name: {"poolName", &parse_pool_name/1},
            pool: {"pool", &parse_pool/1}
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.create_pool(
+               project_id,
+               arguments.workspace_id,
+               arguments.pool_name,
+               arguments.pool,
+               access
+             ) do
+          :ok -> :cowboy_req.reply(204, req)
+          {:error, :already_exists} -> json_error_response(req, "already_exists", status: 409)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+          {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["update_pool"], project_id, access) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           pool_name: {"poolName", &parse_pool_name/1},
+           pool: {"pool", &parse_pool_patch/1}
          }) do
       {:ok, arguments, req} ->
         case Orchestration.update_pool(
@@ -258,6 +283,8 @@ defmodule Coflux.Handlers.Api do
                access
              ) do
           :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :type_change} -> json_error_response(req, "type_change", status: 409)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
@@ -304,6 +331,68 @@ defmodule Coflux.Handlers.Api do
           :ok -> :cowboy_req.reply(204, req)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["get_pools"], project_id, _access) do
+    case read_arguments(req, %{workspace_id: "workspaceId"}) do
+      {:ok, arguments, req} ->
+        case Orchestration.get_pools(project_id, arguments.workspace_id) do
+          {:ok, pools, hash} ->
+            result =
+              Map.new(pools, fn {name, pool} ->
+                {name, build_pool_config(pool)}
+              end)
+
+            req = :cowboy_req.set_resp_header("etag", "\"#{hash}\"", req)
+            json_response(req, result)
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["update_pools"], project_id, access) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           pools: {"pools", &parse_pools/1}
+         }) do
+      {:ok, arguments, req} ->
+        expected_hash =
+          case :cowboy_req.header("if-match", req) do
+            :undefined -> nil
+            raw_etag -> String.trim(raw_etag, "\"")
+          end
+
+        case Orchestration.update_pools(
+               project_id,
+               arguments.workspace_id,
+               arguments.pools,
+               expected_hash,
+               access
+             ) do
+          :ok ->
+            :cowboy_req.reply(204, req)
+
+          {:error, :conflict} ->
+            json_error_response(req, "conflict",
+              status: 412,
+              details: %{"message" => "Pool configuration has changed"}
+            )
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -1028,6 +1117,83 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_pools(value) do
+    cond do
+      is_map(value) ->
+        Enum.reduce_while(value, {:ok, %{}}, fn {name, pool_value}, {:ok, result} ->
+          case parse_pool_name(name) do
+            {:ok, name} ->
+              case parse_pool(pool_value) do
+                {:ok, pool} when is_map(pool) ->
+                  {:cont, {:ok, Map.put(result, name, pool)}}
+
+                _ ->
+                  {:halt, {:error, :invalid}}
+              end
+
+            {:error, _} ->
+              {:halt, {:error, :invalid}}
+          end
+        end)
+
+      true ->
+        {:error, :invalid}
+    end
+  end
+
+  defp build_pool_config(pool) do
+    provides = pool.provides
+    accepts = Map.get(pool, :accepts, %{})
+
+    config = %{"modules" => pool.modules}
+
+    config = if Enum.any?(provides), do: Map.put(config, "provides", provides), else: config
+    config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
+
+    if pool.launcher do
+      Map.put(config, "launcher", build_launcher_config(pool.launcher))
+    else
+      config
+    end
+  end
+
+  defp build_launcher_config(launcher) do
+    type_fields =
+      case launcher.type do
+        :docker ->
+          %{"type" => "docker", "image" => launcher.image}
+          |> maybe_put_value("dockerHost", Map.get(launcher, :docker_host))
+
+        :process ->
+          %{"type" => "process", "directory" => launcher.directory}
+
+        :kubernetes ->
+          %{"type" => "kubernetes", "image" => launcher.image}
+          |> maybe_put_value("namespace", Map.get(launcher, :namespace))
+          |> maybe_put_value("apiServer", Map.get(launcher, :api_server))
+          |> maybe_put_value("serviceAccount", Map.get(launcher, :service_account))
+          |> maybe_put_value("token", Map.get(launcher, :token))
+          |> maybe_put_value("caCert", Map.get(launcher, :ca_cert))
+          |> maybe_put_value("insecure", Map.get(launcher, :insecure))
+          |> maybe_put_value("imagePullPolicy", Map.get(launcher, :image_pull_policy))
+          |> maybe_put_value("nodeSelector", Map.get(launcher, :node_selector))
+          |> maybe_put_value("tolerations", Map.get(launcher, :tolerations))
+          |> maybe_put_value("imagePullSecrets", Map.get(launcher, :image_pull_secrets))
+          |> maybe_put_value("hostAliases", Map.get(launcher, :host_aliases))
+          |> maybe_put_value("resources", Map.get(launcher, :resources))
+      end
+
+    type_fields
+    |> maybe_put_value("serverHost", Map.get(launcher, :server_host))
+    |> maybe_put_value("serverSecure", Map.get(launcher, :server_secure))
+    |> maybe_put_value("adapter", Map.get(launcher, :adapter))
+    |> maybe_put_value("concurrency", Map.get(launcher, :concurrency))
+    |> maybe_put_value("env", Map.get(launcher, :env))
+  end
+
+  defp maybe_put_value(map, _key, nil), do: map
+  defp maybe_put_value(map, key, value), do: Map.put(map, key, value)
+
   defp parse_pool(value) do
     cond do
       is_map(value) ->
@@ -1061,6 +1227,171 @@ defmodule Coflux.Handlers.Api do
 
       true ->
         {:error, :invalid}
+    end
+  end
+
+  # Parses a partial pool update (PATCH semantics).
+  # Only keys present in the JSON are included. A JSON null value means "unset".
+  defp parse_pool_patch(value) do
+    cond do
+      is_map(value) ->
+        fields = [
+          {"modules", &parse_modules/1, :modules},
+          {"provides", &parse_tag_set/1, :provides},
+          {"accepts", &parse_tag_set/1, :accepts},
+          {"launcher", &parse_launcher_patch/1, :launcher}
+        ]
+
+        Enum.reduce_while(fields, {:ok, %{}}, fn {source, parser, target}, {:ok, result} ->
+          case Map.fetch(value, source) do
+            {:ok, nil} ->
+              # Explicit null — signal to unset the field
+              {:cont, {:ok, Map.put(result, target, :unset)}}
+
+            {:ok, field_value} ->
+              case parser.(field_value) do
+                {:ok, parsed} -> {:cont, {:ok, Map.put(result, target, parsed)}}
+                {:error, error} -> {:halt, {:error, error}}
+              end
+
+            :error ->
+              # Key absent — leave unchanged
+              {:cont, {:ok, result}}
+          end
+        end)
+
+      is_nil(value) ->
+        {:ok, nil}
+
+      true ->
+        {:error, :invalid}
+    end
+  end
+
+  # Parses a partial launcher update. Only present keys are included.
+  # A JSON null value means "unset this field".
+  defp parse_launcher_patch(value) when is_map(value) do
+    allowed = Coflux.Config.launcher_types()
+
+    # If "type" is present, validate it; otherwise this is patching an existing launcher
+    case Map.fetch(value, "type") do
+      {:ok, type} when type in ["docker", "process", "kubernetes"] ->
+        type_atom = String.to_existing_atom(type)
+
+        if MapSet.member?(allowed, type_atom) do
+          parse_launcher_patch_fields(value, type_atom)
+        else
+          {:error, :invalid}
+        end
+
+      {:ok, _other} ->
+        {:error, :invalid}
+
+      :error ->
+        # No type specified — patching existing launcher fields
+        parse_launcher_patch_fields(value, nil)
+    end
+  end
+
+  defp parse_launcher_patch(nil), do: {:ok, nil}
+  defp parse_launcher_patch(_), do: {:error, :invalid}
+
+  defp parse_launcher_patch_fields(value, type) do
+    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
+
+    # All possible launcher fields with their validators
+    field_specs = [
+      {"image", &is_binary/1},
+      {"dockerHost", &is_binary/1},
+      {"directory", &is_binary/1},
+      {"namespace", &is_binary/1},
+      {"serviceAccount", &is_binary/1},
+      {"apiServer", &is_binary/1},
+      {"token", &is_binary/1},
+      {"caCert", &is_binary/1},
+      {"insecure", &is_boolean/1},
+      {"imagePullPolicy", &(&1 in valid_pull_policies)},
+      {"nodeSelector", &is_map/1},
+      {"tolerations", &is_list/1},
+      {"imagePullSecrets", &is_list/1},
+      {"hostAliases", &is_list/1},
+      {"resources", &is_map/1},
+      {"serverHost", &is_binary/1},
+      {"serverSecure", &is_boolean/1},
+      {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
+      {"concurrency", fn v -> is_integer(v) and v >= 1 end},
+      {"env",
+       fn v ->
+         is_map(v) and
+           Enum.all?(v, fn {k, val} ->
+             is_binary(k) and (is_binary(val) or is_nil(val)) and
+               not String.starts_with?(k, "COFLUX_")
+           end)
+       end}
+    ]
+
+    # JSON key to atom key mapping
+    key_map = %{
+      "image" => :image,
+      "dockerHost" => :docker_host,
+      "directory" => :directory,
+      "namespace" => :namespace,
+      "serviceAccount" => :service_account,
+      "apiServer" => :api_server,
+      "token" => :token,
+      "caCert" => :ca_cert,
+      "insecure" => :insecure,
+      "imagePullPolicy" => :image_pull_policy,
+      "nodeSelector" => :node_selector,
+      "tolerations" => :tolerations,
+      "imagePullSecrets" => :image_pull_secrets,
+      "hostAliases" => :host_aliases,
+      "resources" => :resources,
+      "serverHost" => :server_host,
+      "serverSecure" => :server_secure,
+      "adapter" => :adapter,
+      "concurrency" => :concurrency,
+      "env" => :env
+    }
+
+    result =
+      Enum.reduce_while(field_specs, {:ok, %{}}, fn {json_key, validator}, {:ok, acc} ->
+        atom_key = Map.fetch!(key_map, json_key)
+
+        case Map.fetch(value, json_key) do
+          {:ok, nil} ->
+            # Explicit null — unset
+            {:cont, {:ok, Map.put(acc, atom_key, :unset)}}
+
+          {:ok, field_value} ->
+            if validator.(field_value) do
+              processed_value =
+                if json_key == "env" and is_map(field_value) do
+                  Map.new(field_value, fn
+                    {k, nil} -> {k, :unset}
+                    {k, v} -> {k, v}
+                  end)
+                else
+                  field_value
+                end
+
+              {:cont, {:ok, Map.put(acc, atom_key, processed_value)}}
+            else
+              {:halt, {:error, :invalid}}
+            end
+
+          :error ->
+            {:cont, {:ok, acc}}
+        end
+      end)
+
+    case result do
+      {:ok, fields} ->
+        launcher = if type, do: Map.put(fields, :type, type), else: fields
+        {:ok, launcher}
+
+      error ->
+        error
     end
   end
 
