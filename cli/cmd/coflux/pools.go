@@ -1018,13 +1018,10 @@ func runPoolsExport(cmd *cobra.Command, args []string) error {
 		tomlPools[name] = apiPoolToTOML(pool)
 	}
 
-	doc := map[string]any{
-		"pools": tomlPools,
-	}
-
 	var buf bytes.Buffer
 	encoder := toml.NewEncoder(&buf)
-	if err := encoder.Encode(doc); err != nil {
+	encoder.Indent = ""
+	if err := encoder.Encode(tomlPools); err != nil {
 		return fmt.Errorf("failed to encode TOML: %w", err)
 	}
 
@@ -1092,19 +1089,20 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	var doc struct {
-		Pools map[string]any `toml:"pools"`
-	}
-	if err := toml.Unmarshal(tomlData, &doc); err != nil {
+	var raw map[string]any
+	if err := toml.Unmarshal(tomlData, &raw); err != nil {
 		return fmt.Errorf("failed to parse TOML: %w", err)
 	}
-	if doc.Pools == nil {
-		doc.Pools = make(map[string]any)
+	// Support legacy format with top-level "pools" key
+	if pools, ok := raw["pools"]; ok {
+		if poolsMap, ok := pools.(map[string]any); ok {
+			raw = poolsMap
+		}
 	}
 
 	// Convert TOML pools to API format
 	desiredPools := make(map[string]map[string]any)
-	for name, raw := range doc.Pools {
+	for name, raw := range raw {
 		pool, ok := raw.(map[string]any)
 		if !ok {
 			return fmt.Errorf("invalid pool configuration for '%s'", name)
@@ -1297,6 +1295,68 @@ func parseProvides(args []string) map[string][]string {
 
 // TOML <-> API conversion
 
+// inlineMap is a map that encodes as a TOML inline table.
+type inlineMap struct {
+	m map[string]any
+}
+
+func (im inlineMap) MarshalTOML() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	keys := make([]string, 0, len(im.m))
+	for k := range im.m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		fmt.Fprintf(&buf, "%s = ", k)
+		if err := encodeInlineValue(&buf, im.m[k]); err != nil {
+			return nil, err
+		}
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func encodeInlineValue(buf *bytes.Buffer, v any) error {
+	switch val := v.(type) {
+	case string:
+		fmt.Fprintf(buf, "%q", val)
+	case []any:
+		buf.WriteByte('[')
+		for i, elem := range val {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			if err := encodeInlineValue(buf, elem); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case []string:
+		buf.WriteByte('[')
+		for i, elem := range val {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			fmt.Fprintf(buf, "%q", elem)
+		}
+		buf.WriteByte(']')
+	case bool:
+		fmt.Fprintf(buf, "%t", val)
+	case int64:
+		fmt.Fprintf(buf, "%d", val)
+	case float64:
+		fmt.Fprintf(buf, "%v", val)
+	default:
+		fmt.Fprintf(buf, "%q", fmt.Sprint(val))
+	}
+	return nil
+}
+
 // camelCase to snake_case mapping for launcher fields
 var camelToSnake = map[string]string{
 	"dockerHost":       "docker_host",
@@ -1327,10 +1387,18 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 		result["modules"] = modules
 	}
 	if provides, ok := pool["provides"]; ok {
-		result["provides"] = provides
+		if m, ok := provides.(map[string]any); ok {
+			result["provides"] = inlineMap{m}
+		} else {
+			result["provides"] = provides
+		}
 	}
 	if accepts, ok := pool["accepts"]; ok {
-		result["accepts"] = accepts
+		if m, ok := accepts.(map[string]any); ok {
+			result["accepts"] = inlineMap{m}
+		} else {
+			result["accepts"] = accepts
+		}
 	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
@@ -1341,11 +1409,17 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 func apiLauncherToTOML(launcher map[string]any) map[string]any {
 	result := make(map[string]any)
 	for k, v := range launcher {
+		key := k
 		if snakeKey, ok := camelToSnake[k]; ok {
-			result[snakeKey] = v
-		} else {
-			result[k] = v
+			key = snakeKey
 		}
+		if key == "env" {
+			if m, ok := v.(map[string]any); ok {
+				result[key] = inlineMap{m}
+				continue
+			}
+		}
+		result[key] = v
 	}
 	return result
 }
