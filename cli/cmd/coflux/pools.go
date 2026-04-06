@@ -589,17 +589,29 @@ var launcherFields = map[string]bool{
 	"token": true, "caCert": true, "insecure": true,
 	"imagePullPolicy": true, "nodeSelector": true, "tolerations": true,
 	"imagePullSecrets": true, "hostAliases": true, "resources": true,
+	"labels": true, "annotations": true, "activeDeadlineSeconds": true,
+	"volumes": true, "volumeMounts": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
 	"concurrency": true, "env": true,
 }
 
-// isValidFieldName checks if a field name (possibly with env. prefix) is valid.
+// mapSubkeyFields lists launcher fields that support dotted sub-key access
+// (e.g. labels.team=ml, annotations.prometheus.io/scrape=true).
+var mapSubkeyFields = map[string]bool{
+	"env":          true,
+	"labels":       true,
+	"annotations":  true,
+	"nodeSelector": true,
+	"resources":    true,
+}
+
+// isValidFieldName checks if a field name (possibly with dotted prefix) is valid.
 func isValidFieldName(name string) bool {
 	if poolTopLevelFields[name] || launcherFields[name] {
 		return true
 	}
 	if base, _, ok := strings.Cut(name, "."); ok {
-		return base == "env"
+		return mapSubkeyFields[base]
 	}
 	return false
 }
@@ -738,19 +750,19 @@ func applyOps(ops []poolFieldOp, includeLauncher bool) map[string]any {
 			} else {
 				pool[op.key] = nil
 			}
-		} else if hasSub && base == "env" {
-			// env.KEY operations: merge into env sub-map
+		} else if hasSub && mapSubkeyFields[base] {
+			// Dotted sub-key (e.g. env.KEY, labels.team, resources.cpu)
 			hasLauncher = true
-			env, ok := launcher["env"].(map[string]any)
+			m, ok := launcher[base].(map[string]any)
 			if !ok {
-				env = make(map[string]any)
+				m = make(map[string]any)
 			}
 			if op.action == "set" {
-				env[sub] = op.value
+				m[sub] = op.value
 			} else {
-				env[sub] = nil
+				m[sub] = nil
 			}
-			launcher["env"] = env
+			launcher[base] = m
 		} else {
 			// Launcher-level field
 			hasLauncher = true
@@ -1359,16 +1371,18 @@ func encodeInlineValue(buf *bytes.Buffer, v any) error {
 
 // camelCase to snake_case mapping for launcher fields
 var camelToSnake = map[string]string{
-	"dockerHost":       "docker_host",
-	"serverHost":       "server_host",
-	"serverSecure":     "server_secure",
-	"serviceAccount":   "service_account",
-	"apiServer":        "api_server",
-	"imagePullPolicy":  "image_pull_policy",
-	"imagePullSecrets": "image_pull_secrets",
-	"hostAliases":      "host_aliases",
-	"nodeSelector":     "node_selector",
-	"caCert":           "ca_cert",
+	"dockerHost":            "docker_host",
+	"serverHost":            "server_host",
+	"serverSecure":          "server_secure",
+	"serviceAccount":        "service_account",
+	"apiServer":             "api_server",
+	"imagePullPolicy":       "image_pull_policy",
+	"imagePullSecrets":      "image_pull_secrets",
+	"hostAliases":           "host_aliases",
+	"nodeSelector":          "node_selector",
+	"caCert":                "ca_cert",
+	"activeDeadlineSeconds": "active_deadline_seconds",
+	"volumeMounts":          "volume_mounts",
 }
 
 var snakeToCamel map[string]string

@@ -117,6 +117,12 @@ defmodule Coflux.Topics.Pool do
           |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
           |> maybe_put(:insecure, Map.get(launcher, :insecure))
           |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
+          |> maybe_put(:labels, Map.get(launcher, :labels))
+          |> maybe_put(:annotations, Map.get(launcher, :annotations))
+          |> maybe_put(:activeDeadlineSeconds, Map.get(launcher, :active_deadline_seconds))
+          |> maybe_put(:volumes, Map.get(launcher, :volumes))
+          |> maybe_put(:volumeMounts, Map.get(launcher, :volume_mounts))
+          |> maybe_put(:resources, Map.get(launcher, :resources))
       end
 
     base

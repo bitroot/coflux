@@ -936,6 +936,11 @@ defmodule Coflux.Handlers.Api do
     image_pull_secrets = Map.get(value, "imagePullSecrets")
     host_aliases = Map.get(value, "hostAliases")
     resources = Map.get(value, "resources")
+    labels = Map.get(value, "labels")
+    annotations = Map.get(value, "annotations")
+    active_deadline_seconds = Map.get(value, "activeDeadlineSeconds")
+    volumes = Map.get(value, "volumes")
+    volume_mounts = Map.get(value, "volumeMounts")
 
     valid_pull_policies = ["Always", "Never", "IfNotPresent"]
 
@@ -982,6 +987,26 @@ defmodule Coflux.Handlers.Api do
       not is_nil(resources) and not is_map(resources) ->
         {:error, :invalid}
 
+      not is_nil(labels) and
+          (not is_map(labels) or
+             Enum.any?(labels, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
+        {:error, :invalid}
+
+      not is_nil(annotations) and
+          (not is_map(annotations) or
+             Enum.any?(annotations, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
+        {:error, :invalid}
+
+      not is_nil(active_deadline_seconds) and
+          (not is_integer(active_deadline_seconds) or active_deadline_seconds < 1) ->
+        {:error, :invalid}
+
+      not is_nil(volumes) and not is_list(volumes) ->
+        {:error, :invalid}
+
+      not is_nil(volume_mounts) and not is_list(volume_mounts) ->
+        {:error, :invalid}
+
       true ->
         launcher = %{type: :kubernetes, image: image}
 
@@ -1025,6 +1050,23 @@ defmodule Coflux.Handlers.Api do
 
         launcher =
           if resources, do: Map.put(launcher, :resources, resources), else: launcher
+
+        launcher =
+          if labels, do: Map.put(launcher, :labels, labels), else: launcher
+
+        launcher =
+          if annotations, do: Map.put(launcher, :annotations, annotations), else: launcher
+
+        launcher =
+          if active_deadline_seconds,
+            do: Map.put(launcher, :active_deadline_seconds, active_deadline_seconds),
+            else: launcher
+
+        launcher =
+          if volumes, do: Map.put(launcher, :volumes, volumes), else: launcher
+
+        launcher =
+          if volume_mounts, do: Map.put(launcher, :volume_mounts, volume_mounts), else: launcher
 
         {:ok, launcher}
     end
@@ -1181,6 +1223,11 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("imagePullSecrets", Map.get(launcher, :image_pull_secrets))
           |> maybe_put_value("hostAliases", Map.get(launcher, :host_aliases))
           |> maybe_put_value("resources", Map.get(launcher, :resources))
+          |> maybe_put_value("labels", Map.get(launcher, :labels))
+          |> maybe_put_value("annotations", Map.get(launcher, :annotations))
+          |> maybe_put_value("activeDeadlineSeconds", Map.get(launcher, :active_deadline_seconds))
+          |> maybe_put_value("volumes", Map.get(launcher, :volumes))
+          |> maybe_put_value("volumeMounts", Map.get(launcher, :volume_mounts))
       end
 
     type_fields

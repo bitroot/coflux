@@ -28,6 +28,7 @@ defmodule Coflux.KubernetesLauncher do
       end
 
     container = apply_resources(container, config)
+    container = apply_volume_mounts(container, config)
 
     pod_spec = %{
       "restartPolicy" => "Never",
@@ -39,6 +40,38 @@ defmodule Coflux.KubernetesLauncher do
     pod_spec = apply_tolerations(pod_spec, config)
     pod_spec = apply_image_pull_secrets(pod_spec, config)
     pod_spec = apply_host_aliases(pod_spec, config)
+    pod_spec = apply_volumes(pod_spec, config)
+
+    default_labels = %{
+      "app.kubernetes.io/managed-by" => "coflux",
+      "coflux.com/component" => "worker"
+    }
+
+    extra_labels = Map.get(config, :labels, %{})
+    merged_labels = Map.merge(default_labels, extra_labels)
+    extra_annotations = Map.get(config, :annotations, %{})
+
+    pod_metadata = %{"labels" => Map.merge(merged_labels, %{"job-name" => job_name})}
+
+    pod_metadata =
+      if map_size(extra_annotations) > 0,
+        do: Map.put(pod_metadata, "annotations", extra_annotations),
+        else: pod_metadata
+
+    job_spec = %{
+      "backoffLimit" => 0,
+      "ttlSecondsAfterFinished" => 300,
+      "template" => %{
+        "metadata" => pod_metadata,
+        "spec" => pod_spec
+      }
+    }
+
+    job_spec =
+      case config[:active_deadline_seconds] do
+        nil -> job_spec
+        seconds -> Map.put(job_spec, "activeDeadlineSeconds", seconds)
+      end
 
     job = %{
       "apiVersion" => "batch/v1",
@@ -46,25 +79,9 @@ defmodule Coflux.KubernetesLauncher do
       "metadata" => %{
         "name" => job_name,
         "namespace" => namespace,
-        "labels" => %{
-          "app.kubernetes.io/managed-by" => "coflux",
-          "coflux.com/component" => "worker"
-        }
+        "labels" => merged_labels
       },
-      "spec" => %{
-        "backoffLimit" => 0,
-        "ttlSecondsAfterFinished" => 300,
-        "template" => %{
-          "metadata" => %{
-            "labels" => %{
-              "app.kubernetes.io/managed-by" => "coflux",
-              "coflux.com/component" => "worker",
-              "job-name" => job_name
-            }
-          },
-          "spec" => pod_spec
-        }
-      }
+      "spec" => job_spec
     }
 
     path = "/apis/batch/v1/namespaces/#{namespace}/jobs"
@@ -244,7 +261,13 @@ defmodule Coflux.KubernetesLauncher do
               {Map.put(req, "memory", v), lim}
 
             {"gpu", v}, {req, lim} ->
-              {req, Map.put(lim, "nvidia.com/gpu", v)}
+              gpu_req = Map.put(req, "nvidia.com/gpu", v)
+              {gpu_req, Map.put(lim, "nvidia.com/gpu", v)}
+
+            {"limits", v}, {req, lim} when is_map(v) ->
+              lim = if v["cpu"], do: Map.put(lim, "cpu", v["cpu"]), else: lim
+              lim = if v["memory"], do: Map.put(lim, "memory", v["memory"]), else: lim
+              {req, lim}
 
             _, acc ->
               acc
@@ -318,6 +341,22 @@ defmodule Coflux.KubernetesLauncher do
 
       aliases when is_list(aliases) ->
         Map.put(pod_spec, "hostAliases", aliases)
+    end
+  end
+
+  defp apply_volumes(pod_spec, config) do
+    case config[:volumes] do
+      nil -> pod_spec
+      [] -> pod_spec
+      volumes when is_list(volumes) -> Map.put(pod_spec, "volumes", volumes)
+    end
+  end
+
+  defp apply_volume_mounts(container, config) do
+    case config[:volume_mounts] do
+      nil -> container
+      [] -> container
+      mounts when is_list(mounts) -> Map.put(container, "volumeMounts", mounts)
     end
   end
 
