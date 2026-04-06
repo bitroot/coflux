@@ -1350,6 +1350,10 @@ func (w *Worker) convertValueToServerFormat(v *adapter.Value) (any, error) {
 	}
 	switch v.Type {
 	case "inline":
+		// Null values are always sent as raw, regardless of blob threshold
+		if v.Value == nil {
+			return []any{"raw", nil, refs}, nil
+		}
 		// Check blob threshold - encode to JSON to measure size
 		encoded, err := json.Marshal(v.Value)
 		if err != nil {

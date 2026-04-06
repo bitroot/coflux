@@ -485,10 +485,27 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  def get_active_execution_ids_for_step(db, step_id, workspace_id) do
+    case query(
+           db,
+           """
+           SELECT e.id
+           FROM executions AS e
+           LEFT JOIN results AS r ON r.execution_id = e.id
+           WHERE e.step_id = ?1
+             AND e.workspace_id = ?2
+             AND r.execution_id IS NULL
+           """,
+           {step_id, workspace_id}
+         ) do
+      {:ok, rows} ->
+        {:ok, Enum.map(rows, fn {id} -> id end)}
+    end
+  end
+
   def rerun_step(db, step_id, workspace_id, execute_after, dependency_ref_ids, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
-      # TODO: cancel pending executions for step?
       {:ok, attempt} = get_next_execution_attempt(db, step_id)
 
       {:ok, execution_id} =
