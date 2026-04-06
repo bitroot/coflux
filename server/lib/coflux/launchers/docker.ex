@@ -3,7 +3,7 @@ defmodule Coflux.DockerLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config) do
+  def launch(env, modules, config, _opts \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
 
     container_env = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)

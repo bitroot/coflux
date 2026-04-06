@@ -2,7 +2,7 @@ defmodule Coflux.ProcessLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config) do
+  def launch(env, modules, config, _opts \\ %{}) do
     cli_path = Coflux.Config.cli_path()
     directory = Map.fetch!(config, :directory)
 

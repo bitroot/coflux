@@ -2657,7 +2657,8 @@ defmodule Coflux.Orchestration.Server do
                   [
                     build_launcher_env(state, workspace_id, token, pool.launcher),
                     pool.modules,
-                    pool.launcher
+                    pool.launcher,
+                    %{pool_name: pool_name}
                   ],
                   fn state, result ->
                     {data, error} =

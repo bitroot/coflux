@@ -4,10 +4,10 @@ defmodule Coflux.KubernetesLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config) do
+  def launch(env, modules, config, opts \\ %{}) do
     namespace = Map.get(config, :namespace, "default")
     conn = build_conn(config)
-    job_name = generate_job_name(config)
+    job_name = generate_job_name(opts)
 
     container_env =
       Enum.map(env, fn {k, v} ->
@@ -118,8 +118,9 @@ defmodule Coflux.KubernetesLauncher do
             {:ok, false, nil, nil}
 
           has_condition?(conditions, "Failed", "True") ->
-            error = get_failure_reason(conditions)
-            logs = fetch_pod_logs(conn, namespace, job_name)
+            {pod_error, pod_logs} = check_pod_terminated(conn, namespace, job_name)
+            error = pod_error || get_failure_reason(conditions)
+            logs = pod_logs || fetch_pod_logs(conn, namespace, job_name)
             {:ok, false, error, logs}
 
           true ->
@@ -362,9 +363,9 @@ defmodule Coflux.KubernetesLauncher do
 
   # --- Helpers ---
 
-  defp generate_job_name(config) do
+  defp generate_job_name(opts) do
     suffix = :crypto.strong_rand_bytes(5) |> Base.hex_encode32(case: :lower, padding: false)
-    pool = Map.get(config, :pool_name, "worker")
+    pool = Map.get(opts, :pool_name, "worker")
 
     name =
       "coflux-#{pool}-#{suffix}"
@@ -399,6 +400,53 @@ defmodule Coflux.KubernetesLauncher do
                               "CreateContainerError",
                               "PostStartHookError"
                             ])
+
+  # Check terminated container status for specific exit reasons (OOM, etc.)
+  # Returns {error_or_nil, logs_or_nil}
+  defp check_pod_terminated(conn, namespace, job_name) do
+    path =
+      "/api/v1/namespaces/#{namespace}/pods?labelSelector=job-name%3D#{job_name}"
+
+    case k8s_request(conn, :get, path) do
+      {:ok, %{"items" => [pod | _]}} ->
+        container_statuses = get_in(pod, ["status", "containerStatuses"]) || []
+
+        case find_terminated_reason(container_statuses) do
+          nil ->
+            {nil, nil}
+
+          {reason, exit_code} ->
+            pod_name = get_in(pod, ["metadata", "name"])
+            logs = fetch_pod_log(conn, namespace, pod_name)
+            error = normalize_terminated_reason(reason, exit_code)
+            {error, logs}
+        end
+
+      _ ->
+        {nil, nil}
+    end
+  end
+
+  defp find_terminated_reason(container_statuses) do
+    Enum.find_value(container_statuses, fn status ->
+      case get_in(status, ["state", "terminated"]) do
+        %{"reason" => reason} = terminated when is_binary(reason) ->
+          {reason, terminated["exitCode"]}
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp normalize_terminated_reason("OOMKilled", _exit_code), do: "oom_killed"
+  defp normalize_terminated_reason("DeadlineExceeded", _exit_code), do: "job_deadline_exceeded"
+  defp normalize_terminated_reason("Evicted", _exit_code), do: "pod_evicted"
+
+  defp normalize_terminated_reason("Error", exit_code) when is_integer(exit_code),
+    do: "exit_code:#{exit_code}"
+
+  defp normalize_terminated_reason(_reason, _exit_code), do: nil
 
   defp check_pod_error(conn, namespace, job_name) do
     path =
