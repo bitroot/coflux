@@ -2023,44 +2023,49 @@ defmodule Coflux.Orchestration.Server do
         pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
         {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
 
-        # TODO: include 'active' workers that aren't in this (potentially limited) list
+        if is_nil(pool) and pool_workers == [] do
+          {:reply, {:error, :not_found}, state}
+        else
+          # TODO: include 'active' workers that aren't in this (potentially limited) list
 
-        workers =
-          Map.new(
-            pool_workers,
-            fn {worker_id, worker_external_id, starting_at, started_at, start_error, stopping_at,
-                stopped_at, stop_error, deactivated_at, error, logs, total_executions} ->
-              worker = Map.get(state.workers, worker_id)
+          workers =
+            Map.new(
+              pool_workers,
+              fn {worker_id, worker_external_id, starting_at, started_at, start_error,
+                  stopping_at, stopped_at, stop_error, deactivated_at, error, logs,
+                  total_executions} ->
+                worker = Map.get(state.workers, worker_id)
 
-              session_external_id =
-                if worker && worker.session_id do
-                  case Map.fetch(state.sessions, worker.session_id) do
-                    {:ok, session} -> session.external_id
-                    :error -> nil
+                session_external_id =
+                  if worker && worker.session_id do
+                    case Map.fetch(state.sessions, worker.session_id) do
+                      {:ok, session} -> session.external_id
+                      :error -> nil
+                    end
                   end
-                end
 
-              # TODO: include pool_id?
-              {worker_external_id,
-               %{
-                 starting_at: starting_at,
-                 started_at: started_at,
-                 start_error: start_error,
-                 stopping_at: stopping_at,
-                 stopped_at: stopped_at,
-                 stop_error: stop_error,
-                 deactivated_at: deactivated_at,
-                 error: error,
-                 logs: logs,
-                 state: if(worker, do: worker.state),
-                 session_external_id: session_external_id,
-                 total_executions: total_executions
-               }}
-            end
-          )
+                # TODO: include pool_id?
+                {worker_external_id,
+                 %{
+                   starting_at: starting_at,
+                   started_at: started_at,
+                   start_error: start_error,
+                   stopping_at: stopping_at,
+                   stopped_at: stopped_at,
+                   stop_error: stop_error,
+                   deactivated_at: deactivated_at,
+                   error: error,
+                   logs: logs,
+                   state: if(worker, do: worker.state),
+                   session_external_id: session_external_id,
+                   total_executions: total_executions
+                 }}
+              end
+            )
 
-        {:ok, ref, state} = add_listener(state, {:pool, workspace_external_id, pool_name}, pid)
-        {:reply, {:ok, pool, workers, ref}, state}
+          {:ok, ref, state} = add_listener(state, {:pool, workspace_external_id, pool_name}, pid)
+          {:reply, {:ok, pool, workers, ref}, state}
+        end
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -2110,10 +2115,14 @@ defmodule Coflux.Orchestration.Server do
           max_runs
         )
 
-      {:ok, ref, state} =
-        add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
+      if is_nil(workflow) and runs == [] do
+        {:reply, {:error, :not_found}, state}
+      else
+        {:ok, ref, state} =
+          add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
 
-      {:reply, {:ok, workflow, instruction, runs, ref}, state}
+        {:reply, {:ok, workflow, instruction, runs, ref}, state}
+      end
     else
       {:error, error} ->
         {:reply, {:error, error}, state}
