@@ -86,6 +86,12 @@ CREATE TABLE results_new (
         OR value_id
         OR successor_ref_id
       )
+      WHEN 9 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+        OR successor_ref_id
+      )
       ELSE FALSE
     END
   )

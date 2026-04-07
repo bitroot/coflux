@@ -51,6 +51,9 @@ defmodule Coflux.Orchestration.Results do
           {:suspended, successor_id} ->
             {6, nil, nil, successor_id, nil, nil}
 
+          {:recurred, successor_id} ->
+            {9, nil, nil, successor_id, nil, nil}
+
           # In-flight spawned
           {:spawned, execution_id} ->
             {7, nil, nil, execution_id, nil, nil}
@@ -171,6 +174,9 @@ defmodule Coflux.Orchestration.Results do
               case Values.get_value_by_id(db, value_id) do
                 {:ok, value} -> {:spawned, ref_id, value}
               end
+
+            {9, nil, nil, successor_id, nil} ->
+              {:recurred, successor_id}
           end
 
         {:ok, {result, created_at, created_by}}

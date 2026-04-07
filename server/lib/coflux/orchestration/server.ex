@@ -4564,6 +4564,7 @@ defmodule Coflux.Orchestration.Server do
       :cancelled -> true
       {:timeout, retry_id} -> is_nil(retry_id)
       {:suspended, _} -> false
+      {:recurred, _} -> false
       {:deferred, _} -> false
       {:cached, _} -> false
       {:spawned, _} -> false
@@ -4601,6 +4602,10 @@ defmodule Coflux.Orchestration.Server do
       {:suspended, successor_id} ->
         successor = if successor_id, do: resolve_execution(db, successor_id)
         {:suspended, successor}
+
+      {:recurred, successor_id} ->
+        successor = if successor_id, do: resolve_execution(db, successor_id)
+        {:recurred, successor}
 
       # In-flight successor (successor_id is an internal execution ID)
       {type, execution_id}
@@ -4728,7 +4733,7 @@ defmodule Coflux.Orchestration.Server do
             {:error, :not_found} -> nil
           end
 
-        {retry_id, state} =
+        {retry_id, recurred?, state} =
           cond do
             match?({:suspended, _, _}, result) ->
               {:suspended, execute_after, dependency_ids} = result
@@ -4748,7 +4753,7 @@ defmodule Coflux.Orchestration.Server do
                   state
                 end
 
-              {retry_id, state}
+              {retry_id, false, state}
 
             result_retryable?(result) && step.retry_limit == -1 ->
               # Unlimited retries - random delay between min and max
@@ -4761,7 +4766,7 @@ defmodule Coflux.Orchestration.Server do
               {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-              {retry_id, state}
+              {retry_id, false, state}
 
             result_retryable?(result) && step.retry_limit > 0 ->
               # Limited retries - check consecutive failures
@@ -4785,13 +4790,13 @@ defmodule Coflux.Orchestration.Server do
                 {:ok, retry_id, _, state} =
                   rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-                {retry_id, state}
+                {retry_id, false, state}
               else
-                {nil, state}
+                {nil, false, state}
               end
 
             step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
-              # Null return from recurrent step: suspend and schedule next iteration
+              # Null return from recurrent step: schedule next iteration via :recurred
               execute_after =
                 if step.delay > 0 do
                   System.os_time(:millisecond) + step.delay
@@ -4800,14 +4805,14 @@ defmodule Coflux.Orchestration.Server do
               {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-              {retry_id, state}
+              {retry_id, true, state}
 
             step.recurrent == 1 and match?({:value, _}, result) ->
               # Non-null return from recurrent step: stop recurrence
-              {nil, state}
+              {nil, false, state}
 
             true ->
-              {nil, state}
+              {nil, false, state}
           end
 
         result =
@@ -4824,8 +4829,8 @@ defmodule Coflux.Orchestration.Server do
             {:suspended, _, _} ->
               {:suspended, retry_id}
 
-            {:value, _} when not is_nil(retry_id) ->
-              {:suspended, retry_id}
+            {:value, _} when recurred? ->
+              {:recurred, retry_id}
 
             other ->
               other
@@ -4880,6 +4885,9 @@ defmodule Coflux.Orchestration.Server do
             resolve_result(db, execution_id)
 
           {:suspended, execution_id} ->
+            resolve_result(db, execution_id)
+
+          {:recurred, execution_id} ->
             resolve_result(db, execution_id)
 
           {:spawned, execution_id} when is_integer(execution_id) ->

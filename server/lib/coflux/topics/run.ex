@@ -361,6 +361,13 @@ defmodule Coflux.Topics.Run do
           successor: if(successor, do: execution_attempt(successor))
         }
 
+      {:recurred, successor} ->
+        %{
+          type: "recurred",
+          createdBy: created_by,
+          successor: if(successor, do: execution_attempt(successor))
+        }
+
       {:deferred, execution, result} ->
         %{
           type: "deferred",
