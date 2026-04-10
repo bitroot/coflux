@@ -89,6 +89,15 @@ def workspaces_resume(host=None, workspace="default"):
     _coflux("workspaces", "resume", host=host, workspace=workspace, output=None)
 
 
+def manifests_register(*modules, adapter=None, host=None, workspace="default"):
+    args = ["manifests"]
+    if adapter:
+        args.extend(["--adapter", adapter])
+    args.append("register")
+    args.extend(modules)
+    _coflux(*args, host=host, workspace=workspace, output=None)
+
+
 def manifests_discover(*modules, adapter=None, host=None, workspace="default"):
     args = ["manifests"]
     if adapter:

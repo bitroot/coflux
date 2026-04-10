@@ -65,16 +65,22 @@ def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides
     with open(manifest_path, "w") as f:
         json.dump(manifest(targets), f)
 
+    adapter = ["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path]
+
     cli.pools_create(
         pool_name,
         type="process",
         modules=modules,
         provides=provides,
         process_dir=str(pool_env["worker_dir"]),
-        adapter=["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path],
+        adapter=adapter,
         host=host,
         **kwargs,
     )
+
+    # Register manifests so the server knows about the workflows
+    adapter_str = ",".join(adapter)
+    cli.manifests_register(*modules, adapter=adapter_str, host=host)
 
 
 class TestPoolLifecycle:
@@ -336,6 +342,10 @@ class TestCommonLauncherFields:
             env={"TEST_POOL_VAR": "pool-env-works"},
             host=host,
         )
+
+        # Register manifests using the real adapter (not the env wrapper)
+        real_adapter = f"python3,{ADAPTER_SCRIPT},--manifest,{manifest_path}"
+        cli.manifests_register("test", adapter=real_adapter, host=host)
 
         resp = cli.submit("test/check_env", host=host)
         executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
