@@ -361,7 +361,7 @@ class ExecutorContext:
     @contextmanager
     def suspense(self, timeout: float | None = None) -> Iterator[None]:
         """Context manager for setting timeout on result waits."""
-        token = _timeout.set(timeout)
+        token = _timeout.set(timeout if timeout is not None else 0)
         try:
             yield
         finally:
