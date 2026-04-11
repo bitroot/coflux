@@ -35,6 +35,36 @@ def test_recurrent_execution(worker):
         assert ctx.result(run_id)["value"]["data"] == "done"
 
 
+def test_recurrent_stops_on_return_value(worker):
+    """Recurrent child task does NOT re-execute after returning a non-null value."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "ticker"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+
+        ex0 = ctx.executor.next_execute()
+
+        ex0.conn.submit_task(ex0.execution_id, "test", "ticker", [], recurrent=True)
+
+        # First execution returns None -> triggers re-execution
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=None)
+
+        # Second execution returns a non-null value -> stops recurrence
+        ex2 = ctx.executor.next_execute()
+        ex2.conn.complete(ex2.execution_id, value="final")
+
+        # No third execution should arrive
+        with pytest.raises(TimeoutError):
+            ctx.executor.next_execute(timeout=2)
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(resp["runId"])["value"]["data"] == "done"
+
+
 def test_recurrent_stops_on_error(worker):
     """Recurrent child task does NOT re-execute after an error."""
     targets = [
