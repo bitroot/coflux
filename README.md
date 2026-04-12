@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <strong>Open-source workflow engine for Python</strong><br>
+  <strong>Orchestration engine for durable workflows</strong><br>
   Orchestrate and observe computational workflows defined in plain Python.<br>
-  Suitable for data pipelines, background tasks, AI agents, etc.
+  Suitable for data pipelines, background tasks, agentic systems.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 - **Plain Python**: workflows are regular Python functions with decorators - no DSLs, no YAML, no static DAGs.
 - **Low latency**: millisecond task startup using warm executor processes.
-- **Real-time observability**: watch workflows execute live using the CLI, or in [Coflux Studio](https://studio.coflux.com), with graph visualisation, logs, and results.
+- **Real-time observability**: watch workflows execute live using the CLI, or in [Coflux Studio](https://studio.coflux.com), with graph visualisation, logs, metrics, and results.
 - **Self-hosted**: you run the server; your data stays in your infrastructure.
 - **Workspace inheritance**: branch production into development workspaces and re-run individual steps with real data.
 
@@ -118,6 +118,26 @@ def notify(campaign_id):
         send_email.submit(r)
 ```
 
+### Metrics
+
+Record numeric values from tasks and visualise them in Studio:
+
+```python
+loss = cf.Metric("loss", group="training")
+
+@cf.task()
+def train(epochs):
+    for epoch in range(epochs):
+        loss.record(run_epoch(epoch), at=epoch)
+```
+
+Track iteration progress with a built-in progress bar:
+
+```python
+for item in cf.progress(items):
+    process(item)
+```
+
 ### Groups
 
 Organise parallel tasks into groups:
@@ -141,7 +161,8 @@ cf.log_info("Processing {count} items for {user}", count=42, user="alice")
 - **Debouncing**: defer execution until a task stops being called (`defer=True`)
 - **Recurrence**: automatically re-execute workflows for polling (`recurrent=True`)
 - **Suspense**: pause a task and free resources while waiting (`cf.suspend()`)
-- **Worker pools**: auto-launch and manage workers with Docker or process launchers
+- **Timeouts**: kill executions that exceed a time limit (`timeout=30`)
+- **Worker pools**: auto-launch and manage workers with Docker, process, or Kubernetes launchers
 
 ## Getting started
 
