@@ -5,6 +5,18 @@ Enhancements:
 - Adds support for storing metrics and their definitions.
 - Adds support for execution timeouts on tasks and workflows.
 - Adds `suspend` flag to `get_result` for non-suspending result polling.
+- Adds experimental Kubernetes launcher for launching workers as Kubernetes jobs.
+- Adds support for run-level memoisation (`memo` on workflows sets default for all steps).
+- Adds `accepts` tags on pools/workers, restricting which executions can be assigned.
+- Workflow `requires` tags now apply to the entire run (merged with step-level tags).
+- Adds support for disabling and re-enabling pools (disabled pools drain workers).
+- Prevents concurrent executions of the same step; re-running cancels in-progress execution.
+- Recurrent targets now only recur when the result is `None`.
+- Adds support for exporting and importing pool configurations.
+- Adds support for overriding workflow options (`requires`, `memo`, `delay`, `retries`) at submission time.
+- Adds support for specifying project via header (in addition to subdomain/server config).
+- Tracks total execution count on sessions and workers.
+- Updates modules topic to track in-progress workflow runs.
 
 ## 0.9.0
 
