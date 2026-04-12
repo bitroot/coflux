@@ -118,7 +118,8 @@ defmodule Coflux.Topics.Workflow do
         retries: build_retries_configuration(workflow.retries),
         recurrent: workflow.recurrent,
         timeout: workflow.timeout,
-        requires: workflow.requires
+        requires: workflow.requires,
+        memo: workflow.memo
       }
     end
   end

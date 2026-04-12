@@ -10,6 +10,12 @@ import (
 
 var submitNoWait bool
 var submitIdempotencyKey string
+var submitRequires []string
+var submitNoRequires bool
+var submitMemo bool
+var submitNoMemo bool
+var submitDelay float64
+var submitRetries int
 
 var submitCmd = &cobra.Command{
 	Use:   "submit <target> [arguments...]",
@@ -26,10 +32,16 @@ By default, the command waits for the workflow to complete:
 
 Use --no-wait to submit and exit immediately without waiting.
 
+Configuration from the workflow definition (requires, memo, delay, retries) can
+be overridden for this run via flags. Passing --requires replaces the workflow's
+requires entirely (it does not append).
+
 Example:
   coflux submit myapp.workflows/process_data '{"key": "value"}' '123'
   coflux submit --no-wait myapp.workflows/process_data '"arg"'
-  coflux submit -o json myapp.workflows/process_data '"arg"'`,
+  coflux submit -o json myapp.workflows/process_data '"arg"'
+  coflux submit --requires gpu:A100 --requires region:eu myapp.workflows/train '"x"'
+  coflux submit --no-memo --retries 0 myapp.workflows/process_data '"x"'`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSubmit,
 }
@@ -37,6 +49,14 @@ Example:
 func init() {
 	submitCmd.Flags().BoolVar(&submitNoWait, "no-wait", false, "Submit and exit immediately without waiting")
 	submitCmd.Flags().StringVar(&submitIdempotencyKey, "idempotency-key", "", "Idempotency key for deduplication")
+	submitCmd.Flags().StringSliceVar(&submitRequires, "requires", nil, "Override the workflow's requires (e.g., --requires gpu:A100,gpu:H100 --requires region:eu). Replaces the workflow's requires entirely.")
+	submitCmd.Flags().BoolVar(&submitNoRequires, "no-requires", false, "Override the workflow's requires with an empty set")
+	submitCmd.Flags().BoolVar(&submitMemo, "memo", false, "Override the workflow to enable memoisation")
+	submitCmd.Flags().BoolVar(&submitNoMemo, "no-memo", false, "Override the workflow to disable memoisation")
+	submitCmd.Flags().Float64Var(&submitDelay, "delay", 0, "Override the workflow's delay (seconds)")
+	submitCmd.Flags().IntVar(&submitRetries, "retries", 0, "Override the workflow's retry limit (0 = no retries)")
+	submitCmd.MarkFlagsMutuallyExclusive("requires", "no-requires")
+	submitCmd.MarkFlagsMutuallyExclusive("memo", "no-memo")
 }
 
 func runSubmit(cmd *cobra.Command, args []string) error {
@@ -98,9 +118,39 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if requires, ok := workflow["requires"]; ok {
 		options["requires"] = requires
 	}
+	if memo, ok := workflow["memo"]; ok {
+		options["memo"] = memo
+	}
 	if timeout, ok := workflow["timeout"].(float64); ok && timeout > 0 {
 		options["timeout"] = int64(timeout)
 	}
+
+	// Apply per-run overrides from flags.
+	if cmd.Flags().Changed("requires") {
+		options["requires"] = parseProvides(submitRequires)
+	} else if submitNoRequires {
+		options["requires"] = map[string][]string{}
+	}
+	if submitMemo {
+		options["memo"] = true
+	} else if submitNoMemo {
+		options["memo"] = false
+	}
+	if cmd.Flags().Changed("delay") {
+		options["delay"] = int64(submitDelay * 1000)
+	}
+	if cmd.Flags().Changed("retries") {
+		if submitRetries <= 0 {
+			options["retries"] = nil
+		} else {
+			options["retries"] = map[string]any{
+				"limit":      submitRetries,
+				"backoffMin": 0,
+				"backoffMax": 0,
+			}
+		}
+	}
+
 	if submitIdempotencyKey != "" {
 		options["idempotencyKey"] = submitIdempotencyKey
 	}
@@ -126,7 +176,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// -o json: wait for root step, print full run snapshot as JSON
 	if isOutput("json") {
-		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -141,7 +191,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// TTY: live tree display, wait for all steps
 	if term.IsTerminal(int(os.Stdout.Fd())) {
-		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -153,7 +203,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	// Non-TTY: print run ID, wait for root step silently
 	fmt.Println(result.RunID)
-	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, result.RunID, workspaceID)
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), result.RunID, workspaceID)
 	if err != nil {
 		return err
 	}

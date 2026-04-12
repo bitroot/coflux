@@ -17,8 +17,8 @@ import (
 // the current data for each topic (by index) and returns lines to display.
 // Return nil from render to skip drawing (e.g. when waiting for all topics).
 // The helper handles terminal cursor management, truncation, and signal handling.
-func watchTopics(ctx context.Context, host string, secure bool, token string, topics []string, render func(data []map[string]any) []string) error {
-	client, err := topicalclient.Connect(ctx, host, secure, token)
+func watchTopics(ctx context.Context, host string, secure bool, token string, project string, topics []string, render func(data []map[string]any) []string) error {
+	client, err := topicalclient.Connect(ctx, host, secure, token, project)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}

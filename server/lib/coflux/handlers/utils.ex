@@ -2,47 +2,77 @@ defmodule Coflux.Handlers.Utils do
   alias Coflux.Config
 
   @doc """
-  Resolves the project from the hostname.
+  Resolves the project from the request.
 
-  Behavior depends on configuration:
-
-  - Neither set: Returns `{:error, :not_configured}`
-  - COFLUX_PROJECT only: Returns the configured project (any access method works)
-  - COFLUX_PUBLIC_HOST starts with `%`: Extracts project from subdomain
-  - Both set: Extracts from subdomain, but must match COFLUX_PROJECT
+  Uses hostname (subdomain or COFLUX_PROJECT) and/or the `X-Project` header.
+  When both identify a project, they must agree.
   """
-  def resolve_project(hostname) do
+  def resolve_project(req) do
+    hostname = get_host(req)
+    header_project = get_project_header(req) || get_project_query_param(req)
     configured_project = Config.project()
     base_domain = Config.base_domain()
 
     # Strip port for subdomain matching
     host = hostname |> String.split(":") |> hd()
 
-    case {configured_project, base_domain} do
-      {nil, nil} ->
-        {:error, :not_configured}
+    host_result =
+      case {configured_project, base_domain} do
+        {nil, nil} ->
+          {:error, :not_configured}
 
-      {project_id, nil} ->
-        {:ok, project_id}
+        {project_id, nil} ->
+          {:ok, project_id}
 
-      {_, base_domain} ->
-        # Subdomain routing
-        cond do
-          host == base_domain ->
-            {:error, :project_required}
+        {_, base_domain} ->
+          cond do
+            host == base_domain ->
+              {:error, :project_required}
 
-          String.ends_with?(host, "." <> base_domain) ->
-            project_id = String.replace_suffix(host, "." <> base_domain, "")
+            String.ends_with?(host, "." <> base_domain) ->
+              project_id = String.replace_suffix(host, "." <> base_domain, "")
 
-            if configured_project && project_id != configured_project do
-              {:error, :project_mismatch}
-            else
-              {:ok, project_id}
-            end
+              if configured_project && project_id != configured_project do
+                {:error, :project_mismatch}
+              else
+                {:ok, project_id}
+              end
 
-          true ->
-            {:error, :invalid_host}
+            true ->
+              {:error, :invalid_host}
+          end
+      end
+
+    case {host_result, header_project} do
+      {result, nil} ->
+        result
+
+      {{:ok, project_id}, header} ->
+        if header == project_id do
+          {:ok, project_id}
+        else
+          {:error, :project_mismatch}
         end
+
+      {_error, header} ->
+        {:ok, header}
+    end
+  end
+
+  defp get_project_header(req) do
+    case :cowboy_req.header("x-project", req) do
+      :undefined -> nil
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp get_project_query_param(req) do
+    qs = :cowboy_req.parse_qs(req)
+
+    case List.keyfind(qs, "project", 0) do
+      {"project", value} when value != "" -> value
+      _ -> nil
     end
   end
 
@@ -85,7 +115,7 @@ defmodule Coflux.Handlers.Utils do
 
     headers = %{
       "access-control-allow-methods" => "OPTIONS, GET, POST, PUT, PATCH, DELETE",
-      "access-control-allow-headers" => "content-type,authorization,x-api-version",
+      "access-control-allow-headers" => "content-type,authorization,x-api-version,x-project",
       "access-control-max-age" => "86400"
     }
 

@@ -59,6 +59,7 @@ def managed_worker(
     concurrency=1,
     modules=None,
     provides=None,
+    accepts=None,
 ):
     """Start a worker with an executor and clean up on exit.
 
@@ -84,6 +85,7 @@ def managed_worker(
         adapter,
         concurrency=concurrency,
         provides=provides,
+        accepts=accepts,
         host=host,
         workspace=workspace,
         env_vars={"logs_store_flush_interval": "0"},

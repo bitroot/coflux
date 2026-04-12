@@ -192,6 +192,22 @@ defmodule Coflux.Orchestration.Values do
   end
 
   defp ensure_execution_ref(db, run_external_id, step_number, attempt) do
+    {module, target} =
+      case query_one(
+             db,
+             """
+             SELECT s.module, s.target
+             FROM executions AS e
+             INNER JOIN steps AS s ON s.id = e.step_id
+             INNER JOIN runs AS r ON r.id = s.run_id
+             WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+             """,
+             {run_external_id, step_number, attempt}
+           ) do
+        {:ok, {m, t}} -> {m, t}
+        {:ok, nil} -> {nil, nil}
+      end
+
     {:ok, _} =
       insert_one(
         db,
@@ -199,7 +215,9 @@ defmodule Coflux.Orchestration.Values do
         %{
           run_external_id: run_external_id,
           step_number: step_number,
-          attempt: attempt
+          attempt: attempt,
+          module: module,
+          target: target
         },
         on_conflict: "DO NOTHING"
       )

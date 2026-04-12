@@ -5,6 +5,7 @@ worker processes when executions are submitted for matching modules.
 """
 
 import json
+import subprocess
 
 import pytest
 import support.cli as cli
@@ -54,7 +55,7 @@ def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides
 
     Creates the workspace (if needed) and configures a pool whose launcher
     starts a ``coflux worker`` process pointing at the test adapter.
-    Extra keyword arguments are forwarded to ``cli.pools_update``.
+    Extra keyword arguments are forwarded to ``cli.pools_create``.
     """
     modules = modules or ["test"]
     manifest_path = pool_env["manifest_path"]
@@ -64,15 +65,22 @@ def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides
     with open(manifest_path, "w") as f:
         json.dump(manifest(targets), f)
 
-    cli.pools_update(
+    adapter = ["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path]
+
+    cli.pools_create(
         pool_name,
+        type="process",
         modules=modules,
         provides=provides,
         process_dir=str(pool_env["worker_dir"]),
-        adapter=["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path],
+        adapter=adapter,
         host=host,
         **kwargs,
     )
+
+    # Register manifests so the server knows about the workflows
+    adapter_str = ",".join(adapter)
+    cli.manifests_register(*modules, adapter=adapter_str, host=host)
 
 
 class TestPoolLifecycle:
@@ -105,6 +113,23 @@ class TestPoolLifecycle:
         cli.pools_delete("test-pool", host=host)
         pools = cli.pools_list(host=host)
         assert "test-pool" not in pools
+
+    def test_create_already_exists(self, pool_env):
+        """Creating a pool that already exists fails."""
+        targets = [workflow("test", "my_workflow")]
+        _setup_pool(pool_env, targets)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _setup_pool(pool_env, targets)
+        assert "already_exists" in exc_info.value.stderr
+
+    def test_update_nonexistent(self, pool_env):
+        """Updating a pool that doesn't exist fails."""
+        host = pool_env["host"]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_update("no-such-pool", concurrency=2, host=host)
+        assert "not_found" in exc_info.value.stderr
 
 
 class TestProcessLauncher:
@@ -308,14 +333,19 @@ class TestCommonLauncherFields:
         with open(manifest_path, "w") as f:
             json.dump(manifest(targets), f)
 
-        cli.pools_update(
+        cli.pools_create(
             "env-worker-pool",
+            type="process",
             modules=["test"],
             process_dir=str(worker_dir),
             adapter=["python3", wrapper_script, "--manifest", manifest_path, "--socket", socket_path],
             env={"TEST_POOL_VAR": "pool-env-works"},
             host=host,
         )
+
+        # Register manifests using the real adapter (not the env wrapper)
+        real_adapter = f"python3,{ADAPTER_SCRIPT},--manifest,{manifest_path}"
+        cli.manifests_register("test", adapter=real_adapter, host=host)
 
         resp = cli.submit("test/check_env", host=host)
         executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)

@@ -2,7 +2,7 @@ defmodule Coflux.ProcessLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config) do
+  def launch(env, modules, config, _opts \\ %{}) do
     cli_path = Coflux.Config.cli_path()
     directory = Map.fetch!(config, :directory)
 
@@ -31,8 +31,8 @@ defmodule Coflux.ProcessLauncher do
       {:ok, pid} ->
         {:ok, %{pid: pid}}
 
-      {:error, reason} ->
-        {:error, "failed to start process: #{inspect(reason)}"}
+      {:error, _reason} ->
+        {:error, "launch_process_failed"}
     end
   end
 
@@ -76,13 +76,7 @@ defmodule Coflux.ProcessLauncher do
     |> Enum.join("\n")
   end
 
-  defp truncate_bytes(string, max_bytes) when byte_size(string) <= max_bytes, do: string
-
-  defp truncate_bytes(string, max_bytes) do
-    string
-    |> binary_part(byte_size(string) - max_bytes, max_bytes)
-    |> String.replace(~r/^[^\n]*\n/, "")
-  end
+  defdelegate truncate_bytes(string, max_bytes), to: Coflux.Launchers.Utils
 
   defp shell_escape(arg) do
     "'" <> String.replace(arg, "'", "'\\''") <> "'"

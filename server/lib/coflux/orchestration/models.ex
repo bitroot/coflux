@@ -7,6 +7,8 @@ defmodule Coflux.Orchestration.Models do
       :external_id,
       :parent_ref_id,
       :idempotency_key,
+      :requires_tag_set_id,
+      :memo,
       :created_at,
       :created_by
     ]
@@ -22,7 +24,9 @@ defmodule Coflux.Orchestration.Models do
           {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
         end
 
-      Keyword.put(fields, :created_by, created_by)
+      fields
+      |> Keyword.put(:created_by, created_by)
+      |> Keyword.update!(:memo, &(&1 == 1))
     end
   end
 
@@ -76,6 +80,7 @@ defmodule Coflux.Orchestration.Models do
       :defer_key,
       :parent_id,
       :requires_tag_set_id,
+      :run_requires_tag_set_id,
       :retry_limit,
       :retry_backoff_min,
       :retry_backoff_max,

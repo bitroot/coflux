@@ -43,7 +43,14 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:pool], build_pool(pool))
   end
 
-  defp process_notification(topic, {:worker, _worker_id, worker_external_id, starting_at}) do
+  defp process_notification(topic, {:state, state}) do
+    Topic.set(topic, [:pool, :state], to_string(state))
+  end
+
+  defp process_notification(
+         topic,
+         {:worker, _worker_id, worker_external_id, starting_at, session_external_id}
+       ) do
     Topic.set(topic, [:workers, worker_external_id], %{
       startingAt: starting_at,
       startedAt: nil,
@@ -53,7 +60,8 @@ defmodule Coflux.Topics.Pool do
       deactivatedAt: nil,
       logs: nil,
       state: :active,
-      connected: nil
+      sessionId: session_external_id,
+      executions: 0
     })
   end
 
@@ -88,8 +96,8 @@ defmodule Coflux.Topics.Pool do
     Topic.set(topic, [:workers, worker_external_id, :state], state)
   end
 
-  defp process_notification(topic, {:worker_connected, worker_external_id, connected}) do
-    Topic.set(topic, [:workers, worker_external_id, :connected], connected)
+  defp process_notification(topic, {:worker_executions, worker_external_id, total}) do
+    Topic.set(topic, [:workers, worker_external_id, :executions], total)
   end
 
   defp build_launcher(launcher) do
@@ -101,10 +109,25 @@ defmodule Coflux.Topics.Pool do
 
         :process ->
           %{type: "process", directory: launcher.directory}
+
+        :kubernetes ->
+          %{type: "kubernetes", image: launcher.image}
+          |> maybe_put(:namespace, Map.get(launcher, :namespace))
+          |> maybe_put(:apiServer, Map.get(launcher, :api_server))
+          |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
+          |> maybe_put(:insecure, Map.get(launcher, :insecure))
+          |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
+          |> maybe_put(:labels, Map.get(launcher, :labels))
+          |> maybe_put(:annotations, Map.get(launcher, :annotations))
+          |> maybe_put(:activeDeadlineSeconds, Map.get(launcher, :active_deadline_seconds))
+          |> maybe_put(:volumes, Map.get(launcher, :volumes))
+          |> maybe_put(:volumeMounts, Map.get(launcher, :volume_mounts))
+          |> maybe_put(:resources, Map.get(launcher, :resources))
       end
 
     base
     |> maybe_put(:serverHost, Map.get(launcher, :server_host))
+    |> maybe_put(:serverSecure, Map.get(launcher, :server_secure))
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
     |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
     |> maybe_put(:env, Map.get(launcher, :env))
@@ -118,8 +141,10 @@ defmodule Coflux.Topics.Pool do
       %{
         modules: pool.modules,
         provides: pool.provides,
+        accepts: Map.get(pool, :accepts, %{}),
         # TODO: include launcher ID?
-        launcher: if(pool.launcher, do: build_launcher(pool.launcher))
+        launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
+        state: to_string(Map.get(pool, :state, :active))
       }
     end
   end
@@ -136,7 +161,8 @@ defmodule Coflux.Topics.Pool do
       error: worker.error,
       logs: worker.logs,
       state: worker.state,
-      connected: worker.connected
+      sessionId: worker.session_external_id,
+      executions: worker.total_executions
     }
   end
 end

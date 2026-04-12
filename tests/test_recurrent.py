@@ -21,17 +21,48 @@ def test_recurrent_execution(worker):
         # Submit a recurrent child task
         ex0.conn.submit_task(ex0.execution_id, "test", "ticker", [], recurrent=True)
 
-        # Three executions arrive automatically, each on a fresh connection
+        # Three executions arrive automatically, each on a fresh connection.
+        # Recurrent tasks must return None to trigger the next iteration.
         prev_eid = None
         for i in range(3):
             ex = ctx.executor.next_execute()
             if prev_eid is not None:
                 assert ex.execution_id != prev_eid
-            ex.conn.complete(ex.execution_id, value=f"tick {i + 1}")
+            ex.conn.complete(ex.execution_id, value=None)
             prev_eid = ex.execution_id
 
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_recurrent_stops_on_return_value(worker):
+    """Recurrent child task does NOT re-execute after returning a non-null value."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "ticker"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+
+        ex0 = ctx.executor.next_execute()
+
+        ex0.conn.submit_task(ex0.execution_id, "test", "ticker", [], recurrent=True)
+
+        # First execution returns None -> triggers re-execution
+        ex1 = ctx.executor.next_execute()
+        ex1.conn.complete(ex1.execution_id, value=None)
+
+        # Second execution returns a non-null value -> stops recurrence
+        ex2 = ctx.executor.next_execute()
+        ex2.conn.complete(ex2.execution_id, value="final")
+
+        # No third execution should arrive
+        with pytest.raises(TimeoutError):
+            ctx.executor.next_execute(timeout=2)
+
+        ex0.conn.complete(ex0.execution_id, value="done")
+        assert ctx.result(resp["runId"])["value"]["data"] == "done"
 
 
 def test_recurrent_stops_on_error(worker):
@@ -48,9 +79,9 @@ def test_recurrent_stops_on_error(worker):
 
         ex0.conn.submit_task(ex0.execution_id, "test", "ticker", [], recurrent=True)
 
-        # First execution succeeds -> triggers re-execution
+        # First execution returns None -> triggers re-execution
         ex1 = ctx.executor.next_execute()
-        ex1.conn.complete(ex1.execution_id, value="tick 1")
+        ex1.conn.complete(ex1.execution_id, value=None)
 
         # Second execution arrives (recurrence), fail it
         ex2 = ctx.executor.next_execute()

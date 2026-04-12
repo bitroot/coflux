@@ -5,6 +5,7 @@ defmodule Coflux.Orchestration.Sessions do
 
   def create_session(db, workspace_id, worker_id, opts \\ []) do
     provides = Keyword.get(opts, :provides)
+    accepts = Keyword.get(opts, :accepts)
     activation_timeout = Keyword.get(opts, :activation_timeout)
     reconnection_timeout = Keyword.get(opts, :reconnection_timeout)
     created_by = Keyword.get(opts, :created_by)
@@ -24,6 +25,14 @@ defmodule Coflux.Orchestration.Sessions do
               end
             end
 
+          accepts_tag_set_id =
+            if accepts && Enum.any?(accepts) do
+              case TagSets.get_or_create_tag_set_id(db, accepts) do
+                {:ok, tag_set_id} ->
+                  tag_set_id
+              end
+            end
+
           now = current_timestamp()
 
           case insert_one(db, :sessions, %{
@@ -31,6 +40,7 @@ defmodule Coflux.Orchestration.Sessions do
                  workspace_id: workspace_id,
                  worker_id: worker_id,
                  provides_tag_set_id: provides_tag_set_id,
+                 accepts_tag_set_id: accepts_tag_set_id,
                  activation_timeout: activation_timeout,
                  reconnection_timeout: reconnection_timeout,
                  secret_hash: {:blob, secret_hash},
@@ -99,6 +109,7 @@ defmodule Coflux.Orchestration.Sessions do
         s.workspace_id,
         s.worker_id,
         s.provides_tag_set_id,
+        s.accepts_tag_set_id,
         s.activation_timeout,
         s.reconnection_timeout,
         s.secret_hash,
@@ -111,6 +122,20 @@ defmodule Coflux.Orchestration.Sessions do
       )
       """,
       {}
+    )
+  end
+
+  def get_assignment_counts(db) do
+    query(
+      db,
+      """
+      SELECT a.session_id, COUNT(*) AS total
+      FROM assignments AS a
+      WHERE NOT EXISTS (
+        SELECT 1 FROM session_expirations se WHERE se.session_id = a.session_id
+      )
+      GROUP BY a.session_id
+      """
     )
   end
 

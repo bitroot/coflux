@@ -86,6 +86,12 @@ CREATE TABLE results_new (
         OR value_id
         OR successor_ref_id
       )
+      WHEN 9 THEN successor_id
+      AND NOT (
+        error_id
+        OR value_id
+        OR successor_ref_id
+      )
       ELSE FALSE
     END
   )
@@ -97,3 +103,27 @@ ALTER TABLE results_new RENAME TO results;
 
 CREATE INDEX idx_results_successor_id ON results(successor_id);
 CREATE INDEX idx_results_successor_ref_id ON results(successor_ref_id);
+
+CREATE TABLE pool_states (
+  pool_name TEXT NOT NULL,
+  workspace_id INTEGER NOT NULL,
+  state INTEGER NOT NULL, -- 0: active, 1: disabled
+  created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_pool_states_ws_name ON pool_states(workspace_id, pool_name, created_at);
+
+-- Add accepts_tag_set_id to pool_definitions and sessions
+ALTER TABLE pool_definitions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+ALTER TABLE sessions ADD COLUMN accepts_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+
+-- Add requires_tag_set_id to runs (inherited from workflow definition)
+ALTER TABLE runs ADD COLUMN requires_tag_set_id INTEGER REFERENCES tag_sets ON DELETE RESTRICT;
+
+-- Add memo flag to runs (inherited from workflow definition, applied to child tasks)
+ALTER TABLE runs ADD COLUMN memo INTEGER;
+
+-- Add memo flag to workflows (propagated to child tasks via run)
+ALTER TABLE workflows ADD COLUMN memo INTEGER;

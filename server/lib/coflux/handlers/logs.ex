@@ -38,7 +38,7 @@ defmodule Coflux.Handlers.Logs do
   defp handle_post(req, opts) do
     host = get_host(req)
 
-    with {:ok, project_id} <- resolve_project(host),
+    with {:ok, project_id} <- resolve_project(req),
          {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
       handle_post_with_project(req, opts, project_id)
     else
@@ -90,7 +90,7 @@ defmodule Coflux.Handlers.Logs do
   defp handle_get(req, opts) do
     host = get_host(req)
 
-    with {:ok, project_id} <- resolve_project(host),
+    with {:ok, project_id} <- resolve_project(req),
          {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
       handle_get_with_project(req, opts, project_id)
     else

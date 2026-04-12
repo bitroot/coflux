@@ -250,7 +250,7 @@ func runQueue(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	return watchQueue(cmd.Context(), getHost(), isSecure(), token, workspaceID, workspace)
+	return watchQueue(cmd.Context(), getHost(), isSecure(), token, getProject(), workspaceID, workspace)
 }
 
 func printQueueTable(entries []queueEntry, sessions []sessionEntry, workspaceState string) {
@@ -265,8 +265,8 @@ func printQueueTable(entries []queueEntry, sessions []sessionEntry, workspaceSta
 	}
 }
 
-func watchQueue(ctx context.Context, host string, secure bool, token string, workspaceID string, workspaceName string) error {
-	return watchTopics(ctx, host, secure, token,
+func watchQueue(ctx context.Context, host string, secure bool, token string, project string, workspaceID string, workspaceName string) error {
+	return watchTopics(ctx, host, secure, token, project,
 		[]string{
 			"workspaces/" + workspaceID + "/queue",
 			"workspaces/" + workspaceID + "/sessions",

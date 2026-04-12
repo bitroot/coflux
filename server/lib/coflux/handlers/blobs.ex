@@ -15,7 +15,7 @@ defmodule Coflux.Handlers.Blobs do
       method ->
         host = get_host(req)
 
-        with {:ok, project_id} <- resolve_project(host),
+        with {:ok, project_id} <- resolve_project(req),
              {:ok, _access} <- Auth.check(get_token(req), project_id, host) do
           handle(req, method, bindings[:key], opts)
         else

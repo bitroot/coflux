@@ -596,3 +596,100 @@ def test_poll_with_timeout_returns_value_if_ready_before_timeout(worker):
 
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_workflow_requires_inherited_by_child_task(worker):
+    """Child tasks inherit the workflow's requires tags from the run.
+
+    A workflow with requires={"gpu": ["cuda-12"]} submits a child task that has
+    no requires of its own. The child should still be dispatched to the worker
+    with matching provides, because it inherits from the run.
+    """
+    targets = [
+        workflow("test", "main", requires={"gpu": ["cuda-12"]}),
+        task("test", "compute"),
+    ]
+
+    # Worker A: no provides, concurrency=2
+    with worker(targets, concurrency=2) as ctx_a:
+        # Worker B: provides gpu=cuda-12, concurrency=2
+        with worker(
+            targets,
+            concurrency=2,
+            provides={"gpu": ["cuda-12"]},
+        ) as ctx_b:
+            resp = ctx_b.submit("test", "main")
+            run_id = resp["runId"]
+
+            # Workflow has requires, so it must land on worker B
+            ex = ctx_b.executor.next_execute(timeout=5)
+            assert ex.target == "main"
+
+            # Submit child task with no requires
+            ref = ex.conn.submit_task(
+                ex.execution_id,
+                "test", "compute",
+                [],
+            )
+
+            # Child should also land on worker B (inherited requires)
+            ex_child = ctx_b.executor.next_execute(timeout=5)
+            assert ex_child.target == "compute"
+
+            # Verify worker A did NOT receive the task
+            with pytest.raises(TimeoutError):
+                ctx_a.executor.next_execute(timeout=1)
+
+            ex_child.conn.complete(ex_child.execution_id, value="computed")
+            assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
+            ex.conn.complete(ex.execution_id, value="done")
+            assert ctx_a.result(run_id)["value"]["data"] == "done"
+
+
+def test_task_requires_unset_overrides_workflow(worker):
+    """A child task can unset a workflow's requires tag using an empty list.
+
+    The workflow has requires={"gpu": ["cuda-12"]}. The child task sets
+    requires={"gpu": []} to unset the gpu tag. The child should then be
+    dispatchable to a worker without gpu provides.
+    """
+    targets = [
+        workflow("test", "main", requires={"gpu": ["cuda-12"]}),
+        task("test", "compute"),
+    ]
+
+    # Worker A: no provides, concurrency=2
+    with worker(targets, concurrency=2) as ctx_a:
+        # Worker B: provides gpu=cuda-12, concurrency=2
+        with worker(
+            targets,
+            concurrency=2,
+            provides={"gpu": ["cuda-12"]},
+        ) as ctx_b:
+            resp = ctx_b.submit("test", "main")
+            run_id = resp["runId"]
+
+            # Workflow lands on worker B (has matching provides)
+            ex = ctx_b.executor.next_execute(timeout=5)
+            assert ex.target == "main"
+
+            # Submit child task that unsets the gpu requirement
+            ref = ex.conn.submit_task(
+                ex.execution_id,
+                "test", "compute",
+                [],
+                requires={"gpu": []},
+            )
+
+            # Child should land on either worker (no effective requires).
+            # Try worker A first since it has more availability.
+            try:
+                ex_child = ctx_a.executor.next_execute(timeout=5)
+            except TimeoutError:
+                ex_child = ctx_b.executor.next_execute(timeout=5)
+
+            assert ex_child.target == "compute"
+            ex_child.conn.complete(ex_child.execution_id, value="computed")
+            assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
+            ex.conn.complete(ex.execution_id, value="done")
+            assert ctx_a.result(run_id)["value"]["data"] == "done"

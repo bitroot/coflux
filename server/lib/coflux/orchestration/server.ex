@@ -54,7 +54,7 @@ defmodule Coflux.Orchestration.Server do
               # ref -> {pid, session_id}
               connections: %{},
 
-              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
+              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
               sessions: %{},
 
               # external_id -> session_id
@@ -185,7 +185,7 @@ defmodule Coflux.Orchestration.Server do
       workspaces
       |> Map.keys()
       |> Enum.reduce(%{}, fn workspace_id, pools ->
-        {:ok, workspace_pools} = Workspaces.get_workspace_pools(state.db, workspace_id)
+        {:ok, workspace_pools, _hash} = Workspaces.get_workspace_pools(state.db, workspace_id)
         Map.put(pools, workspace_id, workspace_pools)
       end)
 
@@ -202,16 +202,32 @@ defmodule Coflux.Orchestration.Server do
     # Load active sessions from DB
     {:ok, active_sessions} = Sessions.load_active_sessions(state.db)
 
+    # Load total assignment counts per session for lifetime execution tracking
+    {:ok, assignment_counts} = Sessions.get_assignment_counts(state.db)
+
+    assignment_counts_by_session =
+      Map.new(assignment_counts, fn {session_id, total} -> {session_id, total} end)
+
     state =
       Enum.reduce(
         active_sessions,
         state,
         fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
-            activation_timeout, reconnection_timeout, secret_hash, created_at, activated_at},
+            accepts_tag_set_id, activation_timeout, reconnection_timeout, secret_hash, created_at,
+            activated_at},
            state ->
           provides =
             if provides_tag_set_id do
               case TagSets.get_tag_set(state.db, provides_tag_set_id) do
+                {:ok, tag_set} -> tag_set
+              end
+            else
+              %{}
+            end
+
+          accepts =
+            if accepts_tag_set_id do
+              case TagSets.get_tag_set(state.db, accepts_tag_set_id) do
                 {:ok, tag_set} -> tag_set
               end
             else
@@ -232,11 +248,13 @@ defmodule Coflux.Orchestration.Server do
             concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
+            accepts: accepts,
             worker_id: worker_id,
             last_idle_at: activated_at || created_at,
             activated_at: activated_at,
             activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout
+            reconnection_timeout: reconnection_timeout,
+            total_executions: Map.get(assignment_counts_by_session, session_id, 0)
           }
 
           state =
@@ -260,6 +278,20 @@ defmodule Coflux.Orchestration.Server do
           end
         end
       )
+
+    # Deactivate orphaned workers that have no launch result (data: nil) and
+    # no associated session. These were created but the server crashed before
+    # a session could be created for them, so nothing will ever connect.
+    # Workers that DO have a session are left alone — the session's activation
+    # timeout will handle cleanup if the launched process never connects.
+    state =
+      state.workers
+      |> Enum.filter(fn {_worker_id, worker} ->
+        is_nil(worker.data) && is_nil(worker.session_id)
+      end)
+      |> Enum.reduce(state, fn {worker_id, _worker}, state ->
+        deactivate_worker(state, worker_id, "server_restarted")
+      end)
 
     # Restore pending assignments into session state instead of abandoning them.
     # Workers will reconnect and report via heartbeats which executions they're
@@ -613,8 +645,8 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:get_pools, workspace_external_id}, _from, state) do
     with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id) do
       case Workspaces.get_workspace_pools(state.db, workspace_id) do
-        {:ok, pools} ->
-          {:reply, {:ok, pools}, state}
+        {:ok, pools, hash} ->
+          {:reply, {:ok, pools, hash}, state}
       end
     else
       {:error, error} ->
@@ -622,40 +654,211 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:update_pool, workspace_external_id, pool_name, pool, access}, _from, state) do
+  def handle_call(
+        {:update_pools, workspace_external_id, desired_pools, expected_hash, access},
+        _from,
+        state
+      ) do
     with {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access) do
-      case Workspaces.update_pool(state.db, workspace_id, pool_name, pool, access[:principal_id]) do
-        {:ok, pool_id} ->
+      case Workspaces.update_pools(
+             state.db,
+             workspace_id,
+             desired_pools,
+             expected_hash,
+             access[:principal_id]
+           ) do
+        {:ok, changed_pool_names} ->
+          # Drain workers only for pools that actually changed
+          state =
+            state.workers
+            |> Enum.reduce(state, fn {worker_id, worker}, state ->
+              if worker.state == :active &&
+                   MapSet.member?(changed_pool_names, worker.pool_name) do
+                update_worker_state(state, worker_id, :draining, workspace_id, worker.pool_name)
+              else
+                state
+              end
+            end)
+
+          # Update in-memory pools (reload from DB to include :id and :state)
+          ws_ext_id = workspace_external_id(state, workspace_id)
+
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          state =
+            put_in(state, [Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+
+          # Send notifications only for changed pools
+          state =
+            Enum.reduce(changed_pool_names, state, fn name, state ->
+              pool = Map.get(updated_pools, name)
+
+              state
+              |> notify_listeners({:pool, ws_ext_id, name}, {:updated, pool})
+              |> notify_listeners({:pools, ws_ext_id}, {:pool, name, pool})
+            end)
+
+          state = flush_notifications(state)
+
+          {:reply, :ok, state}
+
+        {:error, :conflict} ->
+          {:reply, {:error, :conflict}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call(
+        {:create_pool, workspace_external_id, pool_name, pool, access},
+        _from,
+        state
+      ) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      case Workspaces.create_pool(
+             state.db,
+             workspace_id,
+             pool_name,
+             pool,
+             access[:principal_id]
+           ) do
+        {:ok, _pool_id} ->
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          ws_ext_id = workspace_external_id(state, workspace_id)
+          pool = Map.get(updated_pools, pool_name)
+
+          state =
+            state
+            |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
+            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
+            |> flush_notifications()
+
+          {:reply, :ok, state}
+
+        {:error, :already_exists} ->
+          {:reply, {:error, :already_exists}, state}
+      end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call(
+        {:update_pool, workspace_external_id, pool_name, pool_patch, access},
+        _from,
+        state
+      ) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      case Workspaces.update_pool(
+             state.db,
+             workspace_id,
+             pool_name,
+             pool_patch,
+             access[:principal_id]
+           ) do
+        {:ok, _pool_id} ->
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
               if worker.state == :active && worker.pool_name == pool_name do
-                # TODO: only if pool has meaningfully changed?
                 update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
               else
                 state
               end
             end)
-            |> update_in([Access.key(:pools), Access.key(workspace_id, %{})], fn pools ->
-              if pool do
-                Map.put(pools, pool_name, Map.put(pool, :id, pool_id))
-              else
-                Map.delete(pools, pool_name)
-              end
-            end)
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, workspace_id), pool_name},
-              {:updated, pool}
-            )
-            |> notify_listeners(
-              {:pools, workspace_external_id(state, workspace_id)},
-              {:pool, pool_name, pool}
-            )
+
+          # Reload pools from DB to get the merged result with :id and :state
+          {:ok, updated_pools, _hash} =
+            Workspaces.get_workspace_pools(state.db, workspace_id)
+
+          ws_ext_id = workspace_external_id(state, workspace_id)
+          pool = Map.get(updated_pools, pool_name)
+
+          state =
+            state
+            |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
+            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
+            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
             |> flush_notifications()
 
           {:reply, :ok, state}
+
+        {:error, :not_found} ->
+          {:reply, {:error, :not_found}, state}
+
+        {:error, :type_change} ->
+          {:reply, {:error, :type_change}, state}
       end
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call({:disable_pool, workspace_external_id, pool_name, access}, _from, state) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      :ok = Workspaces.disable_pool(state.db, workspace_id, pool_name, access[:principal_id])
+
+      state =
+        state
+        |> put_in(
+          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          :disabled
+        )
+        |> notify_listeners(
+          {:pool, workspace_external_id, pool_name},
+          {:state, :disabled}
+        )
+        |> notify_listeners(
+          {:pools, workspace_external_id},
+          {:pool_state, pool_name, :disabled}
+        )
+        |> flush_notifications()
+
+      send(self(), :tick)
+
+      {:reply, :ok, state}
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call({:enable_pool, workspace_external_id, pool_name, access}, _from, state) do
+    with {:ok, workspace_id, _} <-
+           require_workspace(state, workspace_external_id, access) do
+      :ok = Workspaces.enable_pool(state.db, workspace_id, pool_name, access[:principal_id])
+
+      state =
+        state
+        |> put_in(
+          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          :active
+        )
+        |> notify_listeners(
+          {:pool, workspace_external_id, pool_name},
+          {:state, :active}
+        )
+        |> notify_listeners(
+          {:pools, workspace_external_id},
+          {:pool_state, pool_name, :active}
+        )
+        |> flush_notifications()
+
+      send(self(), :tick)
+
+      {:reply, :ok, state}
     else
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -831,6 +1034,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call({:create_session, workspace_external_id, access, opts}, _from, state) do
     provides = Keyword.get(opts, :provides, %{})
+    accepts = Keyword.get(opts, :accepts, %{})
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
     reconnection_timeout =
@@ -840,6 +1044,7 @@ defmodule Coflux.Orchestration.Server do
            require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
+        accepts: accepts,
         activation_timeout: activation_timeout,
         reconnection_timeout: reconnection_timeout,
         created_by: access[:principal_id]
@@ -858,11 +1063,13 @@ defmodule Coflux.Orchestration.Server do
             concurrency: 0,
             workspace_id: workspace_id,
             provides: provides,
+            accepts: accepts,
             worker_id: nil,
             last_idle_at: now,
             activated_at: nil,
             activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout
+            reconnection_timeout: reconnection_timeout,
+            total_executions: 0
           }
 
           state =
@@ -943,15 +1150,11 @@ defmodule Coflux.Orchestration.Server do
 
       state =
         case session.worker_id && Map.fetch(state.workers, session.worker_id) do
-          {:ok, worker} ->
-            state
-            |> put_in(
+          {:ok, _worker} ->
+            put_in(
+              state,
               [Access.key(:workers), session.worker_id, Access.key(:session_id)],
               session_id
-            )
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-              {:worker_connected, worker.external_id, true}
             )
 
           _ ->
@@ -986,10 +1189,13 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:declare_targets, external_id, targets, concurrency}, _from, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
+    now = System.os_time(:millisecond)
+
     state =
       state
       |> assign_targets(targets, session_id)
       |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
+      |> put_in([Access.key(:sessions), session_id, :last_idle_at], now)
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -1065,6 +1271,14 @@ defmodule Coflux.Orchestration.Server do
     cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
     arguments = Enum.map(arguments, &normalize_value(&1))
 
+    # Inherit run-level memo if the step doesn't specify its own
+    opts =
+      if is_nil(Keyword.get(opts, :memo)) and run.memo do
+        Keyword.put(opts, :memo, true)
+      else
+        opts
+      end
+
     case Runs.schedule_step(
            state.db,
            run.id,
@@ -1111,7 +1325,21 @@ defmodule Coflux.Orchestration.Server do
         timeout = Keyword.get(opts, :timeout, 0)
         delay = Keyword.get(opts, :delay, 0)
         execute_after = if delay > 0, do: created_at + delay
-        requires = Keyword.get(opts, :requires) || %{}
+        step_requires = Keyword.get(opts, :requires) || %{}
+
+        run_requires =
+          if run.requires_tag_set_id do
+            case TagSets.get_tag_set(state.db, run.requires_tag_set_id) do
+              {:ok, tag_set} -> tag_set
+            end
+          else
+            %{}
+          end
+
+        requires =
+          run_requires
+          |> Map.merge(step_requires)
+          |> Map.reject(fn {_key, values} -> values == [] end)
 
         execution_external_id = execution_external_id(run.external_id, step_number, attempt)
 
@@ -1127,6 +1355,8 @@ defmodule Coflux.Orchestration.Server do
           if !memo_hit do
             arguments = Enum.map(arguments, &build_value(&1, state.db))
 
+            recurrent = Keyword.get(opts, :recurrent, false)
+
             state
             |> notify_listeners(
               {:run, run.external_id},
@@ -1140,10 +1370,11 @@ defmodule Coflux.Orchestration.Server do
                  cache_key: cache_key,
                  memo_key: memo_key,
                  retries: retries,
+                 recurrent: recurrent,
                  timeout: timeout,
                  created_at: created_at,
                  arguments: arguments,
-                 requires: requires
+                 requires: step_requires
                }, ws_ext_id}
             )
             |> notify_listeners(
@@ -1238,7 +1469,6 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:rerun_step, step_id, workspace_external_id, access}, _from, state) do
-    # TODO: abort/cancel any running/scheduled retry? (for the same workspace) (and reference this retry?)
     with {:ok, run_external_id, step_number} <- parse_step_id(step_id),
          {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access),
@@ -1260,6 +1490,8 @@ defmodule Coflux.Orchestration.Server do
 
       if base_workspace_id == workspace_id ||
            is_workspace_ancestor?(state, base_workspace_id, workspace_id) do
+        state = cancel_active_step_executions(state, step.id, workspace_id)
+
         {:ok, _execution_id, attempt, state} =
           rerun_step(state, step, workspace_id, created_by: access[:principal_id])
 
@@ -1291,8 +1523,7 @@ defmodule Coflux.Orchestration.Server do
            Runs.get_execution_id(state.db, run_ext_id, step_number, attempt) do
       active_id = resolve_active_execution(state.db, execution_id)
 
-      {:ok, state} = process_result(state, active_id, :cancelled, access[:principal_id])
-      state = cancel_descendants(state, active_id, workspace_id)
+      state = do_cancel_execution(state, active_id, workspace_id)
       state = flush_notifications(state)
       {:reply, :ok, state}
     else
@@ -1428,7 +1659,7 @@ defmodule Coflux.Orchestration.Server do
           state
           |> notify_listeners(
             {:sessions, workspace_external_id(state, session.workspace_id)},
-            {:executions, session.external_id,
+            {:executing, session.external_id,
              session.starting |> MapSet.union(session.executing) |> Enum.count()}
           )
           |> flush_notifications()
@@ -1487,12 +1718,12 @@ defmodule Coflux.Orchestration.Server do
               end)
 
             session = Map.fetch!(state.sessions, session_id)
-            executions = session.starting |> MapSet.union(session.executing) |> Enum.count()
+            executing = session.starting |> MapSet.union(session.executing) |> Enum.count()
 
             notify_listeners(
               state,
               {:sessions, workspace_external_id(state, session.workspace_id)},
-              {:executions, session.external_id, executions}
+              {:executing, session.external_id, executing}
             )
 
           :error ->
@@ -1755,7 +1986,7 @@ defmodule Coflux.Orchestration.Server do
         # Resolve tag sets, de-duplicating by ID
         tag_sets =
           executions
-          |> Enum.map(&elem(&1, 8))
+          |> Enum.flat_map(fn row -> [elem(row, 8), elem(row, 9)] end)
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq()
           |> Map.new(fn tag_set_id ->
@@ -1792,47 +2023,49 @@ defmodule Coflux.Orchestration.Server do
         pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
         {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
 
-        # TODO: include 'active' workers that aren't in this (potentially limited) list
+        if is_nil(pool) and pool_workers == [] do
+          {:reply, {:error, :not_found}, state}
+        else
+          # TODO: include 'active' workers that aren't in this (potentially limited) list
 
-        workers =
-          Map.new(
-            pool_workers,
-            fn {worker_id, worker_external_id, starting_at, started_at, start_error, stopping_at,
-                stopped_at, stop_error, deactivated_at, error, logs} ->
-              worker = Map.get(state.workers, worker_id)
+          workers =
+            Map.new(
+              pool_workers,
+              fn {worker_id, worker_external_id, starting_at, started_at, start_error,
+                  stopping_at, stopped_at, stop_error, deactivated_at, error, logs,
+                  total_executions} ->
+                worker = Map.get(state.workers, worker_id)
 
-              connected =
-                if worker do
-                  if worker.session_id do
+                session_external_id =
+                  if worker && worker.session_id do
                     case Map.fetch(state.sessions, worker.session_id) do
-                      {:ok, session} -> !is_nil(session.connection)
-                      :error -> false
+                      {:ok, session} -> session.external_id
+                      :error -> nil
                     end
-                  else
-                    false
                   end
-                end
 
-              # TODO: include pool_id?
-              {worker_external_id,
-               %{
-                 starting_at: starting_at,
-                 started_at: started_at,
-                 start_error: start_error,
-                 stopping_at: stopping_at,
-                 stopped_at: stopped_at,
-                 stop_error: stop_error,
-                 deactivated_at: deactivated_at,
-                 error: error,
-                 logs: logs,
-                 state: if(worker, do: worker.state),
-                 connected: connected
-               }}
-            end
-          )
+                # TODO: include pool_id?
+                {worker_external_id,
+                 %{
+                   starting_at: starting_at,
+                   started_at: started_at,
+                   start_error: start_error,
+                   stopping_at: stopping_at,
+                   stopped_at: stopped_at,
+                   stop_error: stop_error,
+                   deactivated_at: deactivated_at,
+                   error: error,
+                   logs: logs,
+                   state: if(worker, do: worker.state),
+                   session_external_id: session_external_id,
+                   total_executions: total_executions
+                 }}
+              end
+            )
 
-        {:ok, ref, state} = add_listener(state, {:pool, workspace_external_id, pool_name}, pid)
-        {:reply, {:ok, pool, workers, ref}, state}
+          {:ok, ref, state} = add_listener(state, {:pool, workspace_external_id, pool_name}, pid)
+          {:reply, {:ok, pool, workers, ref}, state}
+        end
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -1882,10 +2115,14 @@ defmodule Coflux.Orchestration.Server do
           max_runs
         )
 
-      {:ok, ref, state} =
-        add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
+      if is_nil(workflow) and runs == [] do
+        {:reply, {:error, :not_found}, state}
+      else
+        {:ok, ref, state} =
+          add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
 
-      {:reply, {:ok, workflow, instruction, runs, ref}, state}
+        {:reply, {:ok, workflow, instruction, runs, ref}, state}
+      end
     else
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -2058,7 +2295,7 @@ defmodule Coflux.Orchestration.Server do
 
     tag_sets =
       executions_due
-      |> Enum.map(& &1.requires_tag_set_id)
+      |> Enum.flat_map(&[&1.requires_tag_set_id, &1.run_requires_tag_set_id])
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
       |> Enum.reduce(%{}, fn tag_set_id, tag_sets ->
@@ -2122,9 +2359,11 @@ defmodule Coflux.Orchestration.Server do
                 {state, assigned, unassigned}
               else
                 requires =
-                  if execution.requires_tag_set_id,
-                    do: Map.fetch!(tag_sets, execution.requires_tag_set_id),
-                    else: %{}
+                  effective_requires(
+                    tag_sets,
+                    execution.run_requires_tag_set_id,
+                    execution.requires_tag_set_id
+                  )
 
                 if execution.type == :task || !execution.parent_id do
                   case choose_session(state, execution, requires) do
@@ -2159,12 +2398,43 @@ defmodule Coflux.Orchestration.Server do
                           [Access.key(:sessions), session_id, :starting],
                           &MapSet.put(&1, execution_external_id)
                         )
+                        |> update_in(
+                          [Access.key(:sessions), session_id, :total_executions],
+                          &(&1 + 1)
+                        )
                         |> send_session(
                           session_id,
                           {:execute, execution_external_id, execution.module, execution.target,
                            enriched_arguments, execution.run_external_id, workspace_external_id,
                            execution.timeout}
                         )
+
+                      # Notify sessions topic of updated total
+                      session = Map.fetch!(state.sessions, session_id)
+
+                      state =
+                        notify_listeners(
+                          state,
+                          {:sessions, workspace_external_id},
+                          {:executions, session.external_id, session.total_executions}
+                        )
+
+                      state =
+                        if session.worker_id do
+                          worker = Map.get(state.workers, session.worker_id)
+
+                          if worker do
+                            notify_listeners(
+                              state,
+                              {:pool, workspace_external_id, worker.pool_name},
+                              {:worker_executions, worker.external_id, session.total_executions}
+                            )
+                          else
+                            state
+                          end
+                        else
+                          state
+                        end
 
                       {state, [{execution, assigned_at} | assigned], unassigned}
                   end
@@ -2328,9 +2598,11 @@ defmodule Coflux.Orchestration.Server do
           executions
           |> Enum.map(fn execution ->
             requires =
-              if execution.requires_tag_set_id,
-                do: Map.fetch!(tag_sets, execution.requires_tag_set_id),
-                else: %{}
+              effective_requires(
+                tag_sets,
+                execution.run_requires_tag_set_id,
+                execution.requires_tag_set_id
+              )
 
             choose_pool(state, execution, requires)
           end)
@@ -2354,8 +2626,11 @@ defmodule Coflux.Orchestration.Server do
                 reconnection_timeout =
                   Map.get(pool, :reconnection_timeout, @default_reconnection_timeout_ms)
 
+                pool_accepts = Map.get(pool, :accepts, %{})
+
                 session_opts = [
                   provides: pool.provides,
+                  accepts: pool_accepts,
                   activation_timeout: activation_timeout,
                   reconnection_timeout: reconnection_timeout
                 ]
@@ -2374,11 +2649,13 @@ defmodule Coflux.Orchestration.Server do
                   concurrency: 0,
                   workspace_id: workspace_id,
                   provides: pool.provides,
+                  accepts: pool_accepts,
                   worker_id: worker_id,
                   last_idle_at: session_now,
                   activated_at: nil,
                   activation_timeout: activation_timeout,
-                  reconnection_timeout: reconnection_timeout
+                  reconnection_timeout: reconnection_timeout,
+                  total_executions: 0
                 }
 
                 state
@@ -2392,14 +2669,15 @@ defmodule Coflux.Orchestration.Server do
                   [
                     build_launcher_env(state, workspace_id, token, pool.launcher),
                     pool.modules,
-                    pool.launcher
+                    pool.launcher,
+                    %{pool_name: pool_name}
                   ],
                   fn state, result ->
                     {data, error} =
                       case result do
                         {:ok, {:ok, data}} -> {data, nil}
                         {:ok, {:error, error}} -> {nil, error}
-                        :error -> {nil, "launcher_crashed"}
+                        :error -> {nil, "launch_crashed"}
                       end
 
                     {:ok, started_at} =
@@ -2438,7 +2716,7 @@ defmodule Coflux.Orchestration.Server do
                 |> put_in([Access.key(:worker_external_ids), worker_external_id], worker_id)
                 |> notify_listeners(
                   {:pool, workspace_external_id(state, workspace_id), pool_name},
-                  {:worker, worker_id, worker_external_id, created_at}
+                  {:worker, worker_id, worker_external_id, created_at, external_id}
                 )
             end
           end)
@@ -2486,6 +2764,9 @@ defmodule Coflux.Orchestration.Server do
 
             {:ok, {:ok, false, error, logs}} ->
               deactivate_worker(state, worker_id, error, logs)
+
+            {:ok, {:error, _reason}} ->
+              deactivate_worker(state, worker_id, "poll_error")
 
             :error ->
               # TODO: ?
@@ -2544,6 +2825,17 @@ defmodule Coflux.Orchestration.Server do
         call_launcher(state, launcher, :stop, [worker.data], fn state, result ->
           case result do
             {:ok, :ok} ->
+              {:ok, stopped_at} =
+                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
+
+              state
+              |> notify_listeners(
+                {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
+                {:worker_stop_result, worker.external_id, stopped_at, nil}
+              )
+
+            {:ok, {:error, _reason}} ->
+              # Stop failed (e.g. connection refused) — treat as stopped
               {:ok, stopped_at} =
                 Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
 
@@ -2746,19 +3038,6 @@ defmodule Coflux.Orchestration.Server do
                   {:connected, session.external_id, false}
                 )
 
-              state =
-                if session.worker_id do
-                  worker = Map.fetch!(state.workers, session.worker_id)
-
-                  notify_listeners(
-                    state,
-                    {:pool, workspace_external_id(state, session.workspace_id), worker.pool_name},
-                    {:worker_connected, worker.external_id, false}
-                  )
-                else
-                  state
-                end
-
               state
 
             :error ->
@@ -2821,6 +3100,36 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Cancel a single execution: record :cancelled, abort if assigned, cancel descendants.
+  defp do_cancel_execution(state, execution_id, workspace_id) do
+    state =
+      case record_and_notify_result(state, execution_id, :cancelled, nil) do
+        {:ok, state} -> state
+        {:error, :already_recorded} -> state
+      end
+
+    state =
+      case Runs.get_execution_key(state.db, execution_id) do
+        {:ok, {r, s, a}} ->
+          abort_execution(state, execution_external_id(r, s, a))
+
+        {:error, :not_found} ->
+          state
+      end
+
+    cancel_descendants(state, execution_id, workspace_id)
+  end
+
+  # Cancel all active (unresolved) executions for a step in a workspace.
+  defp cancel_active_step_executions(state, step_id, workspace_id) do
+    {:ok, active_execution_ids} =
+      Runs.get_active_execution_ids_for_step(state.db, step_id, workspace_id)
+
+    Enum.reduce(active_execution_ids, state, fn exec_id, state ->
+      do_cancel_execution(state, exec_id, workspace_id)
+    end)
+  end
+
   # Cancel all descendant executions of a given execution (excludes the
   # execution itself). Follows both step parent-child links and spawned
   # result chains via the recursive CTE in get_execution_descendants.
@@ -2831,25 +3140,9 @@ defmodule Coflux.Orchestration.Server do
     |> Enum.filter(fn {exec_id, _module, _assigned_at, _completed_at, exec_workspace_id} ->
       exec_id != execution_id && exec_workspace_id == workspace_id
     end)
-    |> Enum.reduce(state, fn {exec_id, module, assigned_at, completed_at, _}, state ->
+    |> Enum.reduce(state, fn {exec_id, _module, _assigned_at, completed_at, _}, state ->
       if !completed_at do
-        state =
-          case record_and_notify_result(state, exec_id, :cancelled, module) do
-            {:ok, state} -> state
-            {:error, :already_recorded} -> state
-          end
-
-        if assigned_at do
-          case Runs.get_execution_key(state.db, exec_id) do
-            {:ok, {r, s, a}} ->
-              abort_execution(state, execution_external_id(r, s, a))
-
-            {:error, :not_found} ->
-              state
-          end
-        else
-          state
-        end
+        do_cancel_execution(state, exec_id, workspace_id)
       else
         state
       end
@@ -3028,7 +3321,7 @@ defmodule Coflux.Orchestration.Server do
         waiting
         |> Enum.map(fn {execution_ext_id, execution_waiting} ->
           {execution_ext_id,
-           Enum.reject(execution_waiting, fn {from_ext_id, _, _} ->
+           Enum.reject(execution_waiting, fn {from_ext_id, _, _, _} ->
              MapSet.member?(session.starting, from_ext_id) ||
                MapSet.member?(session.executing, from_ext_id)
            end)}
@@ -3047,13 +3340,13 @@ defmodule Coflux.Orchestration.Server do
       if session.worker_id do
         case Map.fetch(state.workers, session.worker_id) do
           {:ok, worker} ->
-            # TODO: check that worker workspace matches session workspace?
-            state
-            |> put_in([Access.key(:workers), session.worker_id, :session_id], nil)
-            |> notify_listeners(
-              {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-              {:worker_connected, worker.external_id, false}
-            )
+            if is_nil(worker.data) do
+              # Worker never got a launch result — the launch was in-flight when
+              # the server crashed. Deactivate it so it doesn't sit forever.
+              deactivate_worker(state, session.worker_id, "launch_incomplete")
+            else
+              put_in(state, [Access.key(:workers), session.worker_id, :session_id], nil)
+            end
 
           :error ->
             state
@@ -3242,13 +3535,26 @@ defmodule Coflux.Orchestration.Server do
         state =
           register_pending_dependencies(state, execution_id, pending_dependencies)
 
-        requires =
+        step_requires =
           if step.requires_tag_set_id do
-            {:ok, requires} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
-            requires
+            {:ok, tag_set} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
+            tag_set
           else
             %{}
           end
+
+        run_requires =
+          if run.requires_tag_set_id do
+            {:ok, tag_set} = TagSets.get_tag_set(state.db, run.requires_tag_set_id)
+            tag_set
+          else
+            %{}
+          end
+
+        requires =
+          run_requires
+          |> Map.merge(step_requires)
+          |> Map.reject(fn {_key, values} -> values == [] end)
 
         execution_external_id =
           execution_external_id(run.external_id, step.number, attempt)
@@ -3734,6 +4040,17 @@ defmodule Coflux.Orchestration.Server do
         resolve_execution_ref(db, run.parent_ref_id)
       end
 
+    run_requires =
+      if run.requires_tag_set_id do
+        case TagSets.get_tag_set(db, run.requires_tag_set_id) do
+          {:ok, tag_set} -> tag_set
+        end
+      else
+        %{}
+      end
+
+    run = Map.put(run, :requires, run_requires)
+
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
     {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
@@ -3824,6 +4141,7 @@ defmodule Coflux.Orchestration.Server do
            retry_limit: step.retry_limit,
            retry_backoff_min: step.retry_backoff_min,
            retry_backoff_max: step.retry_backoff_max,
+           recurrent: step.recurrent,
            timeout: step.timeout,
            created_at: step.created_at,
            arguments: arguments,
@@ -4255,6 +4573,7 @@ defmodule Coflux.Orchestration.Server do
       :cancelled -> true
       {:timeout, retry_id} -> is_nil(retry_id)
       {:suspended, _} -> false
+      {:recurred, _} -> false
       {:deferred, _} -> false
       {:cached, _} -> false
       {:spawned, _} -> false
@@ -4292,6 +4611,10 @@ defmodule Coflux.Orchestration.Server do
       {:suspended, successor_id} ->
         successor = if successor_id, do: resolve_execution(db, successor_id)
         {:suspended, successor}
+
+      {:recurred, successor_id} ->
+        successor = if successor_id, do: resolve_execution(db, successor_id)
+        {:recurred, successor}
 
       # In-flight successor (successor_id is an internal execution ID)
       {type, execution_id}
@@ -4419,7 +4742,7 @@ defmodule Coflux.Orchestration.Server do
             {:error, :not_found} -> nil
           end
 
-        {retry_id, state} =
+        {retry_id, recurred?, state} =
           cond do
             match?({:suspended, _, _}, result) ->
               {:suspended, execute_after, dependency_ids} = result
@@ -4439,7 +4762,7 @@ defmodule Coflux.Orchestration.Server do
                   state
                 end
 
-              {retry_id, state}
+              {retry_id, false, state}
 
             result_retryable?(result) && step.retry_limit == -1 ->
               # Unlimited retries - random delay between min and max
@@ -4452,7 +4775,7 @@ defmodule Coflux.Orchestration.Server do
               {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-              {retry_id, state}
+              {retry_id, false, state}
 
             result_retryable?(result) && step.retry_limit > 0 ->
               # Limited retries - check consecutive failures
@@ -4476,24 +4799,29 @@ defmodule Coflux.Orchestration.Server do
                 {:ok, retry_id, _, state} =
                   rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-                {retry_id, state}
+                {retry_id, false, state}
               else
-                {nil, state}
+                {nil, false, state}
               end
 
-            step.recurrent == 1 and match?({:value, _}, result) ->
+            step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
+              # Null return from recurrent step: schedule next iteration via :recurred
               execute_after =
                 if step.delay > 0 do
                   System.os_time(:millisecond) + step.delay
                 end
 
-              {:ok, _, _, state} =
+              {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id, execute_after: execute_after)
 
-              {nil, state}
+              {retry_id, true, state}
+
+            step.recurrent == 1 and match?({:value, _}, result) ->
+              # Non-null return from recurrent step: stop recurrence
+              {nil, false, state}
 
             true ->
-              {nil, state}
+              {nil, false, state}
           end
 
         result =
@@ -4509,6 +4837,9 @@ defmodule Coflux.Orchestration.Server do
 
             {:suspended, _, _} ->
               {:suspended, retry_id}
+
+            {:value, _} when recurred? ->
+              {:recurred, retry_id}
 
             other ->
               other
@@ -4563,6 +4894,9 @@ defmodule Coflux.Orchestration.Server do
             resolve_result(db, execution_id)
 
           {:suspended, execution_id} ->
+            resolve_result(db, execution_id)
+
+          {:recurred, execution_id} ->
             resolve_result(db, execution_id)
 
           {:spawned, execution_id} when is_integer(execution_id) ->
@@ -4685,12 +5019,53 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp session_pool_disabled?(session, state) do
+    if session.worker_id do
+      worker = Map.fetch!(state.workers, session.worker_id)
+      workspace_pools = Map.get(state.pools, session.workspace_id, %{})
+      pool = Map.get(workspace_pools, worker.pool_name)
+      pool != nil && Map.get(pool, :state, :active) == :disabled
+    else
+      false
+    end
+  end
+
   defp has_requirements?(provides, requires) do
     # TODO: case insensitive matching?
     Enum.all?(requires, fn {key, requires_values} ->
       (provides || %{})
       |> Map.get(key, [])
       |> Enum.any?(&(&1 in requires_values))
+    end)
+  end
+
+  defp merge_tag_sets(a, b) do
+    Map.merge(a || %{}, b || %{}, fn _key, v1, v2 -> Enum.uniq(v1 ++ v2) end)
+  end
+
+  # Merge run-level requires with step-level requires (child overrides per key).
+  defp effective_requires(tag_sets, run_requires_tag_set_id, step_requires_tag_set_id) do
+    run_requires =
+      if run_requires_tag_set_id,
+        do: Map.fetch!(tag_sets, run_requires_tag_set_id),
+        else: %{}
+
+    step_requires =
+      if step_requires_tag_set_id,
+        do: Map.fetch!(tag_sets, step_requires_tag_set_id),
+        else: %{}
+
+    run_requires
+    |> Map.merge(step_requires)
+    |> Map.reject(fn {_key, values} -> values == [] end)
+  end
+
+  defp satisfies_accepts?(accepts, requires) do
+    # Worker's accepts tags must all be present in the task's requires tags
+    Enum.all?(accepts || %{}, fn {key, accepts_values} ->
+      (requires || %{})
+      |> Map.get(key, [])
+      |> Enum.any?(&(&1 in accepts_values))
     end)
   end
 
@@ -4706,12 +5081,14 @@ defmodule Coflux.Orchestration.Server do
 
     %{
       connected: !is_nil(session.connection),
-      executions: session.starting |> MapSet.union(session.executing) |> Enum.count(),
+      executing: session.starting |> MapSet.union(session.executing) |> Enum.count(),
       concurrency: session.concurrency,
       pool_name: if(worker, do: worker.pool_name),
       targets: targets,
       provides: session.provides,
-      worker_state: if(worker, do: worker.state)
+      accepts: session.accepts,
+      worker_state: if(worker, do: worker.state),
+      executions: session.total_executions
     }
   end
 
@@ -5054,7 +5431,9 @@ defmodule Coflux.Orchestration.Server do
           session.workspace_id == execution.workspace_id && session.connection &&
             !session_at_capacity?(session) &&
             session_active?(session, state) &&
-            has_requirements?(session.provides, requires)
+            !session_pool_disabled?(session, state) &&
+            has_requirements?(merge_tag_sets(session.provides, session.accepts), requires) &&
+            satisfies_accepts?(session.accepts, requires)
         end)
 
       if Enum.any?(session_ids) do
@@ -5069,8 +5448,10 @@ defmodule Coflux.Orchestration.Server do
       state.pools
       |> Map.get(execution.workspace_id, %{})
       |> Map.filter(fn {_, pool} ->
-        pool.launcher && execution.module in pool.modules &&
-          has_requirements?(pool.provides, requires)
+        Map.get(pool, :state, :active) != :disabled &&
+          pool.launcher && execution.module in pool.modules &&
+          has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
+          satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
       end)
 
     if Enum.any?(pools) do
@@ -5252,6 +5633,7 @@ defmodule Coflux.Orchestration.Server do
 
     base = %{
       "COFLUX_HOST" => coflux_host,
+      "COFLUX_PROJECT" => state.project_id,
       "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
       "COFLUX_SESSION" => token
     }
@@ -5268,6 +5650,13 @@ defmodule Coflux.Orchestration.Server do
         concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
       end
 
+    base =
+      case Map.get(launcher, :server_secure) do
+        nil -> base
+        true -> Map.put(base, "COFLUX_SECURE", "true")
+        false -> Map.put(base, "COFLUX_SECURE", "false")
+      end
+
     case Map.get(launcher, :env) do
       nil -> base
       env -> Map.merge(base, env)
@@ -5279,6 +5668,7 @@ defmodule Coflux.Orchestration.Server do
       case launcher.type do
         :docker -> Coflux.DockerLauncher
         :process -> Coflux.ProcessLauncher
+        :kubernetes -> Coflux.KubernetesLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)

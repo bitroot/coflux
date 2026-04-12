@@ -67,8 +67,24 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:get_pools, workspace_id})
   end
 
+  def update_pools(project_id, workspace_id, pools, expected_hash, access \\ nil) do
+    call_server(project_id, {:update_pools, workspace_id, pools, expected_hash, access})
+  end
+
+  def create_pool(project_id, workspace_id, pool_name, pool, access \\ nil) do
+    call_server(project_id, {:create_pool, workspace_id, pool_name, pool, access})
+  end
+
   def update_pool(project_id, workspace_id, pool_name, pool, access \\ nil) do
     call_server(project_id, {:update_pool, workspace_id, pool_name, pool, access})
+  end
+
+  def disable_pool(project_id, workspace_id, pool_name, access \\ nil) do
+    call_server(project_id, {:disable_pool, workspace_id, pool_name, access})
+  end
+
+  def enable_pool(project_id, workspace_id, pool_name, access \\ nil) do
+    call_server(project_id, {:enable_pool, workspace_id, pool_name, access})
   end
 
   def stop_worker(project_id, workspace_id, worker_id, access \\ nil) do

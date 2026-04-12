@@ -290,7 +290,7 @@ defmodule Coflux.Config do
     System.get_env("COFLUX_CLI_PATH", "coflux")
   end
 
-  @valid_launcher_types MapSet.new([:docker, :process])
+  @valid_launcher_types MapSet.new([:docker, :process, :kubernetes])
 
   defp parse_launcher_types do
     case System.get_env("COFLUX_LAUNCHER_TYPES") do

@@ -215,6 +215,7 @@ def worker(server, project_id, tmp_path):
         modules=None,
         concurrency=1,
         provides=None,
+        accepts=None,
         workspace="default",
     ):
         nonlocal _worker_count
@@ -233,6 +234,7 @@ def worker(server, project_id, tmp_path):
             concurrency=concurrency,
             modules=modules,
             provides=provides,
+            accepts=accepts,
         ) as executor:
             ctx = WorkerContext(
                 host, workspace, executor, handler, project_id, worker_dir

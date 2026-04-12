@@ -37,6 +37,7 @@ type Store interface {
 type HTTPStore struct {
 	baseURL       string
 	token         string
+	project       string
 	client        *http.Client
 	batchSize     int
 	flushInterval time.Duration
@@ -51,13 +52,14 @@ type HTTPStore struct {
 }
 
 // NewHTTPStore creates a new HTTP log store
-func NewHTTPStore(baseURL string, token string, batchSize int, flushInterval time.Duration, logger *slog.Logger) *HTTPStore {
+func NewHTTPStore(baseURL string, token string, project string, batchSize int, flushInterval time.Duration, logger *slog.Logger) *HTTPStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &HTTPStore{
 		baseURL:       baseURL,
 		token:         token,
+		project:       project,
 		client:        &http.Client{Timeout: 30 * time.Second},
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
@@ -194,6 +196,9 @@ func (s *HTTPStore) send(entries []Entry) error {
 	req.Header.Set("Content-Type", "application/json")
 	if s.token != "" {
 		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if s.project != "" {
+		req.Header.Set("X-Project", s.project)
 	}
 
 	resp, err := s.client.Do(req)

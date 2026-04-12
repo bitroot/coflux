@@ -6,6 +6,7 @@ import "strings"
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
 type Config struct {
 	Host      string        `mapstructure:"host"`
+	Project   string        `mapstructure:"project"`
 	Token     string        `mapstructure:"token"`
 	Secure    *bool         `mapstructure:"secure"`
 	Workspace string        `mapstructure:"workspace"`
@@ -41,6 +42,7 @@ type WorkerConfig struct {
 	Adapter     []string `mapstructure:"adapter"`
 	Concurrency int      `mapstructure:"concurrency"`
 	Provides    []string `mapstructure:"provides"`
+	Accepts     []string `mapstructure:"accepts"`
 }
 
 // ParseProvides converts a flat provides list (e.g., ["gpu:A100", "gpu:H100", "region:eu"])

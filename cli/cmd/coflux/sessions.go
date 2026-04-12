@@ -163,7 +163,7 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 	}
 
 	if sessionsListWatch {
-		return watchSessions(cmd.Context(), getHost(), isSecure(), token, workspaceID)
+		return watchSessions(cmd.Context(), getHost(), isSecure(), token, getProject(), workspaceID)
 	}
 
 	data, err := client.CaptureTopic(cmd.Context(), "workspaces/"+workspaceID+"/sessions")
@@ -174,8 +174,8 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func watchSessions(ctx context.Context, host string, secure bool, token string, workspaceID string) error {
-	return watchTopics(ctx, host, secure, token,
+func watchSessions(ctx context.Context, host string, secure bool, token string, project string, workspaceID string) error {
+	return watchTopics(ctx, host, secure, token, project,
 		[]string{"workspaces/" + workspaceID + "/sessions"},
 		func(data []map[string]any) []string {
 			if data[0] == nil {

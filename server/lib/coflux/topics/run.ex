@@ -60,6 +60,7 @@ defmodule Coflux.Topics.Run do
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
         retries: build_retries(step.retries),
+        recurrent: step.recurrent,
         timeout: step.timeout,
         createdAt: step.created_at,
         arguments: Enum.map(step.arguments, &build_value/1),
@@ -210,6 +211,7 @@ defmodule Coflux.Topics.Run do
     %{
       createdAt: run.created_at,
       createdBy: build_principal(run.created_by),
+      requires: run.requires,
       parent: if(parent, do: build_execution(parent)),
       steps:
         steps
@@ -229,6 +231,7 @@ defmodule Coflux.Topics.Run do
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
              retries: build_retries(step),
+             recurrent: step.recurrent == 1,
              timeout: step.timeout,
              createdAt: step.created_at,
              arguments: Enum.map(step.arguments, &build_value/1),
@@ -354,6 +357,13 @@ defmodule Coflux.Topics.Run do
       {:suspended, successor} ->
         %{
           type: "suspended",
+          createdBy: created_by,
+          successor: if(successor, do: execution_attempt(successor))
+        }
+
+      {:recurred, successor} ->
+        %{
+          type: "recurred",
           createdBy: created_by,
           successor: if(successor, do: execution_attempt(successor))
         }

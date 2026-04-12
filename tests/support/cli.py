@@ -89,6 +89,15 @@ def workspaces_resume(host=None, workspace="default"):
     _coflux("workspaces", "resume", host=host, workspace=workspace, output=None)
 
 
+def manifests_register(*modules, adapter=None, host=None, workspace="default"):
+    args = ["manifests"]
+    if adapter:
+        args.extend(["--adapter", adapter])
+    args.append("register")
+    args.extend(modules)
+    _coflux(*args, host=host, workspace=workspace, output=None)
+
+
 def manifests_discover(*modules, adapter=None, host=None, workspace="default"):
     args = ["manifests"]
     if adapter:
@@ -160,28 +169,55 @@ def logs_get(
     return result.stdout
 
 
-def pools_update(
-    name, modules=None, provides=None, process_dir=None,
-    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
+def _pools_set_args(
+    modules=None, provides=None, accepts=None, process_dir=None,
+    docker_image=None, adapter=None, concurrency=None, env=None,
 ):
-    args = ["pools", "update", name]
+    """Build --set/--modules/--provides/--accepts args for pool create/update."""
+    args = []
     if modules:
-        for m in modules:
-            args.extend(["--module", m])
+        args.extend(["--modules", ",".join(modules)])
     if provides:
         for key, values in provides.items():
             args.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
+    if accepts:
+        for key, values in accepts.items():
+            args.extend(["--accepts", ",".join(f"{key}:{v}" for v in values)])
     if process_dir:
-        args.extend(["--process-dir", process_dir])
+        args.extend(["--set", f"directory={process_dir}"])
     if docker_image:
-        args.extend(["--docker-image", docker_image])
+        args.extend(["--set", f"image={docker_image}"])
     if adapter:
-        args.extend(["--adapter", ",".join(adapter)])
+        args.extend(["--set", f"adapter={json.dumps(adapter)}"])
     if concurrency:
-        args.extend(["--concurrency", str(concurrency)])
+        args.extend(["--set", f"concurrency={concurrency}"])
     if env:
         for k, v in env.items():
-            args.extend(["--env", f"{k}={v}"])
+            args.extend(["--set", f"env.{k}={v}"])
+    return args
+
+
+def pools_create(
+    name, type, modules=None, provides=None, accepts=None, process_dir=None,
+    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
+):
+    args = ["pools", "create", name, "--type", type]
+    args.extend(_pools_set_args(
+        modules=modules, provides=provides, accepts=accepts, process_dir=process_dir,
+        docker_image=docker_image, adapter=adapter, concurrency=concurrency, env=env,
+    ))
+    _coflux(*args, host=host, workspace=workspace, output=None)
+
+
+def pools_update(
+    name, modules=None, provides=None, accepts=None, process_dir=None,
+    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
+):
+    args = ["pools", "update", name]
+    args.extend(_pools_set_args(
+        modules=modules, provides=provides, accepts=accepts, process_dir=process_dir,
+        docker_image=docker_image, adapter=adapter, concurrency=concurrency, env=env,
+    ))
     _coflux(*args, host=host, workspace=workspace, output=None)
 
 
@@ -209,6 +245,7 @@ def worker(
     adapter,
     concurrency=1,
     provides=None,
+    accepts=None,
     host=None,
     workspace="default",
     env_vars=None,
@@ -234,6 +271,9 @@ def worker(
     if provides:
         for key, values in provides.items():
             cmd.extend(["--provides", ",".join(f"{key}:{v}" for v in values)])
+    if accepts:
+        for key, values in accepts.items():
+            cmd.extend(["--accepts", ",".join(f"{key}:{v}" for v in values)])
     cmd.extend(modules)
     return subprocess.Popen(
         cmd, env=_build_env(env_vars), stdout=subprocess.PIPE, stderr=subprocess.PIPE

@@ -160,7 +160,7 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 
 	// -o json: wait for root step, print full run snapshot as JSON
 	if isOutput("json") {
-		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 
 	// TTY: live tree display, wait for all steps
 	if term.IsTerminal(int(os.Stdout.Fd())) {
-		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -186,7 +186,7 @@ func runRunsInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	// Non-TTY: wait for root step silently
-	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -481,7 +481,7 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 
 	// -o json: wait for root step, print full run snapshot as JSON
 	if isOutput("json") {
-		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		runData, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -496,7 +496,7 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 
 	// TTY: live tree display, wait for all steps
 	if term.IsTerminal(int(os.Stdout.Fd())) {
-		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+		exitCode, err := watchRun(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -508,7 +508,7 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 
 	// Non-TTY: print execution info, wait for root step silently
 	fmt.Printf("%s:%d\n", result.ExecutionID, result.Attempt)
-	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, runID, workspaceID)
+	_, exitCode, err := waitForRootResult(cmd.Context(), getHost(), isSecure(), token, getProject(), runID, workspaceID)
 	if err != nil {
 		return err
 	}

@@ -220,7 +220,7 @@ func runManifestsInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	if manifestsInspectWatch {
-		return watchTopics(cmd.Context(), getHost(), isSecure(), token,
+		return watchTopics(cmd.Context(), getHost(), isSecure(), token, getProject(),
 			[]string{"workspaces/" + workspaceID + "/manifests"},
 			func(data []map[string]any) []string {
 				if data[0] == nil {
@@ -405,6 +405,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"recurrent":   t.Recurrent,
 			"requires":    requires,
 			"instruction": instruction,
+			"memo":        t.Memo,
 		}
 
 		manifests[t.Module][t.Name] = def

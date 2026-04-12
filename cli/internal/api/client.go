@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -17,11 +18,12 @@ import (
 type Client struct {
 	baseURL string
 	token   string
+	project string
 	client  *http.Client
 }
 
 // NewClient creates a new API client
-func NewClient(host string, secure bool, token string) *Client {
+func NewClient(host string, secure bool, token string, project string) *Client {
 	scheme := "http"
 	if secure {
 		scheme = "https"
@@ -29,24 +31,28 @@ func NewClient(host string, secure bool, token string) *Client {
 	return &Client{
 		baseURL: fmt.Sprintf("%s://%s", scheme, host),
 		token:   token,
+		project: project,
 		client:  &http.Client{},
 	}
 }
 
 // CreateSession creates a new worker session
-func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string) (string, error) {
+func (c *Client) CreateSession(ctx context.Context, workspaceID string, provides map[string][]string, accepts map[string][]string) (string, error) {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
 	if provides != nil {
 		body["provides"] = provides
 	}
+	if accepts != nil {
+		body["accepts"] = accepts
+	}
 
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
 
-	if err := c.post(ctx, "/api/create_session", body, &result); err != nil {
+	if _, err := c.post(ctx, "/api/create_session", body, &result); err != nil {
 		return "", err
 	}
 
@@ -60,7 +66,8 @@ func (c *Client) RegisterManifests(ctx context.Context, workspaceID string, mani
 		"manifests":   manifests,
 	}
 
-	return c.post(ctx, "/api/register_manifests", body, nil)
+	_, err := c.post(ctx, "/api/register_manifests", body, nil)
+	return err
 }
 
 // SubmitResult contains the IDs returned from submitting a workflow
@@ -81,7 +88,7 @@ func (c *Client) SubmitWorkflow(ctx context.Context, workspaceID, module, target
 	maps.Copy(body, options)
 
 	var result SubmitResult
-	if err := c.post(ctx, "/api/submit_workflow", body, &result); err != nil {
+	if _, err := c.post(ctx, "/api/submit_workflow", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -135,7 +142,7 @@ func (c *Client) CreateWorkspace(ctx context.Context, name string, baseID *strin
 	var result struct {
 		ID string `json:"id"`
 	}
-	if err := c.post(ctx, "/api/create_workspace", body, &result); err != nil {
+	if _, err := c.post(ctx, "/api/create_workspace", body, &result); err != nil {
 		return "", err
 	}
 	return result.ID, nil
@@ -147,7 +154,8 @@ func (c *Client) UpdateWorkspace(ctx context.Context, workspaceID string, update
 		"workspaceId": workspaceID,
 	}
 	maps.Copy(body, updates)
-	return c.post(ctx, "/api/update_workspace", body, nil)
+	_, err := c.post(ctx, "/api/update_workspace", body, nil)
+	return err
 }
 
 // ArchiveWorkspace archives a workspace
@@ -155,7 +163,8 @@ func (c *Client) ArchiveWorkspace(ctx context.Context, workspaceID string) error
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
-	return c.post(ctx, "/api/archive_workspace", body, nil)
+	_, err := c.post(ctx, "/api/archive_workspace", body, nil)
+	return err
 }
 
 // PauseWorkspace pauses a workspace (stops dispatching new executions)
@@ -163,7 +172,8 @@ func (c *Client) PauseWorkspace(ctx context.Context, workspaceID string) error {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
-	return c.post(ctx, "/api/pause_workspace", body, nil)
+	_, err := c.post(ctx, "/api/pause_workspace", body, nil)
+	return err
 }
 
 // ResumeWorkspace resumes a paused workspace
@@ -171,7 +181,8 @@ func (c *Client) ResumeWorkspace(ctx context.Context, workspaceID string) error 
 	body := map[string]any{
 		"workspaceId": workspaceID,
 	}
-	return c.post(ctx, "/api/resume_workspace", body, nil)
+	_, err := c.post(ctx, "/api/resume_workspace", body, nil)
+	return err
 }
 
 // ArchiveModule archives a module in a workspace (hides its targets)
@@ -180,7 +191,8 @@ func (c *Client) ArchiveModule(ctx context.Context, workspaceID, moduleName stri
 		"workspaceId": workspaceID,
 		"moduleName":  moduleName,
 	}
-	return c.post(ctx, "/api/archive_module", body, nil)
+	_, err := c.post(ctx, "/api/archive_module", body, nil)
+	return err
 }
 
 // Pools API
@@ -207,6 +219,17 @@ func (c *Client) GetPool(ctx context.Context, workspaceID, pool string) (map[str
 	return result, nil
 }
 
+// CreatePool creates a new pool (fails if it already exists)
+func (c *Client) CreatePool(ctx context.Context, workspaceID, poolName string, pool any) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+		"pool":        pool,
+	}
+	_, err := c.post(ctx, "/api/create_pool", body, nil)
+	return err
+}
+
 // UpdatePool updates or creates a pool
 func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, pool any) error {
 	body := map[string]any{
@@ -214,7 +237,91 @@ func (c *Client) UpdatePool(ctx context.Context, workspaceID, poolName string, p
 		"poolName":    poolName,
 		"pool":        pool,
 	}
-	return c.post(ctx, "/api/update_pool", body, nil)
+	_, err := c.post(ctx, "/api/update_pool", body, nil)
+	return err
+}
+
+func (c *Client) DisablePool(ctx context.Context, workspaceID, poolName string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+	}
+	_, err := c.post(ctx, "/api/disable_pool", body, nil)
+	return err
+}
+
+// ErrConflict indicates the pool configuration has changed since the ETag was fetched.
+var ErrConflict = errors.New("conflict: pool configuration has changed, re-run to see updated plan")
+
+// GetPoolConfigsResult holds the response from GetPoolConfigs.
+type GetPoolConfigsResult struct {
+	Pools map[string]map[string]any
+	ETag  string
+}
+
+// GetPoolConfigs retrieves all pool configs for a workspace along with an ETag.
+func (c *Client) GetPoolConfigs(ctx context.Context, workspaceID string) (*GetPoolConfigsResult, error) {
+	body := map[string]any{"workspaceId": workspaceID}
+	var pools map[string]map[string]any
+	headers, err := c.post(ctx, "/api/get_pools", body, &pools)
+	if err != nil {
+		return nil, err
+	}
+	return &GetPoolConfigsResult{Pools: pools, ETag: headers.Get("ETag")}, nil
+}
+
+// UpdatePools atomically replaces all pool configs for a workspace.
+// The ifMatch parameter should be the ETag from a previous GetPoolConfigs call.
+func (c *Client) UpdatePools(ctx context.Context, workspaceID string, pools map[string]map[string]any, ifMatch string) error {
+	jsonBody, err := json.Marshal(map[string]any{
+		"workspaceId": workspaceID,
+		"pools":       pools,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/update_pools", bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", ifMatch)
+	c.setCommonHeaders(req)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == 412 {
+		return ErrConflict
+	}
+
+	if resp.StatusCode >= 400 {
+		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
+			return err
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+func (c *Client) EnablePool(ctx context.Context, workspaceID, poolName string) error {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"poolName":    poolName,
+	}
+	_, err := c.post(ctx, "/api/enable_pool", body, nil)
+	return err
 }
 
 // Tokens API
@@ -245,7 +352,7 @@ func (c *Client) CreateToken(ctx context.Context, name string, workspaces []stri
 	var result struct {
 		Token string `json:"token"`
 	}
-	if err := c.post(ctx, "/api/create_token", body, &result); err != nil {
+	if _, err := c.post(ctx, "/api/create_token", body, &result); err != nil {
 		return "", err
 	}
 	return result.Token, nil
@@ -256,7 +363,8 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 	body := map[string]any{
 		"externalId": externalID,
 	}
-	return c.post(ctx, "/api/revoke_token", body, nil)
+	_, err := c.post(ctx, "/api/revoke_token", body, nil)
+	return err
 }
 
 // RerunStepResult contains the IDs returned from re-running a step
@@ -272,7 +380,7 @@ func (c *Client) RerunStep(ctx context.Context, workspaceID, stepID string) (*Re
 		"stepId":      stepID,
 	}
 	var result RerunStepResult
-	if err := c.post(ctx, "/api/rerun_step", body, &result); err != nil {
+	if _, err := c.post(ctx, "/api/rerun_step", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -284,7 +392,8 @@ func (c *Client) CancelExecution(ctx context.Context, workspaceID, executionID s
 		"workspaceId": workspaceID,
 		"executionId": executionID,
 	}
-	return c.post(ctx, "/api/cancel_execution", body, nil)
+	_, err := c.post(ctx, "/api/cancel_execution", body, nil)
+	return err
 }
 
 // CaptureTopic captures a topic snapshot via the REST endpoint
@@ -298,6 +407,18 @@ func (c *Client) CaptureTopic(ctx context.Context, path string) (map[string]any,
 
 // HTTP helpers
 
+func (c *Client) setCommonHeaders(req *http.Request) {
+	if apiVersion := version.APIVersion(); apiVersion != "dev" {
+		req.Header.Set("X-API-Version", apiVersion)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.project != "" {
+		req.Header.Set("X-Project", c.project)
+	}
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values, result any) error {
 	reqURL := c.baseURL + path
 	if params != nil {
@@ -309,12 +430,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if apiVersion := version.APIVersion(); apiVersion != "dev" {
-		req.Header.Set("X-API-Version", apiVersion)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.setCommonHeaders(req)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -355,39 +471,34 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 	return nil
 }
 
-func (c *Client) post(ctx context.Context, path string, body any, result any) error {
+func (c *Client) post(ctx context.Context, path string, body any, result any) (http.Header, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jsonBody))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if apiVersion := version.APIVersion(); apiVersion != "dev" {
-		req.Header.Set("X-API-Version", apiVersion)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.setCommonHeaders(req)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
-			return err
+			return nil, err
 		}
 		var errResp struct {
 			Error   string `json:"error"`
@@ -397,20 +508,20 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
 			if errResp.Details != nil {
 				detailsJSON, _ := json.Marshal(errResp.Details)
-				return fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
+				return nil, fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
 			}
-			return fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
+			return nil, fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	if result != nil && len(respBody) > 0 {
 		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
+			return nil, fmt.Errorf("failed to parse response: %w", err)
 		}
 	}
 
-	return nil
+	return resp.Header, nil
 }
 
 // checkVersionMismatch checks if an HTTP error response is a version mismatch
