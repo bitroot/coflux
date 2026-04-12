@@ -10,7 +10,7 @@ def poll_for_updates():
         process_update.submit(update)
 ```
 
-This continues indefinitely until the run is cancelled or an error occurs (without a successful retry).
+The task recurs as long as it returns `None`. Returning any other value completes the cycle and stops recurrence. The run can also be stopped by cancelling it, or if an error occurs (without a successful retry).
 
 ## Delay
 

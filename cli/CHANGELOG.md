@@ -4,6 +4,11 @@ Enhancements:
 
 - Updates `server` command to set default project ("default"), and improve Docker lifecycle handling.
 - Updates `worker` command to infer adapter (to avoid running `setup`).
+- Adds `--type kubernetes` support for `pools create` and `pools update`.
+- Adds `pools disable` and `pools enable` commands.
+- Adds `pools export` and `pools import` commands.
+- Adds `--accepts` flag for pool commands.
+- Adds `--requires`, `--memo`/`--no-memo`, `--delay`, and `--retries` flags to `submit`.
 
 ## 0.9.0
 

@@ -96,6 +96,24 @@ def create_order(user_execution, product_execution):
     # ...
 ```
 
+### Polling
+
+Instead of blocking with `.result()`, you can use `.poll()` to check whether a result is ready without suspending the caller:
+
+```python
+execution = slow_task.submit()
+while (result := execution.poll(timeout=1)) is None:
+    print("waiting...")
+```
+
+`poll()` returns the result if it's available, or `None` (by default) if the execution is still running. The optional `timeout` parameter specifies how long to wait (in seconds) before returning `None`.
+
+A custom default value can be provided with the `default` keyword argument:
+
+```python
+result = execution.poll(default="not ready")
+```
+
 ### Suspense
 
 A timeout can be imposed on the `.result()` call by surrounding it in a 'suspense' context. See the [suspense](/suspense) page for details.

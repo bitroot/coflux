@@ -1,3 +1,7 @@
+---
+sidebar_label: Server
+---
+
 # Server configuration
 
 The Coflux server is distributed as a Docker image and can be started using the CLI or directly with Docker.
