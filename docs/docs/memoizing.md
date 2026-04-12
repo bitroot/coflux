@@ -12,6 +12,18 @@ def fetch_user(user_id):
     ...
 ```
 
+## Workflow-level memo
+
+Setting `memo=True` on a `@workflow` applies it as a default for all tasks in the run:
+
+```python
+@workflow(memo=True)
+def analyse():
+    ...
+```
+
+Individual tasks can still override this — for example, a task with `memo=False` will not be memoized even if the workflow has `memo=True`.
+
 Memoized steps are indicated in Studio with a pin icon.
 
 As with caching, explicitly clicking the 're-run' button for a step will force the step to be re-run, even if it's memoized. Then subsequent memoizing will use the new step execution.

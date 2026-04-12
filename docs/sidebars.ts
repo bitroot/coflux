@@ -31,6 +31,7 @@ const sidebars: SidebarsConfig = {
       label: "Execution",
       items: [
         "retries",
+        "timeouts",
         "recurring",
         "caching",
         "memoizing",
@@ -46,6 +47,7 @@ const sidebars: SidebarsConfig = {
         "blobs",
         "assets",
         "logging",
+        "metrics",
       ],
     },
     {
@@ -56,6 +58,14 @@ const sidebars: SidebarsConfig = {
         "cli_config",
         "authentication",
         "pools",
+      ],
+    },
+    {
+      type: "category",
+      label: "Reference",
+      items: [
+        "python_reference",
+        "cli_reference",
       ],
     },
   ],

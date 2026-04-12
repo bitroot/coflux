@@ -1,3 +1,7 @@
+---
+sidebar_label: CLI
+---
+
 # CLI configuration
 
 The CLI is configured through a combination of a configuration file, environment variables, and command-line flags. The priority order is: flags > environment variables > config file > defaults.
