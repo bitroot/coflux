@@ -625,19 +625,28 @@ func (p *Pool) Abort(executionID string) error {
 	return nil
 }
 
-// Stop shuts down the pool. Closes all warm executors and waits for busy
-// executions to finish.
+// Stop shuts down the pool. Closes all warm and busy executors and waits for
+// running executions to finish.
 func (p *Pool) Stop() error {
 	p.mu.Lock()
 	p.shutdown = true
 	warm := p.warm
 	p.warm = nil
+	busy := make([]*adapter.Executor, 0, len(p.busy))
+	for _, exec := range p.busy {
+		busy = append(busy, exec)
+	}
 	p.mu.Unlock()
 
 	p.cancel()
 
 	var lastErr error
 	for _, exec := range warm {
+		if err := exec.Close(); err != nil {
+			lastErr = err
+		}
+	}
+	for _, exec := range busy {
 		if err := exec.Close(); err != nil {
 			lastErr = err
 		}
