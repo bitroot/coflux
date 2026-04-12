@@ -45,6 +45,10 @@ type ExecutionHandler interface {
 	ReportError(ctx context.Context, executionID string, errorType, message, traceback string, retryable *bool) error
 	// ReportTimeout reports that an execution timed out
 	ReportTimeout(ctx context.Context, executionID string) error
+	// SubmitInput creates an input request and returns its external ID
+	SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error)
+	// ResolveInput waits for an input response by external ID
+	ResolveInput(ctx context.Context, params *adapter.ResolveInputParams) (*adapter.ResolveResult, error)
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
 }
@@ -252,14 +256,17 @@ loop:
 		case "metric":
 			p.handleMetric(execCtx, executionID, params, logger)
 
-		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob":
+		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob", "submit_input", "resolve_input":
 			p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
 			p.handleRegisterGroup(execCtx, executionID, params, logger)
 
 		default:
-			logger.Warn("unknown message method", "method", method)
+			err := fmt.Errorf("unknown message method: %s", method)
+			logger.Error("unknown message method", "method", method)
+			p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
+			break loop
 		}
 	}
 
@@ -547,6 +554,47 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			errInfo = &adapter.ErrorInfo{Code: "cancel_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}
+		}
+
+	case "submit_input":
+		var req adapter.SubmitInputParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		inputID, err := p.handler.SubmitInput(ctx, &req)
+		if err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "input_error", Message: err.Error()}
+		} else {
+			result = map[string]any{"input_id": inputID}
+		}
+
+	case "resolve_input":
+		var req adapter.ResolveInputParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		resolved, err := p.handler.ResolveInput(ctx, &req)
+		if err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "input_error", Message: err.Error()}
+		} else if resolved == nil {
+			// No result available (poll timeout)
+		} else {
+			switch resolved.Status {
+			case "value":
+				result = resolved.Value
+			case "error":
+				result = map[string]any{
+					"status":        "error",
+					"error_type":    resolved.ErrorType,
+					"error_message": resolved.ErrorMessage,
+				}
+			case "cancelled", "dismissed":
+				result = map[string]any{"status": "dismissed"}
+			case "suspended":
+				result = map[string]any{"status": "suspended"}
+			}
 		}
 	}
 

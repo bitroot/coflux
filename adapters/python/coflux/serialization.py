@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import collections
 import datetime
 import decimal
@@ -14,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import Asset, AssetMetadata, Execution
+from .models import Asset, AssetMetadata, Execution, Input
 
 # Try to import pydantic
 try:
@@ -99,6 +100,9 @@ def _encode_value(
             return {"type": "uuid", "value": str(v)}
         elif isinstance(v, Execution):
             references.append(["execution", v.id, v.module, v.target])
+            return {"type": "ref", "index": len(references) - 1}
+        elif isinstance(v, Input):
+            references.append(["input", v.id])
             return {"type": "ref", "index": len(references) - 1}
         elif isinstance(v, Asset):
             m = v.metadata
@@ -266,6 +270,8 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
             return None
         elif ref_type == "execution":
             return Execution(ref[1], ref[2], ref[3])
+        elif ref_type == "input":
+            return Input(ref[1])
         elif ref_type == "asset":
             asset_id = ref[1]
             metadata = None
@@ -326,8 +332,6 @@ def _deserialize_value(
         return _deserialize_pydantic(value, metadata or {})
     elif format_name == "pickle":
         # Inline pickle is base64-encoded
-        import base64
-
         data = base64.b64decode(value)
         return pickle.loads(data)
     else:

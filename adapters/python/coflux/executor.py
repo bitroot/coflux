@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 from . import protocol
 from .context import ExecutorContext
 from .state import set_context
 from .output import capture_output
+from .models import Input
 from .serialization import deserialize_value, serialize_value
 
 _COFLUX_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +32,33 @@ def _format_filtered_traceback(exc: Exception) -> str:
     lines.extend(traceback.format_list(filtered))
     lines.extend(traceback.format_exception_only(type(exc), exc))
     return "".join(lines)
+
+
+def _apply_type_hints(fn: Any, args: list[Any]) -> list[Any]:
+    """Upgrade deserialized args using the function's type hints.
+
+    Plain ``Input`` objects lose their type parameter during serialization.
+    If the function annotates a parameter as ``Input[Model]``, reconstruct
+    the parameterized Input so that ``result()`` returns a validated model.
+    """
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        return args
+    params = list(inspect.signature(fn).parameters.keys())
+    for i, (arg, name) in enumerate(zip(args, params)):
+        if not isinstance(arg, Input) or arg._type_arg is not None:
+            continue
+        hint = hints.get(name)
+        if hint is None:
+            continue
+        # Input.__class_getitem__ creates a subclass with _type_arg set,
+        # so Input[Model] is a subclass of Input (not a typing alias).
+        if isinstance(hint, type) and issubclass(hint, Input):
+            type_arg = getattr(hint, "_type_arg", None)
+            if type_arg is not None:
+                args[i] = Input[type_arg](arg.id)
+    return args
 
 
 def execute_target(
@@ -54,6 +83,13 @@ def execute_target(
         # Deserialize arguments
         deserialized_args = [deserialize_value(arg) for arg in arguments]
 
+        # Call the target function with output capture
+        # Note: We call the underlying function, not the Target wrapper
+        fn = target_obj.fn if hasattr(target_obj, "fn") else target_obj
+
+        # Upgrade Input objects using type hints (restores lost type params)
+        deserialized_args = _apply_type_hints(fn, deserialized_args)
+
         # Set up execution context
         set_context(
             ExecutorContext(
@@ -61,9 +97,6 @@ def execute_target(
             )
         )
 
-        # Call the target function with output capture
-        # Note: We call the underlying function, not the Target wrapper
-        fn = target_obj.fn if hasattr(target_obj, "fn") else target_obj
         with capture_output(execution_id):
             result = fn(*deserialized_args)
 

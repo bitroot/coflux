@@ -11,6 +11,8 @@ defmodule Coflux.Orchestration.Server do
     Runs,
     Results,
     Assets,
+    Inputs,
+    Values,
     CacheConfigs,
     TagSets,
     Workers,
@@ -1817,7 +1819,7 @@ defmodule Coflux.Orchestration.Server do
                     process_result(
                       state,
                       from_execution_id,
-                      {:suspended, nil, [pending_execution_id]}
+                      {:suspended, nil, [{:execution, pending_execution_id}]}
                     )
 
                   {{:ok, :suspended}, state}
@@ -1904,15 +1906,560 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:get_asset, asset_external_id, from_execution_external_id}, _from, state) do
     case Assets.get_asset_by_external_id(state.db, asset_external_id) do
       {:ok, asset_id, name, entries} ->
-        if from_execution_external_id do
-          from_execution_id = Map.fetch!(state.execution_ids, from_execution_external_id)
-          {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
-        end
+        state =
+          if from_execution_external_id do
+            from_execution_id = Map.fetch!(state.execution_ids, from_execution_external_id)
+            {:ok, _} = Runs.record_asset_dependency(state.db, from_execution_id, asset_id)
 
+            {:ok, {run_external_id}} =
+              Runs.get_external_run_id_for_execution(state.db, from_execution_id)
+
+            {^asset_external_id, asset_name, total_count, total_size, entry} =
+              resolve_asset(state.db, asset_id)
+
+            notify_listeners(
+              state,
+              {:run, run_external_id},
+              {:asset_dependency, from_execution_external_id, asset_external_id,
+               {asset_name, total_count, total_size, entry}}
+            )
+          else
+            state
+          end
+
+        state = flush_notifications(state)
         {:reply, {:ok, name, entries}, state}
 
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  # --- Input management ---
+
+  def handle_call(
+        {:submit_input, execution_external_id, template, placeholders, schema_json, key, title,
+         actions, initial},
+        _from,
+        state
+      ) do
+    execution_id = Map.fetch!(state.execution_ids, execution_external_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    {:ok, run_id} = Runs.get_run_id_for_execution(state.db, execution_id)
+
+    now = System.system_time(:millisecond)
+
+    # Validate and get-or-create schema
+    schema_id =
+      if schema_json do
+        case Coflux.JsonSchema.validate_schema(schema_json) do
+          :ok ->
+            {:ok, id} = Inputs.get_or_create_schema(state.db, schema_json)
+            id
+
+          {:error, reason} ->
+            throw({:reply, {:error, {:invalid_schema, reason}}, state})
+        end
+      end
+
+    # Validate initial value
+    if initial do
+      if schema_json do
+        initial_value = Jason.decode!(initial)
+
+        case Coflux.JsonSchema.validate_partial(initial_value, schema_json) do
+          :ok -> :ok
+          {:error, reason} -> throw({:reply, {:error, {:invalid_initial, reason}}, state})
+        end
+      else
+        throw({:reply, {:error, {:invalid_initial, "initial value requires a schema"}}, state})
+      end
+    end
+
+    # Get-or-create placeholder values
+    placeholder_value_ids =
+      Enum.map(placeholders, fn {placeholder, value} ->
+        {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+        {placeholder, value_id}
+      end)
+
+    # Get-or-create prompt
+    {:ok, prompt_id} = Inputs.get_or_create_prompt(state.db, template, placeholder_value_ids)
+
+    # Check for existing input by key (run-scoped, workspace-ancestry-aware)
+    {_input_id, input_external_id, created} =
+      if key do
+        workspace_ids = get_cache_workspace_ids(state, workspace_id)
+
+        case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
+          {:ok,
+           {existing_id, existing_ext_id, existing_prompt_id, existing_schema_id, _existing_title,
+            _existing_actions}} ->
+            if existing_prompt_id == prompt_id && existing_schema_id == schema_id do
+              {existing_id, existing_ext_id, false}
+            else
+              throw({:reply, {:error, :input_mismatch}, state})
+            end
+
+          {:ok, nil} ->
+            {:ok, id, ext_id} =
+              Inputs.create_input(
+                state.db,
+                execution_id,
+                workspace_id,
+                prompt_id,
+                schema_id,
+                key,
+                title,
+                actions,
+                initial,
+                now
+              )
+
+            {id, ext_id, true}
+        end
+      else
+        {:ok, id, ext_id} =
+          Inputs.create_input(
+            state.db,
+            execution_id,
+            workspace_id,
+            prompt_id,
+            schema_id,
+            nil,
+            title,
+            actions,
+            initial,
+            now
+          )
+
+        {id, ext_id, true}
+      end
+
+    state =
+      if created do
+        {:ok, {run_external_id}} =
+          Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+        notify_listeners(
+          state,
+          {:run, run_external_id},
+          {:input_submitted, execution_external_id, input_external_id, title}
+        )
+      else
+        state
+      end
+
+    state = flush_notifications(state)
+    {:reply, {:ok, input_external_id}, state}
+  catch
+    {:reply, error, state} ->
+      {:reply, error, state}
+  end
+
+  def handle_call(
+        {:resolve_input, input_external_id, from_execution_external_id, timeout_ms, suspend,
+         request_id},
+        _from,
+        state
+      ) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok,
+       {input_id, _execution_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions,
+        _initial, created_at}} ->
+        from_execution_id =
+          case resolve_internal_execution_id(state, from_execution_external_id) do
+            {:ok, id} -> id
+            {:error, :not_found} -> nil
+          end
+
+        now = System.system_time(:millisecond)
+
+        # Record dependency and notify
+        state =
+          if from_execution_id do
+            {:ok, is_new} =
+              Inputs.record_input_dependency(state.db, from_execution_id, input_id, now)
+
+            if is_new do
+              {:ok, {run_external_id}} =
+                Runs.get_external_run_id_for_execution(state.db, from_execution_id)
+
+              response_type =
+                case Inputs.get_input_response(state.db, input_id) do
+                  {:ok, nil} -> nil
+                  {:ok, {:value, _, _, _}} -> :value
+                  {:ok, {:dismissed, _, _}} -> :dismissed
+                end
+
+              ws_ext_id = workspace_external_id(state, workspace_id)
+              {:ok, {_, s_num, att}} = Runs.get_execution_key(state.db, from_execution_id)
+              dep_execution_ext_id = "#{run_external_id}:#{s_num}:#{att}"
+
+              state
+              |> notify_listeners(
+                {:run, run_external_id},
+                {:input_dependency, from_execution_external_id, input_external_id, title,
+                 response_type}
+              )
+              |> notify_listeners(
+                {:inputs, ws_ext_id},
+                {:input_dependency_active, input_external_id, dep_execution_ext_id,
+                 run_external_id, created_at, title}
+              )
+              |> notify_listeners(
+                {:input, input_external_id},
+                {:active, true}
+              )
+            else
+              state
+            end
+          else
+            state
+          end
+
+        # Check for existing response
+        case Inputs.get_input_response(state.db, input_id) do
+          {:ok, nil} ->
+            # No response yet — wait or suspend
+            cond do
+              timeout_ms == 0 && suspend ->
+                {:ok, state} =
+                  process_result(
+                    state,
+                    from_execution_id,
+                    {:suspended, nil, [{:input, input_id}]}
+                  )
+
+                state = flush_notifications(state)
+                {:reply, {:ok, :suspended}, state}
+
+              timeout_ms == 0 ->
+                state = flush_notifications(state)
+                {:reply, {:ok, nil}, state}
+
+              true ->
+                monotonic_now = System.monotonic_time(:millisecond)
+                expire_at = if timeout_ms, do: monotonic_now + timeout_ms
+
+                waiting_key = {:input, input_external_id}
+
+                state =
+                  update_in(
+                    state,
+                    [Access.key(:waiting), Access.key(waiting_key, [])],
+                    &[{from_execution_external_id, request_id, expire_at, suspend} | &1]
+                  )
+
+                state =
+                  if timeout_ms do
+                    reschedule_expire_waiters(state)
+                  else
+                    state
+                  end
+
+                state = flush_notifications(state)
+                {:reply, :wait, state}
+            end
+
+          {:ok, {:value, value, _created_at, _created_by}} ->
+            state = flush_notifications(state)
+            {:reply, {:ok, {:value, value}}, state}
+
+          {:ok, {:dismissed, _created_at, _created_by}} ->
+            state = flush_notifications(state)
+            {:reply, {:ok, :dismissed}, state}
+        end
+    end
+  end
+
+  def handle_call({:respond_input, input_external_id, value, access}, _from, state) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok,
+       {input_id, execution_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions,
+        _initial, _created_at}} ->
+        # Validate response against schema if one exists
+        if schema_id do
+          {:ok, schema_json} = Inputs.get_input_schema(state.db, schema_id)
+
+          case Coflux.JsonSchema.validate_value(value, schema_json) do
+            :ok -> :ok
+            {:error, reason} -> throw({:reply, {:error, {:validation_failed, reason}}, state})
+          end
+        end
+
+        now = System.system_time(:millisecond)
+
+        created_by =
+          case access do
+            %{principal_id: id} -> id
+            _ -> nil
+          end
+
+        value_json = Jason.encode!(value)
+
+        case Inputs.record_input_response(
+               state.db,
+               input_id,
+               Inputs.type_value(),
+               value_json,
+               now,
+               created_by
+             ) do
+          {:ok, true} ->
+            # Notify waiters
+            waiting_key = {:input, input_external_id}
+            {input_waiting, waiting} = Map.pop(state.waiting, waiting_key, [])
+            state = Map.put(state, :waiting, waiting)
+
+            state =
+              Enum.reduce(input_waiting, state, fn {from_ext_id, request_id, _, _}, state ->
+                case find_session_for_execution(state, from_ext_id) do
+                  {:ok, session_id} ->
+                    send_session(state, session_id, {:response, request_id, {:value, value}})
+
+                  :error ->
+                    state
+                end
+              end)
+
+            # Resolve input dependency for any suspended executions waiting on this input
+            state = update_dependencies_on_input(state, input_id)
+
+            # Notify run topic
+            {:ok, {run_external_id}} =
+              Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+            ws_ext_id = workspace_external_id(state, workspace_id)
+
+            response = build_input_response(state.db, input_id)
+
+            state =
+              state
+              |> notify_listeners(
+                {:run, run_external_id},
+                {:input_response, input_external_id, :value}
+              )
+              |> notify_dependent_runs(input_id, input_external_id, :value, run_external_id)
+              |> notify_listeners(
+                {:inputs, ws_ext_id},
+                {:input_responded, input_external_id, now}
+              )
+              |> notify_listeners(
+                {:input, input_external_id},
+                {:response, response}
+              )
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, :already_responded} ->
+            {:reply, {:error, :already_responded}, state}
+        end
+    end
+  catch
+    {:reply, error, state} ->
+      {:reply, error, state}
+  end
+
+  def handle_call({:get_input, input_external_id}, _from, state) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok,
+       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
+        initial, created_at}} ->
+        {:ok, template, placeholder_values} = Inputs.get_input_prompt(state.db, prompt_id)
+
+        schema =
+          if schema_id do
+            {:ok, s} = Inputs.get_input_schema(state.db, schema_id)
+            s
+          end
+
+        response = build_input_response(state.db, input_id)
+
+        parsed_actions =
+          if actions do
+            Jason.decode!(actions)
+          end
+
+        resolved_placeholders =
+          Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, state.db)} end)
+
+        {:reply,
+         {:ok,
+          %{
+            key: key,
+            template: template,
+            placeholders: resolved_placeholders,
+            schema: schema,
+            initial: initial,
+            title: title,
+            actions: parsed_actions,
+            created_at: created_at,
+            response: response
+          }}, state}
+    end
+  end
+
+  def handle_call({:subscribe_input, input_external_id, pid}, _from, state) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok,
+       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
+        initial, created_at}} ->
+        {:ok, ref, state} = add_listener(state, {:input, input_external_id}, pid)
+
+        {:ok, template, placeholder_values} = Inputs.get_input_prompt(state.db, prompt_id)
+
+        schema =
+          if schema_id do
+            {:ok, s} = Inputs.get_input_schema(state.db, schema_id)
+            s
+          end
+
+        response = build_input_response(state.db, input_id)
+
+        parsed_actions =
+          if actions do
+            Jason.decode!(actions)
+          end
+
+        resolved_placeholders =
+          Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, state.db)} end)
+
+        active = Inputs.has_active_dependency?(state.db, input_id)
+
+        {:reply,
+         {:ok,
+          %{
+            key: key,
+            template: template,
+            placeholders: resolved_placeholders,
+            schema: schema,
+            initial: initial,
+            title: title,
+            actions: parsed_actions,
+            created_at: created_at,
+            response: response,
+            active: active
+          }, ref}, state}
+    end
+  end
+
+  def handle_call({:subscribe_inputs, workspace_external_id, pid}, _from, state) do
+    case resolve_workspace_external_id(state, workspace_external_id) do
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+
+      {:ok, workspace_id} ->
+        {:ok, ref, state} = add_listener(state, {:inputs, workspace_external_id}, pid)
+
+        {:ok, rows} = Inputs.get_inputs_for_workspace(state.db, workspace_id)
+
+        inputs =
+          Map.new(rows, fn {_id, external_id, _execution_id, _workspace_id, _key, _prompt_id,
+                            _schema_id, created_at, title, _has_response, _step_id, _run_id,
+                            run_external_id, step_number, attempt, _module, _target} ->
+            execution_id = "#{run_external_id}:#{step_number}:#{attempt}"
+
+            {external_id,
+             %{
+               executionId: execution_id,
+               runId: run_external_id,
+               createdAt: created_at,
+               title: title
+             }}
+          end)
+
+        {:reply, {:ok, inputs, ref}, state}
+    end
+  end
+
+  def handle_call({:dismiss_input, input_external_id, access}, _from, state) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok,
+       {input_id, execution_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions,
+        _initial, _created_at}} ->
+        now = System.system_time(:millisecond)
+
+        created_by =
+          case access do
+            %{principal_id: id} -> id
+            _ -> nil
+          end
+
+        case Inputs.record_input_response(
+               state.db,
+               input_id,
+               Inputs.type_dismissed(),
+               nil,
+               now,
+               created_by
+             ) do
+          {:ok, true} ->
+            # Cancel waiters
+            waiting_key = {:input, input_external_id}
+            {input_waiting, waiting} = Map.pop(state.waiting, waiting_key, [])
+            state = Map.put(state, :waiting, waiting)
+
+            state =
+              Enum.reduce(input_waiting, state, fn {from_ext_id, request_id, _, _}, state ->
+                case find_session_for_execution(state, from_ext_id) do
+                  {:ok, session_id} ->
+                    send_session(state, session_id, {:response, request_id, :dismissed})
+
+                  :error ->
+                    state
+                end
+              end)
+
+            # Resolve input dependency for any suspended executions waiting on this input
+            state = update_dependencies_on_input(state, input_id)
+
+            # Notify topics
+            {:ok, {run_external_id}} =
+              Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+            ws_ext_id = workspace_external_id(state, workspace_id)
+
+            response = build_input_response(state.db, input_id)
+
+            state =
+              state
+              |> notify_listeners(
+                {:run, run_external_id},
+                {:input_response, input_external_id, :dismissed}
+              )
+              |> notify_dependent_runs(input_id, input_external_id, :dismissed, run_external_id)
+              |> notify_listeners(
+                {:inputs, ws_ext_id},
+                {:input_responded, input_external_id, now}
+              )
+              |> notify_listeners(
+                {:input, input_external_id},
+                {:response, response}
+              )
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, :already_responded} ->
+            {:reply, {:error, :already_responded}, state}
+        end
     end
   end
 
@@ -2968,16 +3515,23 @@ defmodule Coflux.Orchestration.Server do
         fn {from_ext_id, dependency_ext_ids}, state ->
           from_execution_id = Map.fetch!(state.execution_ids, from_ext_id)
 
-          dependency_ids =
-            Enum.flat_map(dependency_ext_ids, fn dep_ext_id ->
-              case resolve_internal_execution_id(state, dep_ext_id) do
-                {:ok, id} -> [id]
-                {:error, :not_found} -> []
-              end
+          dependency_keys =
+            Enum.flat_map(dependency_ext_ids, fn
+              {:input, input_ext_id} ->
+                case Inputs.get_input_id(state.db, input_ext_id) do
+                  {:ok, id} -> [{:input, id}]
+                  {:error, :not_found} -> []
+                end
+
+              dep_ext_id ->
+                case resolve_internal_execution_id(state, dep_ext_id) do
+                  {:ok, id} -> [{:execution, id}]
+                  {:error, :not_found} -> []
+                end
             end)
 
           {:ok, state} =
-            process_result(state, from_execution_id, {:suspended, nil, dependency_ids})
+            process_result(state, from_execution_id, {:suspended, nil, dependency_keys})
 
           state
         end
@@ -3480,12 +4034,19 @@ defmodule Coflux.Orchestration.Server do
 
   defp rerun_step(state, step, workspace_id, opts) do
     execute_after = Keyword.get(opts, :execute_after, nil)
-    dependency_ids = Keyword.get(opts, :dependency_ids, [])
+    dependency_keys = Keyword.get(opts, :dependency_keys, [])
     created_by = Keyword.get(opts, :created_by)
+
+    # Separate execution and input dependencies
+    {exec_deps, input_deps} =
+      Enum.reduce(dependency_keys, {[], []}, fn
+        {:execution, id}, {execs, inputs} -> {[id | execs], inputs}
+        {:input, id}, {execs, inputs} -> {execs, [id | inputs]}
+      end)
 
     # Convert internal dependency execution IDs to execution_ref IDs
     dependency_ref_ids =
-      Enum.map(dependency_ids, fn dep_id ->
+      Enum.map(exec_deps, fn dep_id ->
         {:ok, ref_id} = Runs.create_execution_ref_for(state.db, dep_id)
         ref_id
       end)
@@ -3499,6 +4060,7 @@ defmodule Coflux.Orchestration.Server do
            workspace_id,
            execute_after,
            dependency_ref_ids,
+           input_deps,
            created_by
          ) do
       {:ok, execution_id, attempt, created_at} ->
@@ -3585,6 +4147,31 @@ defmodule Coflux.Orchestration.Server do
             {:step, step.module, step.target, step.type, run.external_id, step.number, attempt}
           )
 
+        # Notify run topic about input dependencies for this execution
+        state =
+          Enum.reduce(input_deps, state, fn input_id, state ->
+            case Inputs.get_input_by_id(state.db, input_id) do
+              {:ok,
+               {input_ext_id, _key, _prompt_id, _schema_id, input_title, _actions, _created_at}} ->
+                response_type =
+                  case Inputs.get_input_response(state.db, input_id) do
+                    {:ok, nil} -> nil
+                    {:ok, {:value, _, _, _}} -> :value
+                    {:ok, {:dismissed, _, _}} -> :dismissed
+                  end
+
+                notify_listeners(
+                  state,
+                  {:run, run.external_id},
+                  {:input_dependency, execution_external_id, input_ext_id, input_title,
+                   response_type}
+                )
+
+              _ ->
+                state
+            end
+          end)
+
         principal =
           case run.created_by do
             %{type: type, external_id: external_id} -> %{type: type, external_id: external_id}
@@ -3622,6 +4209,35 @@ defmodule Coflux.Orchestration.Server do
 
   defp workspace_external_id(state, workspace_id) do
     state.workspaces[workspace_id].external_id
+  end
+
+  defp decode_input_response_type(nil), do: nil
+  defp decode_input_response_type(1), do: :value
+  defp decode_input_response_type(2), do: :dismissed
+
+  defp build_input_response(db, input_id) do
+    case Inputs.get_input_response(db, input_id) do
+      {:ok, nil} ->
+        nil
+
+      {:ok, {:value, value, created_at, created_by_id}} ->
+        principal =
+          case Principals.get_principal(db, created_by_id) do
+            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+            {:ok, nil} -> nil
+          end
+
+        %{type: :value, value: value, created_at: created_at, created_by: principal}
+
+      {:ok, {:dismissed, created_at, created_by_id}} ->
+        principal =
+          case Principals.get_principal(db, created_by_id) do
+            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+            {:ok, nil} -> nil
+          end
+
+        %{type: :dismissed, value: nil, created_at: created_at, created_by: principal}
+    end
   end
 
   defp do_rotate_epoch(state) do
@@ -4057,6 +4673,49 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
     {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
+    {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
+    {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
+    {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
+
+    submitted_inputs_by_execution =
+      run_submitted_inputs
+      |> Enum.group_by(
+        fn {execution_id, _ext_id, _title, _response_type} -> execution_id end,
+        fn {_execution_id, ext_id, title, response_type} ->
+          {ext_id,
+           %{
+             title: title,
+             status: if(response_type, do: decode_input_response_type(response_type))
+           }}
+        end
+      )
+      |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
+
+    input_deps_by_execution =
+      run_input_deps
+      |> Enum.group_by(
+        fn {execution_id, _ext_id, _key, _prompt_id, _title, _created_at, _response_type,
+            _response_value, _responded_at, _created_by} ->
+          execution_id
+        end,
+        fn {_execution_id, ext_id, _key, _prompt_id, title, _created_at, response_type,
+            _response_value, _responded_at, _response_created_by} ->
+          {ext_id,
+           {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
+        end
+      )
+      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+    asset_deps_by_execution =
+      run_asset_deps
+      |> Enum.group_by(
+        fn {execution_id, _asset_id} -> execution_id end,
+        fn {_execution_id, asset_id} ->
+          {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+          {external_id, {:asset, {name, total_count, total_size, entry}}}
+        end
+      )
+      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
 
     metric_definitions_by_execution =
       Enum.group_by(
@@ -4183,7 +4842,7 @@ defmodule Coflux.Orchestration.Server do
                  end)
 
                # TODO: batch? get `get_dependencies` to resolve?
-               dependencies =
+               result_deps =
                  run_dependencies
                  |> Map.get(execution_id, [])
                  |> Map.new(fn dependency_ref_id ->
@@ -4191,8 +4850,17 @@ defmodule Coflux.Orchestration.Server do
                      execution =
                      resolve_execution_ref(db, dependency_ref_id)
 
-                   {ext_id, execution}
+                   {ext_id, {:result, execution}}
                  end)
+
+               dependencies =
+                 Map.merge(
+                   result_deps,
+                   Map.merge(
+                     Map.get(input_deps_by_execution, execution_id, %{}),
+                     Map.get(asset_deps_by_execution, execution_id, %{})
+                   )
+                 )
 
                {attempt,
                 %{
@@ -4206,6 +4874,7 @@ defmodule Coflux.Orchestration.Server do
                   groups: execution_groups,
                   assets: assets,
                   dependencies: dependencies,
+                  inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
                   result: result,
                   result_created_by: result_created_by,
                   children: Map.get(run_children, execution_id, []),
@@ -4532,6 +5201,9 @@ defmodule Coflux.Orchestration.Server do
         {:ok, asset_id} = Assets.get_asset_id(db, external_id)
         {^external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
         {:asset, external_id, {name, total_count, total_size, entry}}
+
+      {:input, external_id} ->
+        {:input, external_id}
     end)
   end
 
@@ -4542,6 +5214,9 @@ defmodule Coflux.Orchestration.Server do
           parse_execution_external_id(execution_external_id)
 
         {:execution, run_ext, step_num, attempt}
+
+      {:input, external_id} ->
+        {:input, external_id}
 
       ref ->
         ref
@@ -4717,6 +5392,32 @@ defmodule Coflux.Orchestration.Server do
             {:completed, execution_external_id}
           )
 
+        # Check if any input dependencies became inactive
+        state =
+          case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
+            {:ok, deps} ->
+              Enum.reduce(deps, state, fn {input_id}, state ->
+                if Inputs.has_active_dependency?(state.db, input_id) do
+                  state
+                else
+                  {:ok, input_ext_id} = Inputs.get_input_external_id(state.db, input_id)
+
+                  state
+                  |> notify_listeners(
+                    {:inputs, ws_ext_id},
+                    {:input_dependency_inactive, input_ext_id}
+                  )
+                  |> notify_listeners(
+                    {:input, input_ext_id},
+                    {:active, false}
+                  )
+                end
+              end)
+
+            _ ->
+              state
+          end
+
         # TODO: only if there's an execution waiting for this result?
         send(self(), :tick)
 
@@ -4745,14 +5446,14 @@ defmodule Coflux.Orchestration.Server do
         {retry_id, recurred?, state} =
           cond do
             match?({:suspended, _, _}, result) ->
-              {:suspended, execute_after, dependency_ids} = result
+              {:suspended, execute_after, dependency_keys} = result
 
               # TODO: limit the number of times a step can suspend? (or rate?)
 
               {:ok, retry_id, _, state} =
                 rerun_step(state, step, workspace_id,
                   execute_after: execute_after,
-                  dependency_ids: dependency_ids
+                  dependency_keys: dependency_keys
                 )
 
               state =
@@ -4967,6 +5668,23 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp notify_dependent_runs(state, input_id, input_external_id, response_type, owner_run_ext_id) do
+    {:ok, rows} = Inputs.get_dependent_run_external_ids(state.db, input_id)
+
+    Enum.reduce(rows, state, fn {run_ext_id}, state ->
+      if run_ext_id == owner_run_ext_id do
+        # Already notified via the direct notification above
+        state
+      else
+        notify_listeners(
+          state,
+          {:run, run_ext_id},
+          {:input_response, input_external_id, response_type}
+        )
+      end
+    end)
+  end
+
   defp notify_listeners(state, topic, payload) do
     if Map.has_key?(state.topics, topic) do
       update_in(state.notifications[topic], &[payload | &1 || []])
@@ -5092,34 +5810,32 @@ defmodule Coflux.Orchestration.Server do
     }
   end
 
-  # Convert a set of internal pending dependency IDs to a list of external IDs.
+  # Convert a set of tagged pending dependency keys to a list of external ID strings.
   defp pending_dependency_external_ids(db, pending_dependency_ids) do
     pending_dependency_ids
-    |> Enum.map(fn dependency_id ->
-      case Runs.get_execution_key(db, dependency_id) do
-        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-        {:error, _} -> nil
-      end
+    |> Enum.map(fn
+      {:execution, dependency_id} ->
+        case Runs.get_execution_key(db, dependency_id) do
+          {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+          {:error, _} -> nil
+        end
+
+      {:input, _input_id} ->
+        # Input dependencies are not shown in the queue
+        nil
     end)
     |> Enum.reject(&is_nil/1)
   end
 
   # Send a queue notification with the current pending dependencies for an execution.
-  # Converts internal execution IDs to external IDs.
+  # Converts tagged dependency keys to external IDs.
   defp notify_queue_dependencies(state, execution_id, pending_dependency_ids) do
     case Runs.get_execution_key(state.db, execution_id) do
       {:ok, {r, s, a}} ->
         execution_ext_id = execution_external_id(r, s, a)
 
         dependency_ext_ids =
-          pending_dependency_ids
-          |> Enum.map(fn dependency_id ->
-            case Runs.get_execution_key(state.db, dependency_id) do
-              {:ok, {dr, ds, da}} -> execution_external_id(dr, ds, da)
-              {:error, _} -> nil
-            end
-          end)
-          |> Enum.reject(&is_nil/1)
+          pending_dependency_external_ids(state.db, pending_dependency_ids)
 
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
         ws_ext_id = workspace_external_id(state, workspace_id)
@@ -5147,14 +5863,7 @@ defmodule Coflux.Orchestration.Server do
               ext_id = execution_external_id(r, s, a)
 
               dependency_ext_ids =
-                dependency_ids
-                |> Enum.map(fn dependency_id ->
-                  case Runs.get_execution_key(state.db, dependency_id) do
-                    {:ok, {dr, ds, da}} -> execution_external_id(dr, ds, da)
-                    {:error, _} -> nil
-                  end
-                end)
-                |> Enum.reject(&is_nil/1)
+                pending_dependency_external_ids(state.db, dependency_ids)
 
               Map.put(acc, ext_id, dependency_ext_ids)
 
@@ -5218,7 +5927,7 @@ defmodule Coflux.Orchestration.Server do
               {:ok, {dependency_execution_id}} when not is_nil(dependency_execution_id) ->
                 case resolve_result(db, dependency_execution_id) do
                   {:ok, _} -> acc
-                  {:pending, pending_id} -> MapSet.put(acc, pending_id)
+                  {:pending, pending_id} -> MapSet.put(acc, {:execution, pending_id})
                 end
 
               _ ->
@@ -5227,10 +5936,25 @@ defmodule Coflux.Orchestration.Server do
           end)
       end
 
-    MapSet.union(argument_dependencies, result_dependencies)
+    # Collect pending input dependencies
+    input_dependencies =
+      case Runs.get_input_dependencies(db, execution_id) do
+        {:ok, deps} ->
+          Enum.reduce(deps, MapSet.new(), fn {input_id}, acc ->
+            if Inputs.is_input_responded?(db, input_id) do
+              acc
+            else
+              MapSet.put(acc, {:input, input_id})
+            end
+          end)
+      end
+
+    argument_dependencies
+    |> MapSet.union(result_dependencies)
+    |> MapSet.union(input_dependencies)
   end
 
-  # Walk references and collect execution IDs that are still pending.
+  # Walk references and collect tagged dependency keys that are still pending.
   defp collect_pending_execution_ids(references, db, seen) do
     Enum.reduce(references, MapSet.new(), fn
       {:execution, run_ext, step_num, attempt}, acc ->
@@ -5261,7 +5985,7 @@ defmodule Coflux.Orchestration.Server do
                   acc
 
                 {:pending, pending_id} ->
-                  MapSet.put(acc, pending_id)
+                  MapSet.put(acc, {:execution, pending_id})
               end
             end
 
@@ -5336,13 +6060,15 @@ defmodule Coflux.Orchestration.Server do
   # 2. Result is a value containing inner execution references (wait_for
   #    semantics) — extracts any still-pending references from the value.
   defp update_dependencies_on_result(state, execution_id) do
-    case Map.fetch(state.dependency_waiters, execution_id) do
+    dependency_key = {:execution, execution_id}
+
+    case Map.fetch(state.dependency_waiters, dependency_key) do
       {:ok, waiters} ->
         state =
           update_in(
             state,
             [Access.key(:dependency_waiters)],
-            &Map.delete(&1, execution_id)
+            &Map.delete(&1, dependency_key)
           )
 
         # Determine new pending dependencies that replace this resolved one.
@@ -5350,7 +6076,7 @@ defmodule Coflux.Orchestration.Server do
         new_pending =
           case resolve_result(state.db, execution_id) do
             {:pending, new_id} when new_id != execution_id ->
-              MapSet.new([new_id])
+              MapSet.new([{:execution, new_id}])
 
             {:ok, {:value, value}} ->
               # The result is a value — check for inner execution references
@@ -5377,23 +6103,70 @@ defmodule Coflux.Orchestration.Server do
             {:ok, current} ->
               updated =
                 current
-                |> MapSet.delete(execution_id)
+                |> MapSet.delete(dependency_key)
                 |> MapSet.union(new_pending)
 
               # Register waiter with new dependency_waiters entries
               state
               |> then(fn state ->
-                Enum.reduce(new_pending, state, fn new_dependency_id, state ->
+                Enum.reduce(new_pending, state, fn new_dep_key, state ->
                   update_in(
                     state,
                     [
                       Access.key(:dependency_waiters),
-                      Access.key(new_dependency_id, MapSet.new())
+                      Access.key(new_dep_key, MapSet.new())
                     ],
                     &MapSet.put(&1, waiter_id)
                   )
                 end)
               end)
+              |> then(fn state ->
+                if MapSet.size(updated) == 0 do
+                  update_in(
+                    state,
+                    [Access.key(:pending_dependencies)],
+                    &Map.delete(&1, waiter_id)
+                  )
+                else
+                  put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
+                end
+              end)
+              |> notify_queue_dependencies(waiter_id, updated)
+
+            :error ->
+              state
+          end
+        end)
+
+      :error ->
+        state
+    end
+  end
+
+  # Called when an input response is recorded. Resolves the {:input, id}
+  # dependency for any executions that were waiting on this input.
+  defp update_dependencies_on_input(state, input_id) do
+    dependency_key = {:input, input_id}
+
+    case Map.fetch(state.dependency_waiters, dependency_key) do
+      {:ok, waiters} ->
+        state =
+          update_in(
+            state,
+            [Access.key(:dependency_waiters)],
+            &Map.delete(&1, dependency_key)
+          )
+
+        Enum.reduce(waiters, state, fn waiter_id, state ->
+          case Map.fetch(state.pending_dependencies, waiter_id) do
+            {:ok, current} ->
+              updated = MapSet.delete(current, dependency_key)
+
+              if MapSet.size(updated) == 0 do
+                send(self(), :tick)
+              end
+
+              state
               |> then(fn state ->
                 if MapSet.size(updated) == 0 do
                   update_in(

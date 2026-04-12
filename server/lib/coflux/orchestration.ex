@@ -224,6 +224,60 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_targets, workspace_id, pid})
   end
 
+  # Input management
+
+  def submit_input(
+        project_id,
+        execution_id,
+        template,
+        placeholders,
+        schema_json,
+        key,
+        title,
+        actions,
+        initial
+      ) do
+    call_server(
+      project_id,
+      {:submit_input, execution_id, template, placeholders, schema_json, key, title, actions,
+       initial}
+    )
+  end
+
+  def resolve_input(
+        project_id,
+        input_external_id,
+        from_execution_id,
+        timeout_ms,
+        suspend,
+        request_id
+      ) do
+    call_server(
+      project_id,
+      {:resolve_input, input_external_id, from_execution_id, timeout_ms, suspend, request_id}
+    )
+  end
+
+  def respond_input(project_id, input_external_id, value, access \\ nil) do
+    call_server(project_id, {:respond_input, input_external_id, value, access})
+  end
+
+  def dismiss_input(project_id, input_external_id, access \\ nil) do
+    call_server(project_id, {:dismiss_input, input_external_id, access})
+  end
+
+  def get_input(project_id, input_external_id) do
+    call_server(project_id, {:get_input, input_external_id})
+  end
+
+  def subscribe_input(project_id, input_external_id, pid) do
+    call_server(project_id, {:subscribe_input, input_external_id, pid})
+  end
+
+  def subscribe_inputs(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_inputs, workspace_id, pid})
+  end
+
   def rotate_epoch(project_id) do
     call_server(project_id, :rotate_epoch)
   end

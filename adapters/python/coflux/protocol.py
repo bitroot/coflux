@@ -319,6 +319,73 @@ def request_suspend(execution_id: str, execute_after: int | None = None) -> int:
     return get_protocol().send_request("suspend", params)
 
 
+def submit_input(
+    execution_id: str,
+    template: str,
+    placeholders: dict[str, dict[str, Any]] | None = None,
+    schema: str | None = None,
+    key: str | None = None,
+    title: str | None = None,
+    actions: tuple[str, str] | None = None,
+    initial: Any = None,
+) -> int:
+    """Submit an input request, returning a request ID.
+
+    The server creates or finds the input and returns its external ID.
+
+    Args:
+        execution_id: The execution creating the input.
+        template: Markdown prompt template with {placeholders}.
+        placeholders: Serialized values for template placeholders.
+        schema: JSON Schema string for validating input.
+        key: Memoization key for reusing inputs.
+        title: Short title for the input (shown in UI).
+        actions: Tuple of (respond_label, dismiss_label) for button text.
+        initial: Plain JSON initial values for pre-populating the form.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "template": template,
+    }
+    if placeholders:
+        params["placeholders"] = placeholders
+    if schema is not None:
+        params["schema"] = schema
+    if key is not None:
+        params["key"] = key
+    if title is not None:
+        params["title"] = title
+    if actions is not None:
+        params["actions"] = list(actions)
+    if initial is not None:
+        params["initial"] = initial
+    return get_protocol().send_request("submit_input", params)
+
+
+def resolve_input(
+    input_external_id: str,
+    from_execution_id: str,
+    timeout_ms: int | None = None,
+    suspend: bool = True,
+) -> int:
+    """Resolve an input by external ID, waiting for its response.
+
+    Args:
+        input_external_id: The input to resolve.
+        from_execution_id: The execution waiting for the response.
+        timeout_ms: Poll timeout in milliseconds.
+        suspend: Whether to suspend if response not available.
+    """
+    params: dict[str, Any] = {
+        "input_external_id": input_external_id,
+        "from_execution_id": from_execution_id,
+    }
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    params["suspend"] = suspend
+    return get_protocol().send_request("resolve_input", params)
+
+
 def request_cancel_execution(
     execution_id: str,
     target_execution_id: str,

@@ -312,6 +312,13 @@ defmodule Coflux.Handlers.Logs do
        when is_binary(f) and is_binary(k) and is_integer(s) and is_map(m),
        do: true
 
+  defp valid_reference?(%{
+         "type" => "input",
+         "inputId" => id
+       })
+       when is_binary(id),
+       do: true
+
   defp valid_reference?(_), do: false
 
   defp format_entry(entry) do

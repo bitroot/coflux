@@ -43,6 +43,12 @@ defmodule Coflux.TopicUtils do
           assetId: asset_id,
           asset: build_asset(asset)
         }
+
+      {:input, input_external_id} ->
+        %{
+          type: "input",
+          inputId: input_external_id
+        }
     end)
   end
 

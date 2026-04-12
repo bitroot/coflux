@@ -31,7 +31,7 @@ defmodule Coflux.Orchestration.Values do
           case query(
                  db,
                  """
-                 SELECT fragment_id, execution_ref_id, asset_id
+                 SELECT fragment_id, execution_ref_id, asset_id, input_id
                  FROM value_references
                  WHERE value_id = ?1
                  ORDER BY position
@@ -40,10 +40,10 @@ defmodule Coflux.Orchestration.Values do
                ) do
             {:ok, rows} ->
               Enum.map(rows, fn
-                {fragment_id, nil, nil} ->
+                {fragment_id, nil, nil, nil} ->
                   load_fragment(db, fragment_id)
 
-                {nil, execution_ref_id, nil} ->
+                {nil, execution_ref_id, nil, nil} ->
                   {:ok, {run_ext, step_num, attempt}} =
                     query_one!(
                       db,
@@ -53,11 +53,17 @@ defmodule Coflux.Orchestration.Values do
 
                   {:execution, run_ext, step_num, attempt}
 
-                {nil, nil, asset_id} ->
+                {nil, nil, asset_id, nil} ->
                   {:ok, {external_id}} =
                     query_one!(db, "SELECT external_id FROM assets WHERE id = ?1", {asset_id})
 
                   {:asset, external_id}
+
+                {nil, nil, nil, input_id} ->
+                  {:ok, {external_id}} =
+                    query_one!(db, "SELECT external_id FROM inputs WHERE id = ?1", {input_id})
+
+                  {:input, external_id}
               end)
           end
 
@@ -121,6 +127,9 @@ defmodule Coflux.Orchestration.Values do
 
         {:asset, external_id} ->
           [3, external_id]
+
+        {:input, external_id} ->
+          [4, external_id]
       end)
 
     data =
@@ -163,7 +172,7 @@ defmodule Coflux.Orchestration.Values do
           insert_many(
             db,
             :value_references,
-            {:value_id, :position, :fragment_id, :execution_ref_id, :asset_id},
+            {:value_id, :position, :fragment_id, :execution_ref_id, :asset_id, :input_id},
             references
             |> Enum.with_index()
             |> Enum.map(fn {reference, position} ->
@@ -172,17 +181,23 @@ defmodule Coflux.Orchestration.Values do
                   {:ok, fragment_id} =
                     get_or_create_fragment(db, format, blob_key, size, metadata)
 
-                  {value_id, position, fragment_id, nil, nil}
+                  {value_id, position, fragment_id, nil, nil, nil}
 
                 {:execution, run_ext, step_num, attempt} ->
                   {:ok, ref_id} = ensure_execution_ref(db, run_ext, step_num, attempt)
-                  {value_id, position, nil, ref_id, nil}
+                  {value_id, position, nil, ref_id, nil, nil}
 
                 {:asset, external_id} ->
                   {:ok, {asset_id}} =
                     query_one!(db, "SELECT id FROM assets WHERE external_id = ?1", {external_id})
 
-                  {value_id, position, nil, nil, asset_id}
+                  {value_id, position, nil, nil, asset_id, nil}
+
+                {:input, external_id} ->
+                  {:ok, {input_id}} =
+                    query_one!(db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id})
+
+                  {value_id, position, nil, nil, nil, input_id}
               end
             end)
           )

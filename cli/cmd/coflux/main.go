@@ -103,7 +103,8 @@ func init() {
 	logsCmd.GroupID = "management"
 	sessionsCmd.GroupID = "management"
 	queueCmd.GroupID = "management"
-	rootCmd.AddCommand(workspacesCmd, manifestsCmd, poolsCmd, tokensCmd, assetsCmd, blobsCmd, logsCmd, sessionsCmd, queueCmd)
+	inputsCmd.GroupID = "management"
+	rootCmd.AddCommand(workspacesCmd, manifestsCmd, poolsCmd, tokensCmd, assetsCmd, blobsCmd, logsCmd, sessionsCmd, queueCmd, inputsCmd)
 }
 
 func initConfig(cmd *cobra.Command, args []string) error {

@@ -29,7 +29,8 @@ defmodule Coflux.MixProject do
       {:mime, "~> 2.0"},
       {:req, "~> 0.5"},
       {:joken, "~> 2.6"},
-      {:jose, "~> 1.11"}
+      {:jose, "~> 1.11"},
+      {:jsv, "~> 0.16"}
     ]
   end
 end
