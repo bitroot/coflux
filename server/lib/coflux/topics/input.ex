@@ -35,6 +35,7 @@ defmodule Coflux.Topics.Input do
              initial: initial,
              title: input.title,
              actions: input.actions,
+             requires: input.requires,
              createdAt: input.created_at,
              response: response,
              active: input.active

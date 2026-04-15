@@ -1942,7 +1942,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call(
         {:submit_input, execution_external_id, template, placeholders, schema_json, key, title,
-         actions, initial},
+         actions, initial, requires},
         _from,
         state
       ) do
@@ -1967,6 +1967,13 @@ defmodule Coflux.Orchestration.Server do
         # Get-or-create prompt
         {:ok, prompt_id} = Inputs.get_or_create_prompt(state.db, template, placeholder_value_ids)
 
+        # Get-or-create requires tag set
+        requires_tag_set_id =
+          if requires && map_size(requires) > 0 do
+            {:ok, id} = TagSets.get_or_create_tag_set_id(state.db, requires)
+            id
+          end
+
         # Check for existing input by key (run-scoped, workspace-ancestry-aware)
         case find_or_create_input(
                state,
@@ -1979,6 +1986,7 @@ defmodule Coflux.Orchestration.Server do
                title,
                actions,
                initial,
+               requires_tag_set_id,
                now
              ) do
           {:error, reason} ->
@@ -2019,7 +2027,7 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok,
        {input_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions, _initial,
-        created_at, _run_id}} ->
+        requires_tag_set_id, created_at, _run_id}} ->
         from_execution_id =
           case resolve_internal_execution_id(state, from_execution_external_id) do
             {:ok, id} -> id
@@ -2047,6 +2055,8 @@ defmodule Coflux.Orchestration.Server do
 
               ws_ext_id = workspace_external_id(state, workspace_id)
 
+              requires = resolve_tag_set(state.db, requires_tag_set_id)
+
               state
               |> notify_listeners(
                 {:run, run_external_id},
@@ -2055,7 +2065,8 @@ defmodule Coflux.Orchestration.Server do
               )
               |> notify_listeners(
                 {:inputs, ws_ext_id},
-                {:input_dependency_active, input_external_id, run_external_id, created_at, title}
+                {:input_dependency_active, input_external_id, run_external_id, created_at, title,
+                 requires}
               )
               |> notify_listeners(
                 {:input, input_external_id},
@@ -2130,7 +2141,7 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok,
        {input_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions, _initial,
-        _created_at, _run_id}} ->
+        _requires_tag_set_id, _created_at, _run_id}} ->
         # Validate response against schema if one exists
         with :ok <- validate_input_response(state, schema_id, value) do
           now = System.system_time(:millisecond)
@@ -2213,7 +2224,9 @@ defmodule Coflux.Orchestration.Server do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
-      {:ok, {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}} ->
+      {:ok,
+       {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id,
+        created_at}} ->
         details =
           build_input_details(
             db,
@@ -2224,6 +2237,7 @@ defmodule Coflux.Orchestration.Server do
             title,
             actions,
             initial,
+            requires_tag_set_id,
             created_at
           )
 
@@ -2236,7 +2250,9 @@ defmodule Coflux.Orchestration.Server do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
-      {:ok, {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}} ->
+      {:ok,
+       {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id,
+        created_at}} ->
         {:ok, ref, state} = add_listener(state, {:input, input_external_id}, pid)
 
         details =
@@ -2249,6 +2265,7 @@ defmodule Coflux.Orchestration.Server do
             title,
             actions,
             initial,
+            requires_tag_set_id,
             created_at
           )
 
@@ -2270,12 +2287,13 @@ defmodule Coflux.Orchestration.Server do
 
         inputs =
           Map.new(rows, fn {_id, run_ext_id, input_number, _workspace_id, _key, _prompt_id,
-                            _schema_id, created_at, title, _has_response} ->
+                            _schema_id, created_at, title, requires_tag_set_id, _has_response} ->
             {input_external_id(run_ext_id, input_number),
              %{
                runId: run_ext_id,
                createdAt: created_at,
-               title: title
+               title: title,
+               requires: resolve_tag_set(state.db, requires_tag_set_id)
              }}
           end)
 
@@ -2290,7 +2308,7 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok,
        {input_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions, _initial,
-        _created_at, _run_id}} ->
+        _requires_tag_set_id, _created_at, _run_id}} ->
         now = System.system_time(:millisecond)
 
         created_by =
@@ -4056,7 +4074,7 @@ defmodule Coflux.Orchestration.Server do
             case Inputs.get_input_by_id(state.db, input_id) do
               {:ok,
                {run_ext_id, input_number, _key, _prompt_id, _schema_id, input_title, _actions,
-                _created_at}} ->
+                _requires_tag_set_id, _created_at}} ->
                 input_ext_id = input_external_id(run_ext_id, input_number)
 
                 response_type =
@@ -4155,6 +4173,7 @@ defmodule Coflux.Orchestration.Server do
          title,
          actions,
          initial,
+         requires_tag_set_id,
          created_at
        ) do
     {:ok, template, placeholder_values} = Inputs.get_input_prompt(db, prompt_id)
@@ -4175,6 +4194,8 @@ defmodule Coflux.Orchestration.Server do
     resolved_placeholders =
       Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, db)} end)
 
+    requires = resolve_tag_set(db, requires_tag_set_id)
+
     %{
       key: key,
       template: template,
@@ -4183,9 +4204,18 @@ defmodule Coflux.Orchestration.Server do
       initial: initial,
       title: title,
       actions: parsed_actions,
+      requires: requires,
       created_at: created_at,
       response: response
     }
+  end
+
+  defp resolve_tag_set(_db, nil), do: %{}
+
+  defp resolve_tag_set(db, tag_set_id) do
+    case TagSets.get_tag_set(db, tag_set_id) do
+      {:ok, tag_set} -> tag_set
+    end
   end
 
   defp do_rotate_epoch(state) do
@@ -4934,6 +4964,7 @@ defmodule Coflux.Orchestration.Server do
          title,
          actions,
          initial,
+         requires_tag_set_id,
          now
        ) do
     if key do
@@ -4942,8 +4973,9 @@ defmodule Coflux.Orchestration.Server do
       case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
         {:ok,
          {existing_id, existing_number, existing_prompt_id, existing_schema_id, _existing_title,
-          _existing_actions}} ->
-          if existing_prompt_id == prompt_id && existing_schema_id == schema_id do
+          _existing_actions, existing_requires_tag_set_id}} ->
+          if existing_prompt_id == prompt_id && existing_schema_id == schema_id &&
+               existing_requires_tag_set_id == requires_tag_set_id do
             Inputs.record_execution_input(state.db, execution_id, existing_id, now)
             {:ok, existing_number, false}
           else
@@ -4963,6 +4995,7 @@ defmodule Coflux.Orchestration.Server do
               title,
               actions,
               initial,
+              requires_tag_set_id,
               now
             )
 
@@ -4981,6 +5014,7 @@ defmodule Coflux.Orchestration.Server do
           title,
           actions,
           initial,
+          requires_tag_set_id,
           now
         )
 
@@ -4999,7 +5033,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # Read-only: returns {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}
+  # Read-only: returns {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id, created_at}
   # where `db` is the DB handle the data lives in (active or archive).
   # Does NOT copy data to the active epoch.
   defp read_input_from_active_or_archives(state, input_external_id) do
@@ -5013,10 +5047,10 @@ defmodule Coflux.Orchestration.Server do
 
               {:ok,
                {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
-                created_at, _run_id}} ->
+                requires_tag_set_id, created_at, _run_id}} ->
                 {:found,
                  {archive_db, input_id, key, prompt_id, schema_id, title, actions, initial,
-                  created_at}}
+                  requires_tag_set_id, created_at}}
             end
           end
 
@@ -5030,10 +5064,11 @@ defmodule Coflux.Orchestration.Server do
           end
 
         {:ok,
-         {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial, created_at,
-          _run_id}} ->
+         {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
+          requires_tag_set_id, created_at, _run_id}} ->
           {:ok,
-           {state.db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}}
+           {state.db, input_id, key, prompt_id, schema_id, title, actions, initial,
+            requires_tag_set_id, created_at}}
       end
     else
       :error -> {:ok, nil}

@@ -96,6 +96,7 @@ defmodule Coflux.Orchestration.Inputs do
         title,
         actions,
         initial,
+        requires_tag_set_id,
         now
       ) do
     with_transaction(db, fn ->
@@ -112,6 +113,7 @@ defmodule Coflux.Orchestration.Inputs do
           title: title,
           actions: actions,
           initial: initial,
+          requires_tag_set_id: requires_tag_set_id,
           created_at: now
         })
 
@@ -145,7 +147,8 @@ defmodule Coflux.Orchestration.Inputs do
     case query(
            db,
            """
-           SELECT i.id, i.number, i.prompt_id, i.schema_id, i.title, i.actions
+           SELECT i.id, i.number, i.prompt_id, i.schema_id, i.title, i.actions,
+                  i.requires_tag_set_id
            FROM inputs AS i
            WHERE i.run_id = ?1
              AND i.workspace_id IN (#{placeholders})
@@ -155,8 +158,8 @@ defmodule Coflux.Orchestration.Inputs do
            """,
            List.to_tuple([run_id] ++ workspace_ids ++ [key])
          ) do
-      {:ok, [{id, number, prompt_id, schema_id, title, actions}]} ->
-        {:ok, {id, number, prompt_id, schema_id, title, actions}}
+      {:ok, [{id, number, prompt_id, schema_id, title, actions, requires_tag_set_id}]} ->
+        {:ok, {id, number, prompt_id, schema_id, title, actions, requires_tag_set_id}}
 
       {:ok, []} ->
         {:ok, nil}
@@ -234,7 +237,7 @@ defmodule Coflux.Orchestration.Inputs do
       db,
       """
       SELECT i.id, i.workspace_id, i.key, i.prompt_id, i.schema_id,
-             i.title, i.actions, i.initial, i.created_at, r.id AS run_id
+             i.title, i.actions, i.initial, i.requires_tag_set_id, i.created_at, r.id AS run_id
       FROM inputs AS i
       INNER JOIN runs AS r ON r.id = i.run_id
       WHERE r.external_id = ?1 AND i.number = ?2
@@ -248,7 +251,7 @@ defmodule Coflux.Orchestration.Inputs do
       db,
       """
       SELECT r.external_id, i.number, i.key, i.prompt_id, i.schema_id, i.title, i.actions,
-             i.created_at
+             i.requires_tag_set_id, i.created_at
       FROM inputs AS i
       INNER JOIN runs AS r ON r.id = i.run_id
       WHERE i.id = ?1
@@ -342,7 +345,7 @@ defmodule Coflux.Orchestration.Inputs do
       db,
       """
       SELECT i.id, r.external_id, i.number, i.workspace_id, i.key,
-             i.prompt_id, i.schema_id, i.created_at,
+             i.prompt_id, i.schema_id, i.requires_tag_set_id, i.created_at,
              ir.type AS response_type, ir.value AS response_value, ir.created_at AS responded_at,
              ir.created_by
       FROM inputs AS i
@@ -361,6 +364,7 @@ defmodule Coflux.Orchestration.Inputs do
       SELECT DISTINCT i.id, r.external_id AS run_external_id, i.number,
              i.workspace_id, i.key,
              i.prompt_id, i.schema_id, i.created_at, i.title,
+             i.requires_tag_set_id,
              ir.type AS response_type
       FROM inputs AS i
       INNER JOIN runs AS r ON r.id = i.run_id

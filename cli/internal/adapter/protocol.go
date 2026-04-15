@@ -259,14 +259,15 @@ type UploadBlobParams struct {
 
 // SubmitInputParams for submit_input request
 type SubmitInputParams struct {
-	ExecutionID  string            `json:"execution_id"`
-	Template     string            `json:"template"`
-	Placeholders map[string]*Value `json:"placeholders,omitempty"`
-	Schema       *string           `json:"schema,omitempty"` // JSON Schema as string
-	Key          *string           `json:"key,omitempty"`
-	Title        *string           `json:"title,omitempty"`
-	Actions      []string          `json:"actions,omitempty"` // [respond_label, dismiss_label]
-	Initial      any               `json:"initial,omitempty"` // Plain JSON initial values
+	ExecutionID  string              `json:"execution_id"`
+	Template     string              `json:"template"`
+	Placeholders map[string]*Value   `json:"placeholders,omitempty"`
+	Schema       *string             `json:"schema,omitempty"` // JSON Schema as string
+	Key          *string             `json:"key,omitempty"`
+	Title        *string             `json:"title,omitempty"`
+	Actions      []string            `json:"actions,omitempty"` // [respond_label, dismiss_label]
+	Initial      any                 `json:"initial,omitempty"` // Plain JSON initial values
+	Requires     map[string][]string `json:"requires,omitempty"`
 }
 
 // ResolveInputParams for resolve_input request

@@ -235,12 +235,13 @@ defmodule Coflux.Orchestration do
         key,
         title,
         actions,
-        initial
+        initial,
+        requires
       ) do
     call_server(
       project_id,
       {:submit_input, execution_id, template, placeholders, schema_json, key, title, actions,
-       initial}
+       initial, requires}
     )
   end
 

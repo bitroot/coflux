@@ -328,6 +328,7 @@ def submit_input(
     title: str | None = None,
     actions: tuple[str, str] | None = None,
     initial: Any = None,
+    requires: dict[str, list[str]] | None = None,
 ) -> int:
     """Submit an input request, returning a request ID.
 
@@ -342,6 +343,7 @@ def submit_input(
         title: Short title for the input (shown in UI).
         actions: Tuple of (respond_label, dismiss_label) for button text.
         initial: Plain JSON initial values for pre-populating the form.
+        requires: Tag set for routing inputs to specific users.
     """
     params: dict[str, Any] = {
         "execution_id": execution_id,
@@ -359,6 +361,8 @@ def submit_input(
         params["actions"] = list(actions)
     if initial is not None:
         params["initial"] = initial
+    if requires is not None:
+        params["requires"] = requires
     return get_protocol().send_request("submit_input", params)
 
 

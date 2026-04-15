@@ -700,6 +700,7 @@ defmodule Coflux.Handlers.Api do
               "initial" => initial,
               "title" => input.title,
               "actions" => input.actions,
+              "requires" => input.requires,
               "createdAt" => input.created_at,
               "response" => response
             })

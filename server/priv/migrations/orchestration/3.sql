@@ -34,12 +34,14 @@ CREATE TABLE inputs (
   title TEXT,
   actions TEXT,
   initial TEXT,
+  requires_tag_set_id INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE (run_id, number),
   FOREIGN KEY (run_id) REFERENCES runs ON DELETE CASCADE,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (prompt_id) REFERENCES input_prompts ON DELETE RESTRICT,
-  FOREIGN KEY (schema_id) REFERENCES input_schemas ON DELETE RESTRICT
+  FOREIGN KEY (schema_id) REFERENCES input_schemas ON DELETE RESTRICT,
+  FOREIGN KEY (requires_tag_set_id) REFERENCES tag_sets ON DELETE RESTRICT
 ) STRICT;
 
 CREATE INDEX idx_inputs_key ON inputs(key) WHERE key IS NOT NULL;

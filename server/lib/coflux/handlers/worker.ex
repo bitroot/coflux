@@ -344,8 +344,12 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "submit_input" ->
-        [execution_id, template, placeholders, schema_json, key, title, actions, initial] =
-          message["params"]
+        {execution_id, template, placeholders, schema_json, key, title, actions, initial,
+         requires} =
+          case message["params"] do
+            [eid, t, p, s, k, ti, a, i, r] -> {eid, t, p, s, k, ti, a, i, r}
+            [eid, t, p, s, k, ti, a, i] -> {eid, t, p, s, k, ti, a, i, nil}
+          end
 
         if is_recognised_execution?(execution_id, state) do
           parsed_placeholders =
@@ -365,7 +369,8 @@ defmodule Coflux.Handlers.Worker do
                  key,
                  title,
                  actions_json,
-                 initial_json
+                 initial_json,
+                 requires
                ) do
             {:ok, input_external_id} ->
               {[success_message(message["id"], input_external_id)], state}

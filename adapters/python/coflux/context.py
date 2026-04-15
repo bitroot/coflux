@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import protocol
-from .errors import ExecutionCancelled, ExecutionTimeout, InputDismissed, create_execution_error
+from .errors import (
+    ExecutionCancelled,
+    ExecutionTimeout,
+    InputDismissed,
+    create_execution_error,
+)
 from .models import Asset, AssetEntry, AssetMetadata, Input
 from .serialization import deserialize_value, serialize_value
 
@@ -302,6 +307,7 @@ class ExecutorContext:
         title: str | None = None,
         actions: tuple[str, str] | None = None,
         initial: Any = None,
+        requires: dict[str, list[str]] | None = None,
     ) -> str:
         """Create an input request and return its external ID.
 
@@ -329,6 +335,7 @@ class ExecutorContext:
             title=title,
             actions=actions,
             initial=initial,
+            requires=requires,
         )
         result = self._wait_response(request_id)
         return result["input_id"]

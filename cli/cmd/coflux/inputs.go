@@ -87,6 +87,10 @@ func runInputsList(cmd *cobra.Command, args []string) error {
 		executionID := getString(entry, "executionId")
 		key := getString(entry, "key")
 		createdAt := getInt64(entry, "createdAt")
+		requires := ""
+		if r, ok := entry["requires"].(map[string]any); ok {
+			requires = formatTagSet(r)
+		}
 
 		if key == "" {
 			key = "-"
@@ -97,11 +101,12 @@ func runInputsList(cmd *cobra.Command, args []string) error {
 			runID,
 			executionID,
 			key,
+			requires,
 			formatTimestamp(createdAt),
 		})
 	}
 
-	printTable([]string{"ID", "Run", "Execution", "Key", "Created"}, rows)
+	printTable([]string{"ID", "Run", "Execution", "Key", "Requires", "Created"}, rows)
 	return nil
 }
 
@@ -138,6 +143,10 @@ func runInputsInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Created: %s\n", formatTimestamp(getInt64(input, "createdAt")))
+
+	if r, ok := input["requires"].(map[string]any); ok && len(r) > 0 {
+		fmt.Printf("Requires: %s\n", formatTagSet(r))
+	}
 
 	// Display prompt
 	template := getString(input, "template")

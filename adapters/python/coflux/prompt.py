@@ -12,6 +12,23 @@ from .state import get_context
 
 T = t.TypeVar("T")
 
+
+def _parse_requires(
+    requires: dict[str, str | bool | list[str]] | None,
+) -> dict[str, list[str]] | None:
+    if not requires:
+        return None
+
+    def _parse_value(v: str | bool | list[str]) -> list[str]:
+        if isinstance(v, bool):
+            return ["true"] if v else ["false"]
+        if isinstance(v, str):
+            return [v]
+        return v
+
+    return {k: _parse_value(v) for k, v in requires.items()}
+
+
 _PRIMITIVE_SCHEMAS: dict[type, dict[str, str]] = {
     str: {"type": "string"},
     int: {"type": "integer"},
@@ -57,10 +74,12 @@ class Prompt(t.Generic[T]):
         title: str | None = None,
         actions: tuple[str, str] | None = None,
         schema: str | dict | None = None,
+        requires: dict[str, str | bool | list[str]] | None = None,
         # Internal — set via fluent methods
         _key: str | None = None,
         _initial: t.Any = None,
         _model_schema: str | None = None,
+        _requires: dict[str, list[str]] | None = None,
     ):
         self._template = template
         self._model = model
@@ -68,6 +87,13 @@ class Prompt(t.Generic[T]):
         self._actions = actions
         self._key = _key
         self._initial = _initial
+
+        if _requires is not None:
+            self._requires = _requires
+        elif requires is not None:
+            self._requires = _parse_requires(requires)
+        else:
+            self._requires = None
 
         if _model_schema is not None:
             self._model_schema = _model_schema
@@ -94,6 +120,7 @@ class Prompt(t.Generic[T]):
             _key=overrides.get("_key", self._key),
             _initial=overrides.get("_initial", self._initial),
             _model_schema=overrides.get("_model_schema", self._model_schema),
+            _requires=overrides.get("_requires", self._requires),
         )
 
     def with_key(self, key: str) -> Prompt[T]:
@@ -107,6 +134,10 @@ class Prompt(t.Generic[T]):
     def with_actions(self, respond: str, dismiss: str) -> Prompt[T]:
         """Return a new Prompt with custom button labels."""
         return self._copy(actions=(respond, dismiss))
+
+    def with_requires(self, requires: dict[str, str | bool | list[str]]) -> Prompt[T]:
+        """Return a new Prompt with routing tags for matching to users."""
+        return self._copy(_requires=_parse_requires(requires))
 
     def __call__(self, **kwargs: t.Any) -> T:
         """Submit the prompt and block until a response is available.
@@ -136,6 +167,7 @@ class Prompt(t.Generic[T]):
             title=self._title,
             actions=self._actions,
             initial=initial_value,
+            requires=self._requires,
         )
         if self._model is not None:
             return Input[self._model](input_id)

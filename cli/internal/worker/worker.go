@@ -941,7 +941,7 @@ func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputPar
 		}
 	}
 
-	result, err := conn.Request(ctx, "submit_input",
+	reqParams := []any{
 		params.ExecutionID,
 		params.Template,
 		serverPlaceholders,
@@ -950,7 +950,10 @@ func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputPar
 		params.Title,
 		params.Actions,
 		params.Initial,
-	)
+		params.Requires,
+	}
+
+	result, err := conn.Request(ctx, "submit_input", reqParams...)
 	if err != nil {
 		return "", err
 	}

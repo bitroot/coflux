@@ -486,12 +486,15 @@ defmodule Coflux.Orchestration.Epoch do
             existing_id
 
           {:ok, nil} ->
-            {:ok, {workspace_id, key, prompt_id, schema_id, title, actions, initial, created_at}} =
+            {:ok,
+             {workspace_id, key, prompt_id, schema_id, title, actions, initial,
+              requires_tag_set_id,
+              created_at}} =
               query_one!(
                 source_db,
                 """
                 SELECT workspace_id, key, prompt_id, schema_id,
-                       title, actions, initial, created_at
+                       title, actions, initial, requires_tag_set_id, created_at
                 FROM inputs
                 WHERE id = ?1
                 """,
@@ -513,6 +516,7 @@ defmodule Coflux.Orchestration.Epoch do
                 title: title,
                 actions: actions,
                 initial: initial,
+                requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
                 created_at: created_at
               })
 
@@ -1068,12 +1072,13 @@ defmodule Coflux.Orchestration.Epoch do
   def ensure_input(source_db, target_db, input_id) do
     {:ok,
      {run_id, number, workspace_id, key, prompt_id, schema_id, title, actions, initial,
+      requires_tag_set_id,
       created_at}} =
       query_one!(
         source_db,
         """
         SELECT run_id, number, workspace_id, key, prompt_id, schema_id,
-               title, actions, initial, created_at
+               title, actions, initial, requires_tag_set_id, created_at
         FROM inputs
         WHERE id = ?1
         """,
@@ -1110,6 +1115,7 @@ defmodule Coflux.Orchestration.Epoch do
               title,
               actions,
               initial,
+              requires_tag_set_id,
               created_at
             )
         end
@@ -1147,6 +1153,7 @@ defmodule Coflux.Orchestration.Epoch do
               title,
               actions,
               initial,
+              requires_tag_set_id,
               created_at
             )
         end
@@ -1166,6 +1173,7 @@ defmodule Coflux.Orchestration.Epoch do
          title,
          actions,
          initial,
+         requires_tag_set_id,
          created_at
        ) do
     new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
@@ -1183,6 +1191,7 @@ defmodule Coflux.Orchestration.Epoch do
         title: title,
         actions: actions,
         initial: initial,
+        requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
         created_at: created_at
       })
 
