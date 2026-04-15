@@ -11,7 +11,7 @@ import datetime as dt
 import typing as t
 from pathlib import Path
 
-from .input import InputFactory
+from .prompt import Prompt
 from ._version import __version__
 from .decorators import task, workflow, stub
 from .target import Cache, Defer, Retries
@@ -38,6 +38,7 @@ __all__ = [
     "Metric",
     "MetricGroup",
     "MetricScale",
+    "Prompt",
     "Cache",
     "Defer",
     "Retries",
@@ -48,7 +49,6 @@ __all__ = [
     "group",
     "suspense",
     "suspend",
-    "input",
     "log_debug",
     "log_info",
     "log_warning",
@@ -156,9 +156,6 @@ def log_error(template: str | None = None, **kwargs) -> None:
         log_error("Failed to process {item}: {error}", item="order-123", error=str(e))
     """
     get_context().log_message(5, template, **kwargs)
-
-
-input: InputFactory[t.Any] = InputFactory()
 
 
 def asset(
