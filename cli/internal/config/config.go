@@ -40,6 +40,7 @@ type ServerConfig struct {
 // WorkerConfig holds worker-specific settings
 type WorkerConfig struct {
 	Adapter     []string `mapstructure:"adapter"`
+	Modules     []string `mapstructure:"modules"`
 	Concurrency int      `mapstructure:"concurrency"`
 	Provides    []string `mapstructure:"provides"`
 	Accepts     []string `mapstructure:"accepts"`

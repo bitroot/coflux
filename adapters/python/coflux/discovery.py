@@ -4,27 +4,73 @@ from __future__ import annotations
 
 import importlib
 import json
+import pkgutil
 import sys
 from typing import Any
 
 from .target import Target, _to_ms, serialize_cache, serialize_defer, serialize_retries
 
 
+def _expand_modules(module_names: list[str]) -> list[str]:
+    """Expand package names into their constituent submodules.
+
+    If a name refers to a Python package (has __path__), it is recursively
+    walked using pkgutil.walk_packages. Plain module names are passed through
+    unchanged. Submodules whose final component starts with '_' are skipped.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for name in module_names:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:
+            # Let discover_targets handle the error with its own warning
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+            continue
+
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+
+        if hasattr(mod, "__path__"):
+            for _importer, subname, _ispkg in pkgutil.walk_packages(
+                mod.__path__, mod.__name__ + "."
+            ):
+                # Skip private submodules (e.g., _internal, _helpers)
+                leaf = subname.rsplit(".", 1)[-1]
+                if leaf.startswith("_"):
+                    continue
+                if subname not in seen:
+                    seen.add(subname)
+                    result.append(subname)
+
+    return result
+
+
 def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
     """Discover all targets in the specified modules.
 
+    If a module name refers to a package, all submodules are scanned
+    recursively (private submodules starting with '_' are skipped).
+
     Args:
-        modules: List of module names to scan (e.g., ["myapp.workflows", "myapp.tasks"])
+        modules: List of module or package names to scan
+                 (e.g., ["myapp.workflows", "myapp.tasks"] or just ["myapp"])
 
     Returns:
         List of target definitions suitable for JSON serialization.
     """
+    expanded = _expand_modules(modules)
     targets = []
+    seen_targets: set[int] = set()
 
-    for module_name in modules:
+    for module_name in expanded:
         try:
             module = importlib.import_module(module_name)
-        except ImportError as e:
+        except Exception as e:
             print(
                 f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr
             )
@@ -34,6 +80,10 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
             if isinstance(attr, Target) and not attr.definition.is_stub:
+                # Deduplicate targets re-exported across modules
+                if id(attr) in seen_targets:
+                    continue
+                seen_targets.add(id(attr))
                 target_def = _build_target_definition(attr, module_name)
                 targets.append(target_def)
 

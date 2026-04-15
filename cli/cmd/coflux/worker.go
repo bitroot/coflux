@@ -20,15 +20,19 @@ import (
 )
 
 var workerCmd = &cobra.Command{
-	Use:   "worker <modules...>",
+	Use:   "worker [modules...]",
 	Short: "Start a Coflux worker",
 	Long: `Start a worker that connects to the Coflux server, registers discovered
 targets, and executes workflows and tasks as assigned.
 
+Modules can be specified as arguments or via 'worker.modules' in coflux.toml.
+Packages are scanned recursively for targets.
+
 Examples:
+  coflux worker myapp
   coflux worker myapp.workflows myapp.tasks
-  coflux worker --dev myapp.workflows        # Development mode (watch + register)`,
-	Args: cobra.MinimumNArgs(1),
+  coflux worker --dev myapp
+  coflux worker`,
 	RunE: runWorker,
 }
 
@@ -93,7 +97,11 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	}
 	cfg.Token = token
 
-	modules := args
+	// Resolve modules: CLI args override config
+	modules, err := resolveModules(args, cfg)
+	if err != nil {
+		return err
+	}
 
 	// Override adapter if specified via flag
 	if len(workerAdapter) > 0 {
