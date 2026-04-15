@@ -120,10 +120,7 @@ func isConnectionError(err error) bool {
 	if errors.Is(err, ErrNotConnected) {
 		return true
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "connection lost") ||
-		strings.Contains(msg, "connection closed") ||
-		strings.Contains(msg, "abnormal closure")
+	return errors.Is(err, api.ErrConnectionLost)
 }
 
 // waitForConn blocks until a connection is available or the context is cancelled.

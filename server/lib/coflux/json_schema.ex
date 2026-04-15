@@ -55,6 +55,8 @@ defmodule Coflux.JsonSchema do
   Validate a value against a JSON Schema with `required` constraints removed.
 
   Useful for validating partial/initial values where missing fields are expected.
+  Note: this does not resolve `$ref` — required constraints inside referenced
+  definitions will not be stripped.
   Returns :ok or {:error, reason}.
   """
   def validate_partial(value, schema_json) when is_binary(schema_json) do

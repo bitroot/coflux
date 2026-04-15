@@ -1099,7 +1099,9 @@ defmodule Coflux.Orchestration.Epoch do
             new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
             new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
             new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
-            {:ok, new_execution_id} = remap_execution_id_by_key(source_db, target_db, execution_id)
+
+            {:ok, new_execution_id} =
+              remap_execution_id_by_key(source_db, target_db, execution_id)
 
             {:ok, new_input_id} =
               insert_one(target_db, :inputs, %{

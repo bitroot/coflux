@@ -1950,114 +1950,59 @@ defmodule Coflux.Orchestration.Server do
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
     {:ok, run_id} = Runs.get_run_id_for_execution(state.db, execution_id)
 
-    now = System.system_time(:millisecond)
+    case validate_and_prepare_input(state, schema_json, initial) do
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
 
-    # Validate and get-or-create schema
-    schema_id =
-      if schema_json do
-        case Coflux.JsonSchema.validate_schema(schema_json) do
-          :ok ->
-            {:ok, id} = Inputs.get_or_create_schema(state.db, schema_json)
-            id
+      {:ok, schema_id} ->
+        now = System.system_time(:millisecond)
 
+        # Get-or-create placeholder values
+        placeholder_value_ids =
+          Enum.map(placeholders, fn {placeholder, value} ->
+            {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+            {placeholder, value_id}
+          end)
+
+        # Get-or-create prompt
+        {:ok, prompt_id} = Inputs.get_or_create_prompt(state.db, template, placeholder_value_ids)
+
+        # Check for existing input by key (run-scoped, workspace-ancestry-aware)
+        case find_or_create_input(
+               state,
+               key,
+               run_id,
+               workspace_id,
+               execution_id,
+               prompt_id,
+               schema_id,
+               title,
+               actions,
+               initial,
+               now
+             ) do
           {:error, reason} ->
-            throw({:reply, {:error, {:invalid_schema, reason}}, state})
-        end
-      end
+            {:reply, {:error, reason}, state}
 
-    # Validate initial value
-    if initial do
-      if schema_json do
-        initial_value = Jason.decode!(initial)
+          {:ok, input_external_id, created} ->
+            state =
+              if created do
+                {:ok, {run_external_id}} =
+                  Runs.get_external_run_id_for_execution(state.db, execution_id)
 
-        case Coflux.JsonSchema.validate_partial(initial_value, schema_json) do
-          :ok -> :ok
-          {:error, reason} -> throw({:reply, {:error, {:invalid_initial, reason}}, state})
+                notify_listeners(
+                  state,
+                  {:run, run_external_id},
+                  {:input_submitted, execution_external_id, input_external_id, title}
+                )
+              else
+                state
+              end
+
+            state = flush_notifications(state)
+            {:reply, {:ok, input_external_id}, state}
         end
-      else
-        throw({:reply, {:error, {:invalid_initial, "initial value requires a schema"}}, state})
-      end
     end
-
-    # Get-or-create placeholder values
-    placeholder_value_ids =
-      Enum.map(placeholders, fn {placeholder, value} ->
-        {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
-        {placeholder, value_id}
-      end)
-
-    # Get-or-create prompt
-    {:ok, prompt_id} = Inputs.get_or_create_prompt(state.db, template, placeholder_value_ids)
-
-    # Check for existing input by key (run-scoped, workspace-ancestry-aware)
-    {_input_id, input_external_id, created} =
-      if key do
-        workspace_ids = get_cache_workspace_ids(state, workspace_id)
-
-        case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
-          {:ok,
-           {existing_id, existing_ext_id, existing_prompt_id, existing_schema_id, _existing_title,
-            _existing_actions}} ->
-            if existing_prompt_id == prompt_id && existing_schema_id == schema_id do
-              {existing_id, existing_ext_id, false}
-            else
-              throw({:reply, {:error, :input_mismatch}, state})
-            end
-
-          {:ok, nil} ->
-            {:ok, id, ext_id} =
-              Inputs.create_input(
-                state.db,
-                execution_id,
-                workspace_id,
-                prompt_id,
-                schema_id,
-                key,
-                title,
-                actions,
-                initial,
-                now
-              )
-
-            {id, ext_id, true}
-        end
-      else
-        {:ok, id, ext_id} =
-          Inputs.create_input(
-            state.db,
-            execution_id,
-            workspace_id,
-            prompt_id,
-            schema_id,
-            nil,
-            title,
-            actions,
-            initial,
-            now
-          )
-
-        {id, ext_id, true}
-      end
-
-    state =
-      if created do
-        {:ok, {run_external_id}} =
-          Runs.get_external_run_id_for_execution(state.db, execution_id)
-
-        notify_listeners(
-          state,
-          {:run, run_external_id},
-          {:input_submitted, execution_external_id, input_external_id, title}
-        )
-      else
-        state
-      end
-
-    state = flush_notifications(state)
-    {:reply, {:ok, input_external_id}, state}
-  catch
-    {:reply, error, state} ->
-      {:reply, error, state}
   end
 
   def handle_call(
@@ -2066,7 +2011,7 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
-    case find_input_in_active_or_archives(state, input_external_id) do
+    case find_and_copy_input_from_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2180,7 +2125,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:respond_input, input_external_id, value, access}, _from, state) do
-    case find_input_in_active_or_archives(state, input_external_id) do
+    case find_and_copy_input_from_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2188,175 +2133,129 @@ defmodule Coflux.Orchestration.Server do
        {input_id, execution_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions,
         _initial, _created_at}} ->
         # Validate response against schema if one exists
-        if schema_id do
-          {:ok, schema_json} = Inputs.get_input_schema(state.db, schema_id)
+        with :ok <- validate_input_response(state, schema_id, value) do
+          now = System.system_time(:millisecond)
 
-          case Coflux.JsonSchema.validate_value(value, schema_json) do
-            :ok -> :ok
-            {:error, reason} -> throw({:reply, {:error, {:validation_failed, reason}}, state})
+          created_by =
+            case access do
+              %{principal_id: id} -> id
+              _ -> nil
+            end
+
+          value_json = Jason.encode!(value)
+
+          case Inputs.record_input_response(
+                 state.db,
+                 input_id,
+                 Inputs.type_value(),
+                 value_json,
+                 now,
+                 created_by
+               ) do
+            {:ok, true} ->
+              # Notify waiters
+              waiting_key = {:input, input_external_id}
+              {input_waiting, waiting} = Map.pop(state.waiting, waiting_key, [])
+              state = Map.put(state, :waiting, waiting)
+
+              state =
+                Enum.reduce(input_waiting, state, fn {from_ext_id, request_id, _, _}, state ->
+                  case find_session_for_execution(state, from_ext_id) do
+                    {:ok, session_id} ->
+                      send_session(state, session_id, {:response, request_id, {:value, value}})
+
+                    :error ->
+                      state
+                  end
+                end)
+
+              # Resolve input dependency for any suspended executions waiting on this input
+              state = update_dependencies_on_input(state, input_id)
+
+              # Notify run topic
+              {:ok, {run_external_id}} =
+                Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+              ws_ext_id = workspace_external_id(state, workspace_id)
+
+              response = build_input_response(state.db, input_id)
+
+              state =
+                state
+                |> notify_listeners(
+                  {:run, run_external_id},
+                  {:input_response, input_external_id, :value}
+                )
+                |> notify_dependent_runs(input_id, input_external_id, :value, run_external_id)
+                |> notify_listeners(
+                  {:inputs, ws_ext_id},
+                  {:input_responded, input_external_id, now}
+                )
+                |> notify_listeners(
+                  {:input, input_external_id},
+                  {:response, response}
+                )
+                |> flush_notifications()
+
+              {:reply, :ok, state}
+
+            {:error, :already_responded} ->
+              {:reply, {:error, :already_responded}, state}
           end
-        end
-
-        now = System.system_time(:millisecond)
-
-        created_by =
-          case access do
-            %{principal_id: id} -> id
-            _ -> nil
-          end
-
-        value_json = Jason.encode!(value)
-
-        case Inputs.record_input_response(
-               state.db,
-               input_id,
-               Inputs.type_value(),
-               value_json,
-               now,
-               created_by
-             ) do
-          {:ok, true} ->
-            # Notify waiters
-            waiting_key = {:input, input_external_id}
-            {input_waiting, waiting} = Map.pop(state.waiting, waiting_key, [])
-            state = Map.put(state, :waiting, waiting)
-
-            state =
-              Enum.reduce(input_waiting, state, fn {from_ext_id, request_id, _, _}, state ->
-                case find_session_for_execution(state, from_ext_id) do
-                  {:ok, session_id} ->
-                    send_session(state, session_id, {:response, request_id, {:value, value}})
-
-                  :error ->
-                    state
-                end
-              end)
-
-            # Resolve input dependency for any suspended executions waiting on this input
-            state = update_dependencies_on_input(state, input_id)
-
-            # Notify run topic
-            {:ok, {run_external_id}} =
-              Runs.get_external_run_id_for_execution(state.db, execution_id)
-
-            ws_ext_id = workspace_external_id(state, workspace_id)
-
-            response = build_input_response(state.db, input_id)
-
-            state =
-              state
-              |> notify_listeners(
-                {:run, run_external_id},
-                {:input_response, input_external_id, :value}
-              )
-              |> notify_dependent_runs(input_id, input_external_id, :value, run_external_id)
-              |> notify_listeners(
-                {:inputs, ws_ext_id},
-                {:input_responded, input_external_id, now}
-              )
-              |> notify_listeners(
-                {:input, input_external_id},
-                {:response, response}
-              )
-              |> flush_notifications()
-
-            {:reply, :ok, state}
-
-          {:error, :already_responded} ->
-            {:reply, {:error, :already_responded}, state}
+        else
+          {:error, reason} ->
+            {:reply, {:error, {:validation_failed, reason}}, state}
         end
     end
-  catch
-    {:reply, error, state} ->
-      {:reply, error, state}
   end
 
   def handle_call({:get_input, input_external_id}, _from, state) do
-    case find_input_in_active_or_archives(state, input_external_id) do
+    case read_input_from_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
-      {:ok,
-       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
-        initial, created_at}} ->
-        {:ok, template, placeholder_values} = Inputs.get_input_prompt(state.db, prompt_id)
+      {:ok, {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}} ->
+        details =
+          build_input_details(
+            db,
+            input_id,
+            key,
+            prompt_id,
+            schema_id,
+            title,
+            actions,
+            initial,
+            created_at
+          )
 
-        schema =
-          if schema_id do
-            {:ok, s} = Inputs.get_input_schema(state.db, schema_id)
-            s
-          end
-
-        response = build_input_response(state.db, input_id)
-
-        parsed_actions =
-          if actions do
-            Jason.decode!(actions)
-          end
-
-        resolved_placeholders =
-          Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, state.db)} end)
-
-        {:reply,
-         {:ok,
-          %{
-            key: key,
-            template: template,
-            placeholders: resolved_placeholders,
-            schema: schema,
-            initial: initial,
-            title: title,
-            actions: parsed_actions,
-            created_at: created_at,
-            response: response
-          }}, state}
+        {:reply, {:ok, details}, state}
     end
   end
 
   def handle_call({:subscribe_input, input_external_id, pid}, _from, state) do
-    case find_input_in_active_or_archives(state, input_external_id) do
+    case read_input_from_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
-      {:ok,
-       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
-        initial, created_at}} ->
+      {:ok, {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}} ->
         {:ok, ref, state} = add_listener(state, {:input, input_external_id}, pid)
 
-        {:ok, template, placeholder_values} = Inputs.get_input_prompt(state.db, prompt_id)
+        details =
+          build_input_details(
+            db,
+            input_id,
+            key,
+            prompt_id,
+            schema_id,
+            title,
+            actions,
+            initial,
+            created_at
+          )
 
-        schema =
-          if schema_id do
-            {:ok, s} = Inputs.get_input_schema(state.db, schema_id)
-            s
-          end
+        active = Inputs.has_active_dependency?(db, input_id)
 
-        response = build_input_response(state.db, input_id)
-
-        parsed_actions =
-          if actions do
-            Jason.decode!(actions)
-          end
-
-        resolved_placeholders =
-          Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, state.db)} end)
-
-        active = Inputs.has_active_dependency?(state.db, input_id)
-
-        {:reply,
-         {:ok,
-          %{
-            key: key,
-            template: template,
-            placeholders: resolved_placeholders,
-            schema: schema,
-            initial: initial,
-            title: title,
-            actions: parsed_actions,
-            created_at: created_at,
-            response: response,
-            active: active
-          }, ref}, state}
+        {:reply, {:ok, Map.put(details, :active, active), ref}, state}
     end
   end
 
@@ -2390,7 +2289,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:dismiss_input, input_external_id, access}, _from, state) do
-    case find_input_in_active_or_archives(state, input_external_id) do
+    case find_and_copy_input_from_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -4247,6 +4146,48 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp build_input_details(
+         db,
+         input_id,
+         key,
+         prompt_id,
+         schema_id,
+         title,
+         actions,
+         initial,
+         created_at
+       ) do
+    {:ok, template, placeholder_values} = Inputs.get_input_prompt(db, prompt_id)
+
+    schema =
+      if schema_id do
+        {:ok, s} = Inputs.get_input_schema(db, schema_id)
+        s
+      end
+
+    response = build_input_response(db, input_id)
+
+    parsed_actions =
+      if actions do
+        Jason.decode!(actions)
+      end
+
+    resolved_placeholders =
+      Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, db)} end)
+
+    %{
+      key: key,
+      template: template,
+      placeholders: resolved_placeholders,
+      schema: schema,
+      initial: initial,
+      title: title,
+      actions: parsed_actions,
+      created_at: created_at,
+      response: response
+    }
+  end
+
   defp do_rotate_epoch(state) do
     epoch_id = Epochs.next_epoch_id(state.epochs)
 
@@ -4948,10 +4889,159 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp find_input_in_active_or_archives(state, input_external_id) do
+  defp validate_and_prepare_input(state, schema_json, initial) do
+    with {:ok, schema_id} <- validate_and_get_schema(state, schema_json),
+         :ok <- validate_initial_value(initial, schema_json, schema_id) do
+      {:ok, schema_id}
+    end
+  end
+
+  defp validate_and_get_schema(_state, nil), do: {:ok, nil}
+
+  defp validate_and_get_schema(state, schema_json) do
+    case Coflux.JsonSchema.validate_schema(schema_json) do
+      :ok ->
+        {:ok, id} = Inputs.get_or_create_schema(state.db, schema_json)
+        {:ok, id}
+
+      {:error, reason} ->
+        {:error, {:invalid_schema, reason}}
+    end
+  end
+
+  defp validate_initial_value(nil, _schema_json, _schema_id), do: :ok
+
+  defp validate_initial_value(_initial, nil, _schema_id),
+    do: {:error, {:invalid_initial, "initial value requires a schema"}}
+
+  defp validate_initial_value(initial, schema_json, _schema_id) do
+    case Jason.decode(initial) do
+      {:ok, initial_value} ->
+        case Coflux.JsonSchema.validate_partial(initial_value, schema_json) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:invalid_initial, reason}}
+        end
+
+      {:error, _} ->
+        {:error, {:invalid_initial, "initial value is not valid JSON"}}
+    end
+  end
+
+  defp find_or_create_input(
+         state,
+         key,
+         run_id,
+         workspace_id,
+         execution_id,
+         prompt_id,
+         schema_id,
+         title,
+         actions,
+         initial,
+         now
+       ) do
+    if key do
+      workspace_ids = get_cache_workspace_ids(state, workspace_id)
+
+      case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
+        {:ok,
+         {_existing_id, existing_ext_id, existing_prompt_id, existing_schema_id, _existing_title,
+          _existing_actions}} ->
+          if existing_prompt_id == prompt_id && existing_schema_id == schema_id do
+            {:ok, existing_ext_id, false}
+          else
+            {:error, :input_mismatch}
+          end
+
+        {:ok, nil} ->
+          {:ok, _id, ext_id} =
+            Inputs.create_input(
+              state.db,
+              execution_id,
+              workspace_id,
+              prompt_id,
+              schema_id,
+              key,
+              title,
+              actions,
+              initial,
+              now
+            )
+
+          {:ok, ext_id, true}
+      end
+    else
+      {:ok, _id, ext_id} =
+        Inputs.create_input(
+          state.db,
+          execution_id,
+          workspace_id,
+          prompt_id,
+          schema_id,
+          nil,
+          title,
+          actions,
+          initial,
+          now
+        )
+
+      {:ok, ext_id, true}
+    end
+  end
+
+  defp validate_input_response(_state, nil, _value), do: :ok
+
+  defp validate_input_response(state, schema_id, value) do
+    {:ok, schema_json} = Inputs.get_input_schema(state.db, schema_id)
+
+    case Coflux.JsonSchema.validate_value(value, schema_json) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Read-only: returns {db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}
+  # where `db` is the DB handle the data lives in (active or archive).
+  # Does NOT copy data to the active epoch.
+  defp read_input_from_active_or_archives(state, input_external_id) do
     case Inputs.get_input_by_external_id(state.db, input_external_id) do
       {:ok, nil} ->
-        # Search archived epochs and copy forward if found
+        query_fn = fn archive_db ->
+          case Inputs.get_input_by_external_id(archive_db, input_external_id) do
+            {:ok, nil} ->
+              :not_found
+
+            {:ok,
+             {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
+              initial, created_at}} ->
+              {:found,
+               {archive_db, input_id, key, prompt_id, schema_id, title, actions, initial,
+                created_at}}
+          end
+        end
+
+        bloom_fn = fn epoch_index ->
+          Index.find_epochs(epoch_index, "input_external_ids", input_external_id)
+        end
+
+        case search_archived_epochs(state, query_fn, bloom_fn) do
+          {:found, result} -> {:ok, result}
+          :not_found -> {:ok, nil}
+        end
+
+      {:ok,
+       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
+        initial, created_at}} ->
+        {:ok,
+         {state.db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}}
+    end
+  end
+
+  # Write path: copies the input to the active epoch if found in an archive.
+  # Returns the full input tuple from the active DB.
+  defp find_and_copy_input_from_archives(state, input_external_id) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
         query_fn = fn archive_db ->
           case Inputs.get_input_by_external_id(archive_db, input_external_id) do
             {:ok, nil} ->
