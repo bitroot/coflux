@@ -118,7 +118,10 @@ defmodule Coflux.Orchestration.Server do
 
   def init(project_id) do
     index_path = ["projects", project_id, "orchestration", "index.json"]
-    {:ok, epoch_index} = Index.load(index_path, ["runs", "cache_keys", "idempotency_keys"])
+
+    {:ok, epoch_index} =
+      Index.load(index_path, ["runs", "cache_keys", "idempotency_keys", "input_external_ids"])
+
     unindexed_epoch_ids = Index.unindexed_epoch_ids(epoch_index)
     archived_epoch_ids = Index.all_epoch_ids(epoch_index)
 
@@ -2063,7 +2066,7 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+    case find_input_in_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2177,7 +2180,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:respond_input, input_external_id, value, access}, _from, state) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+    case find_input_in_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2269,7 +2272,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:get_input, input_external_id}, _from, state) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+    case find_input_in_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2311,7 +2314,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:subscribe_input, input_external_id, pid}, _from, state) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+    case find_input_in_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2387,7 +2390,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:dismiss_input, input_external_id, access}, _from, state) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+    case find_input_in_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -3545,7 +3548,10 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
-  def handle_info({task_ref, {run_bloom, cache_bloom, idempotency_bloom}}, state)
+  def handle_info(
+        {task_ref, {run_bloom, cache_bloom, idempotency_bloom, input_ext_id_bloom}},
+        state
+      )
       when task_ref == state.index_task do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
@@ -3554,7 +3560,8 @@ defmodule Coflux.Orchestration.Server do
       Index.update_filters(state.epoch_index, epoch_id, %{
         "runs" => run_bloom,
         "cache_keys" => cache_bloom,
-        "idempotency_keys" => idempotency_bloom
+        "idempotency_keys" => idempotency_bloom,
+        "input_external_ids" => input_ext_id_bloom
       })
 
     :ok = Index.save(epoch_index)
@@ -4331,7 +4338,11 @@ defmodule Coflux.Orchestration.Server do
     idempotency_keys = Bloom.new(max(100, length(idemp_keys_list)))
     idempotency_keys = Enum.reduce(idemp_keys_list, idempotency_keys, &Bloom.add(&2, &1))
 
-    {runs, cache_keys, idempotency_keys}
+    {:ok, input_ext_ids} = Inputs.get_all_input_external_ids(db)
+    input_external_ids = Bloom.new(max(100, length(input_ext_ids)))
+    input_external_ids = Enum.reduce(input_ext_ids, input_external_ids, &Bloom.add(&2, &1))
+
+    {runs, cache_keys, idempotency_keys, input_external_ids}
   end
 
   defp remap_config_ids(state, %{} = mappings) do
@@ -4934,6 +4945,41 @@ defmodule Coflux.Orchestration.Server do
           {:found, result} -> result
           :not_found -> :miss
         end
+    end
+  end
+
+  defp find_input_in_active_or_archives(state, input_external_id) do
+    case Inputs.get_input_by_external_id(state.db, input_external_id) do
+      {:ok, nil} ->
+        # Search archived epochs and copy forward if found
+        query_fn = fn archive_db ->
+          case Inputs.get_input_by_external_id(archive_db, input_external_id) do
+            {:ok, nil} ->
+              :not_found
+
+            {:ok, {input_id, _, _, _, _, _, _, _, _, _}} ->
+              # Found in archive — copy it to active epoch
+              Epoch.ensure_input(archive_db, state.db, input_id)
+
+              # Re-read from the active DB (now copied)
+              case Inputs.get_input_by_external_id(state.db, input_external_id) do
+                {:ok, nil} -> :not_found
+                {:ok, result} -> {:found, result}
+              end
+          end
+        end
+
+        bloom_fn = fn epoch_index ->
+          Index.find_epochs(epoch_index, "input_external_ids", input_external_id)
+        end
+
+        case search_archived_epochs(state, query_fn, bloom_fn) do
+          {:found, result} -> {:ok, result}
+          :not_found -> {:ok, nil}
+        end
+
+      result ->
+        result
     end
   end
 

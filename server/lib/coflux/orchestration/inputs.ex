@@ -376,6 +376,12 @@ defmodule Coflux.Orchestration.Inputs do
     )
   end
 
+  def get_all_input_external_ids(db) do
+    case query(db, "SELECT external_id FROM inputs") do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn {ext_id} -> ext_id end)}
+    end
+  end
+
   def get_input_dependencies_for_run(db, run_id) do
     query(
       db,
