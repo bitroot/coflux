@@ -148,6 +148,25 @@ def blobs_get(key, output_path, host=None, workspace="default"):
     )
 
 
+def inputs_inspect(input_id, host=None, workspace="default"):
+    result = _coflux("inputs", "inspect", str(input_id), host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def inputs_respond(input_id, value, host=None, workspace="default"):
+    _coflux(
+        "inputs", "respond", str(input_id), json.dumps(value),
+        host=host, workspace=workspace, output=None,
+    )
+
+
+def inputs_dismiss(input_id, host=None, workspace="default"):
+    _coflux(
+        "inputs", "dismiss", str(input_id),
+        host=host, workspace=workspace, output=None,
+    )
+
+
 def logs_get(
     run_id,
     step_attempt=None,

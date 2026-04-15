@@ -204,3 +204,51 @@ def register_group_notification(execution_id, group_id, name=None):
     if name is not None:
         params["name"] = name
     return {"method": "register_group", "params": params}
+
+
+def submit_input_request(
+    request_id,
+    execution_id,
+    template,
+    placeholders=None,
+    schema=None,
+    key=None,
+    title=None,
+    actions=None,
+    initial=None,
+):
+    params = {
+        "execution_id": execution_id,
+        "template": template,
+    }
+    if placeholders is not None:
+        params["placeholders"] = placeholders
+    if schema is not None:
+        params["schema"] = schema
+    if key is not None:
+        params["key"] = key
+    if title is not None:
+        params["title"] = title
+    if actions is not None:
+        params["actions"] = actions
+    if initial is not None:
+        params["initial"] = initial
+    return {"id": request_id, "method": "submit_input", "params": params}
+
+
+def resolve_input_request(
+    request_id,
+    input_external_id,
+    from_execution_id,
+    timeout_ms=None,
+    suspend=None,
+):
+    params = {
+        "input_external_id": input_external_id,
+        "from_execution_id": from_execution_id,
+    }
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    if suspend is not None:
+        params["suspend"] = suspend
+    return {"id": request_id, "method": "resolve_input", "params": params}
