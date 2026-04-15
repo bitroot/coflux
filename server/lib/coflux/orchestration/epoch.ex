@@ -349,7 +349,7 @@ defmodule Coflux.Orchestration.Epoch do
                 copy_execution_result_deps(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_assets(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_asset_deps(source_db, target_db, old_exec_id, new_exec_id)
-                copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id)
                 copy_execution_input_deps(source_db, target_db, old_exec_id, new_exec_id)
               end)
 
@@ -462,48 +462,73 @@ defmodule Coflux.Orchestration.Epoch do
     end)
   end
 
-  defp copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id) do
-    {:ok, inputs} =
+  defp copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id) do
+    # Copy execution_inputs records (which executions submitted which inputs)
+    {:ok, exec_inputs} =
       query(
         source_db,
-        """
-        SELECT id, external_id, workspace_id, key, prompt_id, schema_id,
-               title, actions, initial, created_at
-        FROM inputs
-        WHERE execution_id = ?1
-        """,
+        "SELECT input_id, created_at FROM execution_inputs WHERE execution_id = ?1",
         {old_exec_id}
       )
 
-    Enum.each(inputs, fn {old_input_id, external_id, workspace_id, key, prompt_id, schema_id,
-                          title, actions, initial, created_at} ->
-      # Skip if already copied (by external_id)
-      case query_one(target_db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id}) do
-        {:ok, {_existing}} ->
-          :ok
+    Enum.each(exec_inputs, fn {old_input_id, ei_created_at} ->
+      # Ensure the input itself exists in the target
+      {:ok, {number}} =
+        query_one!(source_db, "SELECT number FROM inputs WHERE id = ?1", {old_input_id})
 
-        {:ok, nil} ->
-          new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
-          new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
-          new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
+      new_input_id =
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {new_run_id, number}
+             ) do
+          {:ok, {existing_id}} ->
+            existing_id
 
-          {:ok, new_input_id} =
-            insert_one(target_db, :inputs, %{
-              external_id: external_id,
-              execution_id: new_exec_id,
-              workspace_id: new_workspace_id,
-              key: key,
-              prompt_id: new_prompt_id,
-              schema_id: new_schema_id,
-              title: title,
-              actions: actions,
-              initial: initial,
-              created_at: created_at
-            })
+          {:ok, nil} ->
+            {:ok, {workspace_id, key, prompt_id, schema_id, title, actions, initial, created_at}} =
+              query_one!(
+                source_db,
+                """
+                SELECT workspace_id, key, prompt_id, schema_id,
+                       title, actions, initial, created_at
+                FROM inputs
+                WHERE id = ?1
+                """,
+                {old_input_id}
+              )
 
-          # Copy response if present
-          copy_input_response(source_db, target_db, old_input_id, new_input_id)
-      end
+            new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
+            new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
+            new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
+
+            {:ok, id} =
+              insert_one(target_db, :inputs, %{
+                run_id: new_run_id,
+                number: number,
+                workspace_id: new_workspace_id,
+                key: key,
+                prompt_id: new_prompt_id,
+                schema_id: new_schema_id,
+                title: title,
+                actions: actions,
+                initial: initial,
+                created_at: created_at
+              })
+
+            # Copy response if present
+            copy_input_response(source_db, target_db, old_input_id, id)
+
+            id
+        end
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :execution_inputs,
+          %{execution_id: new_exec_id, input_id: new_input_id, created_at: ei_created_at},
+          on_conflict: "DO NOTHING"
+        )
     end)
   end
 
@@ -1042,12 +1067,12 @@ defmodule Coflux.Orchestration.Epoch do
 
   def ensure_input(source_db, target_db, input_id) do
     {:ok,
-     {external_id, execution_id, workspace_id, key, prompt_id, schema_id, title, actions, initial,
+     {run_id, number, workspace_id, key, prompt_id, schema_id, title, actions, initial,
       created_at}} =
       query_one!(
         source_db,
         """
-        SELECT external_id, execution_id, workspace_id, key, prompt_id, schema_id,
+        SELECT run_id, number, workspace_id, key, prompt_id, schema_id,
                title, actions, initial, created_at
         FROM inputs
         WHERE id = ?1
@@ -1055,73 +1080,139 @@ defmodule Coflux.Orchestration.Epoch do
         {input_id}
       )
 
-    case query_one(target_db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id}) do
-      {:ok, {existing_id}} ->
-        existing_id
+    # Look up the run's external_id so we can find it in the target
+    {:ok, {run_external_id}} =
+      query_one!(source_db, "SELECT external_id FROM runs WHERE id = ?1", {run_id})
 
-      {:ok, nil} ->
-        # The execution that created this input may belong to a different run.
-        # If the owning execution isn't in the target, copy its entire run first.
-        # Note: copying the run will also copy this input (via copy_execution_inputs),
-        # so we re-check for existence after the copy.
-        case remap_execution_id_by_key(source_db, target_db, execution_id) do
-          {:ok, _id} ->
-            :ok
+    # Check if the run (and thus this input) already exists in the target
+    case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {run_external_id}) do
+      {:ok, {target_run_id}} ->
+        # Run exists — check if this specific input is already there
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {target_run_id, number}
+             ) do
+          {:ok, {existing_id}} ->
+            existing_id
 
-          :not_found ->
-            {:ok, {run_external_id}} =
-              query_one!(
-                source_db,
-                """
-                SELECT r.external_id
-                FROM executions AS e
-                INNER JOIN steps AS s ON s.id = e.step_id
-                INNER JOIN runs AS r ON r.id = s.run_id
-                WHERE e.id = ?1
-                """,
-                {execution_id}
-              )
-
-            with_transaction(target_db, fn ->
-              {:ok, _remap, _visited} =
-                do_copy_run(source_db, target_db, run_external_id, MapSet.new())
-            end)
+          {:ok, nil} ->
+            insert_input_copy(
+              source_db,
+              target_db,
+              input_id,
+              target_run_id,
+              number,
+              workspace_id,
+              key,
+              prompt_id,
+              schema_id,
+              title,
+              actions,
+              initial,
+              created_at
+            )
         end
 
-        # Re-check: the run copy may have already inserted this input
-        case query_one(target_db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id}) do
+      {:ok, nil} ->
+        # Run doesn't exist in target — copy it (which will also copy this input)
+        with_transaction(target_db, fn ->
+          {:ok, _remap, _visited} =
+            do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+        end)
+
+        # The run copy should have created this input — look it up
+        {:ok, {target_run_id}} =
+          query_one!(target_db, "SELECT id FROM runs WHERE external_id = ?1", {run_external_id})
+
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {target_run_id, number}
+             ) do
           {:ok, {already_id}} ->
             already_id
 
           {:ok, nil} ->
-            # Input was not part of the copied run (e.g., belongs to a different
-            # execution than the one being dependency-copied). Insert it now.
-            new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
-            new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
-            new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
-
-            {:ok, new_execution_id} =
-              remap_execution_id_by_key(source_db, target_db, execution_id)
-
-            {:ok, new_input_id} =
-              insert_one(target_db, :inputs, %{
-                external_id: external_id,
-                execution_id: new_execution_id,
-                workspace_id: new_workspace_id,
-                key: key,
-                prompt_id: new_prompt_id,
-                schema_id: new_schema_id,
-                title: title,
-                actions: actions,
-                initial: initial,
-                created_at: created_at
-              })
-
-            copy_input_response(source_db, target_db, input_id, new_input_id)
-
-            new_input_id
+            insert_input_copy(
+              source_db,
+              target_db,
+              input_id,
+              target_run_id,
+              number,
+              workspace_id,
+              key,
+              prompt_id,
+              schema_id,
+              title,
+              actions,
+              initial,
+              created_at
+            )
         end
     end
+  end
+
+  defp insert_input_copy(
+         source_db,
+         target_db,
+         old_input_id,
+         target_run_id,
+         number,
+         workspace_id,
+         key,
+         prompt_id,
+         schema_id,
+         title,
+         actions,
+         initial,
+         created_at
+       ) do
+    new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
+    new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
+    new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
+
+    {:ok, new_input_id} =
+      insert_one(target_db, :inputs, %{
+        run_id: target_run_id,
+        number: number,
+        workspace_id: new_workspace_id,
+        key: key,
+        prompt_id: new_prompt_id,
+        schema_id: new_schema_id,
+        title: title,
+        actions: actions,
+        initial: initial,
+        created_at: created_at
+      })
+
+    copy_input_response(source_db, target_db, old_input_id, new_input_id)
+
+    # Copy execution_inputs records for this input
+    {:ok, exec_inputs} =
+      query(
+        source_db,
+        "SELECT execution_id, created_at FROM execution_inputs WHERE input_id = ?1",
+        {old_input_id}
+      )
+
+    Enum.each(exec_inputs, fn {old_exec_id, ei_created_at} ->
+      case remap_execution_id_by_key(source_db, target_db, old_exec_id) do
+        {:ok, new_exec_id} ->
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :execution_inputs,
+              %{execution_id: new_exec_id, input_id: new_input_id, created_at: ei_created_at},
+              on_conflict: "DO NOTHING"
+            )
+
+        :not_found ->
+          :ok
+      end
+    end)
+
+    new_input_id
   end
 
   defp ensure_input_schema(source_db, target_db, schema_id) do

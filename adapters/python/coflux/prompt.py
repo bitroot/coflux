@@ -6,7 +6,7 @@ import datetime as dt
 import json
 import typing as t
 
-from .models import Input, ModelSchema
+from .models import Input
 from .serialization import serialize_value
 from .state import get_context
 
@@ -52,8 +52,8 @@ class Prompt(t.Generic[T]):
     def __init__(
         self,
         template: str,
-        *,
         model: type[T] | None = None,
+        *,
         title: str | None = None,
         actions: tuple[str, str] | None = None,
         schema: str | dict | None = None,
@@ -78,7 +78,9 @@ class Prompt(t.Generic[T]):
             else:
                 self._model_schema = json.dumps(model.model_json_schema())
         elif schema is not None:
-            self._model_schema = json.dumps(schema) if isinstance(schema, dict) else schema
+            self._model_schema = (
+                json.dumps(schema) if isinstance(schema, dict) else schema
+            )
         else:
             self._model_schema = None
 

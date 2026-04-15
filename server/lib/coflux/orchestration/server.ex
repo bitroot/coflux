@@ -120,7 +120,7 @@ defmodule Coflux.Orchestration.Server do
     index_path = ["projects", project_id, "orchestration", "index.json"]
 
     {:ok, epoch_index} =
-      Index.load(index_path, ["runs", "cache_keys", "idempotency_keys", "input_external_ids"])
+      Index.load(index_path, ["runs", "cache_keys", "idempotency_keys"])
 
     unindexed_epoch_ids = Index.unindexed_epoch_ids(epoch_index)
     archived_epoch_ids = Index.all_epoch_ids(epoch_index)
@@ -1984,23 +1984,25 @@ defmodule Coflux.Orchestration.Server do
           {:error, reason} ->
             {:reply, {:error, reason}, state}
 
-          {:ok, input_external_id, created} ->
+          {:ok, input_number, created} ->
+            {:ok, {run_external_id}} =
+              Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+            input_ext_id = input_external_id(run_external_id, input_number)
+
             state =
               if created do
-                {:ok, {run_external_id}} =
-                  Runs.get_external_run_id_for_execution(state.db, execution_id)
-
                 notify_listeners(
                   state,
                   {:run, run_external_id},
-                  {:input_submitted, execution_external_id, input_external_id, title}
+                  {:input_submitted, execution_external_id, input_ext_id, title}
                 )
               else
                 state
               end
 
             state = flush_notifications(state)
-            {:reply, {:ok, input_external_id}, state}
+            {:reply, {:ok, input_ext_id}, state}
         end
     end
   end
@@ -2016,8 +2018,8 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, :not_found}, state}
 
       {:ok,
-       {input_id, _execution_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions,
-        _initial, created_at}} ->
+       {input_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions, _initial,
+        created_at, _run_id}} ->
         from_execution_id =
           case resolve_internal_execution_id(state, from_execution_external_id) do
             {:ok, id} -> id
@@ -2044,8 +2046,6 @@ defmodule Coflux.Orchestration.Server do
                 end
 
               ws_ext_id = workspace_external_id(state, workspace_id)
-              {:ok, {_, s_num, att}} = Runs.get_execution_key(state.db, from_execution_id)
-              dep_execution_ext_id = "#{run_external_id}:#{s_num}:#{att}"
 
               state
               |> notify_listeners(
@@ -2055,8 +2055,7 @@ defmodule Coflux.Orchestration.Server do
               )
               |> notify_listeners(
                 {:inputs, ws_ext_id},
-                {:input_dependency_active, input_external_id, dep_execution_ext_id,
-                 run_external_id, created_at, title}
+                {:input_dependency_active, input_external_id, run_external_id, created_at, title}
               )
               |> notify_listeners(
                 {:input, input_external_id},
@@ -2130,8 +2129,8 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, :not_found}, state}
 
       {:ok,
-       {input_id, execution_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions,
-        _initial, _created_at}} ->
+       {input_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions, _initial,
+        _created_at, _run_id}} ->
         # Validate response against schema if one exists
         with :ok <- validate_input_response(state, schema_id, value) do
           now = System.system_time(:millisecond)
@@ -2173,8 +2172,8 @@ defmodule Coflux.Orchestration.Server do
               state = update_dependencies_on_input(state, input_id)
 
               # Notify run topic
-              {:ok, {run_external_id}} =
-                Runs.get_external_run_id_for_execution(state.db, execution_id)
+              {:ok, run_external_id, _input_number} =
+                parse_input_external_id(input_external_id)
 
               ws_ext_id = workspace_external_id(state, workspace_id)
 
@@ -2270,15 +2269,11 @@ defmodule Coflux.Orchestration.Server do
         {:ok, rows} = Inputs.get_inputs_for_workspace(state.db, workspace_id)
 
         inputs =
-          Map.new(rows, fn {_id, external_id, _execution_id, _workspace_id, _key, _prompt_id,
-                            _schema_id, created_at, title, _has_response, _step_id, _run_id,
-                            run_external_id, step_number, attempt, _module, _target} ->
-            execution_id = "#{run_external_id}:#{step_number}:#{attempt}"
-
-            {external_id,
+          Map.new(rows, fn {_id, run_ext_id, input_number, _workspace_id, _key, _prompt_id,
+                            _schema_id, created_at, title, _has_response} ->
+            {input_external_id(run_ext_id, input_number),
              %{
-               executionId: execution_id,
-               runId: run_external_id,
+               runId: run_ext_id,
                createdAt: created_at,
                title: title
              }}
@@ -2294,8 +2289,8 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, :not_found}, state}
 
       {:ok,
-       {input_id, execution_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions,
-        _initial, _created_at}} ->
+       {input_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions, _initial,
+        _created_at, _run_id}} ->
         now = System.system_time(:millisecond)
 
         created_by =
@@ -2333,8 +2328,8 @@ defmodule Coflux.Orchestration.Server do
             state = update_dependencies_on_input(state, input_id)
 
             # Notify topics
-            {:ok, {run_external_id}} =
-              Runs.get_external_run_id_for_execution(state.db, execution_id)
+            {:ok, run_external_id, _input_number} =
+              parse_input_external_id(input_external_id)
 
             ws_ext_id = workspace_external_id(state, workspace_id)
 
@@ -3420,9 +3415,12 @@ defmodule Coflux.Orchestration.Server do
           dependency_keys =
             Enum.flat_map(dependency_ext_ids, fn
               {:input, input_ext_id} ->
-                case Inputs.get_input_id(state.db, input_ext_id) do
-                  {:ok, id} -> [{:input, id}]
-                  {:error, :not_found} -> []
+                with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_ext_id),
+                     {:ok, id} <-
+                       Inputs.get_input_id_by_run_and_number(state.db, run_ext_id, input_number) do
+                  [{:input, id}]
+                else
+                  _ -> []
                 end
 
               dep_ext_id ->
@@ -3448,7 +3446,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_info(
-        {task_ref, {run_bloom, cache_bloom, idempotency_bloom, input_ext_id_bloom}},
+        {task_ref, {run_bloom, cache_bloom, idempotency_bloom}},
         state
       )
       when task_ref == state.index_task do
@@ -3459,8 +3457,7 @@ defmodule Coflux.Orchestration.Server do
       Index.update_filters(state.epoch_index, epoch_id, %{
         "runs" => run_bloom,
         "cache_keys" => cache_bloom,
-        "idempotency_keys" => idempotency_bloom,
-        "input_external_ids" => input_ext_id_bloom
+        "idempotency_keys" => idempotency_bloom
       })
 
     :ok = Index.save(epoch_index)
@@ -4058,7 +4055,10 @@ defmodule Coflux.Orchestration.Server do
           Enum.reduce(input_deps, state, fn input_id, state ->
             case Inputs.get_input_by_id(state.db, input_id) do
               {:ok,
-               {input_ext_id, _key, _prompt_id, _schema_id, input_title, _actions, _created_at}} ->
+               {run_ext_id, input_number, _key, _prompt_id, _schema_id, input_title, _actions,
+                _created_at}} ->
+                input_ext_id = input_external_id(run_ext_id, input_number)
+
                 response_type =
                   case Inputs.get_input_response(state.db, input_id) do
                     {:ok, nil} -> nil
@@ -4279,11 +4279,7 @@ defmodule Coflux.Orchestration.Server do
     idempotency_keys = Bloom.new(max(100, length(idemp_keys_list)))
     idempotency_keys = Enum.reduce(idemp_keys_list, idempotency_keys, &Bloom.add(&2, &1))
 
-    {:ok, input_ext_ids} = Inputs.get_all_input_external_ids(db)
-    input_external_ids = Bloom.new(max(100, length(input_ext_ids)))
-    input_external_ids = Enum.reduce(input_ext_ids, input_external_ids, &Bloom.add(&2, &1))
-
-    {runs, cache_keys, idempotency_keys, input_external_ids}
+    {runs, cache_keys, idempotency_keys}
   end
 
   defp remap_config_ids(state, %{} = mappings) do
@@ -4632,9 +4628,9 @@ defmodule Coflux.Orchestration.Server do
     submitted_inputs_by_execution =
       run_submitted_inputs
       |> Enum.group_by(
-        fn {execution_id, _ext_id, _title, _response_type} -> execution_id end,
-        fn {_execution_id, ext_id, title, response_type} ->
-          {ext_id,
+        fn {execution_id, _run_ext_id, _input_number, _title, _response_type} -> execution_id end,
+        fn {_execution_id, run_ext_id, input_number, title, response_type} ->
+          {input_external_id(run_ext_id, input_number),
            %{
              title: title,
              status: if(response_type, do: decode_input_response_type(response_type))
@@ -4646,13 +4642,13 @@ defmodule Coflux.Orchestration.Server do
     input_deps_by_execution =
       run_input_deps
       |> Enum.group_by(
-        fn {execution_id, _ext_id, _key, _prompt_id, _title, _created_at, _response_type,
-            _response_value, _responded_at, _created_by} ->
+        fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
+            _response_type, _response_value, _responded_at, _created_by} ->
           execution_id
         end,
-        fn {_execution_id, ext_id, _key, _prompt_id, title, _created_at, response_type,
-            _response_value, _responded_at, _response_created_by} ->
-          {ext_id,
+        fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
+            response_type, _response_value, _responded_at, _response_created_by} ->
+          {input_external_id(run_ext_id, input_number),
            {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
         end
       )
@@ -4945,18 +4941,20 @@ defmodule Coflux.Orchestration.Server do
 
       case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
         {:ok,
-         {_existing_id, existing_ext_id, existing_prompt_id, existing_schema_id, _existing_title,
+         {existing_id, existing_number, existing_prompt_id, existing_schema_id, _existing_title,
           _existing_actions}} ->
           if existing_prompt_id == prompt_id && existing_schema_id == schema_id do
-            {:ok, existing_ext_id, false}
+            Inputs.record_execution_input(state.db, execution_id, existing_id, now)
+            {:ok, existing_number, false}
           else
             {:error, :input_mismatch}
           end
 
         {:ok, nil} ->
-          {:ok, _id, ext_id} =
+          {:ok, _id, input_number} =
             Inputs.create_input(
               state.db,
+              run_id,
               execution_id,
               workspace_id,
               prompt_id,
@@ -4968,12 +4966,13 @@ defmodule Coflux.Orchestration.Server do
               now
             )
 
-          {:ok, ext_id, true}
+          {:ok, input_number, true}
       end
     else
-      {:ok, _id, ext_id} =
+      {:ok, _id, input_number} =
         Inputs.create_input(
           state.db,
+          run_id,
           execution_id,
           workspace_id,
           prompt_id,
@@ -4985,7 +4984,7 @@ defmodule Coflux.Orchestration.Server do
           now
         )
 
-      {:ok, ext_id, true}
+      {:ok, input_number, true}
     end
   end
 
@@ -5004,72 +5003,81 @@ defmodule Coflux.Orchestration.Server do
   # where `db` is the DB handle the data lives in (active or archive).
   # Does NOT copy data to the active epoch.
   defp read_input_from_active_or_archives(state, input_external_id) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
-      {:ok, nil} ->
-        query_fn = fn archive_db ->
-          case Inputs.get_input_by_external_id(archive_db, input_external_id) do
-            {:ok, nil} ->
-              :not_found
+    with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_external_id) do
+      case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
+        {:ok, nil} ->
+          query_fn = fn archive_db ->
+            case Inputs.get_input_by_run_and_number(archive_db, run_ext_id, input_number) do
+              {:ok, nil} ->
+                :not_found
 
-            {:ok,
-             {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
-              initial, created_at}} ->
-              {:found,
-               {archive_db, input_id, key, prompt_id, schema_id, title, actions, initial,
-                created_at}}
+              {:ok,
+               {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
+                created_at, _run_id}} ->
+                {:found,
+                 {archive_db, input_id, key, prompt_id, schema_id, title, actions, initial,
+                  created_at}}
+            end
           end
-        end
 
-        bloom_fn = fn epoch_index ->
-          Index.find_epochs(epoch_index, "input_external_ids", input_external_id)
-        end
+          bloom_fn = fn epoch_index ->
+            Index.find_epochs(epoch_index, "runs", run_ext_id)
+          end
 
-        case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> {:ok, result}
-          :not_found -> {:ok, nil}
-        end
+          case search_archived_epochs(state, query_fn, bloom_fn) do
+            {:found, result} -> {:ok, result}
+            :not_found -> {:ok, nil}
+          end
 
-      {:ok,
-       {input_id, _execution_id, _workspace_id, key, prompt_id, schema_id, title, actions,
-        initial, created_at}} ->
         {:ok,
-         {state.db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}}
+         {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial, created_at,
+          _run_id}} ->
+          {:ok,
+           {state.db, input_id, key, prompt_id, schema_id, title, actions, initial, created_at}}
+      end
+    else
+      :error -> {:ok, nil}
     end
   end
 
   # Write path: copies the input to the active epoch if found in an archive.
   # Returns the full input tuple from the active DB.
   defp find_and_copy_input_from_archives(state, input_external_id) do
-    case Inputs.get_input_by_external_id(state.db, input_external_id) do
-      {:ok, nil} ->
-        query_fn = fn archive_db ->
-          case Inputs.get_input_by_external_id(archive_db, input_external_id) do
-            {:ok, nil} ->
-              :not_found
+    with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_external_id) do
+      case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
+        {:ok, nil} ->
+          # Search archived epochs using the runs Bloom filter
+          query_fn = fn archive_db ->
+            case Inputs.get_input_by_run_and_number(archive_db, run_ext_id, input_number) do
+              {:ok, nil} ->
+                :not_found
 
-            {:ok, {input_id, _, _, _, _, _, _, _, _, _}} ->
-              # Found in archive — copy it to active epoch
-              Epoch.ensure_input(archive_db, state.db, input_id)
+              {:ok, _result} ->
+                # Found in archive — copy the run to active epoch
+                {:ok, _remap} = Epoch.copy_run(archive_db, state.db, run_ext_id)
 
-              # Re-read from the active DB (now copied)
-              case Inputs.get_input_by_external_id(state.db, input_external_id) do
-                {:ok, nil} -> :not_found
-                {:ok, result} -> {:found, result}
-              end
+                # Re-read from the active DB (now copied)
+                case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
+                  {:ok, nil} -> :not_found
+                  {:ok, active_result} -> {:found, active_result}
+                end
+            end
           end
-        end
 
-        bloom_fn = fn epoch_index ->
-          Index.find_epochs(epoch_index, "input_external_ids", input_external_id)
-        end
+          bloom_fn = fn epoch_index ->
+            Index.find_epochs(epoch_index, "runs", run_ext_id)
+          end
 
-        case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> {:ok, result}
-          :not_found -> {:ok, nil}
-        end
+          case search_archived_epochs(state, query_fn, bloom_fn) do
+            {:found, result} -> {:ok, result}
+            :not_found -> {:ok, nil}
+          end
 
-      result ->
-        result
+        result ->
+          result
+      end
+    else
+      :error -> {:ok, nil}
     end
   end
 
@@ -5233,6 +5241,23 @@ defmodule Coflux.Orchestration.Server do
 
   defp execution_external_id(run_external_id, step_number, attempt) do
     "#{run_external_id}:#{step_number}:#{attempt}"
+  end
+
+  defp input_external_id(run_external_id, input_number) do
+    "#{run_external_id}/i#{input_number}"
+  end
+
+  defp parse_input_external_id(external_id) do
+    case String.split(external_id, "/i", parts: 2) do
+      [run_external_id, number_s] ->
+        case Integer.parse(number_s) do
+          {number, ""} -> {:ok, run_external_id, number}
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
   end
 
   defp track_run_execution(state, run_ext_id, execution_id, root_module, root_target) do
@@ -5536,7 +5561,10 @@ defmodule Coflux.Orchestration.Server do
                 if Inputs.has_active_dependency?(state.db, input_id) do
                   state
                 else
-                  {:ok, input_ext_id} = Inputs.get_input_external_id(state.db, input_id)
+                  {:ok, run_ext_id, input_number} =
+                    Inputs.get_input_run_and_number(state.db, input_id)
+
+                  input_ext_id = input_external_id(run_ext_id, input_number)
 
                   state
                   |> notify_listeners(
@@ -6133,6 +6161,9 @@ defmodule Coflux.Orchestration.Server do
         acc
 
       {:asset, _external_id}, acc ->
+        acc
+
+      {:input, _external_id}, acc ->
         acc
     end)
   end

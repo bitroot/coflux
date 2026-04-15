@@ -70,8 +70,24 @@ defmodule Coflux.Orchestration.Inputs do
 
   # --- Input CRUD ---
 
+  defp get_next_input_number(db, run_id) do
+    case query(
+           db,
+           """
+           SELECT COALESCE(MAX(number), 0) + 1
+           FROM inputs
+           WHERE run_id = ?1
+           """,
+           {run_id}
+         ) do
+      {:ok, [{next_number}]} ->
+        {:ok, next_number}
+    end
+  end
+
   def create_input(
         db,
+        run_id,
         execution_id,
         workspace_id,
         prompt_id,
@@ -83,12 +99,12 @@ defmodule Coflux.Orchestration.Inputs do
         now
       ) do
     with_transaction(db, fn ->
-      {:ok, external_id} = generate_external_id(db, :inputs, 2, "I")
+      {:ok, input_number} = get_next_input_number(db, run_id)
 
       {:ok, input_id} =
         insert_one(db, :inputs, %{
-          external_id: external_id,
-          execution_id: execution_id,
+          run_id: run_id,
+          number: input_number,
           workspace_id: workspace_id,
           key: key,
           prompt_id: prompt_id,
@@ -99,8 +115,24 @@ defmodule Coflux.Orchestration.Inputs do
           created_at: now
         })
 
-      {:ok, input_id, external_id}
+      {:ok, _} =
+        insert_one(db, :execution_inputs, %{
+          execution_id: execution_id,
+          input_id: input_id,
+          created_at: now
+        })
+
+      {:ok, input_id, input_number}
     end)
+  end
+
+  def record_execution_input(db, execution_id, input_id, now) do
+    insert_one(
+      db,
+      :execution_inputs,
+      %{execution_id: execution_id, input_id: input_id, created_at: now},
+      on_conflict: "DO NOTHING"
+    )
   end
 
   def find_input_by_key(db, run_id, workspace_ids, key) do
@@ -113,11 +145,9 @@ defmodule Coflux.Orchestration.Inputs do
     case query(
            db,
            """
-           SELECT i.id, i.external_id, i.prompt_id, i.schema_id, i.title, i.actions
+           SELECT i.id, i.number, i.prompt_id, i.schema_id, i.title, i.actions
            FROM inputs AS i
-           INNER JOIN executions AS e ON e.id = i.execution_id
-           INNER JOIN steps AS s ON s.id = e.step_id
-           WHERE s.run_id = ?1
+           WHERE i.run_id = ?1
              AND i.workspace_id IN (#{placeholders})
              AND i.key = ?#{length(workspace_ids) + 2}
            ORDER BY i.created_at DESC
@@ -125,8 +155,8 @@ defmodule Coflux.Orchestration.Inputs do
            """,
            List.to_tuple([run_id] ++ workspace_ids ++ [key])
          ) do
-      {:ok, [{id, external_id, prompt_id, schema_id, title, actions}]} ->
-        {:ok, {id, external_id, prompt_id, schema_id, title, actions}}
+      {:ok, [{id, number, prompt_id, schema_id, title, actions}]} ->
+        {:ok, {id, number, prompt_id, schema_id, title, actions}}
 
       {:ok, []} ->
         {:ok, nil}
@@ -199,16 +229,17 @@ defmodule Coflux.Orchestration.Inputs do
     end
   end
 
-  def get_input_by_external_id(db, external_id) do
+  def get_input_by_run_and_number(db, run_external_id, input_number) do
     query_one(
       db,
       """
-      SELECT i.id, i.execution_id, i.workspace_id, i.key, i.prompt_id, i.schema_id,
-             i.title, i.actions, i.initial, i.created_at
+      SELECT i.id, i.workspace_id, i.key, i.prompt_id, i.schema_id,
+             i.title, i.actions, i.initial, i.created_at, r.id AS run_id
       FROM inputs AS i
-      WHERE i.external_id = ?1
+      INNER JOIN runs AS r ON r.id = i.run_id
+      WHERE r.external_id = ?1 AND i.number = ?2
       """,
-      {external_id}
+      {run_external_id, input_number}
     )
   end
 
@@ -216,24 +247,43 @@ defmodule Coflux.Orchestration.Inputs do
     query_one(
       db,
       """
-      SELECT i.external_id, i.key, i.prompt_id, i.schema_id, i.title, i.actions,
+      SELECT r.external_id, i.number, i.key, i.prompt_id, i.schema_id, i.title, i.actions,
              i.created_at
       FROM inputs AS i
+      INNER JOIN runs AS r ON r.id = i.run_id
       WHERE i.id = ?1
       """,
       {id}
     )
   end
 
-  def get_input_external_id(db, id) do
-    case query_one(db, "SELECT external_id FROM inputs WHERE id = ?1", {id}) do
-      {:ok, {external_id}} -> {:ok, external_id}
+  def get_input_run_and_number(db, id) do
+    case query_one(
+           db,
+           """
+           SELECT r.external_id, i.number
+           FROM inputs AS i
+           INNER JOIN runs AS r ON r.id = i.run_id
+           WHERE i.id = ?1
+           """,
+           {id}
+         ) do
+      {:ok, {run_ext_id, number}} -> {:ok, run_ext_id, number}
       {:ok, nil} -> {:error, :not_found}
     end
   end
 
-  def get_input_id(db, external_id) do
-    case query_one(db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id}) do
+  def get_input_id_by_run_and_number(db, run_external_id, input_number) do
+    case query_one(
+           db,
+           """
+           SELECT i.id
+           FROM inputs AS i
+           INNER JOIN runs AS r ON r.id = i.run_id
+           WHERE r.external_id = ?1 AND i.number = ?2
+           """,
+           {run_external_id, input_number}
+         ) do
       {:ok, {id}} -> {:ok, id}
       {:ok, nil} -> {:error, :not_found}
     end
@@ -275,13 +325,13 @@ defmodule Coflux.Orchestration.Inputs do
     query(
       db,
       """
-      SELECT i.execution_id, i.external_id, i.title,
+      SELECT ei.execution_id, r.external_id, i.number, i.title,
              ir.type AS response_type
       FROM inputs AS i
-      INNER JOIN executions AS e ON e.id = i.execution_id
-      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN execution_inputs AS ei ON ei.input_id = i.id
+      INNER JOIN runs AS r ON r.id = i.run_id
       LEFT JOIN input_responses AS ir ON ir.input_id = i.id
-      WHERE s.run_id = ?1
+      WHERE i.run_id = ?1
       """,
       {run_id}
     )
@@ -291,15 +341,14 @@ defmodule Coflux.Orchestration.Inputs do
     query(
       db,
       """
-      SELECT i.id, i.external_id, i.execution_id, i.workspace_id, i.key,
+      SELECT i.id, r.external_id, i.number, i.workspace_id, i.key,
              i.prompt_id, i.schema_id, i.created_at,
              ir.type AS response_type, ir.value AS response_value, ir.created_at AS responded_at,
              ir.created_by
       FROM inputs AS i
-      INNER JOIN executions AS e ON e.id = i.execution_id
-      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = i.run_id
       LEFT JOIN input_responses AS ir ON ir.input_id = i.id
-      WHERE s.run_id = ?1
+      WHERE i.run_id = ?1
       """,
       {run_id}
     )
@@ -309,18 +358,12 @@ defmodule Coflux.Orchestration.Inputs do
     query(
       db,
       """
-      SELECT DISTINCT i.id, i.external_id, i.execution_id, i.workspace_id, i.key,
+      SELECT DISTINCT i.id, r.external_id AS run_external_id, i.number,
+             i.workspace_id, i.key,
              i.prompt_id, i.schema_id, i.created_at, i.title,
-             ir.type AS response_type,
-             e.step_id, s.run_id,
-             r.external_id AS run_external_id,
-             s.number AS step_number,
-             e.attempt,
-             s.module, s.target
+             ir.type AS response_type
       FROM inputs AS i
-      INNER JOIN executions AS e ON e.id = i.execution_id
-      INNER JOIN steps AS s ON s.id = e.step_id
-      INNER JOIN runs AS r ON r.id = s.run_id
+      INNER JOIN runs AS r ON r.id = i.run_id
       LEFT JOIN input_responses AS ir ON ir.input_id = i.id
       INNER JOIN input_dependencies AS id ON id.input_id = i.id
       LEFT JOIN results AS dr ON dr.execution_id = id.execution_id
@@ -376,21 +419,16 @@ defmodule Coflux.Orchestration.Inputs do
     )
   end
 
-  def get_all_input_external_ids(db) do
-    case query(db, "SELECT external_id FROM inputs") do
-      {:ok, rows} -> {:ok, Enum.map(rows, fn {ext_id} -> ext_id end)}
-    end
-  end
-
   def get_input_dependencies_for_run(db, run_id) do
     query(
       db,
       """
-      SELECT id.execution_id, i.external_id, i.key, i.prompt_id, i.title, i.created_at,
+      SELECT id.execution_id, r.external_id, i.number, i.key, i.prompt_id, i.title, i.created_at,
              ir.type AS response_type, ir.value AS response_value, ir.created_at AS responded_at,
              ir.created_by
       FROM input_dependencies AS id
       INNER JOIN inputs AS i ON i.id = id.input_id
+      INNER JOIN runs AS r ON r.id = i.run_id
       INNER JOIN executions AS e ON e.id = id.execution_id
       INNER JOIN steps AS s ON s.id = e.step_id
       LEFT JOIN input_responses AS ir ON ir.input_id = i.id

@@ -26,7 +26,7 @@ def test_submit_and_respond_input(worker):
 
         input_id = ex.conn.submit_input(ex.execution_id, "What is your name?")
         assert isinstance(input_id, str)
-        assert input_id.startswith("I")
+        assert "/i" in input_id  # Run-scoped format: R<run_id>/i<number>
 
         # Respond via CLI before resolving
         cli.inputs_respond(input_id, "Alice", host=ctx.host)
@@ -398,6 +398,55 @@ def test_input_passed_between_runs(worker):
         result_b = ctx.result(resp_b["runId"])
         assert result_b["type"] == "value"
         assert result_b["value"]["data"] == "consumed"
+
+
+def test_input_ref_passed_as_task_argument(worker):
+    """Pass an input reference as an argument to a child task."""
+    targets = [
+        workflow("test", "parent"),
+        task("test", "child", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "parent")
+        ex = ctx.executor.next_execute()
+        assert ex.target == "parent"
+
+        # Submit an input and respond to it
+        input_id = ex.conn.submit_input(ex.execution_id, "Enter value")
+        cli.inputs_respond(input_id, "hello", host=ctx.host)
+
+        # Resolve the input to get the value
+        result = ex.conn.resolve_input(input_id, ex.execution_id)
+        assert result["value"] == "hello"
+
+        # Pass the input as a reference argument to a child task
+        input_ref_arg = {
+            "type": "raw",
+            "data": {"type": "ref", "index": 0},
+            "references": [["input", input_id]],
+        }
+        child_exec_id = ex.conn.submit_task(
+            ex.execution_id,
+            "test",
+            "child",
+            [input_ref_arg],
+            wait_for=[0],
+        )
+
+        # The child should execute with the resolved input value
+        ex_child = ctx.executor.next_execute()
+        assert ex_child.target == "child"
+        ex_child.conn.complete(ex_child.execution_id, value="got it")
+
+        # Resolve the child and complete the parent
+        child_result = ex.conn.resolve(ex.execution_id, child_exec_id)
+        assert child_result["value"] == "got it"
+
+        ex.conn.complete(ex.execution_id, value="done")
+        final = ctx.result(resp["runId"])
+        assert final["type"] == "value"
+        assert final["value"]["data"] == "done"
 
 
 # ---------------------------------------------------------------------------

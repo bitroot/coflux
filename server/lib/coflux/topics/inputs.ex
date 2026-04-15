@@ -26,11 +26,10 @@ defmodule Coflux.Topics.Inputs do
   end
 
   defp process_notification(
-         {:input_dependency_active, external_id, execution_id, run_id, created_at, title},
+         {:input_dependency_active, external_id, run_id, created_at, title},
          topic
        ) do
     Topic.set(topic, [external_id], %{
-      executionId: execution_id,
       runId: run_id,
       createdAt: created_at,
       title: title

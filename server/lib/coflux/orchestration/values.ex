@@ -60,10 +60,19 @@ defmodule Coflux.Orchestration.Values do
                   {:asset, external_id}
 
                 {nil, nil, nil, input_id} ->
-                  {:ok, {external_id}} =
-                    query_one!(db, "SELECT external_id FROM inputs WHERE id = ?1", {input_id})
+                  {:ok, {run_ext_id, number}} =
+                    query_one!(
+                      db,
+                      """
+                      SELECT r.external_id, i.number
+                      FROM inputs AS i
+                      INNER JOIN runs AS r ON r.id = i.run_id
+                      WHERE i.id = ?1
+                      """,
+                      {input_id}
+                    )
 
-                  {:input, external_id}
+                  {:input, "#{run_ext_id}/i#{number}"}
               end)
           end
 
@@ -194,8 +203,20 @@ defmodule Coflux.Orchestration.Values do
                   {value_id, position, nil, nil, asset_id, nil}
 
                 {:input, external_id} ->
+                  [run_ext_id, number_s] = String.split(external_id, "/i", parts: 2)
+                  {number, ""} = Integer.parse(number_s)
+
                   {:ok, {input_id}} =
-                    query_one!(db, "SELECT id FROM inputs WHERE external_id = ?1", {external_id})
+                    query_one!(
+                      db,
+                      """
+                      SELECT i.id
+                      FROM inputs AS i
+                      INNER JOIN runs AS r ON r.id = i.run_id
+                      WHERE r.external_id = ?1 AND i.number = ?2
+                      """,
+                      {run_ext_id, number}
+                    )
 
                   {value_id, position, nil, nil, nil, input_id}
               end

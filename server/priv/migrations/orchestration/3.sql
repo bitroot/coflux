@@ -22,11 +22,11 @@ CREATE TABLE input_prompt_placeholders (
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
 ) STRICT;
 
--- Inputs: requested by an execution, optionally keyed per run
+-- Inputs: numbered sequentially per run
 CREATE TABLE inputs (
   id INTEGER PRIMARY KEY,
-  external_id TEXT NOT NULL UNIQUE,
-  execution_id INTEGER NOT NULL,
+  run_id INTEGER NOT NULL,
+  number INTEGER NOT NULL,
   workspace_id INTEGER NOT NULL,
   key TEXT,
   prompt_id INTEGER NOT NULL,
@@ -35,14 +35,25 @@ CREATE TABLE inputs (
   actions TEXT,
   initial TEXT,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  UNIQUE (run_id, number),
+  FOREIGN KEY (run_id) REFERENCES runs ON DELETE CASCADE,
   FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE CASCADE,
   FOREIGN KEY (prompt_id) REFERENCES input_prompts ON DELETE RESTRICT,
   FOREIGN KEY (schema_id) REFERENCES input_schemas ON DELETE RESTRICT
 ) STRICT;
 
 CREATE INDEX idx_inputs_key ON inputs(key) WHERE key IS NOT NULL;
-CREATE INDEX idx_inputs_execution_id ON inputs(execution_id);
+CREATE INDEX idx_inputs_run_id ON inputs(run_id);
+
+-- Tracks which executions submitted each input
+CREATE TABLE execution_inputs (
+  execution_id INTEGER NOT NULL,
+  input_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (execution_id, input_id),
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (input_id) REFERENCES inputs ON DELETE RESTRICT
+) STRICT;
 
 -- Input responses: type 1 = value, type 2 = dismissed
 CREATE TABLE input_responses (
@@ -88,4 +99,3 @@ CREATE TABLE input_dependencies (
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
   FOREIGN KEY (input_id) REFERENCES inputs ON DELETE RESTRICT
 ) STRICT;
-
