@@ -418,7 +418,12 @@ defmodule Coflux.Orchestration.Inputs do
   def get_input_dependencies_for_execution(db, execution_id) do
     query(
       db,
-      "SELECT input_id FROM input_dependencies WHERE execution_id = ?1",
+      """
+      SELECT id.input_id, i.workspace_id
+      FROM input_dependencies AS id
+      INNER JOIN inputs AS i ON i.id = id.input_id
+      WHERE id.execution_id = ?1
+      """,
       {execution_id}
     )
   end

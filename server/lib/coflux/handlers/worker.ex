@@ -418,6 +418,12 @@ defmodule Coflux.Handlers.Worker do
 
             {:error, :not_found} ->
               {[error_message(message["id"], "input_not_found")], state}
+
+            {:error, :execution_not_found} ->
+              # The orchestration server evicted the caller execution between
+              # our is_recognised_execution? pre-check and the call. Close:
+              # the handler's view of the session is out of sync.
+              {[{:close, 4000, "execution_invalid"}], nil}
           end
         else
           {[{:close, 4000, "execution_invalid"}], nil}

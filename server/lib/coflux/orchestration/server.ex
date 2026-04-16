@@ -86,7 +86,13 @@ defmodule Coflux.Orchestration.Server do
               # topic -> [notification]
               notifications: %{},
 
-              # execution_external_id -> [{from_execution_external_id, request_id, expire_at, suspend?}]
+              # Pending RPCs blocked on a dependency, keyed by what they wait for.
+              # Key is a tagged tuple:
+              #   {:execution, execution_external_id} — woken by notify_waiting
+              #   {:input, input_external_id}         — woken by respond_input / dismiss_input
+              # A new kind MUST be handled in: notify_waiting, respond_input /
+              # dismiss_input, expire_waiters, and cleanup_execution.
+              # Value is a list of {from_execution_external_id, request_id, expire_at, suspend?}.
               waiting: %{},
 
               # task_ref -> callback
@@ -1845,10 +1851,12 @@ defmodule Coflux.Orchestration.Server do
                       {:ok, {r, s, a}} -> execution_external_id(r, s, a)
                     end
 
+                  waiting_key = {:execution, pending_ext_id}
+
                   state =
                     update_in(
                       state,
-                      [Access.key(:waiting), Access.key(pending_ext_id, [])],
+                      [Access.key(:waiting), Access.key(waiting_key, [])],
                       &[{from_execution_external_id, request_id, expire_at, suspend} | &1]
                     )
 
@@ -2024,111 +2032,107 @@ defmodule Coflux.Orchestration.Server do
       {:ok,
        {input_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions, _initial,
         requires_tag_set_id, created_at, _run_id}} ->
-        from_execution_id =
-          case resolve_internal_execution_id(state, from_execution_external_id) do
-            {:ok, id} -> id
-            {:error, :not_found} -> nil
-          end
+        case resolve_internal_execution_id(state, from_execution_external_id) do
+          {:error, :not_found} ->
+            {:reply, {:error, :execution_not_found}, state}
 
-        now = System.system_time(:millisecond)
+          {:ok, from_execution_id} ->
+            now = System.system_time(:millisecond)
 
-        # Fetch response once and reuse below
-        input_response = Inputs.get_input_response(state.db, input_id)
+            # Fetch response once and reuse below
+            input_response = Inputs.get_input_response(state.db, input_id)
 
-        # Record dependency and notify
-        state =
-          if from_execution_id do
+            # Record dependency and notify
             {:ok, is_new} =
               Inputs.record_input_dependency(state.db, from_execution_id, input_id, now)
 
-            if is_new do
-              {:ok, {run_external_id}} =
-                Runs.get_external_run_id_for_execution(state.db, from_execution_id)
+            state =
+              if is_new do
+                {:ok, {run_external_id}} =
+                  Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
-              response_type =
-                case input_response do
-                  {:ok, nil} -> nil
-                  {:ok, {:value, _, _, _}} -> :value
-                  {:ok, {:dismissed, _, _}} -> :dismissed
-                end
-
-              ws_ext_id = workspace_external_id(state, workspace_id)
-
-              requires = resolve_tag_set(state.db, requires_tag_set_id)
-
-              state
-              |> notify_listeners(
-                {:run, run_external_id},
-                {:input_dependency, from_execution_external_id, input_external_id, title,
-                 response_type}
-              )
-              |> notify_listeners(
-                {:inputs, ws_ext_id},
-                {:input_dependency_active, input_external_id, run_external_id, created_at, title,
-                 requires}
-              )
-              |> notify_listeners(
-                {:input, input_external_id},
-                {:active, true}
-              )
-            else
-              state
-            end
-          else
-            state
-          end
-
-        # Check for existing response
-        case input_response do
-          {:ok, nil} ->
-            # No response yet — wait or suspend
-            cond do
-              timeout_ms == 0 && suspend ->
-                {:ok, state} =
-                  process_result(
-                    state,
-                    from_execution_id,
-                    {:suspended, nil, [{:input, input_id}]}
-                  )
-
-                state = flush_notifications(state)
-                {:reply, {:ok, :suspended}, state}
-
-              timeout_ms == 0 ->
-                state = flush_notifications(state)
-                {:reply, {:ok, nil}, state}
-
-              true ->
-                monotonic_now = System.monotonic_time(:millisecond)
-                expire_at = if timeout_ms, do: monotonic_now + timeout_ms
-
-                waiting_key = {:input, input_external_id}
-
-                state =
-                  update_in(
-                    state,
-                    [Access.key(:waiting), Access.key(waiting_key, [])],
-                    &[{from_execution_external_id, request_id, expire_at, suspend} | &1]
-                  )
-
-                state =
-                  if timeout_ms do
-                    reschedule_expire_waiters(state)
-                  else
-                    state
+                response_type =
+                  case input_response do
+                    {:ok, nil} -> nil
+                    {:ok, {:value, _, _, _}} -> :value
+                    {:ok, {:dismissed, _, _}} -> :dismissed
                   end
 
+                ws_ext_id = workspace_external_id(state, workspace_id)
+
+                requires = resolve_tag_set(state.db, requires_tag_set_id)
+
+                state
+                |> notify_listeners(
+                  {:run, run_external_id},
+                  {:input_dependency, from_execution_external_id, input_external_id, title,
+                   response_type}
+                )
+                |> notify_listeners(
+                  {:inputs, ws_ext_id},
+                  {:input_dependency_active, input_external_id, run_external_id, created_at,
+                   title, requires}
+                )
+                |> notify_listeners(
+                  {:input, input_external_id},
+                  {:active, true}
+                )
+              else
+                state
+              end
+
+            # Check for existing response
+            case input_response do
+              {:ok, nil} ->
+                # No response yet — wait or suspend
+                cond do
+                  timeout_ms == 0 && suspend ->
+                    {:ok, state} =
+                      process_result(
+                        state,
+                        from_execution_id,
+                        {:suspended, nil, [{:input, input_id}]}
+                      )
+
+                    state = flush_notifications(state)
+                    {:reply, {:ok, :suspended}, state}
+
+                  timeout_ms == 0 ->
+                    state = flush_notifications(state)
+                    {:reply, {:ok, nil}, state}
+
+                  true ->
+                    monotonic_now = System.monotonic_time(:millisecond)
+                    expire_at = if timeout_ms, do: monotonic_now + timeout_ms
+
+                    waiting_key = {:input, input_external_id}
+
+                    state =
+                      update_in(
+                        state,
+                        [Access.key(:waiting), Access.key(waiting_key, [])],
+                        &[{from_execution_external_id, request_id, expire_at, suspend} | &1]
+                      )
+
+                    state =
+                      if timeout_ms do
+                        reschedule_expire_waiters(state)
+                      else
+                        state
+                      end
+
+                    state = flush_notifications(state)
+                    {:reply, :wait, state}
+                end
+
+              {:ok, {:value, value, _created_at, _created_by}} ->
                 state = flush_notifications(state)
-                {:reply, :wait, state}
+                {:reply, {:ok, {:value, value}}, state}
+
+              {:ok, {:dismissed, _created_at, _created_by}} ->
+                state = flush_notifications(state)
+                {:reply, {:ok, :dismissed}, state}
             end
-
-          {:ok, {:value, value, _created_at, _created_by}} ->
-            state = flush_notifications(state)
-            {:reply, {:ok, {:value, value}}, state}
-
-          {:ok, {:dismissed, _created_at, _created_by}} ->
-            state = flush_notifications(state)
-            {:reply, {:ok, :dismissed}, state}
         end
     end
   end
@@ -3355,13 +3359,14 @@ defmodule Coflux.Orchestration.Server do
   def handle_info(:expire_waiters, state) do
     now = System.monotonic_time(:millisecond)
 
-    # waiting map now uses external IDs
-    # Collect expired entries, grouped by from_ext_id with their suspend flag
+    # state.waiting keys are tagged tuples: {:execution, ext_id} or {:input, ext_id}.
+    # Collect expired entries, grouped by the waiter's execution ext_id, with the
+    # dependency keys they were waiting on.
     {to_suspend, to_notify_not_ready} =
       Enum.reduce(
         state.waiting,
         {%{}, []},
-        fn {execution_ext_id, execution_waiting}, {to_suspend, to_notify} ->
+        fn {dependency_key, execution_waiting}, {to_suspend, to_notify} ->
           Enum.reduce(
             execution_waiting,
             {to_suspend, to_notify},
@@ -3371,8 +3376,8 @@ defmodule Coflux.Orchestration.Server do
                   {Map.update(
                      to_suspend,
                      from_ext_id,
-                     [execution_ext_id],
-                     &[execution_ext_id | &1]
+                     [dependency_key],
+                     &[dependency_key | &1]
                    ), to_notify}
                 else
                   {to_suspend, [{from_ext_id, request_id} | to_notify]}
@@ -3391,13 +3396,13 @@ defmodule Coflux.Orchestration.Server do
     state =
       update_in(state, [Access.key(:waiting)], fn waiting ->
         waiting
-        |> Enum.map(fn {ext_id, entries} ->
+        |> Enum.map(fn {key, entries} ->
           remaining =
             Enum.reject(entries, fn {_, _, expire_at, suspend_flag} ->
               expire_at && expire_at <= now && !suspend_flag
             end)
 
-          {ext_id, remaining}
+          {key, remaining}
         end)
         |> Enum.reject(fn {_, entries} -> entries == [] end)
         |> Map.new()
@@ -3426,11 +3431,14 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         to_suspend,
         state,
-        fn {from_ext_id, dependency_ext_ids}, state ->
+        fn {from_ext_id, dependency_keys}, state ->
           from_execution_id = Map.fetch!(state.execution_ids, from_ext_id)
 
-          dependency_keys =
-            Enum.flat_map(dependency_ext_ids, fn
+          # Resolve each tagged external dependency to the internal form expected
+          # by process_result. Drop any dependencies we can't resolve (e.g. the
+          # execution or input has since been evicted).
+          internal_dependency_keys =
+            Enum.flat_map(dependency_keys, fn
               {:input, input_ext_id} ->
                 with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_ext_id),
                      {:ok, id} <-
@@ -3440,7 +3448,7 @@ defmodule Coflux.Orchestration.Server do
                   _ -> []
                 end
 
-              dep_ext_id ->
+              {:execution, dep_ext_id} ->
                 case resolve_internal_execution_id(state, dep_ext_id) do
                   {:ok, id} -> [{:execution, id}]
                   {:error, :not_found} -> []
@@ -3448,7 +3456,11 @@ defmodule Coflux.Orchestration.Server do
             end)
 
           {:ok, state} =
-            process_result(state, from_execution_id, {:suspended, nil, dependency_keys})
+            process_result(
+              state,
+              from_execution_id,
+              {:suspended, nil, internal_dependency_keys}
+            )
 
           state
         end
@@ -3791,16 +3803,17 @@ defmodule Coflux.Orchestration.Server do
       end)
       |> Map.update!(:session_ids, &Map.delete(&1, session.external_id))
       |> Map.update!(:waiting, fn waiting ->
-        # waiting keys and from_execution_ids are now external IDs
+        # waiting keys are tagged tuples ({:execution, _} | {:input, _});
+        # from_execution_ids are external execution IDs.
         waiting
-        |> Enum.map(fn {execution_ext_id, execution_waiting} ->
-          {execution_ext_id,
+        |> Enum.map(fn {waiting_key, execution_waiting} ->
+          {waiting_key,
            Enum.reject(execution_waiting, fn {from_ext_id, _, _, _} ->
              MapSet.member?(session.starting, from_ext_id) ||
                MapSet.member?(session.executing, from_ext_id)
            end)}
         end)
-        |> Enum.reject(fn {_execution_ext_id, execution_waiting} ->
+        |> Enum.reject(fn {_waiting_key, execution_waiting} ->
           Enum.empty?(execution_waiting)
         end)
         |> Map.new()
@@ -5587,11 +5600,15 @@ defmodule Coflux.Orchestration.Server do
             {:completed, execution_external_id}
           )
 
-        # Check if any input dependencies became inactive
+        # Check if any input dependencies became inactive. Route the
+        # :inputs topic notification to the INPUT's workspace (matching
+        # :input_dependency_active in the resolve_input handler), not the
+        # completing execution's workspace — these differ when an execution
+        # in a child workspace resolved an input created in a parent.
         state =
           case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
             {:ok, deps} ->
-              Enum.reduce(deps, state, fn {input_id}, state ->
+              Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
                 if Inputs.has_active_dependency?(state.db, input_id) do
                   state
                 else
@@ -5599,10 +5616,11 @@ defmodule Coflux.Orchestration.Server do
                     Inputs.get_input_run_and_number(state.db, input_id)
 
                   input_ext_id = input_external_id(run_ext_id, input_number)
+                  input_ws_ext_id = workspace_external_id(state, input_ws_id)
 
                   state
                   |> notify_listeners(
-                    {:inputs, ws_ext_id},
+                    {:inputs, input_ws_ext_id},
                     {:input_dependency_inactive, input_ext_id}
                   )
                   |> notify_listeners(
@@ -6456,8 +6474,8 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp notify_waiting(state, execution_id) do
-    # The waiting map uses external execution IDs as keys.
-    # We need to find the external ID for this internal execution_id to pop the right entry.
+    # Translate the internal execution_id to the tagged external-id key used in
+    # state.waiting ({:execution, ext_id}).
     execution_ext_id =
       case Runs.get_execution_key(state.db, execution_id) do
         {:ok, {r, s, a}} -> execution_external_id(r, s, a)
@@ -6466,7 +6484,7 @@ defmodule Coflux.Orchestration.Server do
 
     {execution_waiting, waiting} =
       if execution_ext_id do
-        Map.pop(state.waiting, execution_ext_id)
+        Map.pop(state.waiting, {:execution, execution_ext_id})
       else
         {nil, state.waiting}
       end
@@ -6482,7 +6500,12 @@ defmodule Coflux.Orchestration.Server do
               end
 
             waiting =
-              Map.update(waiting, new_ext_id, execution_waiting, &(&1 ++ execution_waiting))
+              Map.update(
+                waiting,
+                {:execution, new_ext_id},
+                execution_waiting,
+                &(&1 ++ execution_waiting)
+              )
 
             Map.put(state, :waiting, waiting)
 
@@ -6543,7 +6566,7 @@ defmodule Coflux.Orchestration.Server do
       Enum.reduce(
         state.waiting,
         {state, []},
-        fn {for_ext_id, execution_waiting}, {state, pending} ->
+        fn {waiting_key, execution_waiting}, {state, pending} ->
           {removed, remaining} =
             Enum.split_with(execution_waiting, fn {from_ext_id, _, _, _} ->
               from_ext_id == execution_ext_id
@@ -6557,9 +6580,9 @@ defmodule Coflux.Orchestration.Server do
           state =
             Map.update!(state, :waiting, fn waiting ->
               if Enum.any?(remaining) do
-                Map.put(waiting, for_ext_id, remaining)
+                Map.put(waiting, waiting_key, remaining)
               else
-                Map.delete(waiting, for_ext_id)
+                Map.delete(waiting, waiting_key)
               end
             end)
 
