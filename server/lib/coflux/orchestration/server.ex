@@ -2036,6 +2036,9 @@ defmodule Coflux.Orchestration.Server do
 
         now = System.system_time(:millisecond)
 
+        # Fetch response once and reuse below
+        input_response = Inputs.get_input_response(state.db, input_id)
+
         # Record dependency and notify
         state =
           if from_execution_id do
@@ -2047,7 +2050,7 @@ defmodule Coflux.Orchestration.Server do
                 Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
               response_type =
-                case Inputs.get_input_response(state.db, input_id) do
+                case input_response do
                   {:ok, nil} -> nil
                   {:ok, {:value, _, _, _}} -> :value
                   {:ok, {:dismissed, _, _}} -> :dismissed
@@ -2080,7 +2083,7 @@ defmodule Coflux.Orchestration.Server do
           end
 
         # Check for existing response
-        case Inputs.get_input_response(state.db, input_id) do
+        case input_response do
           {:ok, nil} ->
             # No response yet — wait or suspend
             cond do

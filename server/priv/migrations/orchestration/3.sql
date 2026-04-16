@@ -46,6 +46,7 @@ CREATE TABLE inputs (
 
 CREATE INDEX idx_inputs_key ON inputs(key) WHERE key IS NOT NULL;
 CREATE INDEX idx_inputs_run_id ON inputs(run_id);
+CREATE INDEX idx_inputs_run_workspace_key ON inputs(run_id, workspace_id, key) WHERE key IS NOT NULL;
 
 -- Tracks which executions submitted each input
 CREATE TABLE execution_inputs (
