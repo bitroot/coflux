@@ -212,10 +212,12 @@ defmodule Coflux.Topics.Run do
          topic,
          {:input_submitted, execution_external_id, input_external_id, title}
        ) do
+    status = find_existing_input_status(topic, input_external_id)
+
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:inputs, input_external_id], %{
         title: title,
-        status: nil
+        status: status
       })
     end)
   end
@@ -254,6 +256,14 @@ defmodule Coflux.Topics.Run do
     topic
     |> update_submitted_input_status(input_external_id, response_type)
     |> update_dependency_input_status(input_external_id, response_type)
+  end
+
+  defp find_existing_input_status(topic, input_external_id) do
+    Enum.find_value(topic.value.steps, fn {_step_id, step} ->
+      Enum.find_value(step.executions, fn {_attempt, execution} ->
+        get_in(execution, [:inputs, input_external_id, :status])
+      end)
+    end)
   end
 
   defp update_submitted_input_status(topic, input_external_id, response_type) do

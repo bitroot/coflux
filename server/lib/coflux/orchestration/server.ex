@@ -1992,22 +1992,18 @@ defmodule Coflux.Orchestration.Server do
           {:error, reason} ->
             {:reply, {:error, reason}, state}
 
-          {:ok, input_number, created} ->
+          {:ok, input_number, stored_title, _created} ->
             {:ok, {run_external_id}} =
               Runs.get_external_run_id_for_execution(state.db, execution_id)
 
             input_ext_id = input_external_id(run_external_id, input_number)
 
             state =
-              if created do
-                notify_listeners(
-                  state,
-                  {:run, run_external_id},
-                  {:input_submitted, execution_external_id, input_ext_id, title}
-                )
-              else
-                state
-              end
+              notify_listeners(
+                state,
+                {:run, run_external_id},
+                {:input_submitted, execution_external_id, input_ext_id, stored_title}
+              )
 
             state = flush_notifications(state)
             {:reply, {:ok, input_ext_id}, state}
@@ -4975,12 +4971,12 @@ defmodule Coflux.Orchestration.Server do
 
       case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
         {:ok,
-         {existing_id, existing_number, existing_prompt_id, existing_schema_id, _existing_title,
+         {existing_id, existing_number, existing_prompt_id, existing_schema_id, existing_title,
           _existing_actions, existing_requires_tag_set_id}} ->
           if existing_prompt_id == prompt_id && existing_schema_id == schema_id &&
                existing_requires_tag_set_id == requires_tag_set_id do
             Inputs.record_execution_input(state.db, execution_id, existing_id, now)
-            {:ok, existing_number, false}
+            {:ok, existing_number, existing_title, false}
           else
             {:error, :input_mismatch}
           end
@@ -5002,7 +4998,7 @@ defmodule Coflux.Orchestration.Server do
               now
             )
 
-          {:ok, input_number, true}
+          {:ok, input_number, title, true}
       end
     else
       {:ok, _id, input_number} =
@@ -5021,7 +5017,7 @@ defmodule Coflux.Orchestration.Server do
           now
         )
 
-      {:ok, input_number, true}
+      {:ok, input_number, title, true}
     end
   end
 
