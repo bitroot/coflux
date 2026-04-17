@@ -8,7 +8,6 @@ of targets.
 from __future__ import annotations
 
 import datetime as dt
-import typing as t
 from pathlib import Path
 
 from .prompt import Prompt

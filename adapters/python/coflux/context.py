@@ -18,7 +18,7 @@ from .errors import (
     InputDismissed,
     create_execution_error,
 )
-from .models import Asset, AssetEntry, AssetMetadata, Input
+from .models import Asset, AssetEntry, AssetMetadata
 from .serialization import deserialize_value, serialize_value
 
 # Context variable for group tracking
