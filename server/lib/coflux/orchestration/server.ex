@@ -257,6 +257,7 @@ defmodule Coflux.Orchestration.Server do
             starting: MapSet.new(),
             executing: MapSet.new(),
             concurrency: 0,
+            draining: false,
             workspace_id: workspace_id,
             provides: provides,
             accepts: accepts,
@@ -1072,6 +1073,7 @@ defmodule Coflux.Orchestration.Server do
             starting: MapSet.new(),
             executing: MapSet.new(),
             concurrency: 0,
+            draining: false,
             workspace_id: workspace_id,
             provides: provides,
             accepts: accepts,
@@ -1221,6 +1223,27 @@ defmodule Coflux.Orchestration.Server do
     send(self(), :tick)
 
     {:reply, :ok, state}
+  end
+
+  def handle_call({:session_draining, external_id}, _from, state) do
+    case Map.fetch(state.session_ids, external_id) do
+      {:ok, session_id} ->
+        state = put_in(state, [Access.key(:sessions), session_id, :draining], true)
+        session = Map.fetch!(state.sessions, session_id)
+
+        state =
+          state
+          |> notify_listeners(
+            {:sessions, workspace_external_id(state, session.workspace_id)},
+            {:session, session.external_id, build_session_data(state, session)}
+          )
+          |> flush_notifications()
+
+        {:reply, :ok, state}
+
+      :error ->
+        {:reply, :ok, state}
+    end
   end
 
   def handle_call({:start_run, module, target_name, type, arguments, access, opts}, _from, state) do
@@ -3112,6 +3135,7 @@ defmodule Coflux.Orchestration.Server do
                   starting: MapSet.new(),
                   executing: MapSet.new(),
                   concurrency: 0,
+                  draining: false,
                   workspace_id: workspace_id,
                   provides: pool.provides,
                   accepts: pool_accepts,
@@ -6421,6 +6445,7 @@ defmodule Coflux.Orchestration.Server do
           session = Map.fetch!(state.sessions, session_id)
 
           session.workspace_id == execution.workspace_id && session.connection &&
+            !Map.get(session, :draining, false) &&
             !session_at_capacity?(session) &&
             session_active?(session, state) &&
             !session_pool_disabled?(session, state) &&
