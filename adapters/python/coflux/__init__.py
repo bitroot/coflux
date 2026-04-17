@@ -8,6 +8,7 @@ of targets.
 from __future__ import annotations
 
 import datetime as dt
+import typing as t
 from pathlib import Path
 
 from .prompt import Prompt
@@ -89,15 +90,18 @@ def suspense(timeout: float | None = None):
     return get_context().suspense(timeout)
 
 
+_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any]")
+
+
 def select(
-    handles: list[Execution | Input],
+    handles: t.Sequence[_H],
     *,
     cancel_remaining: bool = False,
-) -> tuple[Execution | Input, list[Execution | Input]]:
+) -> tuple[_H, list[_H]]:
     """Wait for the first of one or more handles (executions/inputs) to resolve.
 
     Args:
-        handles: List of Execution and/or Input objects. Must be non-empty.
+        handles: Sequence of Execution and/or Input objects. Must be non-empty.
         cancel_remaining: If True, cancel non-winner execution handles
             atomically once a handle resolves. Input handles are left pending.
 
@@ -116,7 +120,7 @@ def select(
     if not handles:
         raise ValueError("select requires at least one handle")
 
-    winner_idx = get_context().select(handles, cancel_remaining=cancel_remaining)
+    winner_idx = get_context().select(list(handles), cancel_remaining=cancel_remaining)
     if winner_idx is None:
         raise ExecutionTimeout()
 
@@ -125,7 +129,7 @@ def select(
     return winner, remaining
 
 
-def cancel(handles: list[Execution | Input]) -> None:
+def cancel(handles: t.Sequence[Execution[t.Any] | Input[t.Any]]) -> None:
     """Cancel one or more handles (executions and/or inputs) atomically.
 
     Executions are cancelled recursively (descendants too). Inputs
