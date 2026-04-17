@@ -36,6 +36,13 @@ class ExecutionTimeout(Exception):
         super().__init__(message)
 
 
+class InputDismissed(Exception):
+    """Raised when an input request was dismissed."""
+
+    def __init__(self, message: str = "input was dismissed"):
+        super().__init__(message)
+
+
 def _resolve_exception_class(qualified_name: str) -> type | None:
     """Attempt to resolve a fully qualified exception type name to a class.
 

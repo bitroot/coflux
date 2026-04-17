@@ -1,5 +1,6 @@
 defmodule Coflux.Version do
-  @version Mix.Project.config()[:version]
+  @external_resource version_file = Path.expand("../../../VERSION", __DIR__)
+  @version String.trim(File.read!(version_file))
   @api_version (case Version.parse(@version) do
                   {:ok, %Version{major: 0, minor: minor}} -> "0.#{minor}"
                   {:ok, %Version{major: major}} -> "#{major}"

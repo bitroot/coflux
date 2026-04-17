@@ -101,6 +101,7 @@ defmodule Coflux.Topics.Run do
               {dependency_id, build_dependency(dependency)}
             end),
           children: [],
+          inputs: %{},
           result: nil,
           metrics: %{}
         }
@@ -207,6 +208,101 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
+  defp process_notification(
+         topic,
+         {:input_submitted, execution_external_id, input_external_id, title}
+       ) do
+    status = find_existing_input_status(topic, input_external_id)
+
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:inputs, input_external_id], %{
+        title: title,
+        status: status
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:input_dependency, execution_external_id, input_external_id, title, response_type}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:dependencies, input_external_id], %{
+        type: "input",
+        inputId: input_external_id,
+        title: title,
+        status: response_type
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:asset_dependency, execution_external_id, asset_external_id, asset}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:dependencies, asset_external_id], %{
+        type: "asset",
+        assetId: asset_external_id,
+        asset: build_asset(asset)
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:input_response, input_external_id, response_type}
+       ) do
+    topic
+    |> update_submitted_input_status(input_external_id, response_type)
+    |> update_dependency_input_status(input_external_id, response_type)
+  end
+
+  defp find_existing_input_status(topic, input_external_id) do
+    Enum.find_value(topic.value.steps, fn {_step_id, step} ->
+      Enum.find_value(step.executions, fn {_attempt, execution} ->
+        get_in(execution, [:inputs, input_external_id, :status])
+      end)
+    end)
+  end
+
+  defp update_submitted_input_status(topic, input_external_id, response_type) do
+    Enum.reduce(topic.value.steps, topic, fn {step_id, step}, topic ->
+      Enum.reduce(step.executions, topic, fn {attempt, execution}, topic ->
+        inputs = Map.get(execution, :inputs, %{})
+
+        if Map.has_key?(inputs, input_external_id) do
+          Topic.set(
+            topic,
+            [:steps, step_id, :executions, attempt, :inputs, input_external_id, :status],
+            response_type
+          )
+        else
+          topic
+        end
+      end)
+    end)
+  end
+
+  defp update_dependency_input_status(topic, input_external_id, response_type) do
+    Enum.reduce(topic.value.steps, topic, fn {step_id, step}, topic ->
+      Enum.reduce(step.executions, topic, fn {attempt, execution}, topic ->
+        deps = Map.get(execution, :dependencies, %{})
+
+        if Map.has_key?(deps, input_external_id) and
+             Map.get(deps[input_external_id], :type) == "input" do
+          Topic.set(
+            topic,
+            [:steps, step_id, :executions, attempt, :dependencies, input_external_id, :status],
+            response_type
+          )
+        else
+          topic
+        end
+      end)
+    end)
+  end
+
   defp build_run(run, parent, steps, workspace_ids) do
     %{
       createdAt: run.created_at,
@@ -258,6 +354,7 @@ defmodule Coflux.Topics.Run do
                       end),
                     dependencies: build_dependencies(execution.dependencies),
                     children: Enum.map(execution.children, &build_child(&1, run.external_id)),
+                    inputs: Map.get(execution, :inputs, %{}),
                     result: build_result(execution.result, execution.result_created_by),
                     metrics:
                       Map.new(execution.metric_definitions, fn {key, def_data} ->
@@ -282,13 +379,21 @@ defmodule Coflux.Topics.Run do
   end
 
   defp build_dependencies(dependencies) do
-    Map.new(dependencies, fn {execution_id, execution} ->
-      {execution_id, build_dependency(execution)}
+    Map.new(dependencies, fn
+      {id, {:result, execution}} ->
+        {id, %{type: "result", execution: build_execution(execution)}}
+
+      {id, {:input, title, status}} ->
+        {id, %{type: "input", inputId: id, title: title, status: status}}
+
+      {id, {:asset, asset}} ->
+        {id, %{type: "asset", assetId: id, asset: build_asset(asset)}}
     end)
   end
 
   defp build_dependency(execution) do
     %{
+      type: "result",
       execution: build_execution(execution)
     }
   end

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,9 @@ import (
 	"github.com/bitroot/coflux/cli/internal/version"
 	"github.com/gorilla/websocket"
 )
+
+// ErrConnectionLost is a sentinel error for lost or closed connections.
+var ErrConnectionLost = errors.New("connection lost")
 
 const (
 	// Timeouts
@@ -435,6 +439,9 @@ func (c *Connection) Request(ctx context.Context, request string, params ...any)
 	case result := <-resultCh:
 		return result, nil
 	case err := <-errCh:
+		if e, ok := err.(error); ok {
+			return nil, fmt.Errorf("server error: %w", e)
+		}
 		return nil, fmt.Errorf("server error: %v", err)
 	case <-ctx.Done():
 		c.mu.Lock()
@@ -465,7 +472,7 @@ func (c *Connection) Close() error {
 	// Notify all pending requests of the failure
 	for _, cb := range pendingRequests {
 		if cb.OnError != nil {
-			cb.OnError("connection closed")
+			cb.OnError(ErrConnectionLost)
 		}
 	}
 
@@ -492,14 +499,9 @@ func (c *Connection) failPendingRequests(err error) {
 	c.requests = make(map[int]Callbacks)
 	c.mu.Unlock()
 
-	errMsg := "connection lost"
-	if err != nil {
-		errMsg = err.Error()
-	}
-
 	for _, cb := range pendingRequests {
 		if cb.OnError != nil {
-			cb.OnError(errMsg)
+			cb.OnError(ErrConnectionLost)
 		}
 	}
 }

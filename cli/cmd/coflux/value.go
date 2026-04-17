@@ -171,6 +171,12 @@ func formatReference(ref any) string {
 		format, _ := r["format"].(string)
 		size, _ := r["size"].(float64)
 		return fmt.Sprintf("<fragment %s (%s)>", format, humanSize(int64(size)))
+	case "input":
+		inputId, _ := r["inputId"].(string)
+		if inputId != "" {
+			return fmt.Sprintf("<input %s>", inputId)
+		}
+		return "<input>"
 	}
 	return "<ref ?>"
 }
@@ -203,6 +209,12 @@ func formatLogReference(ref any) string {
 		format, _ := r["format"].(string)
 		size, _ := r["size"].(float64)
 		return fmt.Sprintf("<fragment %s (%s)>", format, humanSize(int64(size)))
+	case "input":
+		inputId, _ := r["inputId"].(string)
+		if inputId != "" {
+			return fmt.Sprintf("<input %s>", inputId)
+		}
+		return "<input>"
 	}
 	return "<ref ?>"
 }

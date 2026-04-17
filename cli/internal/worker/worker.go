@@ -53,6 +53,7 @@ type Worker struct {
 
 	connMu sync.RWMutex
 	conn   *api.Connection
+	connCh chan struct{} // closed when a new connection is established
 
 	mu         sync.RWMutex
 	executions map[string]*executionState
@@ -83,6 +84,7 @@ func New(cfg *config.Config, adp adapter.Adapter, session string, logger *slog.L
 		adapter:    adp,
 		session:    session,
 		logger:     logger,
+		connCh:     make(chan struct{}),
 		executions: make(map[string]*executionState),
 	}
 }
@@ -95,15 +97,49 @@ func (w *Worker) getConn() *api.Connection {
 	return w.conn
 }
 
-// setConn sets the current connection (thread-safe)
+// setConn sets the current connection (thread-safe).
+// When a non-nil connection is set, any goroutines waiting in waitForConn are unblocked.
 func (w *Worker) setConn(conn *api.Connection) {
 	w.connMu.Lock()
 	defer w.connMu.Unlock()
 	w.conn = conn
+	if conn != nil {
+		close(w.connCh)
+		w.connCh = make(chan struct{})
+	}
 }
 
 // ErrNotConnected is returned when an operation requires an active connection
 var ErrNotConnected = fmt.Errorf("not connected to server")
+
+// isConnectionError returns true if the error is due to a lost/closed connection.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotConnected) {
+		return true
+	}
+	return errors.Is(err, api.ErrConnectionLost)
+}
+
+// waitForConn blocks until a connection is available or the context is cancelled.
+func (w *Worker) waitForConn(ctx context.Context) (*api.Connection, error) {
+	for {
+		w.connMu.RLock()
+		conn := w.conn
+		ch := w.connCh
+		w.connMu.RUnlock()
+		if conn != nil {
+			return conn, nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
 
 // requireConn returns the current connection or an error if not connected
 func (w *Worker) requireConn() (*api.Connection, error) {
@@ -545,6 +581,8 @@ func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
 			result[i] = []any{"execution", ref.ExecutionID, ref.Module, ref.Target}
 		case api.RefTypeAsset:
 			result[i] = []any{"asset", ref.AssetID, ref.Name, ref.TotalCount, ref.TotalSize}
+		case api.RefTypeInput:
+			result[i] = []any{"input", ref.InputID}
 		case api.RefTypeFragment:
 			// Download fragment blob to local file so the adapter can deserialize it
 			path, err := w.blobs.Download(ref.BlobKey)
@@ -784,13 +822,21 @@ func (w *Worker) processReferences(refs [][]any) ([]any, error) {
 }
 
 func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64, suspend *bool) (*adapter.ResolveResult, error) {
-	conn, err := w.requireConn()
-	if err != nil {
-		return nil, err
-	}
-	result, err := conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs, suspend)
-	if err != nil {
-		return nil, err
+	var result any
+	for {
+		conn, err := w.waitForConn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err = conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs, suspend)
+		if err != nil {
+			if isConnectionError(err) {
+				w.logger.Debug("retrying get_result after reconnect", "execution", targetExecutionID)
+				continue
+			}
+			return nil, err
+		}
+		break
 	}
 
 	// nil result means the wait expired with no result available (poll timeout)
@@ -862,6 +908,8 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 			}, nil
 		case "cancelled":
 			return &adapter.ResolveResult{Status: "cancelled"}, nil
+		case "dismissed":
+			return &adapter.ResolveResult{Status: "dismissed"}, nil
 		case "timeout":
 			return &adapter.ResolveResult{Status: "timeout"}, nil
 		case "suspended":
@@ -869,7 +917,132 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 		}
 	}
 
-	return nil, fmt.Errorf("unexpected result format: %T", result)
+	return nil, fmt.Errorf("unexpected result format: %T (%v)", result, result)
+}
+
+func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error) {
+	conn, err := w.requireConn()
+	if err != nil {
+		return "", err
+	}
+
+	// Convert placeholder values to server format
+	var serverPlaceholders map[string]any
+	if params.Placeholders != nil {
+		serverPlaceholders = make(map[string]any)
+		for key, val := range params.Placeholders {
+			if val != nil {
+				sv, err := w.convertValueToServerFormat(val)
+				if err != nil {
+					return "", fmt.Errorf("failed to convert placeholder %q: %w", key, err)
+				}
+				serverPlaceholders[key] = sv
+			}
+		}
+	}
+
+	reqParams := []any{
+		params.ExecutionID,
+		params.Template,
+		serverPlaceholders,
+		params.Schema,
+		params.Key,
+		params.Title,
+		params.Actions,
+		params.Initial,
+		params.Requires,
+	}
+
+	result, err := conn.Request(ctx, "submit_input", reqParams...)
+	if err != nil {
+		return "", err
+	}
+
+	inputExternalID, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected submit_input result: %T (%v)", result, result)
+	}
+	return inputExternalID, nil
+}
+
+func (w *Worker) ResolveInput(ctx context.Context, params *adapter.ResolveInputParams) (*adapter.ResolveResult, error) {
+	suspend := true
+	if params.Suspend != nil {
+		suspend = *params.Suspend
+	}
+
+	var result any
+	for {
+		conn, err := w.waitForConn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err = conn.Request(ctx, "resolve_input",
+			params.InputExternalID,
+			params.FromExecutionID,
+			params.TimeoutMs,
+			suspend,
+		)
+		if err != nil {
+			if isConnectionError(err) {
+				w.logger.Debug("retrying resolve_input after reconnect", "input", params.InputExternalID)
+				continue
+			}
+			return nil, err
+		}
+		break
+	}
+
+	// nil result means the wait expired with no result available (poll timeout)
+	if result == nil {
+		return nil, nil
+	}
+
+	// Result could be ["suspended"], ["dismissed"], ["value", json_value], etc.
+	if arr, ok := result.([]any); ok && len(arr) >= 1 {
+		resultType := getString(arr[0])
+		switch resultType {
+		case "value":
+			if len(arr) < 2 {
+				return nil, fmt.Errorf("value result missing value: %v", arr)
+			}
+			if arr[1] == nil {
+				return &adapter.ResolveResult{
+					Status: "value",
+					Value:  nil,
+				}, nil
+			}
+			return &adapter.ResolveResult{
+				Status: "value",
+				Value: &adapter.Value{
+					Type:   "inline",
+					Format: "json",
+					Value:  arr[1],
+				},
+			}, nil
+		case "error":
+			var errType, errMsg string
+			if len(arr) >= 2 {
+				errType, _ = arr[1].(string)
+			}
+			if len(arr) >= 3 {
+				errMsg, _ = arr[2].(string)
+			}
+			return &adapter.ResolveResult{
+				Status:       "error",
+				ErrorType:    errType,
+				ErrorMessage: errMsg,
+			}, nil
+		case "cancelled":
+			return &adapter.ResolveResult{Status: "cancelled"}, nil
+		case "dismissed":
+			return &adapter.ResolveResult{Status: "dismissed"}, nil
+		case "suspended":
+			return &adapter.ResolveResult{Status: "suspended"}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unexpected result format: %T (%v)", result, result)
 }
 
 func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error) {
@@ -1230,6 +1403,15 @@ func (w *Worker) processLogReferences(refs []any) ([]any, error) {
 					"name":       refSlice[2],
 					"totalCount": refSlice[3],
 					"totalSize":  refSlice[4],
+				}
+			}
+
+		case "input":
+			// Input reference: ["input", id]
+			if len(refSlice) >= 2 {
+				result[i] = map[string]any{
+					"type":    "input",
+					"inputId": getString(refSlice[1]),
 				}
 			}
 

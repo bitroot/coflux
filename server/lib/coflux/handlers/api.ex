@@ -611,6 +611,109 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "POST", ["respond_input"], project_id, access) do
+    case read_arguments(req, %{input_id: "inputId"}, %{value: "value"}) do
+      {:ok, arguments, req} ->
+        case Orchestration.respond_input(
+               project_id,
+               arguments.input_id,
+               Map.get(arguments, :value),
+               access
+             ) do
+          :ok ->
+            json_response(req, %{})
+
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+
+          {:error, :already_responded} ->
+            json_error_response(req, "already_responded", status: 409)
+
+          {:error, {:validation_failed, reason}} ->
+            json_error_response(req, "validation_failed", details: reason, status: 422)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["dismiss_input"], project_id, access) do
+    case read_arguments(req, %{input_id: "inputId"}) do
+      {:ok, arguments, req} ->
+        case Orchestration.dismiss_input(project_id, arguments.input_id, access) do
+          :ok ->
+            json_response(req, %{})
+
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["get_input"], project_id, _access) do
+    case read_arguments(req, %{input_id: "inputId"}) do
+      {:ok, arguments, req} ->
+        case Orchestration.get_input(project_id, arguments.input_id) do
+          {:ok, input} ->
+            placeholders =
+              Map.new(input.placeholders, fn {placeholder, value} ->
+                {placeholder, Coflux.TopicUtils.build_value(value)}
+              end)
+
+            response =
+              case input.response do
+                nil ->
+                  nil
+
+                %{type: type, value: value, created_at: created_at, created_by: created_by} ->
+                  resp = %{
+                    "type" => Atom.to_string(type),
+                    "createdAt" => created_at
+                  }
+
+                  resp = if value, do: Map.put(resp, "value", value), else: resp
+
+                  if created_by do
+                    Map.put(resp, "createdBy", %{
+                      "type" => created_by.type,
+                      "externalId" => created_by.external_id
+                    })
+                  else
+                    resp
+                  end
+              end
+
+            initial =
+              if input.initial do
+                Jason.decode!(input.initial)
+              end
+
+            json_response(req, %{
+              "key" => input.key,
+              "template" => input.template,
+              "placeholders" => placeholders,
+              "schema" => input.schema,
+              "initial" => initial,
+              "title" => input.title,
+              "actions" => input.actions,
+              "requires" => input.requires,
+              "createdAt" => input.created_at,
+              "response" => response
+            })
+
+          {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, "GET", ["search"], project_id, _access) do
     qs = :cowboy_req.parse_qs(req)
     workspace_id = get_query_param(qs, "workspaceId")

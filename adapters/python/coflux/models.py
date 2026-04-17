@@ -12,6 +12,22 @@ from .state import get_context
 T = t.TypeVar("T")
 D = t.TypeVar("D")
 
+_MISSING = object()
+
+
+class ModelSchema(t.Protocol):
+    """Protocol for schema classes that can validate JSON data.
+
+    Compatible with Pydantic BaseModel and any class providing
+    model_json_schema() and model_validate() classmethods.
+    """
+
+    @classmethod
+    def model_json_schema(cls) -> dict[str, t.Any]: ...
+
+    @classmethod
+    def model_validate(cls, obj: t.Any) -> t.Any: ...
+
 
 class AssetEntry(t.NamedTuple):
     """An entry within an asset (a single file)."""
@@ -101,6 +117,70 @@ class Asset:
         if match:
             entries = [e for e in entries if fnmatch.fnmatch(e.path, match)]
         return {e.path: e.restore(at=at) for e in entries}
+
+
+class Input(t.Generic[T]):
+    """A handle to a requested input, identified by its external ID.
+
+    Can be passed between executions (only the ID is needed).
+
+    When parameterised with a model class (e.g. ``Input[MyModel]``), the
+    type argument is preserved at runtime so that ``result()`` and ``poll()``
+    can automatically validate the response using ``model_validate``.
+    """
+
+    _type_arg: type | None = None
+
+    def __class_getitem__(cls, item: type) -> type:
+        # Create a subclass that remembers the type argument at runtime.
+        # This means Input[MyModel](id).result() can call MyModel.model_validate().
+        name = getattr(item, "__name__", str(item))
+        return type(f"Input[{name}]", (cls,), {"_type_arg": item})
+
+    def __init__(self, input_id: str):
+        self._input_id = input_id
+
+    @property
+    def id(self) -> str:
+        return self._input_id
+
+    def result(self) -> T:
+        """Wait for and return the input response.
+
+        Records a dependency and blocks until the response is available,
+        suspending the execution if necessary. If this Input was
+        parameterised with a model class, the response is validated
+        and returned as an instance of that model.
+        """
+        ctx = get_context()
+        value = ctx.resolve_input(self._input_id)
+        if self._type_arg is not None and hasattr(self._type_arg, "model_validate"):
+            return self._type_arg.model_validate(value)
+        return value
+
+    @t.overload
+    def poll(self, timeout: float | None = None) -> T | None: ...
+
+    @t.overload
+    def poll(self, timeout: float | None = None, *, default: D) -> T | D: ...
+
+    def poll(self, timeout: float | None = None, default: t.Any = None) -> t.Any:
+        """Poll for the input response without suspending.
+
+        Returns the response if available, or ``default`` if not ready yet.
+        """
+        ctx = get_context()
+        timeout_ms = int(timeout * 1000) if timeout else None
+        value = ctx.poll_input(
+            self._input_id,
+            timeout_ms,
+            default=_MISSING,
+        )
+        if value is _MISSING:
+            return default
+        if self._type_arg is not None and hasattr(self._type_arg, "model_validate"):
+            return self._type_arg.model_validate(value)
+        return value
 
 
 class Execution(t.Generic[T]):

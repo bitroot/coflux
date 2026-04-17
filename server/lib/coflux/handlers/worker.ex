@@ -343,6 +343,92 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      "submit_input" ->
+        {execution_id, template, placeholders, schema_json, key, title, actions, initial,
+         requires} =
+          case message["params"] do
+            [eid, t, p, s, k, ti, a, i, r] -> {eid, t, p, s, k, ti, a, i, r}
+            [eid, t, p, s, k, ti, a, i] -> {eid, t, p, s, k, ti, a, i, nil}
+          end
+
+        if is_recognised_execution?(execution_id, state) do
+          parsed_placeholders =
+            Enum.map(placeholders || %{}, fn {placeholder, value} ->
+              {placeholder, parse_value(value)}
+            end)
+
+          actions_json = if actions, do: Jason.encode!(actions)
+          initial_json = if initial, do: Jason.encode!(initial)
+
+          case Orchestration.submit_input(
+                 state.project_id,
+                 execution_id,
+                 template,
+                 parsed_placeholders,
+                 schema_json,
+                 key,
+                 title,
+                 actions_json,
+                 initial_json,
+                 requires
+               ) do
+            {:ok, input_external_id} ->
+              {[success_message(message["id"], input_external_id)], state}
+
+            {:error, {:invalid_schema, reason}} ->
+              {[error_message(message["id"], "invalid_schema: #{reason}")], state}
+
+            {:error, {:invalid_initial, reason}} ->
+              {[error_message(message["id"], "invalid_initial: #{reason}")], state}
+
+            {:error, :input_mismatch} ->
+              {[error_message(message["id"], "input_mismatch")], state}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "resolve_input" ->
+        [input_external_id, from_execution_id, timeout_ms, suspend] =
+          message["params"]
+
+        if is_recognised_execution?(from_execution_id, state) do
+          case Orchestration.resolve_input(
+                 state.project_id,
+                 input_external_id,
+                 from_execution_id,
+                 timeout_ms,
+                 suspend,
+                 message["id"]
+               ) do
+            {:ok, nil} ->
+              {[success_message(message["id"], nil)], state}
+
+            {:ok, :suspended} ->
+              {[success_message(message["id"], ["suspended"])], state}
+
+            {:ok, {:value, value}} ->
+              {[success_message(message["id"], ["value", value])], state}
+
+            {:ok, :dismissed} ->
+              {[success_message(message["id"], ["dismissed"])], state}
+
+            :wait ->
+              {[], state}
+
+            {:error, :not_found} ->
+              {[error_message(message["id"], "input_not_found")], state}
+
+            {:error, :execution_not_found} ->
+              # The orchestration server evicted the caller execution between
+              # our is_recognised_execution? pre-check and the call. Close:
+              # the handler's view of the session is out of sync.
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
       "put_asset" ->
         [execution_id, name, entries] = message["params"]
 
@@ -429,6 +515,14 @@ defmodule Coflux.Handlers.Worker do
     {[success_message(request_id, compose_result(result))], state}
   end
 
+  def websocket_info({:response, request_id, {:value, value}}, state) do
+    {[success_message(request_id, ["value", value])], state}
+  end
+
+  def websocket_info({:response, request_id, :dismissed}, state) do
+    {[success_message(request_id, ["dismissed"])], state}
+  end
+
   def websocket_info({:abort, execution_external_id}, state) do
     {[command_message("abort", [execution_external_id])], state}
   end
@@ -493,6 +587,9 @@ defmodule Coflux.Handlers.Worker do
 
       ["asset", asset_external_id | _rest] ->
         {:asset, asset_external_id}
+
+      ["input", input_external_id | _rest] ->
+        {:input, input_external_id}
     end)
   end
 
@@ -555,6 +652,9 @@ defmodule Coflux.Handlers.Worker do
 
       {:asset, external_id, {name, total_count, total_size, _entry}} ->
         ["asset", external_id, name, total_count, total_size]
+
+      {:input, input_external_id} ->
+        ["input", input_external_id]
     end)
   end
 
@@ -576,6 +676,7 @@ defmodule Coflux.Handlers.Worker do
       {:value, value} -> ["value", compose_value(value)]
       {:abandoned, nil} -> ["abandoned"]
       :cancelled -> ["cancelled"]
+      :dismissed -> ["dismissed"]
       {:timeout, nil} -> ["timeout"]
       :suspended -> ["suspended"]
     end

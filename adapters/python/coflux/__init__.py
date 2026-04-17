@@ -10,12 +10,13 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+from .prompt import Prompt
 from ._version import __version__
 from .decorators import task, workflow, stub
 from .target import Cache, Defer, Retries
-from .errors import ExecutionCancelled, ExecutionError, ExecutionTimeout
+from .errors import ExecutionCancelled, ExecutionError, ExecutionTimeout, InputDismissed
 from .metric import Metric, MetricGroup, MetricScale, progress
-from .models import Asset, AssetEntry, AssetMetadata, Execution
+from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, ModelSchema
 from .state import get_context
 
 __all__ = [
@@ -30,9 +31,13 @@ __all__ = [
     "ExecutionError",
     "ExecutionCancelled",
     "ExecutionTimeout",
+    "InputDismissed",
+    "Input",
+    "ModelSchema",
     "Metric",
     "MetricGroup",
     "MetricScale",
+    "Prompt",
     "Cache",
     "Defer",
     "Retries",

@@ -8,6 +8,7 @@ import (
 
 	"github.com/bitroot/coflux/cli/internal/adapter"
 	"github.com/bitroot/coflux/cli/internal/api"
+	"github.com/bitroot/coflux/cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -31,31 +32,35 @@ func init() {
 }
 
 var manifestsDiscoverCmd = &cobra.Command{
-	Use:   "discover <modules...>",
+	Use:   "discover [modules...]",
 	Short: "Discover targets from local code",
 	Long: `Discover @task and @workflow decorated functions from the specified modules.
 
 This runs the adapter's discovery process and displays the results without
-registering anything with the server.
+registering anything with the server. If no modules are specified, uses
+'worker.modules' from coflux.toml.
 
 Examples:
   coflux manifests discover myapp.workflows myapp.tasks
-  coflux manifests discover -o json myapp.workflows`,
-	Args: cobra.MinimumNArgs(1),
+  coflux manifests discover myapp
+  coflux manifests discover -o json myapp.workflows
+  coflux manifests discover                              # Use modules from coflux.toml`,
 	RunE: runManifestsDiscover,
 }
 
 var manifestsRegisterCmd = &cobra.Command{
-	Use:   "register <modules...>",
+	Use:   "register [modules...]",
 	Short: "Register modules with the server",
 	Long: `Register workflow manifests from the specified modules with the server.
 
 This discovers @task and @workflow decorated functions and registers
-their definitions with the Coflux server.
+their definitions with the Coflux server. If no modules are specified,
+uses 'worker.modules' from coflux.toml.
 
 Examples:
-  coflux manifests register myapp.workflows myapp.tasks`,
-	Args: cobra.MinimumNArgs(1),
+  coflux manifests register myapp.workflows myapp.tasks
+  coflux manifests register myapp
+  coflux manifests register                              # Use modules from coflux.toml`,
 	RunE: runManifestsRegister,
 }
 
@@ -83,6 +88,17 @@ Example:
 	RunE: runManifestsInspect,
 }
 
+func resolveModules(args []string, cfg *config.Config) ([]string, error) {
+	modules := args
+	if len(modules) == 0 {
+		modules = cfg.Worker.Modules
+	}
+	if len(modules) == 0 {
+		return nil, fmt.Errorf("no modules specified; pass them as arguments or set 'worker.modules' in coflux.toml")
+	}
+	return modules, nil
+}
+
 func discoverTargets(cmd *cobra.Command, modules []string) (*adapter.DiscoveryManifest, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -96,8 +112,13 @@ func discoverTargets(cmd *cobra.Command, modules []string) (*adapter.DiscoveryMa
 		return nil, fmt.Errorf("no adapter configured; use --adapter or add 'worker.adapter' to coflux.toml")
 	}
 
+	resolved, err := resolveModules(modules, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	cmdAdapter := adapter.NewCommandAdapter(cfg.Worker.Adapter)
-	manifest, err := cmdAdapter.Discover(cmd.Context(), modules)
+	manifest, err := cmdAdapter.Discover(cmd.Context(), resolved)
 	if err != nil {
 		return nil, fmt.Errorf("discovery failed: %w", err)
 	}

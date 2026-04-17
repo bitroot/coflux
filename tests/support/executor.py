@@ -134,6 +134,38 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
 
+    def submit_input(self, execution_id, template, **kwargs):
+        """Submit an input request and return the input external ID.
+
+        Returns the input_id string on success, or an error dict on failure.
+        """
+        msg = protocol.submit_input_request(None, execution_id, template, **kwargs)
+        resp = self._request(msg)
+        if "error" in resp:
+            return resp["error"]
+        result = resp.get("result")
+        if isinstance(result, dict) and "input_id" in result:
+            return result["input_id"]
+        return result
+
+    def resolve_input(self, input_external_id, from_execution_id, **kwargs):
+        """Resolve an input and return the result dict.
+
+        Returns the raw result dict from the server. For a value response
+        this looks like {"type": "inline", "format": "json", "value": ...}.
+        For dismissed: {"status": "dismissed"}.
+        For suspended: {"status": "suspended"}.
+        Returns None if the poll timed out with no response.
+        Raises RuntimeError if the server returned an error.
+        """
+        msg = protocol.resolve_input_request(
+            None, input_external_id, from_execution_id, **kwargs
+        )
+        resp = self._request(msg)
+        if "error" in resp:
+            raise RuntimeError(f"resolve_input error: {resp['error']}")
+        return resp.get("result")
+
     def complete(self, execution_id, value=None):
         """Send execution_result."""
         self.send(protocol.execution_result(execution_id, value=value))

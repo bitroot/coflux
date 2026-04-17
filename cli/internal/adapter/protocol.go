@@ -257,6 +257,27 @@ type UploadBlobParams struct {
 	SourcePath  string `json:"source_path"`
 }
 
+// SubmitInputParams for submit_input request
+type SubmitInputParams struct {
+	ExecutionID  string              `json:"execution_id"`
+	Template     string              `json:"template"`
+	Placeholders map[string]*Value   `json:"placeholders,omitempty"`
+	Schema       *string             `json:"schema,omitempty"` // JSON Schema as string
+	Key          *string             `json:"key,omitempty"`
+	Title        *string             `json:"title,omitempty"`
+	Actions      []string            `json:"actions,omitempty"` // [respond_label, dismiss_label]
+	Initial      any                 `json:"initial,omitempty"` // Plain JSON initial values
+	Requires     map[string][]string `json:"requires,omitempty"`
+}
+
+// ResolveInputParams for resolve_input request
+type ResolveInputParams struct {
+	InputExternalID string `json:"input_external_id"`
+	FromExecutionID string `json:"from_execution_id"`
+	TimeoutMs       *int64 `json:"timeout_ms,omitempty"`
+	Suspend         *bool  `json:"suspend,omitempty"`
+}
+
 // ParseMessage parses a JSON message from the executor
 func ParseMessage(data []byte) (method string, id *int, params json.RawMessage, err error) {
 	var msg struct {

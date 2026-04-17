@@ -20,15 +20,19 @@ import (
 )
 
 var workerCmd = &cobra.Command{
-	Use:   "worker <modules...>",
+	Use:   "worker [modules...]",
 	Short: "Start a Coflux worker",
 	Long: `Start a worker that connects to the Coflux server, registers discovered
 targets, and executes workflows and tasks as assigned.
 
+Modules can be specified as arguments or via 'worker.modules' in coflux.toml.
+Packages are scanned recursively for targets.
+
 Examples:
+  coflux worker myapp
   coflux worker myapp.workflows myapp.tasks
-  coflux worker --dev myapp.workflows        # Development mode (watch + register)`,
-	Args: cobra.MinimumNArgs(1),
+  coflux worker --dev myapp
+  coflux worker`,
 	RunE: runWorker,
 }
 
@@ -93,7 +97,11 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	}
 	cfg.Token = token
 
-	modules := args
+	// Resolve modules: CLI args override config
+	modules, err := resolveModules(args, cfg)
+	if err != nil {
+		return err
+	}
 
 	// Override adapter if specified via flag
 	if len(workerAdapter) > 0 {
@@ -136,6 +144,10 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		<-sigCh
 		logger.Info("shutting down...")
 		cancel()
+		// Second signal: force exit (shutdown is stuck)
+		<-sigCh
+		logger.Error("forced shutdown")
+		os.Exit(1)
 	}()
 
 	// Determine if we should register manifests
@@ -145,7 +157,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	shouldWatch := workerWatch || workerDev
 
 	if shouldWatch {
-		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger, sigCh)
+		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger)
 	}
 
 	// Run worker
@@ -179,7 +191,6 @@ func runWorkerWithWatch(
 	modules []string,
 	shouldRegister bool,
 	logger *slog.Logger,
-	sigCh chan os.Signal,
 ) error {
 	// Create file watcher
 	watcher, err := fsnotify.NewWatcher()
@@ -225,7 +236,7 @@ func runWorkerWithWatch(
 		restart := false
 		for !restart {
 			select {
-			case <-sigCh:
+			case <-ctx.Done():
 				logger.Info("shutting down...")
 				runCancel()
 				<-workerDone
@@ -256,7 +267,17 @@ func runWorkerWithWatch(
 
 		// Restart: cancel current worker and wait for it to stop
 		runCancel()
-		<-workerDone
+		select {
+		case <-workerDone:
+		case <-ctx.Done():
+			// Signal received during reload cleanup — wait briefly
+			select {
+			case <-workerDone:
+			case <-time.After(5 * time.Second):
+				logger.Warn("worker cleanup timed out during shutdown")
+			}
+			return nil
+		}
 		// Small delay to let file writes complete
 		time.Sleep(100 * time.Millisecond)
 	}

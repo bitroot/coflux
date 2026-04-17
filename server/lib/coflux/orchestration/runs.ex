@@ -148,6 +148,22 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  def get_run_id_for_execution(db, execution_id) do
+    case query_one(
+           db,
+           """
+           SELECT s.run_id
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           WHERE e.id = ?1
+           """,
+           {execution_id}
+         ) do
+      {:ok, {run_id}} -> {:ok, run_id}
+      {:ok, nil} -> {:error, :not_found}
+    end
+  end
+
   def get_steps_for_workspace(db, workspace_id) do
     case query(
            db,
@@ -503,7 +519,15 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ref_ids, created_by \\ nil) do
+  def rerun_step(
+        db,
+        step_id,
+        workspace_id,
+        execute_after,
+        dependency_ref_ids,
+        input_dependency_ids \\ [],
+        created_by \\ nil
+      ) do
     with_transaction(db, fn ->
       now = current_timestamp()
       {:ok, attempt} = get_next_execution_attempt(db, step_id)
@@ -517,6 +541,14 @@ defmodule Coflux.Orchestration.Runs do
           :result_dependencies,
           {:execution_id, :dependency_ref_id, :created_at},
           Enum.map(dependency_ref_ids, &{execution_id, &1, now})
+        )
+
+      {:ok, _} =
+        insert_many(
+          db,
+          :input_dependencies,
+          {:execution_id, :input_id, :created_at},
+          Enum.map(input_dependency_ids, &{execution_id, &1, now})
         )
 
       {:ok, execution_id, attempt, now}
@@ -1010,6 +1042,32 @@ defmodule Coflux.Orchestration.Runs do
       WHERE execution_id = ?1
       """,
       {execution_id}
+    )
+  end
+
+  def get_input_dependencies(db, execution_id) do
+    query(
+      db,
+      """
+      SELECT input_id
+      FROM input_dependencies
+      WHERE execution_id = ?1
+      """,
+      {execution_id}
+    )
+  end
+
+  def get_asset_dependencies_for_run(db, run_id) do
+    query(
+      db,
+      """
+      SELECT ad.execution_id, ad.asset_id
+      FROM asset_dependencies AS ad
+      INNER JOIN executions AS e ON e.id = ad.execution_id
+      INNER JOIN steps AS s ON s.id = e.step_id
+      WHERE s.run_id = ?1
+      """,
+      {run_id}
     )
   end
 

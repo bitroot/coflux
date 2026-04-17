@@ -5,12 +5,19 @@ from __future__ import annotations
 import contextvars
 import datetime as dt
 import fnmatch as fnmatch
+import hashlib
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from . import protocol
-from .errors import ExecutionCancelled, ExecutionTimeout, create_execution_error
+from .errors import (
+    ExecutionCancelled,
+    ExecutionTimeout,
+    InputDismissed,
+    create_execution_error,
+)
 from .models import Asset, AssetEntry, AssetMetadata
 from .serialization import deserialize_value, serialize_value
 
@@ -290,6 +297,115 @@ class ExecutorContext:
             target_execution_id,
         )
         self._wait_response(request_id)
+
+    def submit_input(
+        self,
+        template: str,
+        placeholders: dict[str, Any] | None = None,
+        schema: str | None = None,
+        key: str | None = None,
+        title: str | None = None,
+        actions: tuple[str, str] | None = None,
+        initial: Any = None,
+        requires: dict[str, list[str]] | None = None,
+    ) -> str:
+        """Create an input request and return its external ID.
+
+        The server creates or finds the input by key. Use resolve_input
+        (via Input.result()) to wait for the response.
+        """
+        if key is None:
+            h = hashlib.sha256()
+            h.update(template.encode())
+            if placeholders:
+                h.update(json.dumps(placeholders, sort_keys=True).encode())
+            if schema:
+                h.update(schema.encode())
+            if title:
+                h.update(title.encode())
+            if actions:
+                h.update(json.dumps(actions).encode())
+            key = h.hexdigest()[:16]
+        request_id = protocol.submit_input(
+            self.execution_id,
+            template,
+            placeholders=placeholders,
+            schema=schema,
+            key=key,
+            title=title,
+            actions=actions,
+            initial=initial,
+            requires=requires,
+        )
+        result = self._wait_response(request_id)
+        return result["input_id"]
+
+    def resolve_input(self, input_external_id: str) -> Any:
+        """Resolve an input by external ID, blocking until a response is available.
+
+        Records a dependency and waits for the response. If no response is
+        available, the server suspends this execution.
+        """
+        timeout = _timeout.get()
+        timeout_ms = int(timeout * 1000) if timeout is not None else None
+        request_id = protocol.resolve_input(
+            input_external_id,
+            self.execution_id,
+            timeout_ms=timeout_ms,
+            suspend=True,
+        )
+        value = self._wait_response(request_id)
+        return self._handle_input_result(value)
+
+    def poll_input(
+        self,
+        input_external_id: str,
+        timeout_ms: int | None = None,
+        default: Any = None,
+    ) -> Any:
+        """Poll for an input response without suspending."""
+        request_id = protocol.resolve_input(
+            input_external_id,
+            self.execution_id,
+            timeout_ms=timeout_ms or 0,
+            suspend=False,
+        )
+        value = self._wait_response(request_id)
+        if value is None:
+            return default
+        status = value.get("status") if isinstance(value, dict) else None
+        if status == "error":
+            raise create_execution_error(
+                value.get("error_type", ""),
+                value.get("error_message", ""),
+            )
+        if status == "dismissed":
+            raise InputDismissed()
+        if status is not None:
+            raise RuntimeError(f"Unexpected poll status: {status}")
+        return deserialize_value(value)
+
+    def _handle_input_result(self, value: Any) -> Any:
+        """Handle the response from a resolve_input RPC."""
+        if value is None:
+            return None
+        status = value.get("status") if isinstance(value, dict) else None
+        if status == "error":
+            raise create_execution_error(
+                value.get("error_type", ""),
+                value.get("error_message", ""),
+            )
+        if status == "dismissed":
+            raise InputDismissed()
+        if status == "timeout":
+            raise ExecutionTimeout()
+        if status == "suspended":
+            while protocol.receive_message() is not None:
+                pass
+            raise SystemExit(0)
+        if status is not None:
+            raise RuntimeError(f"Unexpected input status: {status}")
+        return deserialize_value(value)
 
     def log(self, level: int, message: str) -> None:
         """Send a simple log message (used for stdout/stderr capture).

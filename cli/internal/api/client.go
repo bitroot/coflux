@@ -396,6 +396,37 @@ func (c *Client) CancelExecution(ctx context.Context, workspaceID, executionID s
 	return err
 }
 
+// GetInput retrieves details for a specific input
+func (c *Client) GetInput(ctx context.Context, inputID string) (map[string]any, error) {
+	body := map[string]any{
+		"inputId": inputID,
+	}
+	var result map[string]any
+	if _, err := c.post(ctx, "/api/get_input", body, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// RespondInput submits a value in response to an input request
+func (c *Client) RespondInput(ctx context.Context, inputID string, value any) error {
+	body := map[string]any{
+		"inputId": inputID,
+		"value":   value,
+	}
+	_, err := c.post(ctx, "/api/respond_input", body, nil)
+	return err
+}
+
+// DismissInput dismisses an input request
+func (c *Client) DismissInput(ctx context.Context, inputID string) error {
+	body := map[string]any{
+		"inputId": inputID,
+	}
+	_, err := c.post(ctx, "/api/dismiss_input", body, nil)
+	return err
+}
+
 // CaptureTopic captures a topic snapshot via the REST endpoint
 func (c *Client) CaptureTopic(ctx context.Context, path string) (map[string]any, error) {
 	var result map[string]any

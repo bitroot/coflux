@@ -349,6 +349,8 @@ defmodule Coflux.Orchestration.Epoch do
                 copy_execution_result_deps(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_assets(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_asset_deps(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id)
+                copy_execution_input_deps(source_db, target_db, old_exec_id, new_exec_id)
               end)
 
               {:ok,
@@ -455,6 +457,101 @@ defmodule Coflux.Orchestration.Epoch do
           target_db,
           :asset_dependencies,
           %{execution_id: new_exec_id, asset_id: new_asset_id, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id) do
+    # Copy execution_inputs records (which executions submitted which inputs)
+    {:ok, exec_inputs} =
+      query(
+        source_db,
+        "SELECT input_id, created_at FROM execution_inputs WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(exec_inputs, fn {old_input_id, ei_created_at} ->
+      # Ensure the input itself exists in the target
+      {:ok, {number}} =
+        query_one!(source_db, "SELECT number FROM inputs WHERE id = ?1", {old_input_id})
+
+      new_input_id =
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {new_run_id, number}
+             ) do
+          {:ok, {existing_id}} ->
+            existing_id
+
+          {:ok, nil} ->
+            {:ok,
+             {workspace_id, key, prompt_id, schema_id, title, actions, initial,
+              requires_tag_set_id,
+              created_at}} =
+              query_one!(
+                source_db,
+                """
+                SELECT workspace_id, key, prompt_id, schema_id,
+                       title, actions, initial, requires_tag_set_id, created_at
+                FROM inputs
+                WHERE id = ?1
+                """,
+                {old_input_id}
+              )
+
+            new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
+            new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
+            new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
+
+            {:ok, id} =
+              insert_one(target_db, :inputs, %{
+                run_id: new_run_id,
+                number: number,
+                workspace_id: new_workspace_id,
+                key: key,
+                prompt_id: new_prompt_id,
+                schema_id: new_schema_id,
+                title: title,
+                actions: actions,
+                initial: initial,
+                requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
+                created_at: created_at
+              })
+
+            # Copy response if present
+            copy_input_response(source_db, target_db, old_input_id, id)
+
+            id
+        end
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :execution_inputs,
+          %{execution_id: new_exec_id, input_id: new_input_id, created_at: ei_created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_input_deps(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, deps} =
+      query(
+        source_db,
+        "SELECT input_id, created_at FROM input_dependencies WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(deps, fn {old_input_id, created_at} ->
+      new_input_id = ensure_input(source_db, target_db, old_input_id)
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :input_dependencies,
+          %{execution_id: new_exec_id, input_id: new_input_id, created_at: created_at},
           on_conflict: "DO NOTHING"
         )
     end)
@@ -786,17 +883,19 @@ defmodule Coflux.Orchestration.Epoch do
         {:ok, refs} =
           query(
             source_db,
-            "SELECT position, fragment_id, execution_ref_id, asset_id FROM value_references WHERE value_id = ?1",
+            "SELECT position, fragment_id, execution_ref_id, asset_id, input_id FROM value_references WHERE value_id = ?1",
             {value_id}
           )
 
-        Enum.each(refs, fn {position, fragment_id, execution_ref_id, asset_id} ->
+        Enum.each(refs, fn {position, fragment_id, execution_ref_id, asset_id, input_id} ->
           new_fragment_id = if fragment_id, do: ensure_fragment(source_db, target_db, fragment_id)
           new_asset_id = if asset_id, do: ensure_asset(source_db, target_db, asset_id)
 
           new_execution_ref_id =
             if execution_ref_id,
               do: ensure_execution_ref(source_db, target_db, execution_ref_id)
+
+          new_input_id = if input_id, do: ensure_input(source_db, target_db, input_id)
 
           {:ok, _} =
             insert_one(
@@ -807,7 +906,8 @@ defmodule Coflux.Orchestration.Epoch do
                 position: position,
                 fragment_id: new_fragment_id,
                 execution_ref_id: new_execution_ref_id,
-                asset_id: new_asset_id
+                asset_id: new_asset_id,
+                input_id: new_input_id
               },
               on_conflict: "DO NOTHING"
             )
@@ -966,6 +1066,282 @@ defmodule Coflux.Orchestration.Epoch do
         end)
 
         new_id
+    end
+  end
+
+  def ensure_input(source_db, target_db, input_id) do
+    {:ok,
+     {run_id, number, workspace_id, key, prompt_id, schema_id, title, actions, initial,
+      requires_tag_set_id,
+      created_at}} =
+      query_one!(
+        source_db,
+        """
+        SELECT run_id, number, workspace_id, key, prompt_id, schema_id,
+               title, actions, initial, requires_tag_set_id, created_at
+        FROM inputs
+        WHERE id = ?1
+        """,
+        {input_id}
+      )
+
+    # Look up the run's external_id so we can find it in the target
+    {:ok, {run_external_id}} =
+      query_one!(source_db, "SELECT external_id FROM runs WHERE id = ?1", {run_id})
+
+    # Check if the run (and thus this input) already exists in the target
+    case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {run_external_id}) do
+      {:ok, {target_run_id}} ->
+        # Run exists — check if this specific input is already there
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {target_run_id, number}
+             ) do
+          {:ok, {existing_id}} ->
+            existing_id
+
+          {:ok, nil} ->
+            insert_input_copy(
+              source_db,
+              target_db,
+              input_id,
+              target_run_id,
+              number,
+              workspace_id,
+              key,
+              prompt_id,
+              schema_id,
+              title,
+              actions,
+              initial,
+              requires_tag_set_id,
+              created_at
+            )
+        end
+
+      {:ok, nil} ->
+        # Run doesn't exist in target — copy it (which will also copy this input)
+        with_transaction(target_db, fn ->
+          {:ok, _remap, _visited} =
+            do_copy_run(source_db, target_db, run_external_id, MapSet.new())
+        end)
+
+        # The run copy should have created this input — look it up
+        {:ok, {target_run_id}} =
+          query_one!(target_db, "SELECT id FROM runs WHERE external_id = ?1", {run_external_id})
+
+        case query_one(
+               target_db,
+               "SELECT id FROM inputs WHERE run_id = ?1 AND number = ?2",
+               {target_run_id, number}
+             ) do
+          {:ok, {already_id}} ->
+            already_id
+
+          {:ok, nil} ->
+            insert_input_copy(
+              source_db,
+              target_db,
+              input_id,
+              target_run_id,
+              number,
+              workspace_id,
+              key,
+              prompt_id,
+              schema_id,
+              title,
+              actions,
+              initial,
+              requires_tag_set_id,
+              created_at
+            )
+        end
+    end
+  end
+
+  defp insert_input_copy(
+         source_db,
+         target_db,
+         old_input_id,
+         target_run_id,
+         number,
+         workspace_id,
+         key,
+         prompt_id,
+         schema_id,
+         title,
+         actions,
+         initial,
+         requires_tag_set_id,
+         created_at
+       ) do
+    new_prompt_id = ensure_input_prompt(source_db, target_db, prompt_id)
+    new_schema_id = if schema_id, do: ensure_input_schema(source_db, target_db, schema_id)
+    new_workspace_id = remap_workspace_id(source_db, target_db, workspace_id)
+
+    {:ok, new_input_id} =
+      insert_one(target_db, :inputs, %{
+        run_id: target_run_id,
+        number: number,
+        workspace_id: new_workspace_id,
+        key: key,
+        prompt_id: new_prompt_id,
+        schema_id: new_schema_id,
+        title: title,
+        actions: actions,
+        initial: initial,
+        requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
+        created_at: created_at
+      })
+
+    copy_input_response(source_db, target_db, old_input_id, new_input_id)
+
+    # Copy execution_inputs records for this input
+    {:ok, exec_inputs} =
+      query(
+        source_db,
+        "SELECT execution_id, created_at FROM execution_inputs WHERE input_id = ?1",
+        {old_input_id}
+      )
+
+    Enum.each(exec_inputs, fn {old_exec_id, ei_created_at} ->
+      case remap_execution_id_by_key(source_db, target_db, old_exec_id) do
+        {:ok, new_exec_id} ->
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :execution_inputs,
+              %{execution_id: new_exec_id, input_id: new_input_id, created_at: ei_created_at},
+              on_conflict: "DO NOTHING"
+            )
+
+        :not_found ->
+          :ok
+      end
+    end)
+
+    new_input_id
+  end
+
+  defp ensure_input_schema(source_db, target_db, schema_id) do
+    {:ok, {hash, schema}} =
+      query_one!(
+        source_db,
+        "SELECT hash, schema FROM input_schemas WHERE id = ?1",
+        {schema_id}
+      )
+
+    case query_one(target_db, "SELECT id FROM input_schemas WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :input_schemas, %{hash: {:blob, hash}, schema: schema})
+
+        new_id
+    end
+  end
+
+  defp ensure_input_prompt(source_db, target_db, prompt_id) do
+    {:ok, {hash, template}} =
+      query_one!(
+        source_db,
+        "SELECT hash, template FROM input_prompts WHERE id = ?1",
+        {prompt_id}
+      )
+
+    case query_one(target_db, "SELECT id FROM input_prompts WHERE hash = ?1", {{:blob, hash}}) do
+      {:ok, {existing_id}} ->
+        existing_id
+
+      {:ok, nil} ->
+        {:ok, new_id} =
+          insert_one(target_db, :input_prompts, %{hash: {:blob, hash}, template: template})
+
+        # Copy placeholders (which reference values)
+        {:ok, placeholders} =
+          query(
+            source_db,
+            "SELECT placeholder, value_id FROM input_prompt_placeholders WHERE prompt_id = ?1",
+            {prompt_id}
+          )
+
+        Enum.each(placeholders, fn {placeholder, value_id} ->
+          new_value_id = ensure_value(source_db, target_db, value_id)
+
+          {:ok, _} =
+            insert_one(target_db, :input_prompt_placeholders, %{
+              prompt_id: new_id,
+              placeholder: placeholder,
+              value_id: new_value_id
+            })
+        end)
+
+        new_id
+    end
+  end
+
+  defp copy_input_response(source_db, target_db, old_input_id, new_input_id) do
+    case query_one(
+           source_db,
+           "SELECT type, value, created_at, created_by FROM input_responses WHERE input_id = ?1",
+           {old_input_id}
+         ) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, {type, value, created_at, created_by}} ->
+        new_created_by = if created_by, do: ensure_principal(source_db, target_db, created_by)
+
+        {:ok, _} =
+          insert_one(
+            target_db,
+            :input_responses,
+            %{
+              input_id: new_input_id,
+              type: type,
+              value: value,
+              created_at: created_at,
+              created_by: new_created_by
+            },
+            on_conflict: "DO NOTHING"
+          )
+    end
+  end
+
+  # Look up an execution in the target by its run_external_id + step_number + attempt
+  defp remap_execution_id_by_key(source_db, target_db, execution_id) do
+    case query_one(
+           source_db,
+           """
+           SELECT r.external_id, s.number, e.attempt
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           INNER JOIN runs AS r ON r.id = s.run_id
+           WHERE e.id = ?1
+           """,
+           {execution_id}
+         ) do
+      {:ok, nil} ->
+        :not_found
+
+      {:ok, {run_ext_id, step_number, attempt}} ->
+        case query_one(
+               target_db,
+               """
+               SELECT e.id
+               FROM executions AS e
+               INNER JOIN steps AS s ON s.id = e.step_id
+               INNER JOIN runs AS r ON r.id = s.run_id
+               WHERE r.external_id = ?1 AND s.number = ?2 AND e.attempt = ?3
+               """,
+               {run_ext_id, step_number, attempt}
+             ) do
+          {:ok, {new_id}} -> {:ok, new_id}
+          {:ok, nil} -> :not_found
+        end
     end
   end
 

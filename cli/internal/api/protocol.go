@@ -142,6 +142,7 @@ const (
 	RefTypeExecution ReferenceType = "execution"
 	RefTypeAsset     ReferenceType = "asset"
 	RefTypeFragment  ReferenceType = "fragment"
+	RefTypeInput     ReferenceType = "input"
 )
 
 // Reference represents a reference to an execution, asset, or fragment
@@ -156,6 +157,8 @@ type Reference struct {
 	Name       string
 	TotalCount int
 	TotalSize  int64
+	// For input references
+	InputID string
 	// For fragment references
 	Serializer string
 	BlobKey    string
@@ -278,6 +281,13 @@ func ParseReference(data []any) (*Reference, error) {
 			Name:       getString(data[2]),
 			TotalCount: int(totalCount),
 			TotalSize:  int64(totalSize),
+		}, nil
+
+	case "input":
+		// ["input", input_external_id]
+		return &Reference{
+			Type:    RefTypeInput,
+			InputID: getString(data[1]),
 		}, nil
 
 	case "fragment":
