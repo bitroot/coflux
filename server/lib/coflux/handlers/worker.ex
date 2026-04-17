@@ -97,6 +97,10 @@ defmodule Coflux.Handlers.Worker do
             {[], state}
         end
 
+      "session_draining" ->
+        :ok = Orchestration.session_draining(state.project_id, state.session_id)
+        {[], state}
+
       "register_group" ->
         [parent_id, group_id, name] = message["params"]
 

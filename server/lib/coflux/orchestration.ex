@@ -127,6 +127,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:declare_targets, session_id, targets, concurrency})
   end
 
+  def session_draining(project_id, session_id) do
+    call_server(project_id, {:session_draining, session_id})
+  end
+
   def start_run(project_id, module, target, type, arguments, access \\ nil, opts \\ []) do
     call_server(project_id, {:start_run, module, target, type, arguments, access, opts})
   end

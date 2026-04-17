@@ -150,6 +150,30 @@ func (w *Worker) requireConn() (*api.Connection, error) {
 	return conn, nil
 }
 
+// Drain waits for in-flight executions to finish, up to timeout. New
+// executions are refused once Drain has been called. Returns the number
+// of executions still running when the drain ended. The drain aborts
+// early if ctx is cancelled.
+//
+// The WebSocket stays open so in-flight executions can still report
+// results. Cancel the context passed to Run afterwards to tear
+// everything down.
+func (w *Worker) Drain(ctx context.Context, timeout time.Duration) int {
+	if w.pool == nil {
+		return 0
+	}
+	// Signal to the server that this session is draining — the server
+	// will stop routing new work here. Any execute messages already in
+	// flight (the race window between sending this and the server
+	// acting on it) still run normally.
+	if conn := w.getConn(); conn != nil {
+		if err := conn.Notify("session_draining"); err != nil {
+			w.logger.Warn("failed to send session_draining", "error", err)
+		}
+	}
+	return w.pool.Drain(ctx, timeout)
+}
+
 // Run starts the worker
 func (w *Worker) Run(ctx context.Context, modules []string, register bool) error {
 	// Create API client

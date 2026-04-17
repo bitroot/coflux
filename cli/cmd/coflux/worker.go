@@ -37,14 +37,15 @@ Examples:
 }
 
 var (
-	workerWatch       bool
-	workerRegister    bool
-	workerDev         bool
-	workerConcurrency int
-	workerSession     string
-	workerProvides    []string
-	workerAccepts     []string
-	workerAdapter     []string
+	workerWatch        bool
+	workerRegister     bool
+	workerDev          bool
+	workerConcurrency  int
+	workerSession      string
+	workerProvides     []string
+	workerAccepts      []string
+	workerAdapter      []string
+	workerDrainTimeout time.Duration
 )
 
 func init() {
@@ -56,6 +57,7 @@ func init() {
 	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu:A100,gpu:H100,region:eu)")
 	workerCmd.Flags().StringSliceVar(&workerAccepts, "accepts", nil, "Tags that executions must have to be scheduled on this worker (e.g., --accepts priority:high)")
 	workerCmd.Flags().StringSliceVar(&workerAdapter, "adapter", nil, "Adapter command (e.g., --adapter python,-m,coflux)")
+	workerCmd.Flags().DurationVar(&workerDrainTimeout, "drain-timeout", 2*time.Minute, "How long to wait for in-flight executions to finish before aborting them on shutdown or reload. 0 means wait indefinitely. Signal again to abort the drain early.")
 }
 
 func runWorker(cmd *cobra.Command, args []string) error {
@@ -133,18 +135,26 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	// Create worker
 	w := worker.New(cfg, cmdAdapter, session, logger)
 
-	// Setup signal handling
+	// Setup signal handling with three phases:
+	//   1st signal: close shutdownCh — triggers a graceful drain
+	//   2nd signal: close drainAbortCh — aborts the drain early (kill in-flight)
+	//   3rd signal: os.Exit — last resort if shutdown itself is stuck
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
+
+	shutdownCh := make(chan struct{})
+	drainAbortCh := make(chan struct{})
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
-		logger.Info("shutting down...")
-		cancel()
-		// Second signal: force exit (shutdown is stuck)
+		logger.Info("shutting down (signal again to abort drain early)")
+		close(shutdownCh)
+		<-sigCh
+		logger.Warn("aborting drain")
+		close(drainAbortCh)
 		<-sigCh
 		logger.Error("forced shutdown")
 		os.Exit(1)
@@ -157,7 +167,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	shouldWatch := workerWatch || workerDev
 
 	if shouldWatch {
-		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, logger)
+		return runWorkerWithWatch(ctx, cfg, cmdAdapter, session, modules, shouldRegister, shutdownCh, drainAbortCh, logger)
 	}
 
 	// Run worker
@@ -169,20 +179,54 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		"register", shouldRegister,
 	)
 
-	if err := w.Run(ctx, modules, shouldRegister); err != nil {
-		if ctx.Err() != nil {
-			// Normal shutdown
-			logger.Info("worker stopped")
-			return nil
-		}
-		return fmt.Errorf("worker error: %w", err)
-	}
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- w.Run(ctx, modules, shouldRegister)
+	}()
 
-	return nil
+	select {
+	case <-shutdownCh:
+		drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
+		cancel()
+		<-workerDone
+		logger.Info("worker stopped")
+		return nil
+	case err := <-workerDone:
+		if err != nil {
+			return fmt.Errorf("worker error: %w", err)
+		}
+		return nil
+	}
+}
+
+// drainWorker runs a graceful drain with the configured timeout, aborting
+// early if abortCh is closed.
+func drainWorker(w *worker.Worker, timeout time.Duration, abortCh <-chan struct{}, logger *slog.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-abortCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if timeout > 0 {
+		logger.Info("draining in-flight executions", "timeout", timeout)
+	} else {
+		logger.Info("draining in-flight executions (no timeout; signal again to abort)")
+	}
+	if remaining := w.Drain(ctx, timeout); remaining > 0 {
+		logger.Warn("drain incomplete; aborting executions", "remaining", remaining)
+	} else {
+		logger.Info("drain complete")
+	}
 }
 
 // runWorkerWithWatch runs the worker with file watching enabled.
-// When Python files change, the worker is restarted.
+// When Python files change, the worker is restarted (with a graceful
+// drain in between). Closing shutdownCh triggers the same drain-then-stop
+// path; closing drainAbortCh aborts any in-flight drain early.
 func runWorkerWithWatch(
 	ctx context.Context,
 	cfg *config.Config,
@@ -190,6 +234,8 @@ func runWorkerWithWatch(
 	session string,
 	modules []string,
 	shouldRegister bool,
+	shutdownCh <-chan struct{},
+	drainAbortCh <-chan struct{},
 	logger *slog.Logger,
 ) error {
 	// Create file watcher
@@ -221,8 +267,8 @@ func runWorkerWithWatch(
 		workerDone := make(chan error, 1)
 
 		// Start worker in goroutine
+		w := worker.New(cfg, cmdAdapter, session, logger)
 		go func() {
-			w := worker.New(cfg, cmdAdapter, session, logger)
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,
 				"host", cfg.Host,
@@ -232,22 +278,15 @@ func runWorkerWithWatch(
 			workerDone <- w.Run(runCtx, modules, shouldRegister)
 		}()
 
-		// Wait for Python file change, signal, or worker exit
-		restart := false
-		for !restart {
+		// Wait for a file change, shutdown, or worker exit.
+		reason := ""
+		for reason == "" {
 			select {
-			case <-ctx.Done():
-				logger.Info("shutting down...")
-				runCancel()
-				<-workerDone
-				return nil
+			case <-shutdownCh:
+				reason = "shutdown"
 
 			case err := <-workerDone:
 				runCancel()
-				if ctx.Err() != nil {
-					logger.Info("worker stopped")
-					return nil
-				}
 				if err != nil {
 					return fmt.Errorf("worker error: %w", err)
 				}
@@ -256,7 +295,7 @@ func runWorkerWithWatch(
 			case event := <-watcher.Events:
 				if isPythonFileChange(event) {
 					logger.Info("change detected, reloading...", "file", event.Name)
-					restart = true
+					reason = "reload"
 				}
 				// For non-Python changes, continue waiting
 
@@ -265,19 +304,17 @@ func runWorkerWithWatch(
 			}
 		}
 
-		// Restart: cancel current worker and wait for it to stop
+		// Drain in-flight executions (keeps the WebSocket open so results
+		// can still be reported), then tear down.
+		drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
 		runCancel()
-		select {
-		case <-workerDone:
-		case <-ctx.Done():
-			// Signal received during reload cleanup — wait briefly
-			select {
-			case <-workerDone:
-			case <-time.After(5 * time.Second):
-				logger.Warn("worker cleanup timed out during shutdown")
-			}
+		<-workerDone
+
+		if reason == "shutdown" {
+			logger.Info("worker stopped")
 			return nil
 		}
+
 		// Small delay to let file writes complete
 		time.Sleep(100 * time.Millisecond)
 	}

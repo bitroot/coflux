@@ -67,7 +67,8 @@ type Pool struct {
 	warm     []*adapter.Executor          // idle, ready executors
 	busy     map[string]*adapter.Executor // executionID -> running executor
 	aborted  map[string]bool              // executions aborted by the server
-	shutdown bool
+	draining bool                         // set during Drain: skip warm spawning, but still accept Execute
+	shutdown bool                         // set during Stop: refuse Execute entirely
 	cancel   context.CancelFunc
 	ctx      context.Context
 	wg       sync.WaitGroup // tracks runExecution goroutines
@@ -154,11 +155,14 @@ func (p *Pool) Execute(ctx context.Context, executionID, module, target string, 
 		}
 	}
 
+	// Add to busy and wg under the same mutex so Drain can observe both
+	// atomically (otherwise Drain can read busy=0 before wg is incremented,
+	// race wg.Wait, and miss an in-flight execution).
 	p.mu.Lock()
 	p.busy[executionID] = exec
+	p.wg.Add(1)
 	p.mu.Unlock()
 
-	p.wg.Add(1)
 	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs)
 
 	return nil
@@ -313,7 +317,7 @@ func (p *Pool) finishExecution(executionID string, execToClose *adapter.Executor
 // concurrency limit. Failures are silently ignored — warming is best-effort.
 func (p *Pool) tryWarm() {
 	p.mu.Lock()
-	if p.shutdown || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
+	if p.shutdown || p.draining || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
 		p.mu.Unlock()
 		return
 	}
@@ -329,7 +333,7 @@ func (p *Pool) tryWarm() {
 	defer p.mu.Unlock()
 
 	// Re-check limits after spawning (another execution may have started)
-	if p.shutdown || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
+	if p.shutdown || p.draining || len(p.warm)+len(p.busy) >= p.concurrency || len(p.warm) >= p.warmTarget {
 		_ = exec.Close()
 		return
 	}
@@ -623,6 +627,61 @@ func (p *Pool) Abort(executionID string) error {
 
 	_ = exec.Close()
 	return nil
+}
+
+// Drain marks the pool as draining (stops spawning warm executors),
+// closes any existing warm executors, and waits up to timeout for
+// in-flight executions to finish on their own. A timeout of 0 means
+// wait indefinitely (until ctx is cancelled). Execute calls still
+// succeed during drain — late-arriving assignments (from the race
+// window between signalling the server and the server acting on it)
+// will start fresh executor processes and run normally. Returns the
+// number of executions still running when the drain ended (0 if
+// everything finished cleanly). Safe to call multiple times.
+//
+// The drain aborts early if ctx is cancelled.
+//
+// Stop must still be called afterwards to tear down anything that
+// didn't finish within the timeout and to clean up pool resources.
+func (p *Pool) Drain(ctx context.Context, timeout time.Duration) int {
+	p.mu.Lock()
+	warm := p.warm
+	p.warm = nil
+	busyCount := len(p.busy)
+	p.draining = true
+	p.mu.Unlock()
+
+	// Warm executors are idle — close them now.
+	for _, exec := range warm {
+		_ = exec.Close()
+	}
+
+	if busyCount == 0 {
+		return 0
+	}
+
+	drainCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		drainCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return 0
+	case <-drainCtx.Done():
+		p.mu.Lock()
+		remaining := len(p.busy)
+		p.mu.Unlock()
+		return remaining
+	}
 }
 
 // Stop shuts down the pool. Closes all warm and busy executors and waits for
