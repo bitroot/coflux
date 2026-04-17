@@ -232,6 +232,39 @@ def test_input_poll_no_response_yet(worker):
         assert ctx.result(resp["runId"])["type"] == "value"
 
 
+def test_input_cancel_via_cancel_rpc(worker):
+    """Cancelling an input via the cancel RPC transitions it to cancelled.
+
+    After cancellation, resolving returns status=cancelled (distinct from
+    the dismissed path), and any select waiting on the input is notified.
+    """
+    targets = [workflow("test", "cancel_input")]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "cancel_input")
+        ex = ctx.executor.next_execute()
+
+        input_id = ex.conn.submit_input(ex.execution_id, "Please cancel me")
+
+        # Cancel the input via the unified cancel RPC
+        cancel_msg = protocol.cancel_request(
+            None,
+            ex.execution_id,
+            [protocol.input_handle(input_id)],
+        )
+        cancel_msg["id"] = 9001
+        ex.conn.send(cancel_msg)
+        cancel_resp = ex.conn.recv()
+        assert cancel_resp["id"] == 9001
+
+        # Resolving the input should now surface the cancellation
+        resolve_result = ex.conn.resolve_input(input_id, ex.execution_id)
+        assert resolve_result == {"status": "cancelled"}
+
+        ex.conn.complete(ex.execution_id, value="cancelled-ok")
+        assert ctx.result(resp["runId"])["type"] == "value"
+
+
 def test_input_wait_then_respond(worker):
     """resolve_input blocks until the input is responded to."""
     targets = [workflow("test", "blocking")]

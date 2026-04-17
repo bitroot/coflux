@@ -361,11 +361,21 @@ class ExecutorContext:
         )
         return Asset(asset_id, metadata)
 
-    def cancel_execution(self, target_execution_id: str) -> None:
-        """Cancel another execution."""
-        request_id = protocol.request_cancel_execution(
+    def cancel(self, handles: list[Any]) -> None:
+        """Cancel one or more handles (executions and/or inputs).
+
+        For each execution handle, its result is recorded as ``cancelled``
+        and descendant executions are cancelled recursively. For each
+        input handle, it transitions to a terminal ``cancelled`` state
+        (distinct from ``dismissed``) and any select waiters are notified.
+
+        Handles that are already resolved are silently skipped.
+        """
+        if not handles:
+            return
+        request_id = protocol.request_cancel(
             self.execution_id,
-            target_execution_id,
+            [{"type": k, "id": i} for k, i in map(_handle_key, handles)],
         )
         self._wait_response(request_id)
 

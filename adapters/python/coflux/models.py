@@ -148,6 +148,16 @@ class _Handle(t.Generic[T]):
         """Return the resolved value if ready, else ``default``."""
         return get_context().poll_handle(self, timeout, default)
 
+    def cancel(self) -> None:
+        """Cancel this handle.
+
+        For an ``Execution``, records its result as ``cancelled`` and
+        recursively cancels descendants. For an ``Input``, transitions it
+        to a terminal ``cancelled`` state (distinct from ``dismissed``).
+        No-op if the handle is already resolved.
+        """
+        get_context().cancel([self])
+
 
 class Input(_Handle[T]):
     """A handle to a requested input, identified by its external ID.
@@ -198,7 +208,3 @@ class Execution(_Handle[T]):
     @property
     def target(self) -> str:
         return self._target
-
-    def cancel(self) -> None:
-        """Cancel this execution."""
-        get_context().cancel_execution(self._execution_id)

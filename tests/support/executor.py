@@ -177,8 +177,12 @@ class ExecutorConnection:
         )
 
     def cancel(self, execution_id, target_execution_id):
-        """Cancel a child execution."""
-        msg = protocol.cancel_execution_request(None, execution_id, target_execution_id)
+        """Cancel a child execution (convenience wrapper over cancel_request)."""
+        msg = protocol.cancel_request(
+            None,
+            execution_id,
+            [protocol.execution_handle(target_execution_id)],
+        )
         return self._request(msg)
 
     def suspend(self, execution_id, execute_after=None):

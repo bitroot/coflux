@@ -288,17 +288,23 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "cancel" ->
-        [execution_id] = message["params"]
+        [handles, from_execution_id] = message["params"]
 
-        case Orchestration.cancel_execution(state.project_id, state.workspace_id, execution_id) do
-          :ok ->
-            {[], state}
+        if is_recognised_execution?(from_execution_id, state) do
+          case Orchestration.cancel(
+                 state.project_id,
+                 handles,
+                 state.workspace_id,
+                 from_execution_id
+               ) do
+            :ok ->
+              {[success_message(message["id"], nil)], state}
 
-          {:error, :workspace_mismatch} ->
-            {[{:close, 4000, "workspace_mismatch"}], nil}
-
-          {:error, :not_found} ->
-            {[], state}
+            {:error, :workspace_not_found} ->
+              {[{:close, 4000, "workspace_mismatch"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
         end
 
       "suspend" ->

@@ -238,10 +238,10 @@ type SuspendParams struct {
 	ExecuteAfter *int64 `json:"execute_after,omitempty"` // timestamp in ms
 }
 
-// CancelExecutionParams for cancel_execution request
-type CancelExecutionParams struct {
-	ExecutionID       string `json:"execution_id"`
-	TargetExecutionID string `json:"target_execution_id"`
+// CancelParams for cancel request
+type CancelParams struct {
+	ExecutionID string         `json:"execution_id"`
+	Handles     []SelectHandle `json:"handles"`
 }
 
 // RegisterGroupParams for register_group notification

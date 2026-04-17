@@ -49,6 +49,7 @@ __all__ = [
     "suspense",
     "suspend",
     "select",
+    "cancel",
     "log_debug",
     "log_info",
     "log_warning",
@@ -122,6 +123,16 @@ def select(
     winner = handles[winner_idx]
     remaining = [h for i, h in enumerate(handles) if i != winner_idx]
     return winner, remaining
+
+
+def cancel(handles: list[Execution | Input]) -> None:
+    """Cancel one or more handles (executions and/or inputs) atomically.
+
+    Executions are cancelled recursively (descendants too). Inputs
+    transition to a terminal ``cancelled`` state, distinct from
+    ``dismissed``. Handles that are already resolved are silently skipped.
+    """
+    get_context().cancel(handles)
 
 
 def suspend(delay: float | dt.timedelta | dt.datetime | None = None) -> None:

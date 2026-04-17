@@ -378,16 +378,16 @@ def submit_input(
     return get_protocol().send_request("submit_input", params)
 
 
-def request_cancel_execution(
+def request_cancel(
     execution_id: str,
-    target_execution_id: str,
+    handles: list[dict[str, str]],
 ) -> int:
-    """Request to cancel another execution."""
+    """Request to cancel one or more handles (executions and/or inputs)."""
     return get_protocol().send_request(
-        "cancel_execution",
+        "cancel",
         {
             "execution_id": execution_id,
-            "target_execution_id": target_execution_id,
+            "handles": handles,
         },
     )
 

@@ -28,8 +28,8 @@ type ExecutionHandler interface {
 	UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error)
 	// Suspend suspends an execution
 	Suspend(ctx context.Context, executionID string, executeAfter *int64) error
-	// CancelExecution cancels another execution
-	CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error
+	// Cancel cancels one or more handles (executions and/or inputs)
+	Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error
 	// RegisterGroup registers a group for organizing child executions
 	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
@@ -258,7 +258,7 @@ loop:
 		case "metric":
 			p.handleMetric(execCtx, executionID, params, logger)
 
-		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob", "submit_input":
+		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input":
 			p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
@@ -539,13 +539,13 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = map[string]any{}
 		}
 
-	case "cancel_execution":
-		var req adapter.CancelExecutionParams
+	case "cancel":
+		var req adapter.CancelParams
 		if err := json.Unmarshal(params, &req); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		if err := p.handler.CancelExecution(ctx, req.ExecutionID, req.TargetExecutionID); err != nil {
+		if err := p.handler.Cancel(ctx, req.ExecutionID, req.Handles); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "cancel_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}

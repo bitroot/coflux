@@ -1101,12 +1101,13 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error {
-	conn, err := w.requireConn()
+func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {
+	conn, err := w.waitForConn(ctx)
 	if err != nil {
 		return err
 	}
-	return conn.Notify("cancel", targetExecutionID)
+	_, err = conn.Request(ctx, "cancel", handles, executionID)
+	return err
 }
 
 func (w *Worker) RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string]*adapter.Value) error {

@@ -150,6 +150,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:cancel_execution, workspace_id, execution_id, access})
   end
 
+  def cancel(project_id, handles, workspace_id, from_execution_id) do
+    call_server(project_id, {:cancel, handles, workspace_id, from_execution_id})
+  end
+
   def rerun_step(project_id, step_id, workspace_id, access \\ nil) do
     call_server(
       project_id,

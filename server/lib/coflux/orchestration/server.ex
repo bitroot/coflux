@@ -1578,6 +1578,26 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call(
+        {:cancel, handles, workspace_external_id, _from_execution_external_id},
+        _from,
+        state
+      ) do
+    case Map.fetch(state.workspace_external_ids, workspace_external_id) do
+      :error ->
+        {:reply, {:error, :workspace_not_found}, state}
+
+      {:ok, workspace_id} ->
+        state =
+          Enum.reduce(handles, state, fn handle, state ->
+            cancel_handle(state, handle, workspace_id)
+          end)
+
+        state = flush_notifications(state)
+        {:reply, :ok, state}
+    end
+  end
+
   def handle_call({:execution_started, _external_execution_id, _metadata}, _from, state) do
     {:reply, :ok, state}
   end
@@ -1828,7 +1848,7 @@ defmodule Coflux.Orchestration.Server do
                 {:resolved, result} = Enum.at(statuses, resolved_index)
 
                 state =
-                  maybe_cancel_remaining_executions(
+                  maybe_cancel_remaining(
                     state,
                     statuses,
                     resolved_index,
@@ -3455,6 +3475,78 @@ defmodule Coflux.Orchestration.Server do
     cancel_descendants(state, execution_id, workspace_id)
   end
 
+  # Dispatch a single handle cancellation. Used by the unified cancel RPC
+  # and by maybe_cancel_remaining on select.
+  defp cancel_handle(state, %{"type" => "execution", "id" => ext_id}, workspace_id) do
+    case resolve_internal_execution_id(state, ext_id) do
+      {:ok, execution_id} ->
+        active_id = resolve_active_execution(state.db, execution_id)
+        do_cancel_execution(state, active_id, workspace_id)
+
+      {:error, :not_found} ->
+        state
+    end
+  end
+
+  defp cancel_handle(state, %{"type" => "input", "id" => ext_id}, _workspace_id) do
+    do_cancel_input(state, ext_id)
+  end
+
+  # Mark an input as cancelled. Parallels dismiss_input but with a distinct
+  # terminal state; notifies select waiters with :cancelled, resumes any
+  # suspended executions, and notifies topic subscribers.
+  defp do_cancel_input(state, input_external_id) do
+    case find_and_copy_input_from_archives(state, input_external_id) do
+      {:ok, nil} ->
+        state
+
+      {:ok,
+       {input_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions, _initial,
+        _requires_tag_set_id, _created_at, _run_id}} ->
+        now = System.system_time(:millisecond)
+
+        case Inputs.record_input_response(
+               state.db,
+               input_id,
+               Inputs.type_cancelled(),
+               nil,
+               now,
+               nil
+             ) do
+          {:ok, true} ->
+            state =
+              notify_select_waiters(state, {:input, input_external_id}, :cancelled)
+
+            state = update_dependencies_on_input(state, input_id)
+
+            {:ok, run_external_id, _input_number} =
+              parse_input_external_id(input_external_id)
+
+            ws_ext_id = workspace_external_id(state, workspace_id)
+
+            response = build_input_response(state.db, input_id)
+
+            state
+            |> notify_listeners(
+              {:run, run_external_id},
+              {:input_response, input_external_id, :cancelled}
+            )
+            |> notify_dependent_runs(input_id, input_external_id, :cancelled, run_external_id)
+            |> notify_listeners(
+              {:inputs, ws_ext_id},
+              {:input_responded, input_external_id, now}
+            )
+            |> notify_listeners(
+              {:input, input_external_id},
+              {:response, response}
+            )
+
+          {:error, :already_responded} ->
+            state
+        end
+    end
+  end
+
   # Cancel all active (unresolved) executions for a step in a workspace.
   defp cancel_active_step_executions(state, step_id, workspace_id) do
     {:ok, active_execution_ids} =
@@ -3941,6 +4033,7 @@ defmodule Coflux.Orchestration.Server do
                     {:ok, nil} -> nil
                     {:ok, {:value, _, _, _}} -> :value
                     {:ok, {:dismissed, _, _}} -> :dismissed
+                    {:ok, {:cancelled, _, _}} -> :cancelled
                   end
 
                 notify_listeners(
@@ -3997,6 +4090,7 @@ defmodule Coflux.Orchestration.Server do
   defp decode_input_response_type(nil), do: nil
   defp decode_input_response_type(1), do: :value
   defp decode_input_response_type(2), do: :dismissed
+  defp decode_input_response_type(3), do: :cancelled
 
   defp build_input_response(db, input_id) do
     case Inputs.get_input_response(db, input_id) do
@@ -4020,6 +4114,15 @@ defmodule Coflux.Orchestration.Server do
           end
 
         %{type: :dismissed, value: nil, created_at: created_at, created_by: principal}
+
+      {:ok, {:cancelled, created_at, created_by_id}} ->
+        principal =
+          case Principals.get_principal(db, created_by_id) do
+            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+            {:ok, nil} -> nil
+          end
+
+        %{type: :cancelled, value: nil, created_at: created_at, created_by: principal}
     end
   end
 
@@ -6455,6 +6558,7 @@ defmodule Coflux.Orchestration.Server do
                 {:ok, nil} -> nil
                 {:ok, {:value, _, _, _}} -> :value
                 {:ok, {:dismissed, _, _}} -> :dismissed
+                {:ok, {:cancelled, _, _}} -> :cancelled
               end
 
             ws_ext_id = workspace_external_id(state, workspace_id)
@@ -6494,16 +6598,20 @@ defmodule Coflux.Orchestration.Server do
 
           {:ok, {:dismissed, _created_at, _created_by}} ->
             {{:ok, {:resolved, :dismissed}}, state}
+
+          {:ok, {:cancelled, _created_at, _created_by}} ->
+            {{:ok, {:resolved, :cancelled}}, state}
         end
     end
   end
 
-  # When cancel_remaining is true and a handle resolves, cancel any
-  # non-winner execution handles. Input handles are left pending.
-  defp maybe_cancel_remaining_executions(state, _statuses, _winner_idx, false, _from_ext_id),
+  # When cancel_remaining is true and a handle resolves, cancel all
+  # non-winner handles (executions via do_cancel_execution, inputs by
+  # marking them cancelled).
+  defp maybe_cancel_remaining(state, _statuses, _winner_idx, false, _from_ext_id),
     do: state
 
-  defp maybe_cancel_remaining_executions(
+  defp maybe_cancel_remaining(
          state,
          statuses,
          winner_idx,
@@ -6520,13 +6628,10 @@ defmodule Coflux.Orchestration.Server do
     |> Enum.reject(fn {_, idx} -> idx == winner_idx end)
     |> Enum.reduce(state, fn
       {{:pending, {:execution, ext_id}, _}, _idx}, state ->
-        case resolve_internal_execution_id(state, ext_id) do
-          {:ok, execution_id} ->
-            do_cancel_execution(state, execution_id, workspace_id)
+        cancel_handle(state, %{"type" => "execution", "id" => ext_id}, workspace_id)
 
-          {:error, :not_found} ->
-            state
-        end
+      {{:pending, {:input, ext_id}, _}, _idx}, state ->
+        cancel_handle(state, %{"type" => "input", "id" => ext_id}, workspace_id)
 
       {_, _}, state ->
         state

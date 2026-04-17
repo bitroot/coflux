@@ -180,13 +180,18 @@ def json_args(*values):
     return [{"type": "inline", "format": "json", "value": v} for v in values]
 
 
-def cancel_execution_request(request_id, execution_id, target_execution_id):
+def cancel_request(request_id, execution_id, handles):
+    """Build a cancel request.
+
+    ``handles`` is a list of handle specs built via
+    ``protocol.execution_handle(id)`` or ``protocol.input_handle(id)``.
+    """
     return {
         "id": request_id,
-        "method": "cancel_execution",
+        "method": "cancel",
         "params": {
             "execution_id": execution_id,
-            "target_execution_id": target_execution_id,
+            "handles": handles,
         },
     }
 

@@ -42,6 +42,12 @@ defmodule Coflux.Store do
   end
 
   def with_snapshot(db, fun) do
+    # SQLite's ROLLBACK TO reverts changes but leaves the savepoint on the
+    # stack — a subsequent RELEASE is required to actually pop it (and
+    # commit the implicit transaction when it's the outermost savepoint).
+    # Missing the RELEASE leaks the implicit transaction, which breaks
+    # any following BEGIN with "cannot start a transaction within a
+    # transaction".
     name = "s#{:erlang.unique_integer([:positive])}"
     :ok = Sqlite3.execute(db, "SAVEPOINT #{name}")
 
@@ -50,6 +56,7 @@ defmodule Coflux.Store do
     rescue
       e ->
         :ok = Sqlite3.execute(db, "ROLLBACK TO #{name}")
+        :ok = Sqlite3.execute(db, "RELEASE #{name}")
         reraise e, __STACKTRACE__
     else
       {:ok, result} ->
@@ -58,6 +65,7 @@ defmodule Coflux.Store do
 
       {:error, reason} ->
         :ok = Sqlite3.execute(db, "ROLLBACK TO #{name}")
+        :ok = Sqlite3.execute(db, "RELEASE #{name}")
         {:error, reason}
     end
   end
