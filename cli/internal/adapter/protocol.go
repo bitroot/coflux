@@ -86,11 +86,13 @@ type ErrorInfo struct {
 	Message string `json:"message"`
 }
 
-// SelectResult represents the outcome of a select call.
-// Status is one of "ok", "error", "cancelled", "dismissed", or "timeout".
-// Winner is set for all statuses except "timeout".
+// SelectResult represents the outcome of a select call where a handle
+// resolved. A nil *SelectResult means the select wait itself expired
+// without any handle resolving.
+// Status is one of "ok", "error", "cancelled", "dismissed", or "timeout"
+// (the last meaning the resolved handle's execution timed out).
 type SelectResult struct {
-	Winner *int         // index into handles; nil when Status == "timeout"
+	Winner *int         // index into handles
 	Status string       // "ok" | "error" | "cancelled" | "dismissed" | "timeout"
 	Value  *Value       // set when Status == "ok"
 	Error  *ErrorDetail // set when Status == "error"

@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import protocol
-from .errors import ExecutionCancelled, InputDismissed, create_execution_error
+from .errors import (
+    ExecutionCancelled,
+    ExecutionTimeout,
+    InputDismissed,
+    create_execution_error,
+)
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
 from .serialization import deserialize_value, serialize_value
 
@@ -50,6 +55,8 @@ def _unwrap_response(
         raise ExecutionCancelled()
     if status == "dismissed":
         raise InputDismissed()
+    if status == "timeout":
+        raise ExecutionTimeout()
     raise RuntimeError(f"Unexpected select status: {status}")
 
 
@@ -165,13 +172,8 @@ class ExecutorContext:
         )
         response = self._wait_response(request_id)
         if response is None:
-            # Should not happen with the new protocol (timeouts send an
-            # explicit {"status": "timeout"} response). Treat as timeout for
-            # defensiveness.
-            return None
-
-        status = response.get("status")
-        if status == "timeout":
+            # Server signals a wait timeout (nothing resolved before the
+            # timeout expired) by returning a null result.
             return None
 
         winner = response.get("winner")
@@ -192,11 +194,10 @@ class ExecutorContext:
         key = _handle_key(handle)
         if key not in self._resolved:
             if self.select([handle]) is None:
-                # A single-handle suspend=True call should always return a
-                # response (or the process is killed). None would indicate a
-                # timeout, which isn't possible here without a suspense scope;
-                # callers inside a suspense scope should use cf.select directly.
-                raise RuntimeError("Handle resolution timed out")
+                # The wait expired before the handle resolved. Only reachable
+                # from inside a `cf.suspense(timeout=...)` scope; otherwise the
+                # server either resolves or kills the process.
+                raise TimeoutError("timed out waiting for handle to resolve")
         return _unwrap_response(self._resolved[key], handle._parser)
 
     def poll_handle(

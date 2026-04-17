@@ -122,7 +122,7 @@ def select(
 
     winner_idx = get_context().select(list(handles), cancel_remaining=cancel_remaining)
     if winner_idx is None:
-        raise ExecutionTimeout()
+        raise TimeoutError("timed out waiting for any handle to resolve")
 
     winner = handles[winner_idx]
     remaining = [h for i, h in enumerate(handles) if i != winner_idx]

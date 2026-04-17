@@ -345,7 +345,7 @@ defmodule Coflux.Handlers.Worker do
               {[success_message(message["id"], compose_select_result(:timeout))], state}
 
             {:ok, :suspended} ->
-              # Respond with timeout status to unblock the pending RPC before
+              # Respond with a null result to unblock the pending RPC before
               # the separate :abort command terminates the executor. The
               # worker kills the process regardless; sending this response
               # just clears the pending request so the dispatch loop can exit.
@@ -640,16 +640,17 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  # Compose a select result for the CLI. Returns a JSON-compatible map.
+  # Compose a select result for the CLI. Returns a JSON-compatible map,
+  # or `nil` when the select wait itself expired (no handle resolved).
   # Payload is one of:
-  #   :timeout
+  #   :timeout                       (wait expired; `nil` on the wire)
   #   {handle_index, result_detail}
   #     where result_detail is one of:
   #       {:value, value}
   #       {:error, type, message, frames, retry_id, retryable?}
   #       :cancelled | :dismissed | {:abandoned, nil} | {:timeout, nil} | :suspended
   defp compose_select_result(:timeout) do
-    %{"status" => "timeout"}
+    nil
   end
 
   defp compose_select_result({idx, detail}) do
