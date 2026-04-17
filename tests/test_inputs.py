@@ -173,8 +173,12 @@ def test_input_suspends_execution(worker):
 
         # Resolve with suspend — the worker will suspend and kill this executor.
         # We send the request but the connection closes before we get a response.
-        msg = protocol.resolve_input_request(
-            None, input_id, ex.execution_id, timeout_ms=0, suspend=True
+        msg = protocol.select_request(
+            None,
+            ex.execution_id,
+            [protocol.input_handle(input_id)],
+            timeout_ms=0,
+            suspend=True,
         )
         msg["id"] = 999
         ex.conn.send(msg)

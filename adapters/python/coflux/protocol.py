@@ -217,21 +217,33 @@ def request_submit_execution(
     return get_protocol().send_request("submit_execution", params)
 
 
-def request_resolve_reference(
+def request_select(
     execution_id: str,
-    target_execution_id: str,
+    handles: list[dict[str, str]],
     timeout_ms: int | None = None,
     suspend: bool = True,
+    cancel_remaining: bool = False,
 ) -> int:
-    """Request to resolve a reference (get result of another execution)."""
+    """Request to wait for the first of one or more handles to resolve.
+
+    Args:
+        execution_id: The calling execution.
+        handles: List of handle dicts: ``{"type": "execution"|"input", "id": "..."}``.
+        timeout_ms: Maximum wait time in ms. None means no timeout.
+        suspend: If True, the server may suspend the caller while waiting.
+        cancel_remaining: If True, cancel non-winner execution handles atomically
+            once a handle resolves.
+    """
     params: dict[str, Any] = {
         "execution_id": execution_id,
-        "target_execution_id": target_execution_id,
+        "handles": handles,
+        "suspend": suspend,
     }
     if timeout_ms is not None:
         params["timeout_ms"] = timeout_ms
-    params["suspend"] = suspend
-    return get_protocol().send_request("resolve_reference", params)
+    if cancel_remaining:
+        params["cancel_remaining"] = cancel_remaining
+    return get_protocol().send_request("select", params)
 
 
 def request_persist_asset(
@@ -364,30 +376,6 @@ def submit_input(
     if requires is not None:
         params["requires"] = requires
     return get_protocol().send_request("submit_input", params)
-
-
-def resolve_input(
-    input_external_id: str,
-    from_execution_id: str,
-    timeout_ms: int | None = None,
-    suspend: bool = True,
-) -> int:
-    """Resolve an input by external ID, waiting for its response.
-
-    Args:
-        input_external_id: The input to resolve.
-        from_execution_id: The execution waiting for the response.
-        timeout_ms: Poll timeout in milliseconds.
-        suspend: Whether to suspend if response not available.
-    """
-    params: dict[str, Any] = {
-        "input_external_id": input_external_id,
-        "from_execution_id": from_execution_id,
-    }
-    if timeout_ms is not None:
-        params["timeout_ms"] = timeout_ms
-    params["suspend"] = suspend
-    return get_protocol().send_request("resolve_input", params)
 
 
 def request_cancel_execution(

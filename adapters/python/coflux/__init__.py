@@ -48,6 +48,7 @@ __all__ = [
     "group",
     "suspense",
     "suspend",
+    "select",
     "log_debug",
     "log_info",
     "log_warning",
@@ -85,6 +86,42 @@ def suspense(timeout: float | None = None):
             result = slow_task.submit().result()  # Will timeout after 30s
     """
     return get_context().suspense(timeout)
+
+
+def select(
+    handles: list[Execution | Input],
+    *,
+    cancel_remaining: bool = False,
+) -> tuple[Execution | Input, list[Execution | Input]]:
+    """Wait for the first of one or more handles (executions/inputs) to resolve.
+
+    Args:
+        handles: List of Execution and/or Input objects. Must be non-empty.
+        cancel_remaining: If True, cancel non-winner execution handles
+            atomically once a handle resolves. Input handles are left pending.
+
+    Returns:
+        Tuple of ``(winner, remaining)`` where ``winner`` is the first handle
+        to resolve (call ``.result()`` to get its value or raise its error),
+        and ``remaining`` is the list of handles that did not win, in input
+        order.
+
+    Example:
+        winner, remaining = cf.select([a.submit(), b.submit(), c.submit()])
+        value = winner.result()
+
+    Timeouts are taken from an enclosing ``cf.suspense(timeout=...)`` scope.
+    """
+    if not handles:
+        raise ValueError("select requires at least one handle")
+
+    winner_idx = get_context().select(handles, cancel_remaining=cancel_remaining)
+    if winner_idx is None:
+        raise ExecutionTimeout()
+
+    winner = handles[winner_idx]
+    remaining = [h for i, h in enumerate(handles) if i != winner_idx]
+    return winner, remaining
 
 
 def suspend(delay: float | dt.timedelta | dt.datetime | None = None) -> None:

@@ -177,10 +177,18 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:record_result, execution_id, result})
   end
 
-  def get_result(project_id, execution_id, from_execution_id, timeout_ms, suspend, request_id) do
+  def select(
+        project_id,
+        handles,
+        from_execution_id,
+        timeout_ms,
+        suspend,
+        cancel_remaining,
+        request_id
+      ) do
     call_server(
       project_id,
-      {:get_result, execution_id, from_execution_id, timeout_ms, suspend, request_id}
+      {:select, handles, from_execution_id, timeout_ms, suspend, cancel_remaining, request_id}
     )
   end
 
@@ -246,20 +254,6 @@ defmodule Coflux.Orchestration do
       project_id,
       {:submit_input, execution_id, template, placeholders, schema_json, key, title, actions,
        initial, requires}
-    )
-  end
-
-  def resolve_input(
-        project_id,
-        input_external_id,
-        from_execution_id,
-        timeout_ms,
-        suspend,
-        request_id
-      ) do
-    call_server(
-      project_id,
-      {:resolve_input, input_external_id, from_execution_id, timeout_ms, suspend, request_id}
     )
   end
 

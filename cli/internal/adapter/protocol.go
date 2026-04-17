@@ -86,14 +86,20 @@ type ErrorInfo struct {
 	Message string `json:"message"`
 }
 
-// ResolveResult represents the outcome of resolving a reference.
-// A nil ResolveResult (with nil error) means no result is available yet (poll timeout).
-// Status is one of "value", "error", "cancelled", "timeout", or "suspended".
-type ResolveResult struct {
-	Status       string
-	Value        *Value // set when Status == "value"
-	ErrorType    string // set when Status == "error"
-	ErrorMessage string // set when Status == "error"
+// SelectResult represents the outcome of a select call.
+// Status is one of "ok", "error", "cancelled", "dismissed", or "timeout".
+// Winner is set for all statuses except "timeout".
+type SelectResult struct {
+	Winner *int         // index into handles; nil when Status == "timeout"
+	Status string       // "ok" | "error" | "cancelled" | "dismissed" | "timeout"
+	Value  *Value       // set when Status == "ok"
+	Error  *ErrorDetail // set when Status == "error"
+}
+
+// SelectHandle identifies a single handle in a select call.
+type SelectHandle struct {
+	Type string `json:"type"` // "execution" or "input"
+	ID   string `json:"id"`
 }
 
 // ReadyMessage is sent by executor when it's ready for work
@@ -193,12 +199,13 @@ type SubmitExecutionResult struct {
 	Reference []any `json:"reference"`
 }
 
-// ResolveReferenceParams for resolve_reference request
-type ResolveReferenceParams struct {
-	ExecutionID       string `json:"execution_id"`
-	TargetExecutionID string `json:"target_execution_id"`
-	TimeoutMs         *int64 `json:"timeout_ms,omitempty"`
-	Suspend           *bool  `json:"suspend,omitempty"`
+// SelectParams for select request
+type SelectParams struct {
+	ExecutionID     string         `json:"execution_id"`
+	Handles         []SelectHandle `json:"handles"`
+	TimeoutMs       *int64         `json:"timeout_ms,omitempty"`
+	Suspend         bool           `json:"suspend"`
+	CancelRemaining bool           `json:"cancel_remaining,omitempty"`
 }
 
 // PersistAssetParams for persist_asset request
@@ -268,14 +275,6 @@ type SubmitInputParams struct {
 	Actions      []string            `json:"actions,omitempty"` // [respond_label, dismiss_label]
 	Initial      any                 `json:"initial,omitempty"` // Plain JSON initial values
 	Requires     map[string][]string `json:"requires,omitempty"`
-}
-
-// ResolveInputParams for resolve_input request
-type ResolveInputParams struct {
-	InputExternalID string `json:"input_external_id"`
-	FromExecutionID string `json:"from_execution_id"`
-	TimeoutMs       *int64 `json:"timeout_ms,omitempty"`
-	Suspend         *bool  `json:"suspend,omitempty"`
 }
 
 // ParseMessage parses a JSON message from the executor

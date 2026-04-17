@@ -845,17 +845,23 @@ func (w *Worker) processReferences(refs [][]any) ([]any, error) {
 	return result, nil
 }
 
-func (w *Worker) ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64, suspend *bool) (*adapter.ResolveResult, error) {
+func (w *Worker) Select(ctx context.Context, params *adapter.SelectParams) (*adapter.SelectResult, error) {
 	var result any
 	for {
 		conn, err := w.waitForConn(ctx)
 		if err != nil {
 			return nil, err
 		}
-		result, err = conn.Request(ctx, "get_result", targetExecutionID, executionID, timeoutMs, suspend)
+		result, err = conn.Request(ctx, "select",
+			params.Handles,
+			params.ExecutionID,
+			params.TimeoutMs,
+			params.Suspend,
+			params.CancelRemaining,
+		)
 		if err != nil {
 			if isConnectionError(err) {
-				w.logger.Debug("retrying get_result after reconnect", "execution", targetExecutionID)
+				w.logger.Debug("retrying select after reconnect")
 				continue
 			}
 			return nil, err
@@ -863,85 +869,76 @@ func (w *Worker) ResolveReference(ctx context.Context, executionID string, targe
 		break
 	}
 
-	// nil result means the wait expired with no result available (poll timeout)
 	if result == nil {
 		return nil, nil
 	}
 
-	// Result is ["value", value_tuple] or ["error", ...] or ["cancelled"] or ["suspended"]
-	if arr, ok := result.([]any); ok && len(arr) >= 1 {
-		resultType := getString(arr[0])
-		switch resultType {
-		case "value":
-			if len(arr) < 2 {
-				return nil, fmt.Errorf("value result missing value tuple: %v", arr)
-			}
-			valueArr, ok := arr[1].([]any)
-			if !ok {
-				return nil, fmt.Errorf("value tuple is not an array: %T", arr[1])
-			}
-			value, err := api.ParseValue(valueArr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse value: %w", err)
-			}
-			adapterRefs, err := w.refsToAdapter(value.References)
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert references: %w", err)
-			}
-			// Convert to adapter value
-			switch value.Type {
-			case api.ValueTypeRaw:
-				return &adapter.ResolveResult{
-					Status: "value",
-					Value: &adapter.Value{
-						Type:       "inline",
-						Format:     "json",
-						Value:      value.Content,
-						References: adapterRefs,
-					},
-				}, nil
-			case api.ValueTypeBlob:
-				path, err := w.blobs.Download(value.Key)
-				if err != nil {
-					return nil, err
-				}
-				return &adapter.ResolveResult{
-					Status: "value",
-					Value: &adapter.Value{
-						Type:       "file",
-						Format:     "json",
-						Path:       path,
-						References: adapterRefs,
-					},
-				}, nil
-			default:
-				return nil, fmt.Errorf("unknown value type: %s", value.Type)
-			}
-		case "error":
-			var errType, errMsg string
-			if len(arr) >= 2 {
-				errType, _ = arr[1].(string)
-			}
-			if len(arr) >= 3 {
-				errMsg, _ = arr[2].(string)
-			}
-			return &adapter.ResolveResult{
-				Status:       "error",
-				ErrorType:    errType,
-				ErrorMessage: errMsg,
-			}, nil
-		case "cancelled":
-			return &adapter.ResolveResult{Status: "cancelled"}, nil
-		case "dismissed":
-			return &adapter.ResolveResult{Status: "dismissed"}, nil
-		case "timeout":
-			return &adapter.ResolveResult{Status: "timeout"}, nil
-		case "suspended":
-			return &adapter.ResolveResult{Status: "suspended"}, nil
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected select result format: %T (%v)", result, result)
+	}
+
+	status := getString(resultMap["status"])
+	sel := &adapter.SelectResult{Status: status}
+
+	if raw, ok := resultMap["winner"]; ok {
+		if f, ok := raw.(float64); ok {
+			idx := int(f)
+			sel.Winner = &idx
 		}
 	}
 
-	return nil, fmt.Errorf("unexpected result format: %T (%v)", result, result)
+	switch status {
+	case "ok":
+		valueArr, ok := resultMap["value"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("ok status missing value tuple: %v", resultMap)
+		}
+		value, err := api.ParseValue(valueArr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse value: %w", err)
+		}
+		adapterRefs, err := w.refsToAdapter(value.References)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert references: %w", err)
+		}
+		switch value.Type {
+		case api.ValueTypeRaw:
+			sel.Value = &adapter.Value{
+				Type:       "inline",
+				Format:     "json",
+				Value:      value.Content,
+				References: adapterRefs,
+			}
+		case api.ValueTypeBlob:
+			path, err := w.blobs.Download(value.Key)
+			if err != nil {
+				return nil, err
+			}
+			sel.Value = &adapter.Value{
+				Type:       "file",
+				Format:     "json",
+				Path:       path,
+				References: adapterRefs,
+			}
+		default:
+			return nil, fmt.Errorf("unknown value type: %s", value.Type)
+		}
+	case "error":
+		if errRaw, ok := resultMap["error"].(map[string]any); ok {
+			sel.Error = &adapter.ErrorDetail{
+				Type:      getString(errRaw["type"]),
+				Message:   getString(errRaw["message"]),
+				Traceback: getString(errRaw["traceback"]),
+			}
+		}
+	case "cancelled", "dismissed", "timeout":
+		// status-only
+	default:
+		return nil, fmt.Errorf("unknown select status: %s", status)
+	}
+
+	return sel, nil
 }
 
 func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error) {
@@ -987,86 +984,6 @@ func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputPar
 		return "", fmt.Errorf("unexpected submit_input result: %T (%v)", result, result)
 	}
 	return inputExternalID, nil
-}
-
-func (w *Worker) ResolveInput(ctx context.Context, params *adapter.ResolveInputParams) (*adapter.ResolveResult, error) {
-	suspend := true
-	if params.Suspend != nil {
-		suspend = *params.Suspend
-	}
-
-	var result any
-	for {
-		conn, err := w.waitForConn(ctx)
-		if err != nil {
-			return nil, err
-		}
-		result, err = conn.Request(ctx, "resolve_input",
-			params.InputExternalID,
-			params.FromExecutionID,
-			params.TimeoutMs,
-			suspend,
-		)
-		if err != nil {
-			if isConnectionError(err) {
-				w.logger.Debug("retrying resolve_input after reconnect", "input", params.InputExternalID)
-				continue
-			}
-			return nil, err
-		}
-		break
-	}
-
-	// nil result means the wait expired with no result available (poll timeout)
-	if result == nil {
-		return nil, nil
-	}
-
-	// Result could be ["suspended"], ["dismissed"], ["value", json_value], etc.
-	if arr, ok := result.([]any); ok && len(arr) >= 1 {
-		resultType := getString(arr[0])
-		switch resultType {
-		case "value":
-			if len(arr) < 2 {
-				return nil, fmt.Errorf("value result missing value: %v", arr)
-			}
-			if arr[1] == nil {
-				return &adapter.ResolveResult{
-					Status: "value",
-					Value:  nil,
-				}, nil
-			}
-			return &adapter.ResolveResult{
-				Status: "value",
-				Value: &adapter.Value{
-					Type:   "inline",
-					Format: "json",
-					Value:  arr[1],
-				},
-			}, nil
-		case "error":
-			var errType, errMsg string
-			if len(arr) >= 2 {
-				errType, _ = arr[1].(string)
-			}
-			if len(arr) >= 3 {
-				errMsg, _ = arr[2].(string)
-			}
-			return &adapter.ResolveResult{
-				Status:       "error",
-				ErrorType:    errType,
-				ErrorMessage: errMsg,
-			}, nil
-		case "cancelled":
-			return &adapter.ResolveResult{Status: "cancelled"}, nil
-		case "dismissed":
-			return &adapter.ResolveResult{Status: "dismissed"}, nil
-		case "suspended":
-			return &adapter.ResolveResult{Status: "suspended"}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("unexpected result format: %T (%v)", result, result)
 }
 
 func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error) {

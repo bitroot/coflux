@@ -9,17 +9,49 @@ import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from . import protocol
-from .errors import (
-    ExecutionCancelled,
-    ExecutionTimeout,
-    InputDismissed,
-    create_execution_error,
-)
-from .models import Asset, AssetEntry, AssetMetadata
+from .errors import ExecutionCancelled, InputDismissed, create_execution_error
+from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
 from .serialization import deserialize_value, serialize_value
+
+
+def _handle_key(handle: Any) -> tuple[str, str]:
+    """Composite cache key for an Execution/Input handle."""
+    if isinstance(handle, Execution):
+        return ("execution", handle.id)
+    if isinstance(handle, Input):
+        return ("input", handle.id)
+    raise TypeError(f"Unsupported select handle type: {type(handle).__name__}")
+
+
+def _unwrap_response(
+    response: dict[str, Any],
+    parser: Callable[[Any], Any] | None = None,
+) -> Any:
+    """Convert a select winner response into a return value or raised error.
+
+    If ``parser`` is given, it is applied to the deserialized value before
+    returning. Error/cancelled/dismissed statuses raise regardless of
+    whether a parser is supplied.
+    """
+    status = response.get("status")
+    if status == "ok":
+        value = deserialize_value(response["value"])
+        return parser(value) if parser is not None else value
+    if status == "error":
+        error = response.get("error") or {}
+        raise create_execution_error(
+            error.get("type", ""),
+            error.get("message", ""),
+        )
+    if status == "cancelled":
+        raise ExecutionCancelled()
+    if status == "dismissed":
+        raise InputDismissed()
+    raise RuntimeError(f"Unexpected select status: {status}")
+
 
 # Context variable for group tracking
 _group_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
@@ -42,6 +74,11 @@ class ExecutorContext:
         self._defined_metrics: dict[str, dict] = {}
         self._defined_scales: dict[str, dict] = {}
         self._defined_groups: dict[str, dict] = {}
+        # Cache of resolved select responses keyed by (type, id). Populated
+        # by select() when a handle resolves; consumed by resolve_handle /
+        # poll_handle to avoid a round-trip for handles that have already
+        # been seen in this context's lifetime.
+        self._resolved: dict[tuple[str, str], dict[str, Any]] = {}
 
     def submit_execution(
         self,
@@ -86,66 +123,100 @@ class ExecutorContext:
         )
         return self._wait_response(request_id)
 
-    def resolve_execution(self, target_execution_id: str) -> Any:
-        """Resolve an execution by ID and deserialize the result."""
-        timeout = _timeout.get()
-        timeout_ms = int(timeout * 1000) if timeout is not None else None
-        request_id = protocol.request_resolve_reference(
-            self.execution_id,
-            target_execution_id,
-            timeout_ms=timeout_ms,
-        )
-        value = self._wait_response(request_id)
-        status = value.get("status")
-        if status == "error":
-            raise create_execution_error(
-                value.get("error_type", ""),
-                value.get("error_message", ""),
-            )
-        if status == "cancelled":
-            raise ExecutionCancelled()
-        if status == "timeout":
-            raise ExecutionTimeout()
-        if status == "suspended":
-            # The server has suspended this execution and will abort us.
-            # Block until the CLI kills this process.
-            while protocol.receive_message() is not None:
-                pass
-            raise SystemExit(0)
-        if status is not None:
-            raise RuntimeError(f"Unexpected resolve status: {status}")
-        return deserialize_value(value)
-
-    def poll_execution(
+    def select(
         self,
-        target_execution_id: str,
+        handles: list[Any],
+        *,
+        suspend: bool = True,
+        cancel_remaining: bool = False,
         timeout_ms: int | None = None,
-        default: Any = None,
-    ) -> Any:
-        """Poll for an execution result without suspending.
+    ) -> int | None:
+        """Wait for the first of one or more handles to resolve.
 
-        Returns the deserialized result if available, or `default` if not ready.
+        On success, the winner's response is stored in this context's
+        resolve cache so subsequent ``.result()`` / ``.poll()`` calls on the
+        handle can return without a round-trip.
+
+        Args:
+            handles: List of Execution or Input objects.
+            suspend: Whether to allow suspension while waiting.
+            cancel_remaining: If True, cancel non-winner execution handles.
+            timeout_ms: Optional wait timeout. If None, falls back to the
+                current ``cf.suspense`` timeout context var.
+
+        Returns:
+            The index in ``handles`` of the handle that resolved, or
+            ``None`` on timeout.
         """
-        request_id = protocol.request_resolve_reference(
+        if not handles:
+            raise ValueError("select requires at least one handle")
+
+        if timeout_ms is None:
+            timeout = _timeout.get()
+            if timeout is not None:
+                timeout_ms = int(timeout * 1000)
+
+        request_id = protocol.request_select(
             self.execution_id,
-            target_execution_id,
-            timeout_ms=timeout_ms or 0,
-            suspend=False,
+            [{"type": k, "id": i} for k, i in map(_handle_key, handles)],
+            timeout_ms=timeout_ms,
+            suspend=suspend,
+            cancel_remaining=cancel_remaining,
         )
-        value = self._wait_response(request_id)
-        if value is None:
-            return default
-        status = value.get("status")
-        if status == "error":
-            raise create_execution_error(
-                value.get("error_type", ""),
-                value.get("error_message", ""),
-            )
-        if status == "cancelled":
-            raise ExecutionCancelled()
-        if status is not None:
-            raise RuntimeError(f"Unexpected poll status: {status}")
-        return deserialize_value(value)
+        response = self._wait_response(request_id)
+        if response is None:
+            # Should not happen with the new protocol (timeouts send an
+            # explicit {"status": "timeout"} response). Treat as timeout for
+            # defensiveness.
+            return None
+
+        status = response.get("status")
+        if status == "timeout":
+            return None
+
+        winner = response.get("winner")
+        if winner is None:
+            raise RuntimeError(f"Unexpected select response: {response}")
+
+        self._resolved[_handle_key(handles[winner])] = response
+        return winner
+
+    def resolve_handle(self, handle: Any) -> Any:
+        """Block until ``handle`` resolves and return its value (or raise).
+
+        Uses this context's resolve cache if ``cf.select`` has already seen
+        the handle; otherwise issues a single-handle ``select`` call. If
+        the handle has a parser (e.g. an ``Input[Model]``), it is applied
+        to the deserialized value.
+        """
+        key = _handle_key(handle)
+        if key not in self._resolved:
+            if self.select([handle]) is None:
+                # A single-handle suspend=True call should always return a
+                # response (or the process is killed). None would indicate a
+                # timeout, which isn't possible here without a suspense scope;
+                # callers inside a suspense scope should use cf.select directly.
+                raise RuntimeError("Handle resolution timed out")
+        return _unwrap_response(self._resolved[key], handle._parser)
+
+    def poll_handle(
+        self,
+        handle: Any,
+        timeout: float | None,
+        default: Any,
+    ) -> Any:
+        """Non-suspending resolve: returns ``default`` if the handle isn't ready.
+
+        If the handle resolves, applies its parser (if any) to the value.
+        ``default`` is returned as-is when the handle isn't ready; no parser
+        is applied to it.
+        """
+        key = _handle_key(handle)
+        if key not in self._resolved:
+            timeout_ms = int(timeout * 1000) if timeout else 0
+            if self.select([handle], suspend=False, timeout_ms=timeout_ms) is None:
+                return default
+        return _unwrap_response(self._resolved[key], handle._parser)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
@@ -339,73 +410,6 @@ class ExecutorContext:
         )
         result = self._wait_response(request_id)
         return result["input_id"]
-
-    def resolve_input(self, input_external_id: str) -> Any:
-        """Resolve an input by external ID, blocking until a response is available.
-
-        Records a dependency and waits for the response. If no response is
-        available, the server suspends this execution.
-        """
-        timeout = _timeout.get()
-        timeout_ms = int(timeout * 1000) if timeout is not None else None
-        request_id = protocol.resolve_input(
-            input_external_id,
-            self.execution_id,
-            timeout_ms=timeout_ms,
-            suspend=True,
-        )
-        value = self._wait_response(request_id)
-        return self._handle_input_result(value)
-
-    def poll_input(
-        self,
-        input_external_id: str,
-        timeout_ms: int | None = None,
-        default: Any = None,
-    ) -> Any:
-        """Poll for an input response without suspending."""
-        request_id = protocol.resolve_input(
-            input_external_id,
-            self.execution_id,
-            timeout_ms=timeout_ms or 0,
-            suspend=False,
-        )
-        value = self._wait_response(request_id)
-        if value is None:
-            return default
-        status = value.get("status") if isinstance(value, dict) else None
-        if status == "error":
-            raise create_execution_error(
-                value.get("error_type", ""),
-                value.get("error_message", ""),
-            )
-        if status == "dismissed":
-            raise InputDismissed()
-        if status is not None:
-            raise RuntimeError(f"Unexpected poll status: {status}")
-        return deserialize_value(value)
-
-    def _handle_input_result(self, value: Any) -> Any:
-        """Handle the response from a resolve_input RPC."""
-        if value is None:
-            return None
-        status = value.get("status") if isinstance(value, dict) else None
-        if status == "error":
-            raise create_execution_error(
-                value.get("error_type", ""),
-                value.get("error_message", ""),
-            )
-        if status == "dismissed":
-            raise InputDismissed()
-        if status == "timeout":
-            raise ExecutionTimeout()
-        if status == "suspended":
-            while protocol.receive_message() is not None:
-                pass
-            raise SystemExit(0)
-        if status is not None:
-            raise RuntimeError(f"Unexpected input status: {status}")
-        return deserialize_value(value)
 
     def log(self, level: int, message: str) -> None:
         """Send a simple log message (used for stdout/stderr capture).

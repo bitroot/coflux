@@ -103,20 +103,40 @@ def submit_execution_request(
     return {"id": request_id, "method": "submit_execution", "params": params}
 
 
-def resolve_reference_request(request_id, execution_id, target_execution_id, timeout_ms=None, suspend=None):
+def select_request(
+    request_id,
+    execution_id,
+    handles,
+    timeout_ms=None,
+    suspend=True,
+    cancel_remaining=False,
+):
+    """Build a select request.
+
+    handles is a list of dicts like ``{"type": "execution"|"input", "id": "..."}``.
+    """
     params = {
         "execution_id": execution_id,
-        "target_execution_id": target_execution_id,
+        "handles": handles,
+        "suspend": suspend,
     }
     if timeout_ms is not None:
         params["timeout_ms"] = timeout_ms
-    if suspend is not None:
-        params["suspend"] = suspend
+    if cancel_remaining:
+        params["cancel_remaining"] = cancel_remaining
     return {
         "id": request_id,
-        "method": "resolve_reference",
+        "method": "select",
         "params": params,
     }
+
+
+def execution_handle(execution_id):
+    return {"type": "execution", "id": execution_id}
+
+
+def input_handle(input_id):
+    return {"type": "input", "id": input_id}
 
 
 _LEVEL_MAP = {
@@ -236,19 +256,3 @@ def submit_input_request(
     return {"id": request_id, "method": "submit_input", "params": params}
 
 
-def resolve_input_request(
-    request_id,
-    input_external_id,
-    from_execution_id,
-    timeout_ms=None,
-    suspend=None,
-):
-    params = {
-        "input_external_id": input_external_id,
-        "from_execution_id": from_execution_id,
-    }
-    if timeout_ms is not None:
-        params["timeout_ms"] = timeout_ms
-    if suspend is not None:
-        params["suspend"] = suspend
-    return {"id": request_id, "method": "resolve_input", "params": params}
