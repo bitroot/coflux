@@ -11,14 +11,21 @@ import datetime as dt
 import typing as t
 from pathlib import Path
 
-from .prompt import Prompt
 from ._version import __version__
-from .decorators import task, workflow, stub
-from .target import Cache, Defer, Retries
-from .errors import ExecutionCancelled, ExecutionError, ExecutionTimeout, InputDismissed
+from .decorators import stub, task, workflow
+from .errors import (
+    ExecutionAbandoned,
+    ExecutionCancelled,
+    ExecutionError,
+    ExecutionTerminated,
+    ExecutionTimeout,
+    InputDismissed,
+)
 from .metric import Metric, MetricGroup, MetricScale, progress
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, ModelSchema
+from .prompt import Prompt
 from .state import get_context
+from .target import Cache, Defer, Retries
 
 __all__ = [
     # Version
@@ -30,8 +37,10 @@ __all__ = [
     # Classes
     "Execution",
     "ExecutionError",
+    "ExecutionTerminated",
     "ExecutionCancelled",
     "ExecutionTimeout",
+    "ExecutionAbandoned",
     "InputDismissed",
     "Input",
     "ModelSchema",

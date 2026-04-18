@@ -679,10 +679,7 @@ defmodule Coflux.Handlers.Worker do
         Map.put(base, "status", "dismissed")
 
       {:abandoned, _} ->
-        Map.merge(base, %{
-          "status" => "error",
-          "error" => compose_error("Abandoned", "Execution abandoned", [])
-        })
+        Map.put(base, "status", "abandoned")
 
       {:timeout, _} ->
         Map.put(base, "status", "timeout")

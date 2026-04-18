@@ -22,17 +22,46 @@ class ExecutionError(Exception):
         super().__init__(message)
 
 
-class ExecutionCancelled(Exception):
+class ExecutionTerminated(Exception):
+    """Base class for orchestration-initiated terminations.
+
+    Distinct from ExecutionError, which wraps a user exception raised by
+    the dependency's own code. Subclasses here represent reasons the
+    server decided the dependency would not complete normally (cancelled,
+    timed out, abandoned, crashed).
+
+    Catch ExecutionTerminated to handle any of these uniformly::
+
+        except ExecutionTerminated:
+            # any server-initiated termination
+            ...
+
+    Or catch specific subclasses to distinguish causes.
+    """
+
+
+class ExecutionCancelled(ExecutionTerminated):
     """Raised when a child execution was cancelled."""
 
     def __init__(self, message: str = "execution was cancelled"):
         super().__init__(message)
 
 
-class ExecutionTimeout(Exception):
+class ExecutionTimeout(ExecutionTerminated):
     """Raised when a child execution timed out."""
 
     def __init__(self, message: str = "execution timed out"):
+        super().__init__(message)
+
+
+class ExecutionAbandoned(ExecutionTerminated):
+    """Raised when a child execution was abandoned.
+
+    The server gave up on the execution — typically because the worker
+    session expired (heartbeat missed) or the session was removed.
+    """
+
+    def __init__(self, message: str = "execution was abandoned"):
         super().__init__(message)
 
 

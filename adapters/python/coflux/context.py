@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterator
 
 from . import protocol
 from .errors import (
+    ExecutionAbandoned,
     ExecutionCancelled,
     ExecutionTimeout,
     InputDismissed,
@@ -57,6 +58,8 @@ def _unwrap_response(
         raise InputDismissed()
     if status == "timeout":
         raise ExecutionTimeout()
+    if status == "abandoned":
+        raise ExecutionAbandoned()
     raise RuntimeError(f"Unexpected select status: {status}")
 
 
