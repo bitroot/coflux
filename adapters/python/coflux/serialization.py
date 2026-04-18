@@ -7,6 +7,7 @@ import collections
 import datetime
 import decimal
 import importlib
+import inspect
 import io
 import json
 import pickle
@@ -42,6 +43,7 @@ def _write_temp_file(data: bytes) -> str:
 def _encode_value(
     value: Any,
     write_temp_file: Callable[[bytes], str] = _write_temp_file,
+    on_generator: Callable[[Any], tuple[str, int]] | None = None,
 ) -> tuple[Any, list[list[Any]]]:
     """Encode a Python value using the custom JSON value format.
 
@@ -53,6 +55,10 @@ def _encode_value(
         value: The Python value to encode.
         write_temp_file: Callable that writes bytes to a temp file and returns
             the path. Used for pickle fragment references.
+        on_generator: Callback invoked for each generator encountered. Should
+            register the generator (spawn its driver) and return the
+            `(execution_id, sequence)` identifying the stream. If None,
+            encountering a generator raises TypeError.
 
     Returns:
         Tuple of (data, references) where data is JSON-serializable and
@@ -63,6 +69,22 @@ def _encode_value(
     def _encode(v: Any) -> Any:
         if v is None or isinstance(v, (str, bool, int, float)):
             return v
+        elif inspect.isgenerator(v):
+            if on_generator is None:
+                raise TypeError(
+                    "Cannot serialize a generator: no stream driver is active."
+                )
+            execution_id, sequence = on_generator(v)
+            return {
+                "type": "stream",
+                "execution_id": execution_id,
+                "sequence": sequence,
+            }
+        elif inspect.isasyncgen(v):
+            raise TypeError(
+                "Async generators aren't supported yet — use a sync generator "
+                "(def + yield) for now."
+            )
         elif isinstance(v, list):
             return [_encode(x) for x in v]
         elif isinstance(v, dict):
@@ -155,7 +177,10 @@ def _encode_value(
     return data, references
 
 
-def serialize_value(value: Any) -> dict[str, Any]:
+def serialize_value(
+    value: Any,
+    on_generator: Callable[[Any], tuple[str, int]] | None = None,
+) -> dict[str, Any]:
     """Serialize a result value to the protocol format.
 
     Uses the custom JSON value encoding (dict/set/tuple types, fragment refs
@@ -163,11 +188,13 @@ def serialize_value(value: Any) -> dict[str, Any]:
 
     Args:
         value: The Python value to serialize.
+        on_generator: Optional callback for generator objects. See
+            `_encode_value` for the contract. Without it, generators raise.
 
     Returns:
         Serialized value dict.
     """
-    data, references = _encode_value(value)
+    data, references = _encode_value(value, on_generator=on_generator)
     encoded = json.dumps(data, separators=(",", ":")).encode()
 
     if len(encoded) > TRANSFER_THRESHOLD:

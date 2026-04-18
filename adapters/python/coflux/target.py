@@ -409,8 +409,12 @@ class Target(t.Generic[P, T]):
 
         ctx = get_context()
 
-        # Serialize arguments
-        serialized_args = [serialize_value(arg) for arg in args]
+        # Serialize arguments. Generators passed as args are registered with
+        # the current execution's stream driver — the caller becomes the
+        # producer, the callee gets a Stream handle.
+        serialized_args = [
+            serialize_value(arg, on_generator=ctx.register_stream) for arg in args
+        ]
 
         # Use only the declared wait_for from the decorator
         wait_for_val = (

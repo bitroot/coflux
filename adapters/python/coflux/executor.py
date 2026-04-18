@@ -13,6 +13,7 @@ from typing import Any, get_type_hints
 
 from . import protocol
 from .context import ExecutorContext
+from .dispatcher import start_dispatcher
 from .state import set_context
 from .output import capture_output
 from .models import Input
@@ -71,6 +72,10 @@ def execute_target(
 ) -> None:
     """Execute a target with the given arguments."""
     original_dir = os.getcwd()
+    # Start the stdin dispatcher. From here on, all incoming messages flow
+    # through it — individual threads block on the dispatcher rather than
+    # racing on stdin directly.
+    start_dispatcher(protocol.get_protocol())
     try:
         if working_dir:
             os.chdir(working_dir)
@@ -92,11 +97,10 @@ def execute_target(
         deserialized_args = _apply_type_hints(fn, deserialized_args)
 
         # Set up execution context
-        set_context(
-            ExecutorContext(
-                execution_id, working_dir=Path(working_dir) if working_dir else None
-            )
+        ctx = ExecutorContext(
+            execution_id, working_dir=Path(working_dir) if working_dir else None
         )
+        set_context(ctx)
 
         with capture_output(execution_id):
             if inspect.iscoroutinefunction(fn):
@@ -107,9 +111,17 @@ def execute_target(
             else:
                 result = fn(*deserialized_args)
 
-        # Serialize and send result
-        result_value = serialize_value(result)
+        # Serialize result. Generators anywhere in the return value (or that
+        # were passed to submitted child executions as args) have already
+        # been registered with the context's stream driver.
+        result_value = serialize_value(result, on_generator=ctx.register_stream)
         protocol.send_execution_result(execution_id, result_value)
+
+        # Hold the process open until every stream has drained. Thread
+        # safety: stdin access goes through the dispatcher (so subtask
+        # calls from generator bodies don't race), and stdout writes are
+        # serialised by Protocol._write_lock.
+        ctx.wait_streams()
 
     except Exception as e:
         # Evaluate retry 'when' callback if present

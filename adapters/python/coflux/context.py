@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import protocol
+from .dispatcher import get_dispatcher
 from .errors import (
     ExecutionAbandoned,
     ExecutionCancelled,
@@ -22,6 +23,7 @@ from .errors import (
 )
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
 from .serialization import deserialize_value, serialize_value
+from .streams import StreamDriver
 
 
 def _handle_key(handle: Any) -> tuple[str, str]:
@@ -81,7 +83,6 @@ class ExecutorContext:
 
     def __init__(self, execution_id: str, working_dir: Path | None = None):
         self.execution_id = execution_id
-        self._pending_requests: dict[int, Any] = {}
         self._groups: list[str | None] = []
         self._working_dir = working_dir or Path.cwd()
         self._defined_metrics: dict[str, dict] = {}
@@ -92,6 +93,23 @@ class ExecutorContext:
         # poll_handle to avoid a round-trip for handles that have already
         # been seen in this context's lifetime.
         self._resolved: dict[tuple[str, str], dict[str, Any]] = {}
+        # Owns generator streams for this execution. Generators encountered
+        # during serialization (of the return value OR of submit arguments)
+        # are registered here and driven in background threads.
+        self._stream_driver = StreamDriver(execution_id)
+
+    def register_stream(self, generator: Any) -> tuple[str, int]:
+        """Callback for ``serialize_value(on_generator=...)``.
+
+        Registers a generator with this execution's driver and returns the
+        ``(execution_id, sequence)`` stream reference to embed in the
+        serialized value.
+        """
+        return self._stream_driver.register(generator)
+
+    def wait_streams(self) -> None:
+        """Block until every stream produced by this execution has drained."""
+        self._stream_driver.wait_all()
 
     def submit_execution(
         self,
@@ -520,8 +538,7 @@ class ExecutorContext:
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
         # Suspension confirmed. Block until the server aborts this execution.
-        while protocol.receive_message() is not None:
-            pass
+        get_dispatcher().wait_closed()
         raise SystemExit(0)
 
     def _parse_response(self, msg: dict) -> Any:
@@ -532,22 +549,12 @@ class ExecutorContext:
         return msg.get("result", {})
 
     def _wait_response(self, request_id: int) -> Any:
-        """Wait for a response to a request."""
-        if request_id in self._pending_requests:
-            return self._parse_response(self._pending_requests.pop(request_id))
-        while True:
-            msg = protocol.receive_message()
-            if msg is None:
-                raise RuntimeError("Connection closed while waiting for response")
+        """Wait for a response to a request.
 
-            # Check if this is a response
-            if "id" in msg:
-                if msg["id"] == request_id:
-                    return self._parse_response(msg)
-                # Store other responses for later
-                self._pending_requests[msg["id"]] = msg
-            else:
-                # Unexpected message during wait
-                raise RuntimeError(
-                    f"Unexpected message while waiting for response: {msg}"
-                )
+        Delegates to the dispatcher, which owns stdin and routes the matching
+        response to this caller. Safe to call from any thread.
+        """
+        msg = get_dispatcher().wait_for_response(request_id)
+        if msg is None:
+            raise RuntimeError("Timed out waiting for response")
+        return self._parse_response(msg)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import Any
 
 from ._version import __version__
@@ -18,6 +19,10 @@ class Protocol:
         # even when stdout/stderr are redirected for output capture
         self._stdout = sys.stdout
         self._stdin = sys.stdin
+        # Multiple threads (main + stream drivers + dispatcher-invoked
+        # handlers) can emit messages concurrently; serialize writes so JSON
+        # lines don't interleave.
+        self._write_lock = threading.Lock()
 
     def send_message(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a notification message (no response expected)."""
@@ -61,8 +66,9 @@ class Protocol:
     def _write(self, obj: dict[str, Any]) -> None:
         """Write a JSON object as a line to stdout."""
         line = json.dumps(obj, separators=(",", ":"))
-        self._stdout.write(line + "\n")
-        self._stdout.flush()
+        with self._write_lock:
+            self._stdout.write(line + "\n")
+            self._stdout.flush()
 
 
 # Global protocol instance for convenience
