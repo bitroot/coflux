@@ -1,7 +1,7 @@
 defmodule Coflux.Orchestration.Results do
   import Coflux.Store
 
-  alias Coflux.Orchestration.Values
+  alias Coflux.Orchestration.{Errors, Values}
 
   # Writes the results row capturing the disposition (value/error/retryable)
   # and any server-decided successor. Written at the time the disposition is
@@ -20,11 +20,11 @@ defmodule Coflux.Orchestration.Results do
       {type, error_id, value_id, successor_id, successor_ref_id, retryable} =
         case result do
           {:error, type, message, frames, retry_id, retryable} ->
-            {:ok, error_id} = get_or_create_error(db, type, message, frames)
+            error_id = Errors.get_or_create(db, type, message, frames)
             {0, error_id, nil, retry_id, nil, retryable}
 
           {:error, type, message, frames, retry_id} ->
-            {:ok, error_id} = get_or_create_error(db, type, message, frames)
+            error_id = Errors.get_or_create(db, type, message, frames)
             {0, error_id, nil, retry_id, nil, nil}
 
           {:value, value} ->
@@ -181,7 +181,7 @@ defmodule Coflux.Orchestration.Results do
         result =
           case {type, error_id, value_id, successor_id, successor_ref_id} do
             {0, error_id, nil, retry_id, nil} ->
-              case get_error_by_id(db, error_id) do
+              case Errors.get_by_id(db, error_id) do
                 {:ok, {type, message, frames}} ->
                   {:error, type, message, frames, retry_id, retryable}
               end
@@ -232,61 +232,6 @@ defmodule Coflux.Orchestration.Results do
           end
 
         {:ok, {result, created_at, completion_created_at, created_by}}
-    end
-  end
-
-  defp get_error_by_id(db, error_id) do
-    {:ok, {type, message}} =
-      query_one!(db, "SELECT type, message FROM errors WHERE id = ?1", {error_id})
-
-    {:ok, frames} =
-      query(
-        db,
-        "SELECT file, line, name, code FROM error_frames WHERE error_id = ?1 ORDER BY depth",
-        {error_id}
-      )
-
-    {:ok, {type, message, frames}}
-  end
-
-  defp hash_error(type, message, frames) do
-    frame_parts =
-      Enum.flat_map(frames, fn {file, line, name, code} ->
-        [file, Integer.to_string(line), name || 0, code || 0]
-      end)
-
-    parts = Enum.concat([type, message], frame_parts)
-    :crypto.hash(:sha256, Enum.intersperse(parts, 0))
-  end
-
-  defp get_or_create_error(db, type, message, frames) do
-    hash = hash_error(type, message, frames)
-
-    case query_one(db, "SELECT id FROM errors WHERE hash = ?1", {{:blob, hash}}) do
-      {:ok, {id}} ->
-        {:ok, id}
-
-      {:ok, nil} ->
-        {:ok, error_id} =
-          insert_one(db, :errors, %{
-            hash: {:blob, hash},
-            type: type,
-            message: message
-          })
-
-        {:ok, _} =
-          insert_many(
-            db,
-            :error_frames,
-            {:error_id, :depth, :file, :line, :name, :code},
-            frames
-            |> Enum.with_index()
-            |> Enum.map(fn {{file, line, name, code}, index} ->
-              {error_id, index, file, line, name, code}
-            end)
-          )
-
-        {:ok, error_id}
     end
   end
 
