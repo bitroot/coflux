@@ -210,6 +210,42 @@ defmodule Coflux.Orchestration.Streams do
     end
   end
 
+  # Returns one row per stream owned by `execution_id`:
+  # `{sequence, created_at, closed_at | nil, error | nil}` where error, when
+  # present, is a `{type, message, frames}` triple. Used when populating the
+  # topic state for a run — lets the UI render streams and their state in
+  # one query.
+  def get_streams_with_closures_for_execution(db, execution_id) do
+    case query(
+           db,
+           """
+           SELECT s.sequence, s.created_at, c.created_at, c.error_id
+           FROM streams AS s
+           LEFT JOIN stream_closures AS c
+             ON c.execution_id = s.execution_id AND c.sequence = s.sequence
+           WHERE s.execution_id = ?1
+           ORDER BY s.sequence
+           """,
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        streams =
+          Enum.map(rows, fn
+            {sequence, created_at, nil, nil} ->
+              {sequence, created_at, nil, nil}
+
+            {sequence, created_at, closed_at, nil} ->
+              {sequence, created_at, closed_at, nil}
+
+            {sequence, created_at, closed_at, error_id} ->
+              {:ok, error} = Errors.get_by_id(db, error_id)
+              {sequence, created_at, closed_at, error}
+          end)
+
+        {:ok, streams}
+    end
+  end
+
   # Returns the highest position recorded for the stream, or `-1` if empty.
   # Used by the worker protocol to report "head" for flow control without
   # requiring the caller to scan all items.

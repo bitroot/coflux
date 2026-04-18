@@ -332,6 +332,72 @@ defmodule Coflux.Orchestration.Epoch do
                 end
               end)
 
+              # Copy streams, their items, and any closure rows. An execution's
+              # streams may be mid-production (items appended, no closure) —
+              # carry them forward so consumers can keep reading after rotation.
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                {:ok, streams} =
+                  query(
+                    source_db,
+                    "SELECT sequence, created_at FROM streams WHERE execution_id = ?1",
+                    {old_exec_id}
+                  )
+
+                Enum.each(streams, fn {sequence, stream_created_at} ->
+                  {:ok, _} =
+                    insert_one(target_db, :streams, %{
+                      execution_id: new_exec_id,
+                      sequence: sequence,
+                      created_at: stream_created_at
+                    })
+
+                  {:ok, items} =
+                    query(
+                      source_db,
+                      """
+                      SELECT position, value_id, created_at
+                      FROM stream_items
+                      WHERE execution_id = ?1 AND sequence = ?2
+                      """,
+                      {old_exec_id, sequence}
+                    )
+
+                  Enum.each(items, fn {position, value_id, item_created_at} ->
+                    new_value_id = ensure_value(source_db, target_db, value_id)
+
+                    {:ok, _} =
+                      insert_one(target_db, :stream_items, %{
+                        execution_id: new_exec_id,
+                        sequence: sequence,
+                        position: position,
+                        value_id: new_value_id,
+                        created_at: item_created_at
+                      })
+                  end)
+
+                  case query_one(
+                         source_db,
+                         "SELECT error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND sequence = ?2",
+                         {old_exec_id, sequence}
+                       ) do
+                    {:ok, {error_id, closure_created_at}} ->
+                      new_error_id =
+                        if error_id, do: ensure_error(source_db, target_db, error_id)
+
+                      {:ok, _} =
+                        insert_one(target_db, :stream_closures, %{
+                          execution_id: new_exec_id,
+                          sequence: sequence,
+                          error_id: new_error_id,
+                          created_at: closure_created_at
+                        })
+
+                    {:ok, nil} ->
+                      :ok
+                  end
+                end)
+              end)
+
               # Copy children — same-run internal IDs
               {:ok, children} =
                 query(

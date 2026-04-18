@@ -1827,8 +1827,15 @@ defmodule Coflux.Orchestration.Server do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
         case Streams.register_stream(state.db, execution_id, sequence) do
-          {:ok, _} -> {:reply, :ok, state}
-          {:error, :already_registered} -> {:reply, {:error, :already_registered}, state}
+          {:ok, created_at} ->
+            state =
+              notify_stream_opened(state, execution_id, sequence, created_at)
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, :already_registered} ->
+            {:reply, {:error, :already_registered}, state}
         end
 
       :error ->
@@ -1867,8 +1874,13 @@ defmodule Coflux.Orchestration.Server do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
         case Streams.close_stream(state.db, execution_id, sequence, error) do
-          {:ok, _} ->
-            state = push_stream_closed(state, execution_id, sequence, error)
+          {:ok, closed_at} ->
+            state =
+              state
+              |> push_stream_closed(execution_id, sequence, error)
+              |> notify_stream_closed(execution_id, sequence, error, closed_at)
+              |> flush_notifications()
+
             {:reply, :ok, state}
 
           {:error, reason} ->
@@ -4959,6 +4971,8 @@ defmodule Coflux.Orchestration.Server do
                    )
                  )
 
+               {:ok, streams} = Streams.get_streams_with_closures_for_execution(db, execution_id)
+
                {attempt,
                 %{
                   execution_id: exec_external_id,
@@ -4976,7 +4990,8 @@ defmodule Coflux.Orchestration.Server do
                   result: result,
                   result_created_by: result_created_by,
                   children: Map.get(run_children, execution_id, []),
-                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{})
+                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
+                  streams: streams
                 }}
              end)
          }}
@@ -5850,8 +5865,13 @@ defmodule Coflux.Orchestration.Server do
 
     Enum.reduce(sequences, state, fn sequence, state ->
       case Streams.close_stream(state.db, execution_id, sequence) do
-        {:ok, _} -> push_stream_closed(state, execution_id, sequence, push_error)
-        {:error, :already_closed} -> state
+        {:ok, closed_at} ->
+          state
+          |> push_stream_closed(execution_id, sequence, push_error)
+          |> notify_stream_closed(execution_id, sequence, push_error, closed_at)
+
+        {:error, :already_closed} ->
+          state
       end
     end)
   end
@@ -7121,6 +7141,59 @@ defmodule Coflux.Orchestration.Server do
 
       :error ->
         state
+    end
+  end
+
+  # --- Producer flow control ---
+  #
+  # Not yet wired. Implicit backpressure today: a slow consumer's WS push
+  # blocks the GenServer, which blocks append_item, which blocks the
+  # producer. That's usually enough. When a real use case surfaces for
+  # explicit pause/resume (e.g. an infinite producer with no subscribers
+  # filling disk), the hooks go here:
+  #   * On first subscriber for a stream: send_session(producer_session,
+  #     {:stream_resume, producer_exec_ext, sequence}).
+  #   * On last subscriber dropping: {:stream_pause, ...}.
+  # Dispatcher on the adapter side already routes notifications by method;
+  # the StreamDriver gets a per-stream Event to gate its next() calls.
+
+  # --- Stream topic notifications (for Studio subscribers) ---
+  # These flow through `notify_listeners` → the run topic, distinct from the
+  # session-directed `push_stream_*` helpers which target subscribed consumer
+  # sessions' WebSockets.
+
+  defp notify_stream_opened(state, execution_id, sequence, created_at) do
+    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+
+    notify_listeners(
+      state,
+      {:run, r},
+      {:stream_opened, execution_ext_id, sequence, created_at}
+    )
+  end
+
+  defp notify_stream_closed(state, execution_id, sequence, error, closed_at) do
+    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+
+    encoded_error =
+      case error do
+        nil -> nil
+        {type, message, _frames} -> %{type: type, message: message}
+      end
+
+    notify_listeners(
+      state,
+      {:run, r},
+      {:stream_closed, execution_ext_id, sequence, encoded_error, closed_at}
+    )
+  end
+
+  defp execution_external_id_for(db, execution_id) do
+    case Runs.get_execution_key(db, execution_id) do
+      {:ok, {r, s, a}} -> {:ok, execution_external_id(r, s, a)}
+      err -> err
     end
   end
 

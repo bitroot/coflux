@@ -103,7 +103,8 @@ defmodule Coflux.Topics.Run do
           children: [],
           inputs: %{},
           result: nil,
-          metrics: %{}
+          metrics: %{},
+          streams: %{}
         }
       )
     else
@@ -203,6 +204,32 @@ defmodule Coflux.Topics.Run do
        ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:completedAt], completion_at)
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:stream_opened, execution_external_id, sequence, created_at}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:streams, Integer.to_string(sequence)], %{
+        openedAt: created_at,
+        closedAt: nil,
+        error: nil
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:stream_closed, execution_external_id, sequence, error, closed_at}
+       ) do
+    seq_key = Integer.to_string(sequence)
+
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      topic
+      |> Topic.set(base_path ++ [:streams, seq_key, :closedAt], closed_at)
+      |> Topic.set(base_path ++ [:streams, seq_key, :error], error)
     end)
   end
 
@@ -380,7 +407,8 @@ defmodule Coflux.Topics.Run do
                            lower: def_data.lower,
                            upper: def_data.upper
                          }}
-                      end)
+                      end),
+                    streams: build_streams(execution.streams)
                   }}
                end)
            }}
@@ -517,6 +545,24 @@ defmodule Coflux.Topics.Run do
       nil ->
         nil
     end
+  end
+
+  defp build_streams(streams) do
+    Map.new(streams, fn
+      {sequence, opened_at, nil, nil} ->
+        {Integer.to_string(sequence), %{openedAt: opened_at, closedAt: nil, error: nil}}
+
+      {sequence, opened_at, closed_at, nil} ->
+        {Integer.to_string(sequence), %{openedAt: opened_at, closedAt: closed_at, error: nil}}
+
+      {sequence, opened_at, closed_at, {type, message, _frames}} ->
+        {Integer.to_string(sequence),
+         %{
+           openedAt: opened_at,
+           closedAt: closed_at,
+           error: %{type: type, message: message}
+         }}
+    end)
   end
 
   defp execution_attempt({ext_id, _module, _target}) do
