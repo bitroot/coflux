@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import Asset, AssetMetadata, Execution, Input
+from .models import Asset, AssetMetadata, Execution, Input, Stream
 
 # Try to import pydantic
 try:
@@ -259,6 +259,10 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                 return uuid.UUID(v["value"])
             elif t == "ref":
                 return _resolve_ref(v["index"])
+            elif t == "stream":
+                # Producer-owned stream reference. Self-contained —
+                # execution_id and sequence are both in the descriptor.
+                return Stream(v["execution_id"], v["sequence"])
             else:
                 return v
         else:

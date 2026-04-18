@@ -360,6 +360,8 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	)
 	conn.RegisterHandler("execute", w.handleExecute)
 	conn.RegisterHandler("abort", w.handleAbort)
+	conn.RegisterHandler("stream_items", w.handleStreamItems)
+	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
 	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
@@ -553,45 +555,55 @@ func (w *Worker) handleExecute(params []any) error {
 func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 	result := make([]adapter.Argument, len(args))
 	for i, arg := range args {
-		arr, ok := arg.([]any)
-		if !ok {
-			return nil, fmt.Errorf("argument %d: expected array", i)
-		}
-
-		value, err := api.ParseValue(arr)
+		value, err := w.convertValueFromServer(arg)
 		if err != nil {
 			return nil, fmt.Errorf("argument %d: %w", i, err)
 		}
-
-		// Convert to adapter argument
-		adapterRefs, err := w.refsToAdapter(value.References)
-		if err != nil {
-			return nil, fmt.Errorf("argument %d: %w", i, err)
-		}
-		switch value.Type {
-		case api.ValueTypeRaw:
-			result[i] = adapter.Argument{
-				Type:       "inline",
-				Format:     "json",
-				Value:      value.Content,
-				References: adapterRefs,
-			}
-		case api.ValueTypeBlob:
-			// Download blob to cache
-			path, err := w.blobs.Download(value.Key)
-			if err != nil {
-				return nil, fmt.Errorf("argument %d: failed to download blob: %w", i, err)
-			}
-			format := "json"
-			result[i] = adapter.Argument{
-				Type:       "file",
-				Format:     format,
-				Path:       path,
-				References: adapterRefs,
-			}
-		}
+		result[i] = *value
 	}
 	return result, nil
+}
+
+// convertValueFromServer turns a wire-form value array (["raw", data, refs]
+// or ["blob", key, size, refs]) into an adapter-side Value struct suitable
+// for forwarding to the Python adapter.
+func (w *Worker) convertValueFromServer(arg any) (*adapter.Value, error) {
+	arr, ok := arg.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected array")
+	}
+
+	value, err := api.ParseValue(arr)
+	if err != nil {
+		return nil, err
+	}
+
+	adapterRefs, err := w.refsToAdapter(value.References)
+	if err != nil {
+		return nil, err
+	}
+
+	switch value.Type {
+	case api.ValueTypeRaw:
+		return &adapter.Value{
+			Type:       "inline",
+			Format:     "json",
+			Value:      value.Content,
+			References: adapterRefs,
+		}, nil
+	case api.ValueTypeBlob:
+		path, err := w.blobs.Download(value.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download blob: %w", err)
+		}
+		return &adapter.Value{
+			Type:       "file",
+			Format:     "json",
+			Path:       path,
+			References: adapterRefs,
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown value type: %v", value.Type)
 }
 
 func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
@@ -635,6 +647,62 @@ func (w *Worker) handleAbort(params []any) error {
 
 	// Abort on pool
 	return w.pool.Abort(executionID)
+}
+
+// handleStreamItems forwards a server-pushed batch of stream items to the
+// adapter process owning the target execution. Params: [execution_id,
+// subscription_id, items]. Each item arrives as [position, value_array]
+// and is converted to [position, adapter.Value dict] so the Python side
+// can deserialize_value it directly.
+func (w *Worker) handleStreamItems(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_items: insufficient params")
+	}
+	executionID := getString(params[0])
+	subscriptionID, _ := params[1].(float64)
+	rawItems, ok := params[2].([]any)
+	if !ok {
+		return fmt.Errorf("stream_items: items is not an array")
+	}
+
+	converted := make([]any, len(rawItems))
+	for i, raw := range rawItems {
+		itemArr, ok := raw.([]any)
+		if !ok || len(itemArr) != 2 {
+			return fmt.Errorf("stream_items: item %d malformed", i)
+		}
+		value, err := w.convertValueFromServer(itemArr[1])
+		if err != nil {
+			return fmt.Errorf("stream_items: item %d value: %w", i, err)
+		}
+		converted[i] = []any{itemArr[0], value}
+	}
+
+	return w.pool.PushToExecutor(executionID, "stream_items", map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+		"items":           converted,
+	})
+}
+
+// handleStreamClosed forwards a server-pushed stream-closed notification.
+// Params: [execution_id, subscription_id, error_or_null].
+func (w *Worker) handleStreamClosed(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_closed: insufficient params")
+	}
+	executionID := getString(params[0])
+	subscriptionID, _ := params[1].(float64)
+	errField := params[2]
+
+	forwarded := map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+	}
+	if errField != nil {
+		forwarded["error"] = errField
+	}
+	return w.pool.PushToExecutor(executionID, "stream_closed", forwarded)
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context) {
@@ -1136,6 +1204,23 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, sequence i
 		errTuple = []any{streamErr.Type, streamErr.Message, frames}
 	}
 	return conn.Notify("stream_close", executionID, sequence, errTuple)
+}
+
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, sequence int, fromPosition int, filter map[string]any) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, sequence, from_position, filter]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, sequence, fromPosition, filter)
+}
+
+func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	return conn.Notify("stream_unsubscribe", subscriptionID)
 }
 
 func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {

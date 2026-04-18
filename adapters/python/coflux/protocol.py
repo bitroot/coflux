@@ -519,6 +519,39 @@ def send_stream_close(
     get_protocol().send_message("stream_close", params)
 
 
+def send_stream_subscribe(
+    execution_id: str,
+    subscription_id: int,
+    producer_execution_id: str,
+    sequence: int,
+    from_position: int,
+    filter: dict[str, Any] | None = None,
+) -> None:
+    """Open a consumer subscription to a stream owned by another execution.
+
+    ``execution_id`` is the consumer's own execution — the server uses it to
+    track who's subscribed and where to push items.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "subscription_id": subscription_id,
+        "producer_execution_id": producer_execution_id,
+        "sequence": sequence,
+        "from_position": from_position,
+    }
+    if filter is not None:
+        params["filter"] = filter
+    get_protocol().send_message("stream_subscribe", params)
+
+
+def send_stream_unsubscribe(execution_id: str, subscription_id: int) -> None:
+    """Drop a consumer subscription."""
+    get_protocol().send_message(
+        "stream_unsubscribe",
+        {"execution_id": execution_id, "subscription_id": subscription_id},
+    )
+
+
 def receive_message() -> dict[str, Any] | None:
     """Receive the next message from the CLI."""
     return get_protocol().receive()

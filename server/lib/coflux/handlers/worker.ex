@@ -327,6 +327,61 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      "stream_subscribe" ->
+        [
+          subscription_id,
+          consumer_execution_id,
+          producer_execution_id,
+          sequence,
+          from_position,
+          filter
+        ] = message["params"]
+
+        if is_recognised_execution?(consumer_execution_id, state) do
+          case Orchestration.subscribe_stream(
+                 state.project_id,
+                 state.session_id,
+                 subscription_id,
+                 consumer_execution_id,
+                 producer_execution_id,
+                 sequence,
+                 from_position,
+                 filter
+               ) do
+            :ok ->
+              {[], state}
+
+            # If the stream doesn't exist yet (or producer vanished), push an
+            # immediate close so the consumer doesn't wait forever.
+            {:error, reason}
+            when reason in [:stream_not_found, :producer_not_found, :already_subscribed] ->
+              {[
+                 command_message("stream_closed", [
+                   consumer_execution_id,
+                   subscription_id,
+                   %{"type" => "Coflux.StreamNotFound", "message" => Atom.to_string(reason)}
+                 ])
+               ], state}
+
+            {:error, :consumer_not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_unsubscribe" ->
+        [subscription_id] = message["params"]
+
+        :ok =
+          Orchestration.unsubscribe_stream(
+            state.project_id,
+            state.session_id,
+            subscription_id
+          )
+
+        {[], state}
+
       "put_error" ->
         [execution_id, error] = message["params"]
 
@@ -570,6 +625,21 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info({:abort, execution_external_id}, state) do
     {[command_message("abort", [execution_external_id])], state}
+  end
+
+  def websocket_info({:stream_items, execution_external_id, subscription_id, items}, state) do
+    # Items arrive in resolved form ([[position, value_tuple], ...]); compose
+    # each value tuple to wire JSON here.
+    encoded =
+      Enum.map(items, fn [position, value] ->
+        [position, compose_value(value)]
+      end)
+
+    {[command_message("stream_items", [execution_external_id, subscription_id, encoded])], state}
+  end
+
+  def websocket_info({:stream_closed, execution_external_id, subscription_id, error}, state) do
+    {[command_message("stream_closed", [execution_external_id, subscription_id, error])], state}
   end
 
   def websocket_info(:stop, state) do

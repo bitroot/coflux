@@ -57,6 +57,11 @@ type ExecutionHandler interface {
 	// StreamClose closes a stream. Error is nil for a clean close, or a (type, message, traceback)
 	// triple when the producer's generator raised.
 	StreamClose(ctx context.Context, executionID string, sequence int, err *adapter.StreamCloseError) error
+	// StreamSubscribe opens a consumer subscription to a stream owned by another execution.
+	// Filter is nil or a {"type": "slice", ...}/{"type": "partition", ...} map.
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, sequence int, fromPosition int, filter map[string]any) error
+	// StreamUnsubscribe drops a consumer subscription.
+	StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error
 }
 
 // Pool manages executor processes. Each executor handles one execution then
@@ -281,6 +286,12 @@ loop:
 		case "stream_close":
 			p.handleStreamClose(execCtx, executionID, params, logger)
 
+		case "stream_subscribe":
+			p.handleStreamSubscribe(execCtx, executionID, params, logger)
+
+		case "stream_unsubscribe":
+			p.handleStreamUnsubscribe(execCtx, executionID, params, logger)
+
 		default:
 			err := fmt.Errorf("unknown message method: %s", method)
 			logger.Error("unknown message method", "method", method)
@@ -488,6 +499,38 @@ func (p *Pool) handleStreamClose(ctx context.Context, executionID string, params
 	}
 }
 
+func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamSubscribeParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_subscribe message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamSubscribe(
+		ctx,
+		req.ExecutionID,
+		req.SubscriptionID,
+		req.ProducerExecutionID,
+		req.Sequence,
+		req.FromPosition,
+		req.Filter,
+	); err != nil {
+		logger.Error("failed to subscribe to stream", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamUnsubscribe(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamUnsubscribeParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_unsubscribe message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamUnsubscribe(ctx, req.ExecutionID, req.SubscriptionID); err != nil {
+		logger.Error("failed to unsubscribe from stream", "error", err)
+	}
+}
+
 func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method string, id int, params json.RawMessage, logger *slog.Logger) {
 	var result any
 	var errInfo *adapter.ErrorInfo
@@ -644,6 +687,26 @@ func (p *Pool) Abort(executionID string) error {
 
 	_ = exec.Close()
 	return nil
+}
+
+// PushToExecutor forwards a server-originated notification to the adapter
+// process handling the given execution. Used for stream_items / stream_closed
+// pushes and, later, stream_produce_until flow-control signals. Silently
+// no-ops if the execution isn't active — a late push after the adapter exited
+// isn't an error condition.
+func (p *Pool) PushToExecutor(executionID, method string, params any) error {
+	p.mu.Lock()
+	exec, ok := p.busy[executionID]
+	p.mu.Unlock()
+
+	if !ok {
+		return nil
+	}
+
+	return exec.Send(map[string]any{
+		"method": method,
+		"params": params,
+	})
 }
 
 // Drain marks the pool as draining (stops spawning warm executors),

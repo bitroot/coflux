@@ -197,6 +197,31 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:close_stream, execution_id, sequence, error})
   end
 
+  # Stream consumer messages — consumer opens a subscription to receive
+  # items from a producer's stream; server pushes stream_items /
+  # stream_closed commands to the consumer's session.
+
+  def subscribe_stream(
+        project_id,
+        session_id,
+        subscription_id,
+        consumer_execution_id,
+        producer_execution_id,
+        sequence,
+        from_position,
+        filter
+      ) do
+    call_server(
+      project_id,
+      {:subscribe_stream, session_id, subscription_id, consumer_execution_id,
+       producer_execution_id, sequence, from_position, filter}
+    )
+  end
+
+  def unsubscribe_stream(project_id, session_id, subscription_id) do
+    call_server(project_id, {:unsubscribe_stream, session_id, subscription_id})
+  end
+
   def select(
         project_id,
         handles,

@@ -23,7 +23,15 @@ from .errors import (
     InputDismissed,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
-from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, ModelSchema
+from .models import (
+    Asset,
+    AssetEntry,
+    AssetMetadata,
+    Execution,
+    Input,
+    ModelSchema,
+    Stream,
+)
 from .prompt import Prompt
 from .state import get_context
 from .target import Cache, Defer, Retries
@@ -56,6 +64,7 @@ __all__ = [
     "Asset",
     "AssetEntry",
     "AssetMetadata",
+    "Stream",
     # Context functions
     "group",
     "suspense",

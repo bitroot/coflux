@@ -284,6 +284,40 @@ type StreamCloseError struct {
 	Traceback string `json:"traceback"`
 }
 
+// StreamSubscribeParams for stream_subscribe notification.
+// Filter is one of nil, {"type": "slice", "start", "stop"},
+// or {"type": "partition", "n", "i"}.
+type StreamSubscribeParams struct {
+	ExecutionID         string         `json:"execution_id"` // consumer
+	SubscriptionID      int            `json:"subscription_id"`
+	ProducerExecutionID string         `json:"producer_execution_id"`
+	Sequence            int            `json:"sequence"`
+	FromPosition        int            `json:"from_position"`
+	Filter              map[string]any `json:"filter,omitempty"`
+}
+
+// StreamUnsubscribeParams for stream_unsubscribe notification.
+type StreamUnsubscribeParams struct {
+	ExecutionID    string `json:"execution_id"`
+	SubscriptionID int    `json:"subscription_id"`
+}
+
+// StreamItemsParams for stream_items notification pushed CLI → adapter.
+// Items are [[position, value], ...] where value is a wire Value.
+type StreamItemsParams struct {
+	ExecutionID    string `json:"execution_id"`
+	SubscriptionID int    `json:"subscription_id"`
+	Items          []any  `json:"items"`
+}
+
+// StreamClosedParams for stream_closed notification pushed CLI → adapter.
+// Error is nil for clean close or a {type, message} dict for errored close.
+type StreamClosedParams struct {
+	ExecutionID    string         `json:"execution_id"`
+	SubscriptionID int            `json:"subscription_id"`
+	Error          map[string]any `json:"error,omitempty"`
+}
+
 // DownloadBlobParams for download_blob request
 type DownloadBlobParams struct {
 	ExecutionID string `json:"execution_id"`

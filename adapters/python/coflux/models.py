@@ -208,3 +208,72 @@ class Execution(_Handle[T]):
     @property
     def target(self) -> str:
         return self._target
+
+
+class Stream(t.Iterable[T]):
+    """A handle to a stream produced by another execution.
+
+    Iterating a ``Stream`` opens a subscription with the server; items arrive
+    pushed over the WebSocket and yield from the iterator. Each ``__iter__``
+    starts a fresh subscription from position 0, so a stream can be iterated
+    multiple times and each iteration sees the whole sequence.
+
+    ``partition`` and ``slice`` return new ``Stream`` views with an additional
+    filter; no server round-trip happens until iteration begins.
+    """
+
+    def __init__(
+        self,
+        producer_execution_id: str,
+        sequence: int,
+        filters: tuple[dict[str, t.Any], ...] = (),
+    ):
+        self._producer_execution_id = producer_execution_id
+        self._sequence = sequence
+        self._filters = filters
+
+    @property
+    def producer_execution_id(self) -> str:
+        return self._producer_execution_id
+
+    @property
+    def sequence(self) -> int:
+        return self._sequence
+
+    def partition(self, n: int, i: int) -> "Stream[T]":
+        """Return a view of this stream where only positions ``p`` with
+        ``p % n == i`` are delivered. Round-robin partitioning for parallel
+        consumers.
+        """
+        if n < 1 or i < 0 or i >= n:
+            raise ValueError(f"invalid partition args: n={n}, i={i}")
+        return Stream(
+            self._producer_execution_id,
+            self._sequence,
+            self._filters + ({"type": "partition", "n": n, "i": i},),
+        )
+
+    def slice(self, start: int, stop: int | None = None) -> "Stream[T]":
+        """Return a view of this stream restricted to positions ``[start, stop)``.
+
+        ``stop=None`` means unbounded. Equivalent to ``itertools.islice`` on
+        the source stream's positions.
+        """
+        if start < 0 or (stop is not None and stop < start):
+            raise ValueError(f"invalid slice args: start={start}, stop={stop}")
+        return Stream(
+            self._producer_execution_id,
+            self._sequence,
+            self._filters + ({"type": "slice", "start": start, "stop": stop},),
+        )
+
+    def __iter__(self) -> t.Iterator[T]:
+        # Deferred import to avoid a cycle (streams.py imports serialization
+        # which imports models for Execution/Input/Asset).
+        from .streams import open_subscription
+
+        return open_subscription(
+            self._producer_execution_id,
+            self._sequence,
+            self._filters,
+        )
