@@ -10,6 +10,7 @@ defmodule Coflux.Orchestration.Server do
     Sessions,
     Runs,
     Results,
+    Streams,
     Assets,
     Inputs,
     Values,
@@ -3471,6 +3472,12 @@ defmodule Coflux.Orchestration.Server do
         {:error, :already_recorded} -> state
       end
 
+    # Close any open streams so iterating consumers stop waiting. Any
+    # subsequent `append_item` from the producer will fail with `:closed`,
+    # signalling the worker to stop. The closure carries no error; consumers
+    # resolve the cancel from the execution's own disposition.
+    close_open_streams(state, execution_id)
+
     state =
       case Runs.get_execution_key(state.db, execution_id) do
         {:ok, {r, s, a}} ->
@@ -5631,6 +5638,12 @@ defmodule Coflux.Orchestration.Server do
       {:ok, false} ->
         case Results.has_result?(state.db, execution_id) do
           {:ok, true} ->
+            # Close any streams left open by the producer. Generator tasks
+            # normally close their streams explicitly; this is the backstop
+            # for ones that didn't. Consumers resolve the close reason from
+            # the execution's own disposition.
+            close_open_streams(state, execution_id)
+
             case Results.record_completion(state.db, execution_id) do
               {:ok, completion_at} ->
                 fire_completion_notification(state, execution_id, completion_at)
@@ -5657,6 +5670,11 @@ defmodule Coflux.Orchestration.Server do
     {retry_id, _recurred?, state} =
       decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
 
+    # Streams that had been appended to before the worker died need to be
+    # closed so consumers don't wait forever. The closure carries no error —
+    # the execution's own :crashed disposition is the source of truth.
+    close_open_streams(state, execution_id)
+
     case Results.record_completion(state.db, execution_id) do
       {:ok, completion_at} ->
         # Result-time notifications weren't fired (no results row was ever
@@ -5669,6 +5687,22 @@ defmodule Coflux.Orchestration.Server do
       {:error, :already_completed} ->
         state
     end
+  end
+
+  # Closes every stream owned by `execution_id` that doesn't yet have a
+  # closure row. The closure carries no error — the consumer resolves the
+  # reason from the execution's result / completion state (clean, crashed,
+  # cancelled). If a generator closed its stream with an explicit error,
+  # that closure already exists and is left untouched.
+  defp close_open_streams(state, execution_id) do
+    {:ok, sequences} = Streams.get_open_streams_for_execution(state.db, execution_id)
+
+    Enum.each(sequences, fn sequence ->
+      case Streams.close_stream(state.db, execution_id, sequence) do
+        {:ok, _} -> :ok
+        {:error, :already_closed} -> :ok
+      end
+    end)
   end
 
   defp fire_completion_notification(state, execution_id, completion_at) do
