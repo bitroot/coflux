@@ -1,6 +1,9 @@
 ## 0.11.0
 
-No changes.
+Enhancements:
+
+- Adds support for tasks requesting structured inputs from users.
+- Adds a generalised `select` operation for waiting for results, with support for specifying multiple handles, and optional cancellation of the other items.
 
 ## 0.10.0
 

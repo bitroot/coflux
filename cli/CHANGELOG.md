@@ -1,6 +1,9 @@
 ## 0.11.0
 
-No changes.
+Enhancements:
+
+- Adds `--drain-timeout` flag to `worker` (default: 2 minutes) for gracefully draining in-flight executions on shutdown or reload. A second signal aborts the drain early; a third forces exit.
+- Adds `inputs list`, `inputs inspect`, `inputs respond` and `inputs dismiss` commands for managing input requests from the CLI.
 
 ## 0.10.0
 
