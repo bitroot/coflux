@@ -5,6 +5,40 @@ from collections import namedtuple
 
 from . import protocol
 
+
+def _unwrap_select_result(result):
+    """Translate a select result to the legacy resolve_reference / resolve_input shape.
+
+    The select protocol always returns a dict with a status field. The old
+    wait RPCs returned:
+      - value:     {"type": "inline", ..., "value": ...} (the value directly)
+      - error:     {"status": "error", "error_type": "...", "error_message": "..."}
+      - cancelled: {"status": "cancelled"}
+      - dismissed: {"status": "dismissed"}
+      - timeout:   None
+
+    Convert so existing tests that compare against those shapes keep working.
+    """
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        return result
+    status = result.get("status")
+    if status == "ok":
+        return result.get("value")
+    if status == "timeout":
+        return None
+    if status == "error":
+        err = result.get("error") or {}
+        return {
+            "status": "error",
+            "error_type": err.get("type", ""),
+            "error_message": err.get("message", ""),
+        }
+    if status in ("cancelled", "dismissed"):
+        return {"status": status}
+    return result
+
 Execution = namedtuple("Execution", ["conn", "execution_id", "module", "target", "arguments"])
 
 
@@ -92,29 +126,63 @@ class ExecutorConnection:
         resp = self._request(msg)
         return resp["result"]["execution_id"]
 
-    def resolve(self, execution_id, target_execution_id):
-        """Resolve a reference and return the result dict (or error dict)."""
-        msg = protocol.resolve_reference_request(
-            None, execution_id, target_execution_id
+    def select(
+        self,
+        execution_id,
+        handles,
+        timeout_ms=None,
+        suspend=True,
+        cancel_remaining=False,
+    ):
+        """Send a select request and return the result dict (or error dict).
+
+        ``handles`` is a list of handle specs built via
+        ``protocol.execution_handle(id)`` or ``protocol.input_handle(id)``.
+        """
+        msg = protocol.select_request(
+            None,
+            execution_id,
+            handles,
+            timeout_ms=timeout_ms,
+            suspend=suspend,
+            cancel_remaining=cancel_remaining,
         )
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
+
+    def resolve(self, execution_id, target_execution_id):
+        """Resolve a single execution reference (convenience over select).
+
+        Returns the legacy resolve_reference shape for backward compatibility.
+        """
+        return _unwrap_select_result(
+            self.select(
+                execution_id,
+                [protocol.execution_handle(target_execution_id)],
+            )
+        )
 
     def poll(self, execution_id, target_execution_id, timeout_ms=0):
-        """Poll for a reference result without suspending.
+        """Poll for an execution result without suspending.
 
-        Returns the result dict, or None if not yet available.
+        Returns the legacy shape (or None if the poll timed out).
         """
-        msg = protocol.resolve_reference_request(
-            None, execution_id, target_execution_id,
-            timeout_ms=timeout_ms, suspend=False,
+        return _unwrap_select_result(
+            self.select(
+                execution_id,
+                [protocol.execution_handle(target_execution_id)],
+                timeout_ms=timeout_ms,
+                suspend=False,
+            )
         )
-        resp = self._request(msg)
-        return resp.get("result", resp.get("error"))
 
     def cancel(self, execution_id, target_execution_id):
-        """Cancel a child execution."""
-        msg = protocol.cancel_execution_request(None, execution_id, target_execution_id)
+        """Cancel a child execution (convenience wrapper over cancel_request)."""
+        msg = protocol.cancel_request(
+            None,
+            execution_id,
+            [protocol.execution_handle(target_execution_id)],
+        )
         return self._request(msg)
 
     def suspend(self, execution_id, execute_after=None):
@@ -148,23 +216,28 @@ class ExecutorConnection:
             return result["input_id"]
         return result
 
-    def resolve_input(self, input_external_id, from_execution_id, **kwargs):
-        """Resolve an input and return the result dict.
+    def resolve_input(
+        self, input_external_id, from_execution_id, timeout_ms=None, suspend=True
+    ):
+        """Resolve an input (convenience over select).
 
-        Returns the raw result dict from the server. For a value response
-        this looks like {"type": "inline", "format": "json", "value": ...}.
-        For dismissed: {"status": "dismissed"}.
-        For suspended: {"status": "suspended"}.
-        Returns None if the poll timed out with no response.
-        Raises RuntimeError if the server returned an error.
+        Returns the legacy resolve_input shape:
+          - value: the raw value dict
+          - dismissed: {"status": "dismissed"}
+          - timeout: None
+        Raises RuntimeError if the server returned a protocol-level error.
         """
-        msg = protocol.resolve_input_request(
-            None, input_external_id, from_execution_id, **kwargs
+        msg = protocol.select_request(
+            None,
+            from_execution_id,
+            [protocol.input_handle(input_external_id)],
+            timeout_ms=timeout_ms,
+            suspend=suspend,
         )
         resp = self._request(msg)
         if "error" in resp:
-            raise RuntimeError(f"resolve_input error: {resp['error']}")
-        return resp.get("result")
+            raise RuntimeError(f"select error: {resp['error']}")
+        return _unwrap_select_result(resp.get("result"))
 
     def complete(self, execution_id, value=None):
         """Send execution_result."""

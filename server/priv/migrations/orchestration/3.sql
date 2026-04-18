@@ -58,10 +58,10 @@ CREATE TABLE execution_inputs (
   FOREIGN KEY (input_id) REFERENCES inputs ON DELETE RESTRICT
 ) STRICT;
 
--- Input responses: type 1 = value, type 2 = dismissed
+-- Input responses: type 1 = value, type 2 = dismissed, type 3 = cancelled
 CREATE TABLE input_responses (
   input_id INTEGER PRIMARY KEY,
-  type INTEGER NOT NULL CHECK (type IN (1, 2)),
+  type INTEGER NOT NULL CHECK (type IN (1, 2, 3)),
   value TEXT,
   created_at INTEGER NOT NULL,
   created_by INTEGER REFERENCES principals ON DELETE SET NULL,

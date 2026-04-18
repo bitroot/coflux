@@ -11,6 +11,24 @@ P = t.ParamSpec("P")
 T = t.TypeVar("T")
 
 
+class _TargetDecorator(t.Protocol):
+    """Decorator protocol that unwraps ``Coroutine`` for async functions.
+
+    Overloading on ``__call__`` (rather than on the factory function)
+    lets the type checker pick the right overload based on the decorated
+    function's return type — which is visible at application time, but
+    not at the factory call.
+    """
+
+    @t.overload
+    def __call__(
+        self, fn: t.Callable[P, t.Coroutine[t.Any, t.Any, T]]
+    ) -> Target[P, T]: ...
+
+    @t.overload
+    def __call__(self, fn: t.Callable[P, T]) -> Target[P, T]: ...
+
+
 def task(
     *,
     name: str | None = None,
@@ -23,10 +41,15 @@ def task(
     memo: bool | t.Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
-) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
-    """Decorator for defining a task."""
+) -> _TargetDecorator:
+    """Decorator for defining a task.
 
-    def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
+    For ``async def`` functions, the coroutine is run to completion by
+    the executor; the task's return type is the coroutine's resolved
+    value (not the coroutine itself).
+    """
+
+    def decorator(fn):
         return Target(
             fn,
             "task",
@@ -42,7 +65,7 @@ def task(
             timeout=timeout,
         )
 
-    return decorator
+    return decorator  # type: ignore[return-value]
 
 
 def workflow(
@@ -57,10 +80,15 @@ def workflow(
     memo: bool = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
-) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
-    """Decorator for defining a workflow."""
+) -> _TargetDecorator:
+    """Decorator for defining a workflow.
 
-    def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
+    For ``async def`` functions, the coroutine is run to completion by
+    the executor; the workflow's return type is the coroutine's resolved
+    value (not the coroutine itself).
+    """
+
+    def decorator(fn):
         return Target(
             fn,
             "workflow",
@@ -76,7 +104,7 @@ def workflow(
             timeout=timeout,
         )
 
-    return decorator
+    return decorator  # type: ignore[return-value]
 
 
 def stub(
@@ -91,10 +119,10 @@ def stub(
     defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     memo: bool | t.Iterable[str] = False,
-) -> t.Callable[[t.Callable[P, T]], Target[P, T]]:
+) -> _TargetDecorator:
     """Decorator for defining a stub (external reference)."""
 
-    def decorator(fn: t.Callable[P, T]) -> Target[P, T]:
+    def decorator(fn):
         return Target(
             fn,
             type,
@@ -110,4 +138,4 @@ def stub(
             is_stub=True,
         )
 
-    return decorator
+    return decorator  # type: ignore[return-value]

@@ -16,8 +16,8 @@ import (
 type ExecutionHandler interface {
 	// SubmitExecution submits a child execution
 	SubmitExecution(ctx context.Context, params *adapter.SubmitExecutionParams) (map[string]any, error)
-	// ResolveReference resolves a reference to get its result
-	ResolveReference(ctx context.Context, executionID string, targetExecutionID string, timeoutMs *int64, suspend *bool) (*adapter.ResolveResult, error)
+	// Select waits for the first of one or more handles (executions/inputs) to resolve
+	Select(ctx context.Context, params *adapter.SelectParams) (*adapter.SelectResult, error)
 	// PersistAsset persists files as an asset
 	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
@@ -28,8 +28,8 @@ type ExecutionHandler interface {
 	UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error)
 	// Suspend suspends an execution
 	Suspend(ctx context.Context, executionID string, executeAfter *int64) error
-	// CancelExecution cancels another execution
-	CancelExecution(ctx context.Context, executionID string, targetExecutionID string) error
+	// Cancel cancels one or more handles (executions and/or inputs)
+	Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error
 	// RegisterGroup registers a group for organizing child executions
 	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
@@ -47,8 +47,6 @@ type ExecutionHandler interface {
 	ReportTimeout(ctx context.Context, executionID string) error
 	// SubmitInput creates an input request and returns its external ID
 	SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error)
-	// ResolveInput waits for an input response by external ID
-	ResolveInput(ctx context.Context, params *adapter.ResolveInputParams) (*adapter.ResolveResult, error)
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
 }
@@ -260,7 +258,7 @@ loop:
 		case "metric":
 			p.handleMetric(execCtx, executionID, params, logger)
 
-		case "submit_execution", "resolve_reference", "persist_asset", "get_asset", "suspend", "cancel_execution", "download_blob", "upload_blob", "submit_input", "resolve_input":
+		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input":
 			p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
@@ -455,34 +453,27 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = submitResult
 		}
 
-	case "resolve_reference":
-		var req adapter.ResolveReferenceParams
+	case "select":
+		var req adapter.SelectParams
 		if err := json.Unmarshal(params, &req); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		resolved, err := p.handler.ResolveReference(ctx, req.ExecutionID, req.TargetExecutionID, req.TimeoutMs, req.Suspend)
+		resolved, err := p.handler.Select(ctx, &req)
 		if err != nil {
-			errInfo = &adapter.ErrorInfo{Code: "resolve_error", Message: err.Error()}
-		} else if resolved == nil {
-			// No result available (poll timeout) — result stays nil, sent as JSON null
-		} else {
-			switch resolved.Status {
-			case "value":
-				result = resolved.Value
-			case "error":
-				result = map[string]any{
-					"status":        "error",
-					"error_type":    resolved.ErrorType,
-					"error_message": resolved.ErrorMessage,
-				}
-			case "cancelled":
-				result = map[string]any{"status": "cancelled"}
-			case "timeout":
-				result = map[string]any{"status": "timeout"}
-			case "suspended":
-				result = map[string]any{"status": "suspended"}
+			errInfo = &adapter.ErrorInfo{Code: "select_error", Message: err.Error()}
+		} else if resolved != nil {
+			out := map[string]any{"status": resolved.Status}
+			if resolved.Winner != nil {
+				out["winner"] = *resolved.Winner
 			}
+			if resolved.Value != nil {
+				out["value"] = resolved.Value
+			}
+			if resolved.Error != nil {
+				out["error"] = resolved.Error
+			}
+			result = out
 		}
 
 	case "persist_asset":
@@ -548,13 +539,13 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = map[string]any{}
 		}
 
-	case "cancel_execution":
-		var req adapter.CancelExecutionParams
+	case "cancel":
+		var req adapter.CancelParams
 		if err := json.Unmarshal(params, &req); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		if err := p.handler.CancelExecution(ctx, req.ExecutionID, req.TargetExecutionID); err != nil {
+		if err := p.handler.Cancel(ctx, req.ExecutionID, req.Handles); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "cancel_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}
@@ -573,33 +564,6 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = map[string]any{"input_id": inputID}
 		}
 
-	case "resolve_input":
-		var req adapter.ResolveInputParams
-		if err := json.Unmarshal(params, &req); err != nil {
-			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
-			break
-		}
-		resolved, err := p.handler.ResolveInput(ctx, &req)
-		if err != nil {
-			errInfo = &adapter.ErrorInfo{Code: "input_error", Message: err.Error()}
-		} else if resolved == nil {
-			// No result available (poll timeout)
-		} else {
-			switch resolved.Status {
-			case "value":
-				result = resolved.Value
-			case "error":
-				result = map[string]any{
-					"status":        "error",
-					"error_type":    resolved.ErrorType,
-					"error_message": resolved.ErrorMessage,
-				}
-			case "cancelled", "dismissed":
-				result = map[string]any{"status": "dismissed"}
-			case "suspended":
-				result = map[string]any{"status": "suspended"}
-			}
-		}
 	}
 
 	// If the context was cancelled (e.g., execution timed out), don't

@@ -120,7 +120,7 @@ Returned by `target.submit()`. Represents a running or completed execution, and 
 
 Blocks (suspends) until the execution completes and returns the result. If the execution failed, raises the corresponding exception.
 
-**Raises:** `ExecutionError`, `ExecutionCancelled`, or `ExecutionTimeout`.
+**Raises:** `ExecutionError`, `ExecutionCancelled`, or `ExecutionTimeout`. If called inside a `cf.suspense(timeout=...)` scope and the timeout expires before the handle resolves, raises `TimeoutError`.
 
 ### `execution.poll(timeout=None, *, default=None) -> T | D`
 

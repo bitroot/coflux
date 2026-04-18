@@ -8,16 +8,24 @@ of targets.
 from __future__ import annotations
 
 import datetime as dt
+import typing as t
 from pathlib import Path
 
-from .prompt import Prompt
 from ._version import __version__
-from .decorators import task, workflow, stub
-from .target import Cache, Defer, Retries
-from .errors import ExecutionCancelled, ExecutionError, ExecutionTimeout, InputDismissed
+from .decorators import stub, task, workflow
+from .errors import (
+    ExecutionAbandoned,
+    ExecutionCancelled,
+    ExecutionError,
+    ExecutionTerminated,
+    ExecutionTimeout,
+    InputDismissed,
+)
 from .metric import Metric, MetricGroup, MetricScale, progress
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, ModelSchema
+from .prompt import Prompt
 from .state import get_context
+from .target import Cache, Defer, Retries
 
 __all__ = [
     # Version
@@ -29,8 +37,10 @@ __all__ = [
     # Classes
     "Execution",
     "ExecutionError",
+    "ExecutionTerminated",
     "ExecutionCancelled",
     "ExecutionTimeout",
+    "ExecutionAbandoned",
     "InputDismissed",
     "Input",
     "ModelSchema",
@@ -48,6 +58,8 @@ __all__ = [
     "group",
     "suspense",
     "suspend",
+    "select",
+    "cancel",
     "log_debug",
     "log_info",
     "log_warning",
@@ -85,6 +97,55 @@ def suspense(timeout: float | None = None):
             result = slow_task.submit().result()  # Will timeout after 30s
     """
     return get_context().suspense(timeout)
+
+
+_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any]")
+
+
+def select(
+    handles: t.Sequence[_H],
+    *,
+    cancel_remaining: bool = False,
+) -> tuple[_H, list[_H]]:
+    """Wait for the first of one or more handles (executions/inputs) to resolve.
+
+    Args:
+        handles: Sequence of Execution and/or Input objects. Must be non-empty.
+        cancel_remaining: If True, cancel non-winner execution handles
+            atomically once a handle resolves. Input handles are left pending.
+
+    Returns:
+        Tuple of ``(winner, remaining)`` where ``winner`` is the first handle
+        to resolve (call ``.result()`` to get its value or raise its error),
+        and ``remaining`` is the list of handles that did not win, in input
+        order.
+
+    Example:
+        winner, remaining = cf.select([a.submit(), b.submit(), c.submit()])
+        value = winner.result()
+
+    Timeouts are taken from an enclosing ``cf.suspense(timeout=...)`` scope.
+    """
+    if not handles:
+        raise ValueError("select requires at least one handle")
+
+    winner_idx = get_context().select(list(handles), cancel_remaining=cancel_remaining)
+    if winner_idx is None:
+        raise TimeoutError("timed out waiting for any handle to resolve")
+
+    winner = handles[winner_idx]
+    remaining = [h for i, h in enumerate(handles) if i != winner_idx]
+    return winner, remaining
+
+
+def cancel(handles: t.Sequence[Execution[t.Any] | Input[t.Any]]) -> None:
+    """Cancel one or more handles (executions and/or inputs) atomically.
+
+    Executions are cancelled recursively (descendants too). Inputs
+    transition to a terminal ``cancelled`` state, distinct from
+    ``dismissed``. Handles that are already resolved are silently skipped.
+    """
+    get_context().cancel(handles)
 
 
 def suspend(delay: float | dt.timedelta | dt.datetime | None = None) -> None:

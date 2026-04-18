@@ -6,9 +6,11 @@ defmodule Coflux.Orchestration.Inputs do
   # Response types
   @type_value 1
   @type_dismissed 2
+  @type_cancelled 3
 
   def type_value, do: @type_value
   def type_dismissed, do: @type_dismissed
+  def type_cancelled, do: @type_cancelled
 
   # --- Schema deduplication ---
 
@@ -211,6 +213,9 @@ defmodule Coflux.Orchestration.Inputs do
 
       {:ok, {@type_dismissed, _value, created_at, created_by}} ->
         {:ok, {:dismissed, created_at, created_by}}
+
+      {:ok, {@type_cancelled, _value, created_at, created_by}} ->
+        {:ok, {:cancelled, created_at, created_by}}
     end
   end
 

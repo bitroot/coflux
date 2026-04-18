@@ -288,17 +288,23 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "cancel" ->
-        [execution_id] = message["params"]
+        [handles, from_execution_id] = message["params"]
 
-        case Orchestration.cancel_execution(state.project_id, state.workspace_id, execution_id) do
-          :ok ->
-            {[], state}
+        if is_recognised_execution?(from_execution_id, state) do
+          case Orchestration.cancel(
+                 state.project_id,
+                 handles,
+                 state.workspace_id,
+                 from_execution_id
+               ) do
+            :ok ->
+              {[success_message(message["id"], nil)], state}
 
-          {:error, :workspace_mismatch} ->
-            {[{:close, 4000, "workspace_mismatch"}], nil}
-
-          {:error, :not_found} ->
-            {[], state}
+            {:error, :workspace_not_found} ->
+              {[{:close, 4000, "workspace_mismatch"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
         end
 
       "suspend" ->
@@ -318,30 +324,44 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
-      "get_result" ->
-        {execution_id, from_execution_id, timeout_ms, suspend} =
+      "select" ->
+        {handles, from_execution_id, timeout_ms, suspend, cancel_remaining} =
           case message["params"] do
-            [eid, feid, tms, s] -> {eid, feid, tms, s}
-            [eid, feid, tms] -> {eid, feid, tms, true}
+            [h, feid, tms, s, cr] -> {h, feid, tms, s, cr}
+            [h, feid, tms, s] -> {h, feid, tms, s, false}
           end
 
         if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.get_result(
+          case Orchestration.select(
                  state.project_id,
-                 execution_id,
+                 handles,
                  from_execution_id,
                  timeout_ms,
                  suspend,
+                 cancel_remaining,
                  message["id"]
                ) do
-            {:ok, nil} ->
-              {[success_message(message["id"], nil)], state}
+            {:ok, :timeout} ->
+              {[success_message(message["id"], compose_select_result(:timeout))], state}
 
-            {:ok, result} ->
-              {[success_message(message["id"], compose_result(result))], state}
+            {:ok, :suspended} ->
+              # Respond with a null result to unblock the pending RPC before
+              # the separate :abort command terminates the executor. The
+              # worker kills the process regardless; sending this response
+              # just clears the pending request so the dispatch loop can exit.
+              {[success_message(message["id"], compose_select_result(:timeout))], state}
+
+            {:ok, {idx, result}} ->
+              {[success_message(message["id"], compose_select_result({idx, result}))], state}
 
             :wait ->
               {[], state}
+
+            {:error, :execution_not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+
+            {:error, :input_not_found} ->
+              {[error_message(message["id"], "input_not_found")], state}
           end
         else
           {[{:close, 4000, "execution_invalid"}], nil}
@@ -387,47 +407,6 @@ defmodule Coflux.Handlers.Worker do
 
             {:error, :input_mismatch} ->
               {[error_message(message["id"], "input_mismatch")], state}
-          end
-        else
-          {[{:close, 4000, "execution_invalid"}], nil}
-        end
-
-      "resolve_input" ->
-        [input_external_id, from_execution_id, timeout_ms, suspend] =
-          message["params"]
-
-        if is_recognised_execution?(from_execution_id, state) do
-          case Orchestration.resolve_input(
-                 state.project_id,
-                 input_external_id,
-                 from_execution_id,
-                 timeout_ms,
-                 suspend,
-                 message["id"]
-               ) do
-            {:ok, nil} ->
-              {[success_message(message["id"], nil)], state}
-
-            {:ok, :suspended} ->
-              {[success_message(message["id"], ["suspended"])], state}
-
-            {:ok, {:value, value}} ->
-              {[success_message(message["id"], ["value", value])], state}
-
-            {:ok, :dismissed} ->
-              {[success_message(message["id"], ["dismissed"])], state}
-
-            :wait ->
-              {[], state}
-
-            {:error, :not_found} ->
-              {[error_message(message["id"], "input_not_found")], state}
-
-            {:error, :execution_not_found} ->
-              # The orchestration server evicted the caller execution between
-              # our is_recognised_execution? pre-check and the call. Close:
-              # the handler's view of the session is out of sync.
-              {[{:close, 4000, "execution_invalid"}], nil}
           end
         else
           {[{:close, 4000, "execution_invalid"}], nil}
@@ -511,20 +490,8 @@ defmodule Coflux.Handlers.Worker do
      ], state}
   end
 
-  def websocket_info({:result, request_id, nil}, state) do
-    {[success_message(request_id, nil)], state}
-  end
-
-  def websocket_info({:result, request_id, result}, state) do
-    {[success_message(request_id, compose_result(result))], state}
-  end
-
-  def websocket_info({:response, request_id, {:value, value}}, state) do
-    {[success_message(request_id, ["value", value])], state}
-  end
-
-  def websocket_info({:response, request_id, :dismissed}, state) do
-    {[success_message(request_id, ["dismissed"])], state}
+  def websocket_info({:result, request_id, payload}, state) do
+    {[success_message(request_id, compose_select_result(payload))], state}
   end
 
   def websocket_info({:abort, execution_external_id}, state) do
@@ -673,18 +640,83 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  defp compose_result(result) do
-    case result do
-      {:error, type, message, _frames, _retry_id, _retryable} -> ["error", type, message]
-      {:error, type, message, _frames, _retry_id} -> ["error", type, message]
-      {:value, value} -> ["value", compose_value(value)]
-      {:abandoned, nil} -> ["abandoned"]
-      :cancelled -> ["cancelled"]
-      :dismissed -> ["dismissed"]
-      {:timeout, nil} -> ["timeout"]
-      :suspended -> ["suspended"]
+  # Compose a select result for the CLI. Returns a JSON-compatible map,
+  # or `nil` when the select wait itself expired (no handle resolved).
+  # Payload is one of:
+  #   :timeout                       (wait expired; `nil` on the wire)
+  #   {handle_index, result_detail}
+  #     where result_detail is one of:
+  #       {:value, value}
+  #       {:error, type, message, frames, retry_id, retryable?}
+  #       :cancelled | :dismissed | {:abandoned, nil} | {:timeout, nil} | :suspended
+  defp compose_select_result(:timeout) do
+    nil
+  end
+
+  defp compose_select_result({idx, detail}) do
+    base = %{"winner" => idx}
+
+    case detail do
+      {:value, value} ->
+        Map.merge(base, %{"status" => "ok", "value" => compose_value(value)})
+
+      {:error, type, message, frames, _retry_id, _retryable} ->
+        Map.merge(base, %{
+          "status" => "error",
+          "error" => compose_error(type, message, frames)
+        })
+
+      {:error, type, message, frames, _retry_id} ->
+        Map.merge(base, %{
+          "status" => "error",
+          "error" => compose_error(type, message, frames)
+        })
+
+      :cancelled ->
+        Map.put(base, "status", "cancelled")
+
+      :dismissed ->
+        Map.put(base, "status", "dismissed")
+
+      {:abandoned, _} ->
+        Map.put(base, "status", "abandoned")
+
+      {:timeout, _} ->
+        Map.put(base, "status", "timeout")
+
+      :suspended ->
+        # Should not reach the client: suspension is signalled via :abort
+        # rather than as a winner status.
+        Map.put(base, "status", "timeout")
     end
   end
+
+  defp compose_error(type, message, frames) do
+    traceback = format_traceback(frames)
+
+    error = %{"type" => type, "message" => message}
+
+    if traceback != "" do
+      Map.put(error, "traceback", traceback)
+    else
+      error
+    end
+  end
+
+  defp format_traceback(frames) when is_list(frames) do
+    frames
+    |> Enum.map(fn
+      {file, line, name, code} ->
+        "  File \"#{file}\", line #{line}, in #{name}\n    #{code}"
+
+      _ ->
+        ""
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp format_traceback(_), do: ""
 
   defp parse_websocket_protocols(req) do
     case :cowboy_req.parse_header("sec-websocket-protocol", req) do

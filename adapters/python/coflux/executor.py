@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import os
@@ -98,7 +99,13 @@ def execute_target(
         )
 
         with capture_output(execution_id):
-            result = fn(*deserialized_args)
+            if inspect.iscoroutinefunction(fn):
+                # Native async def targets: run the coroutine to completion.
+                # Each execution is its own OS process with nothing else
+                # scheduled, so a fresh event loop per call is fine.
+                result = asyncio.run(fn(*deserialized_args))
+            else:
+                result = fn(*deserialized_args)
 
         # Serialize and send result
         result_value = serialize_value(result)

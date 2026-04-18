@@ -280,7 +280,28 @@ def serialize_retries(retries: Retries) -> dict:
 
 
 class Target(t.Generic[P, T]):
-    """Wrapper for a decorated task or workflow function."""
+    """Wrapper for a decorated task or workflow function.
+
+    The fluent ``with_*`` methods return a new ``Target`` with per-call-site
+    overrides applied, leaving the original decorator-bound target unchanged.
+    Only the original is registered during discovery; fluent copies are
+    call-site wrappers.
+
+    Examples:
+        # Override a single option at the call site
+        my_task.with_retries(3).submit(x)
+
+        # Disable a decorator-level option
+        my_task.with_cache(False).submit(x)
+
+        # Stash a preconfigured variant and reuse it
+        cached = my_task.with_cache(60)
+        cached.submit(a)
+        cached.submit(b)
+
+        # Chain multiple overrides
+        my_task.with_cache(60).with_timeout(30).submit(x)
+    """
 
     def __init__(
         self,
@@ -318,6 +339,52 @@ class Target(t.Generic[P, T]):
             is_stub,
         )
         functools.update_wrapper(self, fn)
+
+    def _copy(self, **definition_overrides: t.Any) -> Target[P, T]:
+        """Return a new Target with ``_definition`` fields overridden."""
+        new = Target.__new__(type(self))
+        new._fn = self._fn
+        new._name = self._name
+        new._module = self._module
+        new._definition = self._definition._replace(**definition_overrides)
+        functools.update_wrapper(new, self._fn)
+        return new
+
+    def with_cache(self, cache: bool | float | dt.timedelta | Cache) -> Target[P, T]:
+        """Return a new Target with caching config overridden for this call site.
+
+        Pass ``False`` to disable caching that was set on the decorator.
+        """
+        return self._copy(cache=_expand_cache(cache))
+
+    def with_retries(self, retries: int | bool | Retries) -> Target[P, T]:
+        """Return a new Target with retries config overridden for this call site.
+
+        Pass ``0`` or ``False`` to disable retries.
+        """
+        return self._copy(retries=_expand_retries(retries))
+
+    def with_defer(self, defer: bool | Defer) -> Target[P, T]:
+        """Return a new Target with defer config overridden for this call site."""
+        return self._copy(defer=_expand_defer(defer))
+
+    def with_memo(self, memo: bool | t.Iterable[str] | str) -> Target[P, T]:
+        """Return a new Target with memoisation config overridden for this call site."""
+        return self._copy(memo=_parse_memo(memo, self._definition.parameters))
+
+    def with_delay(self, delay: float | dt.timedelta) -> Target[P, T]:
+        """Return a new Target with submission delay overridden for this call site."""
+        return self._copy(delay=delay)
+
+    def with_timeout(self, timeout: float | dt.timedelta) -> Target[P, T]:
+        """Return a new Target with execution timeout overridden for this call site."""
+        return self._copy(timeout=timeout)
+
+    def with_requires(
+        self, requires: dict[str, str | bool | list[str]] | None
+    ) -> Target[P, T]:
+        """Return a new Target with routing tags overridden for this call site."""
+        return self._copy(requires=_parse_requires(requires))
 
     @property
     def name(self) -> str:
