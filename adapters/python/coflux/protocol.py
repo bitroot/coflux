@@ -454,6 +454,65 @@ def send_metric(
     get_protocol().send_message("metric", params)
 
 
+def send_stream_register(execution_id: str, sequence: int) -> None:
+    """Register a stream owned by this execution.
+
+    Sequence is worker-assigned and monotonic per execution (0, 1, 2, ...).
+    """
+    get_protocol().send_message(
+        "stream_register",
+        {"execution_id": execution_id, "sequence": sequence},
+    )
+
+
+def send_stream_append(
+    execution_id: str,
+    sequence: int,
+    position: int,
+    value: dict[str, Any],
+) -> None:
+    """Append an item to a stream at the given (worker-assigned) position.
+
+    Position is monotonic per stream (0, 1, 2, ...). Value uses the same
+    Value shape as execution results (type + format + value/path + refs).
+    """
+    get_protocol().send_message(
+        "stream_append",
+        {
+            "execution_id": execution_id,
+            "sequence": sequence,
+            "position": position,
+            "value": value,
+        },
+    )
+
+
+def send_stream_close(
+    execution_id: str,
+    sequence: int,
+    error_type: str | None = None,
+    error_message: str = "",
+    traceback: str = "",
+) -> None:
+    """Close a stream.
+
+    With no error args, signals a clean close (generator exhausted). With
+    error args set, signals that the generator raised — consumers will see
+    the exception on their next iteration.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "sequence": sequence,
+    }
+    if error_type is not None:
+        params["error"] = {
+            "type": error_type,
+            "message": error_message,
+            "traceback": traceback,
+        }
+    get_protocol().send_message("stream_close", params)
+
+
 def receive_message() -> dict[str, Any] | None:
     """Receive the next message from the CLI."""
     return get_protocol().receive()

@@ -1101,6 +1101,43 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, sequence int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	return conn.Notify("stream_register", executionID, sequence)
+}
+
+func (w *Worker) StreamAppend(ctx context.Context, executionID string, sequence int, position int, value *adapter.Value) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Apply blob threshold + upload fragment references just like ReportResult.
+	serverValue, err := w.convertValueToServerFormat(value)
+	if err != nil {
+		return err
+	}
+	return conn.Notify("stream_append", executionID, sequence, position, serverValue)
+}
+
+func (w *Worker) StreamClose(ctx context.Context, executionID string, sequence int, streamErr *adapter.StreamCloseError) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	var errTuple any
+	if streamErr != nil {
+		// Match the shape used for put_error: [type, message, frames].
+		// Stream closures never carry a retryable flag — retry decisions
+		// live at the execution level, not per-stream.
+		frames := parseTraceback(streamErr.Traceback)
+		errTuple = []any{streamErr.Type, streamErr.Message, frames}
+	}
+	return conn.Notify("stream_close", executionID, sequence, errTuple)
+}
+
 func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {
 	conn, err := w.waitForConn(ctx)
 	if err != nil {

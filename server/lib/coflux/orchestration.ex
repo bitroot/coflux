@@ -181,6 +181,22 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:record_result, execution_id, result})
   end
 
+  # Stream producer messages — worker registers a stream, appends items,
+  # and closes the stream. Sequence and position are worker-assigned and
+  # monotonic per-execution / per-stream.
+
+  def register_stream(project_id, execution_id, sequence) do
+    call_server(project_id, {:register_stream, execution_id, sequence})
+  end
+
+  def append_stream_item(project_id, execution_id, sequence, position, value) do
+    call_server(project_id, {:append_stream_item, execution_id, sequence, position, value})
+  end
+
+  def close_stream(project_id, execution_id, sequence, error) do
+    call_server(project_id, {:close_stream, execution_id, sequence, error})
+  end
+
   def select(
         project_id,
         handles,

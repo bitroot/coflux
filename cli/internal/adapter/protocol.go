@@ -253,6 +253,37 @@ type RegisterGroupParams struct {
 	Name        *string `json:"name,omitempty"`
 }
 
+// StreamRegisterParams for stream_register notification.
+// Sequence is worker-assigned, monotonic per execution.
+type StreamRegisterParams struct {
+	ExecutionID string `json:"execution_id"`
+	Sequence    int    `json:"sequence"`
+}
+
+// StreamAppendParams for stream_append notification.
+// Position is worker-assigned, monotonic per stream.
+type StreamAppendParams struct {
+	ExecutionID string `json:"execution_id"`
+	Sequence    int    `json:"sequence"`
+	Position    int    `json:"position"`
+	Value       *Value `json:"value"`
+}
+
+// StreamCloseParams for stream_close notification. Error is present only
+// when the producer's generator raised an exception.
+type StreamCloseParams struct {
+	ExecutionID string            `json:"execution_id"`
+	Sequence    int               `json:"sequence"`
+	Error       *StreamCloseError `json:"error,omitempty"`
+}
+
+// StreamCloseError describes an error that terminated a stream.
+type StreamCloseError struct {
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	Traceback string `json:"traceback"`
+}
+
 // DownloadBlobParams for download_blob request
 type DownloadBlobParams struct {
 	ExecutionID string `json:"execution_id"`

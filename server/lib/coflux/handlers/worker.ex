@@ -253,6 +253,80 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      "stream_register" ->
+        [execution_id, sequence] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.register_stream(state.project_id, execution_id, sequence) do
+            :ok -> {[], state}
+            # Idempotent — a duplicate register is harmless.
+            {:error, :already_registered} -> {[], state}
+            {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_append" ->
+        [execution_id, sequence, position, value] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.append_stream_item(
+                 state.project_id,
+                 execution_id,
+                 sequence,
+                 position,
+                 parse_value(value)
+               ) do
+            :ok ->
+              {[], state}
+
+            # Worker is trying to append to a stream the server has already
+            # closed (e.g., owner execution was cancelled). Surfacing this to
+            # the adapter would let it stop producing; for now, swallow so
+            # the stream-close propagation to the worker (task #10) is the
+            # canonical signal.
+            {:error, :closed} ->
+              {[], state}
+
+            {:error, :not_registered} ->
+              {[], state}
+
+            {:error, :already_appended} ->
+              {[], state}
+
+            {:error, :not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_close" ->
+        [execution_id, sequence, error] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          parsed_error =
+            case parse_error(error) do
+              nil -> nil
+              {type, message, frames, _retryable} -> {type, message, frames}
+            end
+
+          case Orchestration.close_stream(
+                 state.project_id,
+                 execution_id,
+                 sequence,
+                 parsed_error
+               ) do
+            :ok -> {[], state}
+            {:error, :already_closed} -> {[], state}
+            {:error, :not_registered} -> {[], state}
+            {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
       "put_error" ->
         [execution_id, error] = message["params"]
 

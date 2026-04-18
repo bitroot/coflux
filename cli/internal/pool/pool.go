@@ -49,6 +49,14 @@ type ExecutionHandler interface {
 	SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error)
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
+	// StreamRegister declares a new stream owned by an execution.
+	// Sequence is worker-assigned, monotonic per execution.
+	StreamRegister(ctx context.Context, executionID string, sequence int) error
+	// StreamAppend appends an item to a stream at the given (worker-assigned) position.
+	StreamAppend(ctx context.Context, executionID string, sequence int, position int, value *adapter.Value) error
+	// StreamClose closes a stream. Error is nil for a clean close, or a (type, message, traceback)
+	// triple when the producer's generator raised.
+	StreamClose(ctx context.Context, executionID string, sequence int, err *adapter.StreamCloseError) error
 }
 
 // Pool manages executor processes. Each executor handles one execution then
@@ -264,6 +272,15 @@ loop:
 		case "register_group":
 			p.handleRegisterGroup(execCtx, executionID, params, logger)
 
+		case "stream_register":
+			p.handleStreamRegister(execCtx, executionID, params, logger)
+
+		case "stream_append":
+			p.handleStreamAppend(execCtx, executionID, params, logger)
+
+		case "stream_close":
+			p.handleStreamClose(execCtx, executionID, params, logger)
+
 		default:
 			err := fmt.Errorf("unknown message method: %s", method)
 			logger.Error("unknown message method", "method", method)
@@ -432,6 +449,42 @@ func (p *Pool) handleRegisterGroup(ctx context.Context, executionID string, para
 
 	if err := p.handler.RegisterGroup(ctx, req.ExecutionID, req.GroupID, req.Name); err != nil {
 		logger.Error("failed to register group", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamRegister(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamRegisterParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_register message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Sequence); err != nil {
+		logger.Error("failed to register stream", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamAppend(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamAppendParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_append message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamAppend(ctx, req.ExecutionID, req.Sequence, req.Position, req.Value); err != nil {
+		logger.Error("failed to append stream item", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamClose(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamCloseParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_close message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamClose(ctx, req.ExecutionID, req.Sequence, req.Error); err != nil {
+		logger.Error("failed to close stream", "error", err)
 	}
 }
 

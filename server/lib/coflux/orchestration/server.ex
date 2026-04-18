@@ -1807,6 +1807,55 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call({:register_stream, execution_external_id, sequence}, _from, state) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        case Streams.register_stream(state.db, execution_id, sequence) do
+          {:ok, _} -> {:reply, :ok, state}
+          {:error, :already_registered} -> {:reply, {:error, :already_registered}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call(
+        {:append_stream_item, execution_external_id, sequence, position, value},
+        _from,
+        state
+      ) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        case Streams.append_item(
+               state.db,
+               execution_id,
+               sequence,
+               position,
+               normalize_value(value)
+             ) do
+          {:ok, _} -> {:reply, :ok, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:close_stream, execution_external_id, sequence, error}, _from, state) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        case Streams.close_stream(state.db, execution_id, sequence, error) do
+          {:ok, _} -> {:reply, :ok, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
   def handle_call(
         {:select, handles, from_execution_external_id, timeout_ms, suspend, cancel_remaining,
          request_id},
