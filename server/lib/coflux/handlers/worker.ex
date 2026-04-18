@@ -648,7 +648,8 @@ defmodule Coflux.Handlers.Worker do
   #     where result_detail is one of:
   #       {:value, value}
   #       {:error, type, message, frames, retry_id, retryable?}
-  #       :cancelled | :dismissed | {:abandoned, nil} | {:timeout, nil} | :suspended
+  #       :cancelled | :dismissed | {:abandoned, _} | {:crashed, _} |
+  #       {:timeout, _} | :suspended
   defp compose_select_result(:timeout) do
     nil
   end
@@ -680,6 +681,9 @@ defmodule Coflux.Handlers.Worker do
 
       {:abandoned, _} ->
         Map.put(base, "status", "abandoned")
+
+      {:crashed, _} ->
+        Map.put(base, "status", "crashed")
 
       {:timeout, _} ->
         Map.put(base, "status", "timeout")

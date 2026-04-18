@@ -65,6 +65,18 @@ class ExecutionAbandoned(ExecutionTerminated):
         super().__init__(message)
 
 
+class ExecutionCrashed(ExecutionTerminated):
+    """Raised when a child execution's worker terminated without reporting.
+
+    The worker process ended (sent notify_terminated) but never reported
+    a result or error — typically indicates a process crash or shutdown
+    that didn't give the task code a chance to report.
+    """
+
+    def __init__(self, message: str = "worker terminated without reporting a result"):
+        super().__init__(message)
+
+
 class InputDismissed(Exception):
     """Raised when an input request was dismissed."""
 

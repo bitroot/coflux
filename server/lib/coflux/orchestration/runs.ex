@@ -950,21 +950,28 @@ defmodule Coflux.Orchestration.Runs do
   @doc """
   Gets result types for executions of a step, ordered most recent first.
   """
+  # Returns {execution_id, type} for each execution of the step that has
+  # reached a terminal state, most-recent first. A row is considered terminal
+  # if it has either a results row or a completions row (the latter without
+  # the former indicates the worker crashed without reporting).
+  # For crashed executions, type is NULL.
   def get_step_result_types(db, step_id, limit) do
     case query(
            db,
            """
-           SELECT r.type
+           SELECT e.id, r.type
            FROM executions AS e
-           INNER JOIN results AS r ON r.execution_id = e.id
+           LEFT JOIN results AS r ON r.execution_id = e.id
+           LEFT JOIN completions AS c ON c.execution_id = e.id
            WHERE e.step_id = ?1
+             AND (r.execution_id IS NOT NULL OR c.execution_id IS NOT NULL)
            ORDER BY e.created_at DESC
            LIMIT ?2
            """,
            {step_id, limit}
          ) do
       {:ok, rows} ->
-        {:ok, Enum.map(rows, fn {type} -> type end)}
+        {:ok, rows}
     end
   end
 
@@ -1182,7 +1189,7 @@ defmodule Coflux.Orchestration.Runs do
 
     # Also find predecessors that reference this execution via successor_ref_id.
     # This only searches the active epoch, which is sufficient because
-    # successor_ref_id results are always written to the active epoch (either
+    # successor_ref_id rows are always written to the active epoch (either
     # during runtime cache hits or epoch copy), and in-flight runs are copied
     # forward during rotation.
     {:ok, {run_ext, step_num, attempt}} = get_execution_key(db, execution_id)

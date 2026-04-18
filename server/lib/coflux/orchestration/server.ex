@@ -346,10 +346,13 @@ defmodule Coflux.Orchestration.Server do
             end)
           )
         else
-          # Session no longer active - abandon these executions
+          # Session no longer active - abandon these executions. Server-initiated
+          # so we write both the results row (via process_result) and the
+          # completion row (via complete_execution) here — no worker is
+          # going to send notify_terminated for this execution.
           Enum.reduce(execution_ids, state, fn execution_id, state ->
             {:ok, state} = process_result(state, execution_id, :abandoned)
-            state
+            complete_execution(state, execution_id)
           end)
         end
       end)
@@ -1661,8 +1664,10 @@ defmodule Coflux.Orchestration.Server do
 
             case Results.has_result?(state.db, execution_id) do
               {:ok, false} ->
+                # Server-detected abandonment. Write both tables — no worker
+                # will send notify_terminated for this execution.
                 {:ok, state} = process_result(state, execution_id, :abandoned)
-                state
+                complete_execution(state, execution_id)
 
               {:ok, true} ->
                 state
@@ -1731,18 +1736,14 @@ defmodule Coflux.Orchestration.Server do
     state =
       external_execution_ids
       |> Enum.reduce(state, fn ext_id, state ->
-        # If execution has no result recorded, mark it as abandoned
+        # Finalize the execution — writes completion (plus creating any
+        # successor) if it hasn't already been done. For worker-reported
+        # error/timeout this runs the retry decision now. For executions
+        # with no results row yet, falls back to the :abandoned path.
         state =
           case Map.fetch(state.execution_ids, ext_id) do
             {:ok, execution_id} ->
-              case Results.has_result?(state.db, execution_id) do
-                {:ok, false} ->
-                  {:ok, state} = process_result(state, execution_id, :abandoned)
-                  state
-
-                {:ok, true} ->
-                  state
-              end
+              complete_execution(state, execution_id)
 
             :error ->
               state
@@ -2707,8 +2708,10 @@ defmodule Coflux.Orchestration.Server do
                     {:cached, ref_id, value}
                 end
 
-              {:ok, state} =
-                process_result(state, execution.execution_id, result)
+              # Cache hit during scheduling — server-only, no worker runs this
+              # execution. Write results + completion together.
+              {:ok, state} = process_result(state, execution.execution_id, result)
+              state = complete_execution(state, execution.execution_id)
 
               {state, assigned, unassigned}
             else
@@ -3447,7 +3450,7 @@ defmodule Coflux.Orchestration.Server do
   # execution that doesn't yet have a result.
   defp resolve_active_execution(db, execution_id) do
     case Results.get_result(db, execution_id) do
-      {:ok, {{:spawned, successor_id}, _created_at, _created_by}} ->
+      {:ok, {{:spawned, successor_id}, _created_at, _completion_created_at, _created_by}} ->
         resolve_active_execution(db, successor_id)
 
       _ ->
@@ -3457,6 +3460,11 @@ defmodule Coflux.Orchestration.Server do
 
   # Cancel a single execution: record :cancelled, abort if assigned, cancel descendants.
   defp do_cancel_execution(state, execution_id, workspace_id) do
+    # Write the results row and fire result-time notifications to mark the
+    # execution as cancelled. The completion row isn't written until the
+    # worker confirms termination (via notify_terminated), so consumers can
+    # distinguish "cancelling" (results present, completion absent) from
+    # "cancelled" (both present).
     state =
       case record_and_notify_result(state, execution_id, :cancelled, nil) do
         {:ok, state} -> state
@@ -3707,14 +3715,16 @@ defmodule Coflux.Orchestration.Server do
     {session, state} = pop_in(state.sessions[session_id])
     state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
 
-    # starting/executing now contain external IDs - resolve to internal for process_result
+    # starting/executing now contain external IDs - resolve to internal for process_result.
+    # Session removal means no more notify_terminated for these executions, so we
+    # write both results + completion here.
     state =
       session.executing
       |> MapSet.union(session.starting)
       |> Enum.reduce(state, fn ext_id, state ->
         execution_id = Map.fetch!(state.execution_ids, ext_id)
         {:ok, state} = process_result(state, execution_id, :abandoned)
-        state
+        complete_execution(state, execution_id)
       end)
       |> Map.update!(:targets, fn all_targets ->
         Enum.reduce(
@@ -4078,6 +4088,7 @@ defmodule Coflux.Orchestration.Server do
       {:error, _, _, _, false} -> false
       {:error, _, _, _, _} -> true
       :abandoned -> true
+      :crashed -> true
       :timeout -> true
       _ -> false
     end
@@ -4694,17 +4705,17 @@ defmodule Coflux.Orchestration.Server do
       run_executions
       |> Enum.map(&elem(&1, 0))
       |> Enum.reduce(%{}, fn execution_id, results ->
-        {result, completed_at, result_created_by} =
+        {result, result_at, completed_at, result_created_by} =
           case Results.get_result(db, execution_id) do
-            {:ok, {result, completed_at, created_by}} ->
+            {:ok, {result, result_at, completion_at, created_by}} ->
               result = build_result(result, db)
-              {result, completed_at, created_by}
+              {result, result_at, completion_at, created_by}
 
             {:ok, nil} ->
-              {nil, nil, nil}
+              {nil, nil, nil, nil}
           end
 
-        Map.put(results, execution_id, {result, completed_at, result_created_by})
+        Map.put(results, execution_id, {result, result_at, completed_at, result_created_by})
       end)
 
     steps =
@@ -4764,7 +4775,8 @@ defmodule Coflux.Orchestration.Server do
                {:ok, workspace_external_id} =
                  Workspaces.get_workspace_external_id(db, workspace_id)
 
-               {result, completed_at, result_created_by} = Map.fetch!(results, execution_id)
+               {result, result_at, completed_at, result_created_by} =
+                 Map.fetch!(results, execution_id)
 
                execution_groups =
                  groups
@@ -4810,6 +4822,7 @@ defmodule Coflux.Orchestration.Server do
                   created_by: execution_created_by,
                   execute_after: execute_after,
                   assigned_at: assigned_at,
+                  result_at: result_at,
                   completed_at: completed_at,
                   groups: execution_groups,
                   assets: assets,
@@ -5403,6 +5416,7 @@ defmodule Coflux.Orchestration.Server do
       {:error, _, _, _, retry_id} -> is_nil(retry_id)
       {:value, _} -> true
       {:abandoned, retry_id} -> is_nil(retry_id)
+      {:crashed, retry_id} -> is_nil(retry_id)
       :cancelled -> true
       {:timeout, retry_id} -> is_nil(retry_id)
       {:suspended, _} -> false
@@ -5433,6 +5447,10 @@ defmodule Coflux.Orchestration.Server do
       {:abandoned, retry_id} ->
         retry = if retry_id, do: resolve_execution(db, retry_id)
         {:abandoned, retry}
+
+      {:crashed, retry_id} ->
+        retry = if retry_id, do: resolve_execution(db, retry_id)
+        {:crashed, retry}
 
       :cancelled ->
         :cancelled
@@ -5471,127 +5489,197 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Write the results row (with successor info baked in) and fire
+  # result-time notifications: wake waiters, update dependencies, send the
+  # Studio :result event carrying the result tuple and result_at timestamp.
+  # The completion row is written later via complete_execution (triggered by
+  # notify_terminated for worker-involved cases, or by the server-initiated
+  # paths directly when no worker is involved).
   defp record_and_notify_result(state, execution_id, result, _module, created_by \\ nil) do
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-    {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
-    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
-    execution_external_id = execution_external_id(r, s, a)
-
     result =
       case result do
-        {:value, value} ->
-          {:value, normalize_value(value)}
-
-        other ->
-          other
+        {:value, value} -> {:value, normalize_value(value)}
+        other -> other
       end
 
     case Results.record_result(state.db, execution_id, result, created_by) do
-      {:ok, created_at} ->
-        state =
-          state
-          |> notify_waiting(execution_id)
-          |> update_dependencies_on_result(execution_id)
-          |> unregister_pending_dependencies(execution_id)
-
-        final = is_result_final?(result)
-        result = build_result(result, state.db)
-
-        principal =
-          case Principals.get_principal(state.db, created_by) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        ws_ext_id = workspace_external_id(state, workspace_id)
-
-        # get_result_successors now returns {run_external_id, successor_id}
-        state =
-          successors
-          |> Enum.reduce(state, fn {run_external_id, successor_id}, state ->
-            cond do
-              successor_id == execution_id ->
-                notify_listeners(
-                  state,
-                  {:run, run_external_id},
-                  {:result, execution_external_id, result, created_at, principal}
-                )
-
-              final ->
-                {:ok, {r, s, a}} = Runs.get_execution_key(state.db, successor_id)
-                successor_external_id = execution_external_id(r, s, a)
-
-                notify_listeners(
-                  state,
-                  {:run, run_external_id},
-                  # TODO: better name?
-                  {:result_result, successor_external_id, result, created_at, principal}
-                )
-
-              true ->
-                state
-            end
-          end)
-          |> then(fn state ->
-            case untrack_run_execution(state, r, execution_id) do
-              {{root_module, root_target}, state} ->
-                notify_listeners(
-                  state,
-                  {:modules, ws_ext_id},
-                  {:completed, {root_module, root_target}, r, execution_external_id}
-                )
-
-              {nil, state} ->
-                state
-            end
-          end)
-          |> notify_listeners(
-            {:queue, ws_ext_id},
-            {:completed, execution_external_id}
-          )
-
-        # Check if any input dependencies became inactive. Route the
-        # :inputs topic notification to the INPUT's workspace (matching
-        # :input_dependency_active in the resolve_input handler), not the
-        # completing execution's workspace — these differ when an execution
-        # in a child workspace resolved an input created in a parent.
-        state =
-          case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
-            {:ok, deps} ->
-              Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
-                if Inputs.has_active_dependency?(state.db, input_id) do
-                  state
-                else
-                  {:ok, run_ext_id, input_number} =
-                    Inputs.get_input_run_and_number(state.db, input_id)
-
-                  input_ext_id = input_external_id(run_ext_id, input_number)
-                  input_ws_ext_id = workspace_external_id(state, input_ws_id)
-
-                  state
-                  |> notify_listeners(
-                    {:inputs, input_ws_ext_id},
-                    {:input_dependency_inactive, input_ext_id}
-                  )
-                  |> notify_listeners(
-                    {:input, input_ext_id},
-                    {:active, false}
-                  )
-                end
-              end)
-
-            _ ->
-              state
-          end
-
-        # TODO: only if there's an execution waiting for this result?
-        send(self(), :tick)
-
+      {:ok, result_at} ->
+        state = fire_result_notifications(state, execution_id, result, result_at, created_by)
         {:ok, state}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp fire_result_notifications(state, execution_id, result, result_at, created_by) do
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
+    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
+    execution_external_id = execution_external_id(r, s, a)
+
+    state =
+      state
+      |> notify_waiting(execution_id)
+      |> update_dependencies_on_result(execution_id)
+      |> unregister_pending_dependencies(execution_id)
+
+    final = is_result_final?(result)
+    built_result = build_result(result, state.db)
+
+    principal =
+      case Principals.get_principal(state.db, created_by) do
+        {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+        {:ok, nil} -> nil
+      end
+
+    ws_ext_id = workspace_external_id(state, workspace_id)
+
+    state =
+      successors
+      |> Enum.reduce(state, fn {run_external_id, successor_id}, state ->
+        cond do
+          successor_id == execution_id ->
+            notify_listeners(
+              state,
+              {:run, run_external_id},
+              {:result, execution_external_id, built_result, result_at, principal}
+            )
+
+          final ->
+            {:ok, {r2, s2, a2}} = Runs.get_execution_key(state.db, successor_id)
+            successor_external_id = execution_external_id(r2, s2, a2)
+
+            notify_listeners(
+              state,
+              {:run, run_external_id},
+              # TODO: better name?
+              {:result_result, successor_external_id, built_result, result_at, principal}
+            )
+
+          true ->
+            state
+        end
+      end)
+      |> then(fn state ->
+        case untrack_run_execution(state, r, execution_id) do
+          {{root_module, root_target}, state} ->
+            notify_listeners(
+              state,
+              {:modules, ws_ext_id},
+              {:completed, {root_module, root_target}, r, execution_external_id}
+            )
+
+          {nil, state} ->
+            state
+        end
+      end)
+      |> notify_listeners(
+        {:queue, ws_ext_id},
+        {:completed, execution_external_id}
+      )
+
+    # Check if any input dependencies became inactive. Route the
+    # :inputs topic notification to the INPUT's workspace (matching
+    # :input_dependency_active in the resolve_input handler), not the
+    # completing execution's workspace — these differ when an execution
+    # in a child workspace resolved an input created in a parent.
+    state =
+      case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
+        {:ok, deps} ->
+          Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
+            if Inputs.has_active_dependency?(state.db, input_id) do
+              state
+            else
+              {:ok, run_ext_id, input_number} =
+                Inputs.get_input_run_and_number(state.db, input_id)
+
+              input_ext_id = input_external_id(run_ext_id, input_number)
+              input_ws_ext_id = workspace_external_id(state, input_ws_id)
+
+              state
+              |> notify_listeners(
+                {:inputs, input_ws_ext_id},
+                {:input_dependency_inactive, input_ext_id}
+              )
+              |> notify_listeners(
+                {:input, input_ext_id},
+                {:active, false}
+              )
+            end
+          end)
+
+        _ ->
+          state
+      end
+
+    # TODO: only if there's an execution waiting for this result?
+    send(self(), :tick)
+
+    state
+  end
+
+  # Write the completion row and fire a completion-time notification. For
+  # "crashed" cases (notify_terminated with no prior results row), also
+  # decides retry and fires result-time notifications with a synthesised
+  # :crashed shape.
+  defp complete_execution(state, execution_id) do
+    case Results.has_completion?(state.db, execution_id) do
+      {:ok, true} ->
+        state
+
+      {:ok, false} ->
+        case Results.has_result?(state.db, execution_id) do
+          {:ok, true} ->
+            case Results.record_completion(state.db, execution_id) do
+              {:ok, completion_at} ->
+                fire_completion_notification(state, execution_id, completion_at)
+
+              {:error, :already_completed} ->
+                state
+            end
+
+          {:ok, false} ->
+            handle_crashed(state, execution_id)
+        end
+    end
+  end
+
+  # No results row exists for this execution but notify_terminated has
+  # arrived — the worker terminated without reporting. Decide retry, write
+  # completion (no results row), fire notifications.
+  defp handle_crashed(state, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+    # Decide retry as if this were an abandoned-like failure. result_retryable?
+    # treats :crashed as retryable so the step's retry policy applies.
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
+
+    case Results.record_completion(state.db, execution_id) do
+      {:ok, completion_at} ->
+        # Result-time notifications weren't fired (no results row was ever
+        # written), so fire them now alongside the completion notification.
+        state =
+          fire_result_notifications(state, execution_id, {:crashed, retry_id}, nil, nil)
+
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  defp fire_completion_notification(state, execution_id, completion_at) do
+    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
+    execution_external_id = execution_external_id(r, s, a)
+
+    notify_listeners(
+      state,
+      {:run, r},
+      {:completion, execution_external_id, completion_at}
+    )
   end
 
   defp process_result(state, execution_id, result, created_by \\ nil) do
@@ -5603,114 +5691,10 @@ defmodule Coflux.Orchestration.Server do
         {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
 
-        execution_ext_id =
-          case Runs.get_execution_key(state.db, execution_id) do
-            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-            {:error, :not_found} -> nil
-          end
-
         {retry_id, recurred?, state} =
-          cond do
-            match?({:suspended, _, _}, result) ->
-              {:suspended, execute_after, dependency_keys} = result
+          decide_and_create_successor(state, execution_id, step, workspace_id, result)
 
-              # TODO: limit the number of times a step can suspend? (or rate?)
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id,
-                  execute_after: execute_after,
-                  dependency_keys: dependency_keys
-                )
-
-              state =
-                if execution_ext_id do
-                  abort_execution(state, execution_ext_id)
-                else
-                  state
-                end
-
-              {retry_id, false, state}
-
-            result_retryable?(result) && step.retry_limit == -1 ->
-              # Unlimited retries - random delay between min and max
-              delay_ms =
-                step.retry_backoff_min +
-                  :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
-
-              execute_after = System.os_time(:millisecond) + delay_ms
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-              {retry_id, false, state}
-
-            result_retryable?(result) && step.retry_limit > 0 ->
-              # Limited retries - check consecutive failures
-              {:ok, result_types} =
-                Runs.get_step_result_types(state.db, step.id, step.retry_limit + 1)
-
-              consecutive_failures =
-                result_types
-                |> Enum.take_while(&(&1 in [0, 2, 8]))
-                |> Enum.count()
-
-              if consecutive_failures < step.retry_limit do
-                # TODO: add jitter (within min/max delay)
-                delay_ms =
-                  step.retry_backoff_min +
-                    consecutive_failures / max(step.retry_limit - 1, 1) *
-                      (step.retry_backoff_max - step.retry_backoff_min)
-
-                execute_after = System.os_time(:millisecond) + delay_ms
-
-                {:ok, retry_id, _, state} =
-                  rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-                {retry_id, false, state}
-              else
-                {nil, false, state}
-              end
-
-            step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
-              # Null return from recurrent step: schedule next iteration via :recurred
-              execute_after =
-                if step.delay > 0 do
-                  System.os_time(:millisecond) + step.delay
-                end
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-              {retry_id, true, state}
-
-            step.recurrent == 1 and match?({:value, _}, result) ->
-              # Non-null return from recurrent step: stop recurrence
-              {nil, false, state}
-
-            true ->
-              {nil, false, state}
-          end
-
-        result =
-          case result do
-            {:error, type, message, frames, retryable} ->
-              {:error, type, message, frames, retry_id, retryable}
-
-            :abandoned ->
-              {:abandoned, retry_id}
-
-            :timeout ->
-              {:timeout, retry_id}
-
-            {:suspended, _, _} ->
-              {:suspended, retry_id}
-
-            {:value, _} when recurred? ->
-              {:recurred, retry_id}
-
-            other ->
-              other
-          end
+        result = transform_result_with_successor(result, retry_id, recurred?)
 
         state =
           case record_and_notify_result(
@@ -5736,18 +5720,140 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp decide_and_create_successor(state, execution_id, step, workspace_id, result) do
+    execution_ext_id =
+      case Runs.get_execution_key(state.db, execution_id) do
+        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+        {:error, :not_found} -> nil
+      end
+
+    cond do
+      match?({:suspended, _, _}, result) ->
+        {:suspended, execute_after, dependency_keys} = result
+
+        # TODO: limit the number of times a step can suspend? (or rate?)
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id,
+            execute_after: execute_after,
+            dependency_keys: dependency_keys
+          )
+
+        state =
+          if execution_ext_id do
+            abort_execution(state, execution_ext_id)
+          else
+            state
+          end
+
+        {retry_id, false, state}
+
+      result_retryable?(result) && step.retry_limit == -1 ->
+        # Unlimited retries - random delay between min and max
+        delay_ms =
+          step.retry_backoff_min +
+            :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
+
+        execute_after = System.os_time(:millisecond) + delay_ms
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+        {retry_id, false, state}
+
+      result_retryable?(result) && step.retry_limit > 0 ->
+        # Limited retries - check consecutive failures. Exclude the current
+        # execution's row so this works regardless of whether its results row
+        # has already been written (deferred path) or not (immediate path).
+        # A nil type indicates a crashed execution (completion without a
+        # results row) — counted as a failure.
+        {:ok, rows} =
+          Runs.get_step_result_types(state.db, step.id, step.retry_limit + 2)
+
+        consecutive_failures =
+          rows
+          |> Enum.reject(fn {id, _type} -> id == execution_id end)
+          |> Enum.take_while(fn {_id, type} -> type in [0, 2, 8] or is_nil(type) end)
+          |> Enum.count()
+
+        if consecutive_failures < step.retry_limit do
+          # TODO: add jitter (within min/max delay)
+          delay_ms =
+            step.retry_backoff_min +
+              consecutive_failures / max(step.retry_limit - 1, 1) *
+                (step.retry_backoff_max - step.retry_backoff_min)
+
+          execute_after = System.os_time(:millisecond) + delay_ms
+
+          {:ok, retry_id, _, state} =
+            rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+          {retry_id, false, state}
+        else
+          {nil, false, state}
+        end
+
+      step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
+        # Null return from recurrent step: schedule next iteration via :recurred
+        execute_after =
+          if step.delay > 0 do
+            System.os_time(:millisecond) + step.delay
+          end
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+        {retry_id, true, state}
+
+      step.recurrent == 1 and match?({:value, _}, result) ->
+        # Non-null return from recurrent step: stop recurrence
+        {nil, false, state}
+
+      true ->
+        {nil, false, state}
+    end
+  end
+
+  defp transform_result_with_successor(result, retry_id, recurred?) do
+    case result do
+      {:error, type, message, frames, retryable} ->
+        {:error, type, message, frames, retry_id, retryable}
+
+      :abandoned ->
+        {:abandoned, retry_id}
+
+      :crashed ->
+        {:crashed, retry_id}
+
+      :timeout ->
+        {:timeout, retry_id}
+
+      {:suspended, _, _} ->
+        {:suspended, retry_id}
+
+      {:value, _} when recurred? ->
+        {:recurred, retry_id}
+
+      other ->
+        other
+    end
+  end
+
   defp resolve_result(db, execution_id) do
     # TODO: check execution exists?
     case Results.get_result(db, execution_id) do
       {:ok, nil} ->
         {:pending, execution_id}
 
-      {:ok, {result, _created_at, _created_by}} ->
+      {:ok, {result, _created_at, _completion_created_at, _created_by}} ->
         case result do
           {:error, _, _, _, execution_id, _retryable} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           {:abandoned, execution_id} when not is_nil(execution_id) ->
+            resolve_result(db, execution_id)
+
+          {:crashed, execution_id} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           {:timeout, execution_id} when not is_nil(execution_id) ->

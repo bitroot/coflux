@@ -186,14 +186,23 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:result, execution_external_id, result, created_at, created_by}
+         {:result, execution_external_id, result, result_at, created_by}
        ) do
     result = build_result(result, created_by)
 
     update_execution(topic, execution_external_id, fn topic, base_path ->
       topic
       |> Topic.set(base_path ++ [:result], result)
-      |> Topic.set(base_path ++ [:completedAt], created_at)
+      |> Topic.set(base_path ++ [:resultAt], result_at)
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:completion, execution_external_id, completion_at}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:completedAt], completion_at)
     end)
   end
 
@@ -346,6 +355,7 @@ defmodule Coflux.Topics.Run do
                     createdBy: build_principal(execution.created_by),
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
+                    resultAt: execution.result_at,
                     completedAt: execution.completed_at,
                     groups: execution.groups,
                     assets:
@@ -445,6 +455,13 @@ defmodule Coflux.Topics.Run do
       {:abandoned, retry} ->
         %{
           type: "abandoned",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
+
+      {:crashed, retry} ->
+        %{
+          type: "crashed",
           createdBy: created_by,
           retry: if(retry, do: execution_attempt(retry))
         }

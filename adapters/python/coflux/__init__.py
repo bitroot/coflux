@@ -16,6 +16,7 @@ from .decorators import stub, task, workflow
 from .errors import (
     ExecutionAbandoned,
     ExecutionCancelled,
+    ExecutionCrashed,
     ExecutionError,
     ExecutionTerminated,
     ExecutionTimeout,
@@ -41,6 +42,7 @@ __all__ = [
     "ExecutionCancelled",
     "ExecutionTimeout",
     "ExecutionAbandoned",
+    "ExecutionCrashed",
     "InputDismissed",
     "Input",
     "ModelSchema",

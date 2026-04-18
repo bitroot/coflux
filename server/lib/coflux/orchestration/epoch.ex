@@ -261,15 +261,16 @@ defmodule Coflux.Orchestration.Epoch do
                   case query_one(
                          source_db,
                          """
-                         SELECT type, error_id, value_id, successor_id, successor_ref_id, created_at, created_by
+                         SELECT type, error_id, value_id, successor_id, successor_ref_id,
+                                retryable, created_at, created_by
                          FROM results
                          WHERE execution_id = ?1
                          """,
                          {old_exec_id}
                        ) do
                     {:ok,
-                     {type, error_id, value_id, successor_id, successor_ref_id, result_created_at,
-                      result_created_by}} ->
+                     {type, error_id, value_id, successor_id, successor_ref_id, retryable,
+                      result_created_at, result_created_by}} ->
                       new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
 
                       {new_value_id, new_successor_id, new_successor_ref_id, visited} =
@@ -299,6 +300,7 @@ defmodule Coflux.Orchestration.Epoch do
                           value_id: new_value_id,
                           successor_id: new_successor_id,
                           successor_ref_id: new_successor_ref_id,
+                          retryable: retryable,
                           created_at: result_created_at,
                           created_by: ensure_principal(source_db, target_db, result_created_by)
                         })
@@ -309,6 +311,26 @@ defmodule Coflux.Orchestration.Epoch do
                       visited
                   end
                 end)
+
+              # Copy completions (where present — an execution may have results
+              # but no completion yet if it's mid-termination).
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                case query_one(
+                       source_db,
+                       "SELECT created_at FROM completions WHERE execution_id = ?1",
+                       {old_exec_id}
+                     ) do
+                  {:ok, {completion_created_at}} ->
+                    {:ok, _} =
+                      insert_one(target_db, :completions, %{
+                        execution_id: new_exec_id,
+                        created_at: completion_created_at
+                      })
+
+                  {:ok, nil} ->
+                    :ok
+                end
+              end)
 
               # Copy children — same-run internal IDs
               {:ok, children} =

@@ -15,6 +15,7 @@ from . import protocol
 from .errors import (
     ExecutionAbandoned,
     ExecutionCancelled,
+    ExecutionCrashed,
     ExecutionTimeout,
     InputDismissed,
     create_execution_error,
@@ -60,6 +61,8 @@ def _unwrap_response(
         raise ExecutionTimeout()
     if status == "abandoned":
         raise ExecutionAbandoned()
+    if status == "crashed":
+        raise ExecutionCrashed()
     raise RuntimeError(f"Unexpected select status: {status}")
 
 
