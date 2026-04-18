@@ -48,3 +48,7 @@ Timeouts compose with [retries](./retries.md) — a timed-out execution counts a
 def unreliable_api_call():
     ...
 ```
+
+## Wait timeouts vs execution timeouts
+
+`ExecutionTimeout` is raised when a child execution exceeds its configured `timeout` (above). It's a different concept from a [`cf.suspense(timeout=...)`](./suspense.md) wait expiring — the latter raises the standard `TimeoutError` and affects only the caller, not the execution being waited on.

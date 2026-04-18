@@ -104,6 +104,9 @@ Start a worker.
 | `--accepts` | Tags executions must have |
 | `--adapter` | Adapter command |
 | `--session` | Session ID (for pool-launched workers) |
+| `--drain-timeout` | How long to wait for in-flight executions to finish on shutdown or reload (default: `2m`; `0` = wait indefinitely) |
+
+On `SIGINT`/`SIGTERM` the worker stops accepting new executions and drains the in-flight ones (up to `--drain-timeout`). Sending the signal a second time aborts the drain early; a third time forces an immediate exit. The same drain runs between reloads in `--watch` / `--dev` mode.
 
 ## `coflux setup`
 
@@ -210,6 +213,17 @@ See [pools](./pools.md) for launcher-specific fields.
 | `tokens list` | List service tokens |
 | `tokens create` | Create a token (`--name`, `--workspaces`) |
 | `tokens revoke <id>` | Revoke a token |
+
+## `coflux inputs`
+
+| Command | Description |
+|---------|-------------|
+| `inputs list` | List pending inputs (`--run` to filter by run ID) |
+| `inputs inspect <input-id>` | Show a prompt's template, schema, and current state |
+| `inputs respond <input-id> <value>` | Submit a response (value as JSON) |
+| `inputs dismiss <input-id>` | Dismiss a prompt |
+
+See [inputs](./inputs.md) for the workflow side of the API.
 
 ## `coflux assets`
 

@@ -45,6 +45,10 @@ Workflows need to be registered with a project and workspace so that they appear
 
 When a workflow is submitted, this initiates a _run_. A run is made up of _steps_, which each correspond to a target to be executed. The target (a workflow or task) can call other tasks, which cause those to be scheduled as steps. Each step has at least one associated _execution_. Steps can be retried (manually or automatically), which will lead to multiple executions being associated with the step.
 
+## Inputs
+
+Tasks can request _input_ from a user mid-execution - for example, an approval before a deployment, or a structured form to fill in. Prompts are responded to from Studio (or the CLI), and the execution resumes once a response is provided. See [inputs](./inputs.md).
+
 ## Assets
 
 Executions can persist _assets_ (a collection of files) which can be passed between executions and restored as needed, or viewed in Studio.

@@ -8,6 +8,8 @@ All exports are available from the `coflux` package (`import coflux as cf`).
 
 ## Decorators
 
+Both `@workflow` and `@task` accept `async def` functions in addition to regular functions. The coroutine is run to completion by the executor, and the target's return type is the coroutine's resolved value.
+
 ### `@workflow`
 
 Defines a workflow — the entry point for a run.
@@ -104,6 +106,29 @@ Calls the target synchronously — submits for execution and blocks until the re
 
 Submits the target for asynchronous execution and returns an `Execution` handle. The caller can continue other work and retrieve the result later.
 
+### Per-call-site overrides
+
+Each `with_*` method returns a new `Target` with the corresponding decorator-level option overridden, leaving the original target unchanged. This is useful for one-off variations without re-decorating, and the methods can be chained:
+
+```python
+my_task.with_retries(3).with_timeout(30).submit(x)
+my_task.with_cache(False).submit(x)  # disable caching for this call
+
+cached = my_task.with_cache(60)      # stash a configured variant
+cached.submit(a)
+cached.submit(b)
+```
+
+| Method | Description |
+|--------|-------------|
+| `with_cache(cache)` | Override [caching](./caching.md). Pass `False` to disable. |
+| `with_retries(retries)` | Override [retries](./retries.md). Pass `0` or `False` to disable. |
+| `with_defer(defer)` | Override [defer](./deferring.md) configuration. |
+| `with_memo(memo)` | Override [memoisation](./memoizing.md) configuration. |
+| `with_delay(delay)` | Override submission delay (seconds or `timedelta`). |
+| `with_timeout(timeout)` | Override execution [timeout](./timeouts.md). |
+| `with_requires(requires)` | Override worker routing tags. |
+
 ## Execution
 
 Returned by `target.submit()`. Represents a running or completed execution, and acts as a future for its result. Can be passed as an argument to other tasks, or returned from a task/workflow.
@@ -134,6 +159,74 @@ Checks whether a result is ready without suspending the caller. Returns the resu
 ### `execution.cancel() -> None`
 
 Cancels the execution and its descendants.
+
+## Input
+
+Returned by `prompt.submit(...)`. Represents a [requested input](./inputs.md), and acts as a future for the response. Like `Execution`, it can be passed to other tasks and only carries an ID across the wire.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `str` | Input ID |
+
+### `input.result() -> T`
+
+Blocks (suspends) until the input is responded to and returns the value. If the prompt was created with a `model`, the value is parsed into that type.
+
+**Raises:** `InputDismissed` if the prompt was dismissed; `ExecutionCancelled` if the input was cancelled. Raises `TimeoutError` if called inside a `cf.suspense(timeout=...)` scope and the timeout expires before a response arrives.
+
+### `input.poll(timeout=None, *, default=None) -> T | D`
+
+Non-suspending check for a response. Returns the value if available, or `default` otherwise.
+
+### `input.cancel() -> None`
+
+Cancels the input, transitioning it to a terminal _cancelled_ state (distinct from _dismissed_).
+
+## Prompt
+
+Defines a prompt for [requesting input](./inputs.md) from a user. Submit it to get an `Input` handle.
+
+```python
+cf.Prompt(
+    template: str,
+    model: type[T] | None = None,
+    *,
+    title: str | None = None,
+    actions: tuple[str, str] | None = None,
+    schema: str | dict | None = None,
+    requires: dict[str, str | bool | list[str]] | None = None,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `template` | `str` | required | Message template. May contain `{placeholders}` substituted at submission. |
+| `model` | `type \| None` | `None` | Pydantic model (or primitive type) used to render a form and validate the response. Without a model, the prompt is approval-only. |
+| `title` | `str \| None` | `None` | Short title shown above the prompt. |
+| `actions` | `tuple[str, str] \| None` | `None` | Custom labels for the respond/dismiss buttons, as `(respond, dismiss)`. |
+| `schema` | `str \| dict \| None` | `None` | Raw JSON schema (alternative to `model`). |
+| `requires` | `dict \| None` | `None` | Routing tags for matching to responders. |
+
+### `prompt(**placeholders) -> T`
+
+Submits the prompt and blocks until a response is available. Equivalent to `prompt.submit(...).result()`.
+
+### `prompt.submit(**placeholders) -> Input[T]`
+
+Submits the prompt and returns an `Input` handle without blocking.
+
+### Per-submission overrides
+
+Each `with_*` method returns a new `Prompt` with overrides applied:
+
+| Method | Description |
+|--------|-------------|
+| `with_key(key)` | Use an explicit memoisation key (per-run). |
+| `with_initial(value)` | Pre-populate the form with an initial value (e.g. a Pydantic instance). |
+| `with_actions(respond, dismiss)` | Override button labels. |
+| `with_requires(requires)` | Override routing tags. |
 
 ## Configuration classes
 
@@ -273,6 +366,27 @@ Context manager that sets a timeout on `.result()` calls within its scope. If th
 
 Explicitly suspends the current execution. It will be re-run after the specified delay. `delay` can be `float` (seconds), `timedelta`, or `datetime`.
 
+### `select(handles, *, cancel_remaining=False)`
+
+Wait for the first of one or more handles (`Execution` and/or `Input`) to resolve. Returns `(winner, remaining)` — call `winner.result()` to get the value (or to raise the exception that resolved it). Picks up its timeout from any enclosing `cf.suspense(timeout=...)` scope; raises `TimeoutError` if the wait expires. See [select](./select.md).
+
+```python
+winner, remaining = cf.select([a.submit(), b.submit()])
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `handles` | `Sequence[Execution \| Input]` | required | Handles to wait on (must be non-empty). |
+| `cancel_remaining` | `bool` | `False` | Atomically cancel non-winner `Execution` handles when one resolves. `Input` handles are left pending. |
+
+### `cancel(handles)`
+
+Atomically cancel one or more handles. `Execution` handles are cancelled recursively (descendants too); `Input` handles transition to a terminal _cancelled_ state (distinct from _dismissed_). Already-resolved handles are silently skipped.
+
+```python
+cf.cancel([execution_a, execution_b, input_c])
+```
+
 ### Logging
 
 Structured logging functions that associate key-value pairs with a template string. Values are stored separately from the template, enabling filtering and search in Studio. See [logging](./logging.md).
@@ -293,5 +407,7 @@ Creates and persists a collection of files as an asset, which can be inspected a
 | Exception | Description |
 |-----------|-------------|
 | `ExecutionError` | Child execution failed. When the original exception type can be resolved, the raised exception subclasses both `ExecutionError` and the original type, so you can catch either. |
-| `ExecutionCancelled` | Child execution was cancelled. |
-| `ExecutionTimeout` | Child execution exceeded its configured timeout. |
+| `ExecutionCancelled` | Child execution (or input) was cancelled. |
+| `ExecutionTimeout` | Child execution exceeded its configured `timeout`. |
+| `InputDismissed` | A requested input was dismissed by the responder. |
+| `TimeoutError` (built-in) | A `cf.suspense(timeout=...)` wait expired before a handle resolved. |

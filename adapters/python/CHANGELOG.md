@@ -1,6 +1,16 @@
 ## 0.11.0
 
-No changes.
+Enhancements:
+
+- Adds `cf.Prompt` and `cf.Input` for requesting structured input from users mid-execution (with optional Pydantic model for typed responses, per-run memoisation, and `requires` tags for routing).
+- Adds `cf.select` for waiting on the first of multiple handles (executions and/or inputs) to resolve, with optional cancellation of the rest.
+- Adds `cf.cancel` (and `.cancel()` on handles) for atomic cancellation of executions and inputs.
+- Supports `async def` functions in `@task` and `@workflow` decorators.
+- Adds fluent `with_*` methods to `Target` for overriding decorator options at a call site.
+
+Changes:
+
+- Wait-expiry from `cf.suspense(timeout=...)` now raises the standard `TimeoutError`; `ExecutionTimeout` is reserved for executions exceeding their configured `timeout`.
 
 ## 0.10.0
 
