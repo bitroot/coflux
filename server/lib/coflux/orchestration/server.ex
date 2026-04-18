@@ -1898,15 +1898,21 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
+    # Producer may already have terminated — resolve from DB (active epoch)
+    # rather than the in-memory active-execution cache.
+    producer_result =
+      case resolve_internal_execution_id(state, producer_execution_external_id) do
+        {:ok, id} -> {:ok, id}
+        {:error, :not_found} -> {:error, :producer_not_found}
+      end
+
     with {:ok, session_id} <-
            Map.fetch(state.session_ids, session_external_id)
            |> ok_or(:session_not_found),
          {:ok, consumer_execution_id} <-
            Map.fetch(state.execution_ids, consumer_execution_external_id)
            |> ok_or(:consumer_not_found),
-         {:ok, producer_execution_id} <-
-           Map.fetch(state.execution_ids, producer_execution_external_id)
-           |> ok_or(:producer_not_found),
+         {:ok, producer_execution_id} <- producer_result,
          {:ok, true} <- Streams.exists?(state.db, producer_execution_id, sequence),
          key = {session_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
@@ -7270,10 +7276,26 @@ defmodule Coflux.Orchestration.Server do
           {:stream_items, sub.consumer_execution_external_id, subscription_id, resolved_items}
         )
 
-      update_in(
-        state.stream_subscriptions[key],
-        &Map.put(&1, :cursor, next_cursor)
-      )
+      state =
+        update_in(
+          state.stream_subscriptions[key],
+          &Map.put(&1, :cursor, next_cursor)
+        )
+
+      # If the filter is now exhausted (slice's stop reached), close the
+      # subscription synchronously — matches push_stream_item's behaviour.
+      # Without this, a consumer that subscribed after appends with a
+      # bounded filter would wait forever for a close that never comes.
+      if filter_exhausted?(sub.filter, next_cursor) do
+        state
+        |> send_session(
+          session_id,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
+        )
+        |> drop_subscription(key)
+      else
+        state
+      end
     end
   end
 
@@ -7356,10 +7378,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # If a subscription attaches to an already-closed stream, emit closure now.
+  # If push_backlog already closed the subscription (e.g., a bounded filter
+  # was exhausted by the backlog itself), this is a no-op.
   defp maybe_push_closure_if_closed(state, session_id, subscription_id) do
     key = {session_id, subscription_id}
-    sub = Map.fetch!(state.stream_subscriptions, key)
 
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
+
+      {:ok, sub} ->
+        do_maybe_push_closure(state, sub, session_id, subscription_id, key)
+    end
+  end
+
+  defp do_maybe_push_closure(state, sub, session_id, subscription_id, key) do
     case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.sequence) do
       {:ok, nil} ->
         state

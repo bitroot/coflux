@@ -49,11 +49,20 @@ class ExecutorConnection:
         self._conn = conn
         self._file = conn.makefile("rb")
         self._next_request_id = 1
+        # When a test mixes RPCs with async pushes (stream_items, stream_closed),
+        # we may read a push while waiting for a response and vice-versa. Park
+        # mismatched messages here so the next `recv` / helper picks them up.
+        self._buffer = []
 
     def send(self, msg: dict):
         self._conn.sendall(protocol.encode_message(msg))
 
     def recv(self, timeout=10) -> dict:
+        if self._buffer:
+            return self._buffer.pop(0)
+        return self._recv_raw(timeout)
+
+    def _recv_raw(self, timeout) -> dict:
         self._conn.settimeout(timeout)
         try:
             line = self._file.readline()
@@ -90,14 +99,22 @@ class ExecutorConnection:
         return p["execution_id"], p.get("module", ""), p["target"], p.get("arguments", [])
 
     def _request(self, msg):
-        """Send a request message (with auto-assigned ID) and return the response."""
+        """Send a request message (with auto-assigned ID) and return the response.
+
+        If async pushes (stream_items / stream_closed) arrive ahead of the
+        response, they're parked in the buffer so tests can fetch them later
+        via recv_push.
+        """
         rid = self._next_request_id
         self._next_request_id += 1
         msg["id"] = rid
         self.send(msg)
-        resp = self.recv()
-        assert resp["id"] == rid
-        return resp
+        while True:
+            incoming = self.recv()
+            if incoming.get("id") == rid:
+                return incoming
+            # Park non-matching messages (typically notifications).
+            self._buffer.append(incoming)
 
     def submit_task(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child task execution and return the target execution ID."""
@@ -239,15 +256,126 @@ class ExecutorConnection:
             raise RuntimeError(f"select error: {resp['error']}")
         return _unwrap_select_result(resp.get("result"))
 
+    # --- Stream producer helpers ---
+
+    def stream_register(self, execution_id, sequence):
+        """Notify that a new stream exists."""
+        self.send(protocol.stream_register(execution_id, sequence))
+
+    def stream_append(self, execution_id, sequence, position, value, format="json"):
+        """Append an item (raw JSON value) to a stream."""
+        self.send(protocol.stream_append(execution_id, sequence, position, value, format=format))
+
+    def stream_close(self, execution_id, sequence, error=None):
+        """Close a stream (optionally with an error {type, message, traceback})."""
+        self.send(protocol.stream_close(execution_id, sequence, error=error))
+
+    # --- Stream consumer helpers ---
+
+    def stream_subscribe(
+        self,
+        execution_id,
+        subscription_id,
+        producer_execution_id,
+        sequence,
+        from_position=0,
+        filter=None,
+    ):
+        """Subscribe to a stream. ``filter`` is an optional dict built via
+        protocol.slice_filter / partition_filter / chain_filter."""
+        self.send(
+            protocol.stream_subscribe(
+                execution_id,
+                subscription_id,
+                producer_execution_id,
+                sequence,
+                from_position=from_position,
+                filter=filter,
+            )
+        )
+
+    def stream_unsubscribe(self, execution_id, subscription_id):
+        self.send(protocol.stream_unsubscribe(execution_id, subscription_id))
+
+    def recv_push(self, method, subscription_id=None, timeout=10):
+        """Read messages until one matching ``method`` (and subscription) arrives.
+
+        Returns the params dict. Non-matching messages are re-buffered in
+        order so later calls can consume them.
+        """
+        held = []
+        deadline = time.time() + timeout
+        try:
+            while True:
+                remaining = max(0.01, deadline - time.time())
+                msg = self.recv(timeout=remaining)
+                if msg.get("method") == method:
+                    params = msg.get("params", {})
+                    if (
+                        subscription_id is None
+                        or params.get("subscription_id") == subscription_id
+                    ):
+                        # Put held messages back (preserve order) before returning.
+                        self._buffer[:0] = held
+                        return params
+                held.append(msg)
+        except TimeoutError:
+            # Restore buffer and propagate.
+            self._buffer[:0] = held
+            raise
+
+    def drain_stream(self, subscription_id, timeout=10):
+        """Collect every pushed item + final closure for ``subscription_id``.
+
+        Returns ``(items, closed_params)`` where ``items`` is a list of
+        ``[position, value_dict]`` pairs in arrival order. Messages for other
+        subscriptions are re-buffered so later calls can fetch them.
+        """
+        items = []
+        deadline = time.time() + timeout
+        while True:
+            remaining = max(0.01, deadline - time.time())
+            msg = self.recv(timeout=remaining)
+            method = msg.get("method")
+            params = msg.get("params", {})
+            if params.get("subscription_id") != subscription_id or method not in (
+                "stream_items",
+                "stream_closed",
+            ):
+                self._buffer.append(msg)
+                continue
+            if method == "stream_items":
+                items.extend(params.get("items", []))
+                continue
+            # stream_closed — terminal
+            return items, params
+
     def complete(self, execution_id, value=None):
-        """Send execution_result."""
+        """Send execution_result and signal the mock adapter we're done.
+
+        Closing the socket mirrors what a real adapter does — it exits after
+        the task finishes (and streams drain). Without this, the CLI's
+        post-result receive loop never hits EOF, so the mock adapter hangs
+        and ties up the worker's concurrency slot.
+        """
         self.send(protocol.execution_result(execution_id, value=value))
+        self._close_sending_side()
 
     def fail(self, execution_id, error_type, message, traceback="", retryable=None):
         """Send execution_error."""
         self.send(
             protocol.execution_error(execution_id, error_type, message, traceback, retryable=retryable)
         )
+        self._close_sending_side()
+
+    def _close_sending_side(self):
+        """Shut down the socket's write side; reads stay open for any pushes
+        in flight (e.g. final stream_closed) so asserts can still collect.
+        """
+        try:
+            self._conn.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
     def close(self):
         try:

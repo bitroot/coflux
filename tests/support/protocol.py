@@ -231,6 +231,94 @@ def register_group_notification(execution_id, group_id, name=None):
     return {"method": "register_group", "params": params}
 
 
+# --- Stream messages (producer side: adapter → server) ---
+
+
+def stream_register(execution_id, sequence):
+    return {
+        "method": "stream_register",
+        "params": {"execution_id": execution_id, "sequence": sequence},
+    }
+
+
+def stream_append(execution_id, sequence, position, value, format="json"):
+    """Append an item to a stream. ``value`` is the raw JSON value.
+
+    Builds a Value wire-form message with an empty references list. Tests
+    that need references should build the Value dict manually.
+    """
+    return {
+        "method": "stream_append",
+        "params": {
+            "execution_id": execution_id,
+            "sequence": sequence,
+            "position": position,
+            "value": {
+                "type": "inline",
+                "format": format,
+                "value": value,
+                "references": [],
+            },
+        },
+    }
+
+
+def stream_close(execution_id, sequence, error=None):
+    """Close a stream. ``error`` is optional {type, message, traceback}."""
+    params = {"execution_id": execution_id, "sequence": sequence}
+    if error is not None:
+        params["error"] = error
+    return {"method": "stream_close", "params": params}
+
+
+# --- Stream messages (consumer side: adapter → server) ---
+
+
+def stream_subscribe(
+    execution_id,
+    subscription_id,
+    producer_execution_id,
+    sequence,
+    from_position=0,
+    filter=None,
+):
+    params = {
+        "execution_id": execution_id,
+        "subscription_id": subscription_id,
+        "producer_execution_id": producer_execution_id,
+        "sequence": sequence,
+        "from_position": from_position,
+    }
+    if filter is not None:
+        params["filter"] = filter
+    return {"method": "stream_subscribe", "params": params}
+
+
+def stream_unsubscribe(execution_id, subscription_id):
+    return {
+        "method": "stream_unsubscribe",
+        "params": {
+            "execution_id": execution_id,
+            "subscription_id": subscription_id,
+        },
+    }
+
+
+# --- Filter builders ---
+
+
+def slice_filter(start, stop=None):
+    return {"type": "slice", "start": start, "stop": stop}
+
+
+def partition_filter(n, i):
+    return {"type": "partition", "n": n, "i": i}
+
+
+def chain_filter(*filters):
+    return {"type": "chain", "filters": list(filters)}
+
+
 def submit_input_request(
     request_id,
     execution_id,

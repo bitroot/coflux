@@ -214,6 +214,10 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 		defer cancelTimeout()
 	}
 	timedOut := false
+	// Once the adapter has reported a result, a subsequent EOF is the
+	// expected natural exit (after any stream drain completes). Don't
+	// treat that as a failure to receive.
+	resultReported := false
 
 	// Handle messages until execution completes
 loop:
@@ -240,6 +244,9 @@ loop:
 			if aborted {
 				logger.Info("execution aborted")
 				logger.Debug("aborted executor exit", "error", err)
+			} else if resultReported {
+				// Clean exit after result + stream drain.
+				logger.Debug("executor exited after result", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
 				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
@@ -255,10 +262,17 @@ loop:
 
 		switch method {
 		case "execution_result":
+			// Don't break the loop here — a streaming task keeps sending
+			// stream_append/stream_close messages after the result is
+			// committed. Stop reading only when the adapter process exits
+			// (Receive returns an error), which happens after wait_all in
+			// the adapter drains every generator.
 			p.handleExecutionResult(execCtx, executionID, params, logger)
-			break loop
+			resultReported = true
 
 		case "execution_error":
+			// Error is terminal — a task that raised before yielding any
+			// generators has nothing to stream. Stop reading.
 			p.handleExecutionError(execCtx, executionID, params, logger)
 			break loop
 
