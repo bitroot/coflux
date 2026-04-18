@@ -80,6 +80,19 @@ def _encode_value(
                 "execution_id": execution_id,
                 "sequence": sequence,
             }
+        elif isinstance(v, Stream):
+            # Pass-through: a Stream handle received from another execution
+            # (possibly with partition/slice filters layered on top) is
+            # being forwarded as an argument. Preserve the filter chain so
+            # the downstream consumer subscribes with the same filters.
+            encoded: dict[str, Any] = {
+                "type": "stream",
+                "execution_id": v.producer_execution_id,
+                "sequence": v.sequence,
+            }
+            if v._filters:
+                encoded["filters"] = list(v._filters)
+            return encoded
         elif inspect.isasyncgen(v):
             raise TypeError(
                 "Async generators aren't supported yet — use a sync generator "
@@ -261,8 +274,11 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                 return _resolve_ref(v["index"])
             elif t == "stream":
                 # Producer-owned stream reference. Self-contained —
-                # execution_id and sequence are both in the descriptor.
-                return Stream(v["execution_id"], v["sequence"])
+                # execution_id, sequence, and any filter chain (when the
+                # Stream was forwarded with partition/slice filters
+                # already applied) are all in the descriptor.
+                filters = tuple(v.get("filters") or ())
+                return Stream(v["execution_id"], v["sequence"], filters)
             else:
                 return v
         else:
