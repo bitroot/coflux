@@ -24,6 +24,7 @@ const sidebars: SidebarsConfig = {
         "executions",
         "concurrency",
         "groups",
+        "inputs",
       ],
     },
     {
@@ -37,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "memoizing",
         "deferring",
         "suspense",
+        "select",
       ],
     },
     {
