@@ -14,6 +14,8 @@ Two common patterns:
     taking turns over different connections.
 """
 
+import pytest
+
 from support.manifest import workflow
 from support.protocol import (
     execution_result,
@@ -622,3 +624,118 @@ def test_filter_chain_combines_slice_and_partition(worker):
         cons_ex.conn.complete(cons_ex.execution_id)
 
         assert [item[0] for item in items] == [0, 2, 4]
+
+
+# --- Backpressure -------------------------------------------------------
+
+
+def test_backpressure_no_buffer_no_initial_demand(worker):
+    """Registering with buffer=0 and no subscribers: the server sends no
+    demand grants — the producer stays paused until a consumer attaches.
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        # Producer shouldn't get any demand grants yet.
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.5)
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_backpressure_prewarms_up_to_buffer(worker):
+    """buffer=N without any subscribers: producer is granted N credits
+    up front so it can run ahead and pre-warm.
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=5)
+
+        params = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert params["index"] == 0
+        assert params["n"] == 5
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_backpressure_subscribe_unblocks_producer(worker):
+    """buffer=0 + consumer subscribes → server grants 1 credit. Producer
+    emits. Consumer reads → cursor advances → server grants 1 more.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        # No consumer yet → no demand.
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.3)
+
+        # Attach consumer. First grant arrives.
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+        first = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert first["n"] == 1
+
+        # Producer emits item 0 (it's the adapter's responsibility to
+        # decrement credits; we just emulate that here by appending).
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "hi")
+
+        # Consumer receives item → cursor advances → server grants again.
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        second = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert second["n"] == 1
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_backpressure_unbounded_sends_no_demand(worker):
+    """Registering without a buffer (wire buffer=null) opts out of
+    backpressure — the server never sends demand grants for this stream.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)  # buffer omitted
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+
+        # Even with a consumer attached, no demand grant should fire.
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.5)
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(prod_resp["runId"])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import typing as t
 
-from .target import Cache, Defer, Retries, Target
+from .target import _BUFFER_UNSET, Cache, Defer, Retries, Target
 
 if t.TYPE_CHECKING:
     from .models import Stream
@@ -52,12 +52,20 @@ def task(
     memo: bool | t.Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
+    buffer: int | None = _BUFFER_UNSET,  # type: ignore[assignment]
 ) -> _TargetDecorator:
     """Decorator for defining a task.
 
     For ``async def`` functions, the coroutine is run to completion by
     the executor; the task's return type is the coroutine's resolved
     value (not the coroutine itself).
+
+    ``buffer`` only applies to generator-bodied tasks. ``0`` (default)
+    gives strict lockstep: the producer emits an item, waits for a
+    consumer to ack, then emits the next. ``N`` lets the producer stay
+    up to N items ahead of the fastest consumer. ``None`` disables
+    backpressure entirely. Passing ``buffer`` on a non-generator task
+    raises ``TypeError`` at decoration time.
     """
 
     def decorator(fn):
@@ -74,6 +82,7 @@ def task(
             memo=memo,
             requires=requires,
             timeout=timeout,
+            buffer=buffer,
         )
 
     return decorator  # type: ignore[return-value]
@@ -91,12 +100,15 @@ def workflow(
     memo: bool = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
+    buffer: int | None = _BUFFER_UNSET,  # type: ignore[assignment]
 ) -> _TargetDecorator:
     """Decorator for defining a workflow.
 
     For ``async def`` functions, the coroutine is run to completion by
     the executor; the workflow's return type is the coroutine's resolved
     value (not the coroutine itself).
+
+    See ``@cf.task`` for ``buffer=`` semantics.
     """
 
     def decorator(fn):
@@ -113,6 +125,7 @@ def workflow(
             memo=memo,
             requires=requires,
             timeout=timeout,
+            buffer=buffer,
         )
 
     return decorator  # type: ignore[return-value]

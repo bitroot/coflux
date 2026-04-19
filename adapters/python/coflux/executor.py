@@ -112,10 +112,26 @@ def execute_target(
             else:
                 result = fn(*deserialized_args)
 
-        # Serialize result. Generators anywhere in the return value (or that
-        # were passed to submitted child executions as args) have already
-        # been registered with the context's stream driver.
-        result_value = serialize_value(result, on_generator=ctx.register_stream)
+        # If the task body was itself a generator (``def`` + ``yield``
+        # or ``async def`` + ``yield``), the call above returned an
+        # unstarted generator object. Register it with the task's
+        # configured buffer so callers don't have to wrap explicitly.
+        # Streams created via cf.stream(...) are already registered;
+        # they appear here as Stream handles, not generators.
+        if (inspect.isgenerator(result) or inspect.isasyncgen(result)) and hasattr(
+            target_obj, "definition"
+        ):
+            from .streams import stream as _register_stream
+
+            result = _register_stream(
+                result, buffer=target_obj.definition.buffer
+            )
+
+        # Serialize result. Any streams returned (directly, or embedded
+        # in the result structure) were already registered via
+        # cf.stream() or the auto-wrap above; they're Stream handles
+        # here, not raw generators.
+        result_value = serialize_value(result)
         protocol.send_execution_result(execution_id, result_value)
 
         # Hold the process open until every stream has drained. Thread

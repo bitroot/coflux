@@ -39,6 +39,7 @@ defmodule Coflux.Topics.Stream do
          Topic.new(
            %{
              producer: initial.producer,
+             buffer: initial.buffer,
              openedAt: initial.openedAt,
              closure: build_closure(initial.closure),
              items: Enum.map(initial.items, &build_item/1),

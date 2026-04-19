@@ -51,8 +51,9 @@ type ExecutionHandler interface {
 	NotifyTerminated(ctx context.Context, executionID string) error
 	// StreamRegister declares a new stream owned by an execution.
 	// Index is worker-assigned, monotonic per execution — it identifies
-	// the stream within its producer execution.
-	StreamRegister(ctx context.Context, executionID string, index int) error
+	// the stream within its producer execution. Buffer is the optional
+	// backpressure budget; nil means unbounded (no flow control).
+	StreamRegister(ctx context.Context, executionID string, index int, buffer *int) error
 	// StreamAppend appends an item to a stream. Sequence is worker-assigned,
 	// monotonic per stream — it identifies the item within its stream.
 	StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error
@@ -486,7 +487,7 @@ func (p *Pool) handleStreamRegister(ctx context.Context, executionID string, par
 		return
 	}
 
-	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Index); err != nil {
+	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Index, req.Buffer); err != nil {
 		logger.Error("failed to register stream", "error", err)
 	}
 }

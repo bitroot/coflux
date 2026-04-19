@@ -258,9 +258,9 @@ class ExecutorConnection:
 
     # --- Stream producer helpers ---
 
-    def stream_register(self, execution_id, index):
-        """Notify that a new stream exists."""
-        self.send(protocol.stream_register(execution_id, index))
+    def stream_register(self, execution_id, index, buffer=None):
+        """Notify that a new stream exists. ``buffer`` enables backpressure."""
+        self.send(protocol.stream_register(execution_id, index, buffer=buffer))
 
     def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""

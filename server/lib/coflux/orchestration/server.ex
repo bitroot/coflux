@@ -136,7 +136,24 @@ defmodule Coflux.Orchestration.Server do
               # stream_subscribers: {producer_execution_id, index} -> MapSet of
               #     {consumer_execution_id, subscription_id}
               stream_subscriptions: %{},
-              stream_subscribers: %{}
+              stream_subscribers: %{},
+
+              # Per-stream producer state for backpressure. Only present
+              # when the producer opted in by registering with a non-nil
+              # buffer. Keyed by {producer_execution_id, index}.
+              #
+              #   %{buffer, demand_granted, session_id, execution_external_id}
+              #
+              # * buffer                — configured backpressure budget
+              # * demand_granted        — cumulative credits sent so far
+              # * session_id            — where to route stream_demand
+              # * execution_external_id — external id for the command wire
+              #
+              # The current max_cursor across adapter subscribers is
+              # recomputed from stream_subscribers on demand rather than
+              # cached here, since it changes often and is cheap to
+              # derive.
+              stream_producers: %{}
   end
 
   def start_link(opts) do
@@ -1830,13 +1847,32 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:register_stream, execution_external_id, index}, _from, state) do
+  def handle_call(
+        {:register_stream, execution_external_id, index, buffer, session_external_id},
+        _from,
+        state
+      ) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        case Streams.register_stream(state.db, execution_id, index) do
+        case Streams.register_stream(state.db, execution_id, index, buffer) do
           {:ok, created_at} ->
+            # Resolve the session's external id to the internal one —
+            # send_session (which delivers stream_demand) indexes by the
+            # internal id.
+            internal_session_id =
+              Map.get(state.session_ids, session_external_id)
+
             state =
-              notify_stream_opened(state, execution_id, index, created_at)
+              state
+              |> maybe_init_stream_producer(
+                execution_id,
+                execution_external_id,
+                index,
+                buffer,
+                internal_session_id
+              )
+              |> notify_stream_opened(execution_id, index, buffer, created_at)
+              |> maybe_send_initial_demand(execution_id, index)
               |> flush_notifications()
 
             {:reply, :ok, state}
@@ -1847,6 +1883,151 @@ defmodule Coflux.Orchestration.Server do
 
       :error ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  defp maybe_init_stream_producer(
+         state,
+         _execution_id,
+         _execution_external_id,
+         _index,
+         nil,
+         _session_id
+       ) do
+    # buffer=nil means the producer has opted out of backpressure — no
+    # tracking required on the server side. It'll emit freely and the
+    # adapter's driver never waits.
+    state
+  end
+
+  defp maybe_init_stream_producer(
+         state,
+         execution_id,
+         execution_external_id,
+         index,
+         buffer,
+         session_id
+       )
+       when is_integer(buffer) and buffer >= 0 do
+    put_in(state.stream_producers[{execution_id, index}], %{
+      buffer: buffer,
+      demand_granted: 0,
+      session_id: session_id,
+      execution_external_id: execution_external_id
+    })
+  end
+
+  defp maybe_send_initial_demand(state, execution_id, index) do
+    # At registration time there are no subscribers yet. Allow the
+    # producer to pre-warm up to `buffer` items; lockstep (buffer=0)
+    # stays paused until a consumer attaches.
+    refresh_stream_demand(state, {execution_id, index})
+  end
+
+  # Recompute the target demand for one stream and, if it's grown,
+  # send a delta grant to the producer's session.
+  #
+  # Formula:
+  #   target = max_cursor + buffer + (1 if has_subscribers else 0)
+  # The +1 on subscriber presence unblocks lockstep streams — a
+  # consumer's cursor at position N means "ready for item N", which is
+  # one item beyond what they've acked.
+  #
+  # demand_granted is monotonic; if target drops (e.g. the fastest
+  # consumer left) we don't claw back, future grants just wait until
+  # the remaining subscribers catch up past the old max.
+  defp refresh_stream_demand(state, {_execution_id, index} = key) do
+    case Map.fetch(state.stream_producers, key) do
+      :error ->
+        state
+
+      {:ok, producer} ->
+        has_subscribers = has_stream_subscribers?(state, key)
+        max_cursor = current_max_cursor(state, key)
+        bump = if has_subscribers, do: 1, else: 0
+        target = max_cursor + producer.buffer + bump
+        delta = target - producer.demand_granted
+
+        if delta > 0 do
+          state
+          |> put_in([Access.key(:stream_producers), key, :demand_granted], target)
+          |> send_session(
+            producer.session_id,
+            {:stream_demand, producer.execution_external_id, index, delta}
+          )
+        else
+          state
+        end
+    end
+  end
+
+  defp has_stream_subscribers?(state, key) do
+    case Map.get(state.stream_subscribers, key) do
+      nil -> false
+      set -> MapSet.size(set) > 0
+    end
+  end
+
+  defp current_max_cursor(state, key) do
+    state.stream_subscribers
+    |> Map.get(key, MapSet.new())
+    |> Enum.reduce(0, fn sub_key, acc ->
+      case Map.get(state.stream_subscriptions, sub_key) do
+        nil -> acc
+        sub -> max(acc, sub.cursor)
+      end
+    end)
+  end
+
+  defp drop_stream_producer(state, key) do
+    Map.update!(state, :stream_producers, &Map.delete(&1, key))
+  end
+
+  # Lazily rebuild stream_producer state from the DB if it's missing.
+  # Used after server restart — in-memory producer state is gone but
+  # the ``streams`` table still has the buffer. We rebuild on first
+  # append or subscribe for a given stream, recovering flow control.
+  #
+  # ``session_id`` is the internal id of the producer's current session;
+  # supply ``nil`` if not known, in which case demand grants will be
+  # deferred until the session is resolvable.
+  defp ensure_stream_producer(
+         state,
+         execution_id,
+         execution_external_id,
+         index,
+         session_id
+       ) do
+    key = {execution_id, index}
+
+    cond do
+      Map.has_key?(state.stream_producers, key) ->
+        state
+
+      true ->
+        case Streams.get_buffer(state.db, execution_id, index) do
+          {:ok, nil} ->
+            # Stream opted out of backpressure; nothing to track.
+            state
+
+          {:ok, buffer} when is_integer(buffer) ->
+            # Reconstruct state. demand_granted starts at items already
+            # produced — we assume earlier-us granted enough for those,
+            # and rely on the producer having kept its local credit
+            # counter consistent.
+            {:ok, head} = Streams.get_stream_head(state.db, execution_id, index)
+            items_produced = if head < 0, do: 0, else: head + 1
+
+            put_in(state.stream_producers[key], %{
+              buffer: buffer,
+              demand_granted: items_produced,
+              session_id: session_id,
+              execution_external_id: execution_external_id
+            })
+
+          {:error, :not_found} ->
+            state
+        end
     end
   end
 
@@ -1865,8 +2046,24 @@ defmodule Coflux.Orchestration.Server do
                normalize_value(value)
              ) do
           {:ok, created_at} ->
+            # If we came out of a server restart with no in-memory
+            # producer state for this stream, rebuild it now from the
+            # persisted buffer so subsequent consumer advances can
+            # refresh demand. The appending session is the producer.
+            producer_session_id =
+              case find_session_for_execution(state, execution_external_id) do
+                {:ok, sid} -> sid
+                :error -> nil
+              end
+
             state =
               state
+              |> ensure_stream_producer(
+                execution_id,
+                execution_external_id,
+                index,
+                producer_session_id
+              )
               |> push_stream_item(execution_id, index, sequence, value)
               |> notify_stream_item_appended(
                 execution_id,
@@ -1906,6 +2103,7 @@ defmodule Coflux.Orchestration.Server do
               state
               |> push_stream_closed(execution_id, index, error)
               |> notify_stream_closed(execution_id, index, reason, error, closed_at)
+              |> drop_stream_producer({execution_id, index})
               |> flush_notifications()
 
             {:reply, :ok, state}
@@ -1962,6 +2160,31 @@ defmodule Coflux.Orchestration.Server do
             &MapSet.put(&1, key)
           )
         end)
+
+      # Post-restart recovery: producer state may be missing. The
+      # producer's session isn't necessarily the one the subscribe
+      # came from — look it up across sessions by external execution
+      # id.
+      producer_session_id =
+        case find_session_for_execution(state, producer_execution_external_id) do
+          {:ok, sid} -> sid
+          :error -> nil
+        end
+
+      state =
+        ensure_stream_producer(
+          state,
+          producer_execution_id,
+          producer_execution_external_id,
+          index,
+          producer_session_id
+        )
+
+      # First subscriber (or a later one whose cursor exceeds the prior
+      # max) may unblock the producer — recompute demand before pushing
+      # backlog so any delivered items keep the credit maths honest.
+      state =
+        refresh_stream_demand(state, {producer_execution_id, index})
 
       # Push any items already in the log that match the filter, then (if
       # the stream has already closed) the terminal close record.
@@ -3921,11 +4144,13 @@ defmodule Coflux.Orchestration.Server do
 
   defp remove_session(state, session_id) do
     {:ok, _} = Sessions.expire_session(state.db, session_id)
+    # Drop any stream subscriptions this session held — consumer has gone
+    # away, so there's no one to push to. Do this before popping the
+    # session from state.sessions since drop_session_subscriptions reads
+    # the session's live execution set.
+    state = drop_session_subscriptions(state, session_id)
     {session, state} = pop_in(state.sessions[session_id])
     state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
-    # Drop any stream subscriptions this session held — consumer has gone
-    # away, so there's no one to push to.
-    state = drop_session_subscriptions(state, session_id)
 
     # starting/executing now contain external IDs - resolve to internal for process_result.
     # Session removal means no more notify_terminated for these executions, so we
@@ -5916,6 +6141,7 @@ defmodule Coflux.Orchestration.Server do
           state
           |> push_stream_closed(execution_id, index, push_error)
           |> notify_stream_closed(execution_id, index, :lifecycle, push_error, closed_at)
+          |> drop_stream_producer({execution_id, index})
 
         {:error, :already_closed} ->
           state
@@ -5925,22 +6151,23 @@ defmodule Coflux.Orchestration.Server do
 
   # Returns the streams list for `execution_id` with :lifecycle closures'
   # errors resolved from the execution's recorded result. Shape:
-  # `{index, opened_at, closed_at | nil, reason | nil, error | nil}` —
+  # `{index, buffer, opened_at, closed_at | nil, reason | nil, error | nil}` —
   # reason is retained so the topic can colour open vs complete vs
-  # errored vs lifecycle distinctly.
+  # errored vs lifecycle distinctly; buffer is passed through for the
+  # topic to display.
   defp streams_with_resolved_errors(db, execution_id) do
     {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
 
     Enum.map(rows, fn
-      {index, opened_at, nil, nil, nil} ->
-        {index, opened_at, nil, nil, nil}
+      {index, buffer, opened_at, nil, nil, nil} ->
+        {index, buffer, opened_at, nil, nil, nil}
 
-      {index, opened_at, closed_at, :lifecycle, _} ->
-        {index, opened_at, closed_at, :lifecycle,
+      {index, buffer, opened_at, closed_at, :lifecycle, _} ->
+        {index, buffer, opened_at, closed_at, :lifecycle,
          derive_lifecycle_error(db, execution_id)}
 
-      {index, opened_at, closed_at, reason, error} ->
-        {index, opened_at, closed_at, reason, error}
+      {index, buffer, opened_at, closed_at, reason, error} ->
+        {index, buffer, opened_at, closed_at, reason, error}
     end)
   end
 
@@ -7265,14 +7492,14 @@ defmodule Coflux.Orchestration.Server do
   # items on demand.
   @stream_topic_tail_size 200
 
-  defp notify_stream_opened(state, execution_id, index, created_at) do
+  defp notify_stream_opened(state, execution_id, index, buffer, created_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
 
     notify_listeners(
       state,
       {:run, r},
-      {:stream_opened, execution_ext_id, index, created_at}
+      {:stream_opened, execution_ext_id, index, buffer, created_at}
     )
   end
 
@@ -7336,6 +7563,7 @@ defmodule Coflux.Orchestration.Server do
     with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_ext_id),
          {:ok, true} <- Streams.exists?(state.db, execution_id, index),
          {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, index),
+         {:ok, buffer} <- Streams.get_buffer(state.db, execution_id, index),
          {:ok, {items, total_count}} <-
            Streams.get_stream_tail(state.db, execution_id, index, @stream_topic_tail_size) do
       # Keep the tuple shape here — the topic module runs TopicUtils.build_value
@@ -7351,6 +7579,7 @@ defmodule Coflux.Orchestration.Server do
       {:ok,
        %{
          producer: build_stream_producer(state.db, execution_ext_id, execution_id),
+         buffer: buffer,
          openedAt: opened_at,
          closure: closure,
          items: resolved_items,
@@ -7521,20 +7750,26 @@ defmodule Coflux.Orchestration.Server do
         &Map.put(&1, :cursor, advance_to)
       )
 
-    # If the filter is now exhausted (slice's stop reached), close the
-    # subscription synchronously — matches push_stream_item's behaviour.
-    # Without this, a consumer that subscribed after appends with a
-    # bounded filter would wait forever for a close that never comes.
-    if filter_exhausted?(sub.filter, advance_to) do
-      state
-      |> send_to_consumer(
-        sub,
-        {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
-      )
-      |> drop_subscription(key)
-    else
-      state
-    end
+    state =
+      if filter_exhausted?(sub.filter, advance_to) do
+        # If the filter is now exhausted (slice's stop reached), close the
+        # subscription synchronously — matches push_stream_item's
+        # behaviour. Without this, a consumer that subscribed after
+        # appends with a bounded filter would wait forever for a close
+        # that never comes.
+        state
+        |> send_to_consumer(
+          sub,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
+        )
+        |> drop_subscription(key)
+      else
+        state
+      end
+
+    # The backlog push moved this consumer's cursor forward — may
+    # unblock the producer if their buffer has room now.
+    refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
   end
 
   # Resolve the consumer's current session and send, skipping if the
@@ -7548,55 +7783,61 @@ defmodule Coflux.Orchestration.Server do
 
   # Push a freshly-appended item to every subscriber of this stream.
   defp push_stream_item(state, producer_execution_id, index, sequence, value) do
-    subscribers =
-      Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
+    stream_key = {producer_execution_id, index}
 
-    Enum.reduce(subscribers, state, fn key, state ->
-      {_consumer_execution_id, subscription_id} = key
-      sub = Map.fetch!(state.stream_subscriptions, key)
+    subscribers = Map.get(state.stream_subscribers, stream_key, MapSet.new())
 
-      cond do
-        sequence < sub.cursor ->
-          # Consumer already has this sequence via backlog; skip.
-          state
+    state =
+      Enum.reduce(subscribers, state, fn key, state ->
+        {_consumer_execution_id, subscription_id} = key
+        sub = Map.fetch!(state.stream_subscriptions, key)
 
-        not filter_matches?(sub.filter, sequence) ->
-          state
-
-        true ->
-          # Value came off the wire in parse form (ext-id refs, no metadata).
-          # Normalise + resolve to match the form push_backlog sends; the WS
-          # handler composes to wire JSON.
-          resolved = build_value(normalize_value(value), state.db)
-          item = [sequence, resolved]
-
-          state =
-            send_to_consumer(
-              state,
-              sub,
-              {:stream_items, sub.consumer_execution_external_id, subscription_id, [item]}
-            )
-
-          state =
-            update_in(
-              state.stream_subscriptions[key],
-              &Map.put(&1, :cursor, sequence + 1)
-            )
-
-          # If the filter is exhausted (e.g. slice reached its stop), close
-          # the subscription early — no more items will match.
-          if filter_exhausted?(sub.filter, sequence + 1) do
+        cond do
+          sequence < sub.cursor ->
+            # Consumer already has this sequence via backlog; skip.
             state
-            |> send_to_consumer(
-              sub,
-              {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
-            )
-            |> drop_subscription(key)
-          else
+
+          not filter_matches?(sub.filter, sequence) ->
             state
-          end
-      end
-    end)
+
+          true ->
+            # Value came off the wire in parse form (ext-id refs, no metadata).
+            # Normalise + resolve to match the form push_backlog sends; the WS
+            # handler composes to wire JSON.
+            resolved = build_value(normalize_value(value), state.db)
+            item = [sequence, resolved]
+
+            state =
+              send_to_consumer(
+                state,
+                sub,
+                {:stream_items, sub.consumer_execution_external_id, subscription_id, [item]}
+              )
+
+            state =
+              update_in(
+                state.stream_subscriptions[key],
+                &Map.put(&1, :cursor, sequence + 1)
+              )
+
+            # If the filter is exhausted (e.g. slice reached its stop), close
+            # the subscription early — no more items will match.
+            if filter_exhausted?(sub.filter, sequence + 1) do
+              state
+              |> send_to_consumer(
+                sub,
+                {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
+              )
+              |> drop_subscription(key)
+            else
+              state
+            end
+        end
+      end)
+
+    # Subscriber cursors may have advanced — recompute demand once per
+    # stream (cheaper than once per subscriber, same result).
+    refresh_stream_demand(state, stream_key)
   end
 
   # On close, tell every subscriber. Error is either nil (clean close) or a

@@ -186,8 +186,11 @@ defmodule Coflux.Orchestration do
   # producer execution; `sequence` identifies an item within the stream.
   # Both are worker-assigned and monotonic from 0.
 
-  def register_stream(project_id, execution_id, index) do
-    call_server(project_id, {:register_stream, execution_id, index})
+  def register_stream(project_id, execution_id, index, buffer, session_id) do
+    call_server(
+      project_id,
+      {:register_stream, execution_id, index, buffer, session_id}
+    )
   end
 
   def append_stream_item(project_id, execution_id, index, sequence, value) do

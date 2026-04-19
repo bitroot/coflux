@@ -98,13 +98,14 @@ class ExecutorContext:
         # are registered here and driven in background threads.
         self._stream_driver = StreamDriver(execution_id)
 
-    def register_stream(self, generator: Any) -> str:
-        """Callback for ``serialize_value(on_generator=...)``.
+    def register_stream(self, generator: Any, buffer: int | None) -> str:
+        """Register a generator with this execution's stream driver and
+        return the resulting opaque stream id.
 
-        Registers a generator with this execution's driver and returns the
-        opaque stream ``id`` to embed in the serialized value.
+        Called from ``cf.stream(...)``; also from the executor when the
+        task body itself is a generator.
         """
-        return self._stream_driver.register(generator)
+        return self._stream_driver.register(generator, buffer)
 
     def wait_streams(self) -> None:
         """Block until every stream produced by this execution has drained."""

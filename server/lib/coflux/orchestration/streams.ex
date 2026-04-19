@@ -34,18 +34,35 @@ defmodule Coflux.Orchestration.Streams do
   alias Coflux.Orchestration.{Errors, Values}
 
   # Registers a new stream owned by `execution_id` at `index` (monotonic
-  # per-execution, worker-assigned). Returns `{:error, :already_registered}`
-  # if the index was already used.
-  def register_stream(db, execution_id, index) do
+  # per-execution, worker-assigned). ``buffer`` is the persisted flow-
+  # control budget — ``nil`` means no backpressure, integer N means the
+  # producer may be up to N items ahead of the fastest consumer. Returns
+  # ``{:error, :already_registered}`` if the index was already used.
+  def register_stream(db, execution_id, index, buffer \\ nil) do
     now = current_timestamp()
 
     case insert_one(db, :streams, %{
            execution_id: execution_id,
            index: index,
+           buffer: buffer,
            created_at: now
          }) do
       {:ok, _} -> {:ok, now}
       {:error, "UNIQUE constraint failed: " <> _} -> {:error, :already_registered}
+    end
+  end
+
+  # Returns the persisted buffer for a stream. Result is ``{:ok, buffer}``
+  # where ``buffer`` is either an integer or ``nil`` (no backpressure).
+  # ``{:error, :not_found}`` if the stream doesn't exist.
+  def get_buffer(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT buffer FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {buffer}} -> {:ok, buffer}
     end
   end
 
@@ -256,7 +273,8 @@ defmodule Coflux.Orchestration.Streams do
   end
 
   # Returns one row per stream owned by `execution_id`:
-  # `{index, created_at, closed_at | nil, reason | nil, error | nil}`.
+  # `{index, buffer, created_at, closed_at | nil, reason | nil, error | nil}`.
+  #   * buffer is the persisted backpressure budget (integer or nil)
   #   * reason is :complete | :errored | :lifecycle when closed, nil when open
   #   * error is the stored `{type, message, frames}` triple for :errored
   #     closures only — callers that need to surface an error for a
@@ -266,7 +284,7 @@ defmodule Coflux.Orchestration.Streams do
     case query(
            db,
            """
-           SELECT s.`index`, s.created_at, c.created_at, c.reason, c.error_id
+           SELECT s.`index`, s.buffer, s.created_at, c.created_at, c.reason, c.error_id
            FROM streams AS s
            LEFT JOIN stream_closures AS c
              ON c.execution_id = s.execution_id AND c.`index` = s.`index`
@@ -278,15 +296,17 @@ defmodule Coflux.Orchestration.Streams do
       {:ok, rows} ->
         streams =
           Enum.map(rows, fn
-            {index, created_at, nil, nil, nil} ->
-              {index, created_at, nil, nil, nil}
+            {index, buffer, created_at, nil, nil, nil} ->
+              {index, buffer, created_at, nil, nil, nil}
 
-            {index, created_at, closed_at, reason_int, nil} ->
-              {index, created_at, closed_at, reason_from_int(reason_int), nil}
+            {index, buffer, created_at, closed_at, reason_int, nil} ->
+              {index, buffer, created_at, closed_at, reason_from_int(reason_int), nil}
 
-            {index, created_at, closed_at, reason_int, error_id} ->
+            {index, buffer, created_at, closed_at, reason_int, error_id} ->
               {:ok, error} = Errors.get_by_id(db, error_id)
-              {index, created_at, closed_at, reason_from_int(reason_int), error}
+
+              {index, buffer, created_at, closed_at, reason_from_int(reason_int),
+               error}
           end)
 
         {:ok, streams}

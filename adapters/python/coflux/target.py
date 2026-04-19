@@ -70,6 +70,10 @@ class TargetDefinition(t.NamedTuple):
     timeout: float | dt.timedelta
     instruction: str | None
     is_stub: bool
+    # Backpressure for generator-bodied tasks. 0 = strict lockstep (default),
+    # N = up to N items ahead of the fastest consumer, None = unbounded.
+    # Only meaningful when ``fn`` is a generator function.
+    buffer: int | None
 
 
 def _json_dumps(obj: t.Any) -> str:
@@ -195,6 +199,36 @@ def _parse_requires(
     return {k: _parse_require(v) for k, v in requires.items()} if requires else None
 
 
+_BUFFER_UNSET = object()
+
+
+def _resolve_buffer(
+    buffer: t.Any,
+    fn: t.Callable,
+) -> int | None:
+    """Validate the decorator's ``buffer=`` and return the resolved value.
+
+    Default is 0 (strict lockstep) for generator-bodied tasks. ``None``
+    disables backpressure. ``buffer`` on a non-generator task is an
+    error — it wouldn't apply to anything.
+    """
+    is_generator = inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn)
+    if buffer is _BUFFER_UNSET:
+        return 0 if is_generator else None
+    if not is_generator:
+        raise TypeError(
+            f"@cf.task/@cf.workflow(buffer=...) only applies to generator functions "
+            f"(def + yield or async def + yield); {fn.__name__} is not."
+        )
+    if buffer is None:
+        return None
+    if not isinstance(buffer, int) or isinstance(buffer, bool) or buffer < 0:
+        raise ValueError(
+            f"buffer must be a non-negative integer or None, got {buffer!r}"
+        )
+    return buffer
+
+
 def _build_definition(
     type: TargetType,
     fn: t.Callable,
@@ -208,6 +242,7 @@ def _build_definition(
     requires: dict[str, str | bool | list[str]] | None,
     timeout: float | dt.timedelta,
     is_stub: bool,
+    buffer: t.Any = _BUFFER_UNSET,
 ) -> TargetDefinition:
     parameters = inspect.signature(fn).parameters.values()
     for p in parameters:
@@ -228,6 +263,7 @@ def _build_definition(
         timeout,
         inspect.getdoc(fn),
         is_stub,
+        _resolve_buffer(buffer, fn),
     )
 
 
@@ -320,6 +356,7 @@ class Target(t.Generic[P, T]):
         requires: dict[str, str | bool | list[str]] | None = None,
         timeout: float | dt.timedelta = 0,
         is_stub: bool = False,
+        buffer: t.Any = _BUFFER_UNSET,
     ):
         self._fn = fn
         self._name = name or fn.__name__
@@ -337,6 +374,7 @@ class Target(t.Generic[P, T]):
             requires,
             timeout,
             is_stub,
+            buffer,
         )
         functools.update_wrapper(self, fn)
 
@@ -409,12 +447,11 @@ class Target(t.Generic[P, T]):
 
         ctx = get_context()
 
-        # Serialize arguments. Generators passed as args are registered with
-        # the current execution's stream driver — the caller becomes the
-        # producer, the callee gets a Stream handle.
-        serialized_args = [
-            serialize_value(arg, on_generator=ctx.register_stream) for arg in args
-        ]
+        # Serialize arguments. Streams passed as args must already have
+        # been registered via cf.stream(...) — the caller becomes the
+        # producer, the callee gets a Stream handle. Bare generators
+        # raise; the user should wrap them explicitly.
+        serialized_args = [serialize_value(arg) for arg in args]
 
         # Use only the declared wait_for from the decorator
         wait_for_val = (

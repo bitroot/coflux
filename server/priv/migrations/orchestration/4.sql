@@ -41,6 +41,12 @@ INSERT INTO completions (execution_id, created_at)
 CREATE TABLE streams (
   execution_id INTEGER NOT NULL,
   `index` INTEGER NOT NULL,
+  -- Producer-side backpressure budget. NULL opts out of flow control
+  -- (producer emits freely). Integer N means the producer may run up
+  -- to N items ahead of the fastest consumer; N=0 is strict lockstep.
+  -- Persisted so the server can reconstruct per-stream flow-control
+  -- state on restart and so Studio can display the configuration.
+  buffer INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (execution_id, `index`),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE

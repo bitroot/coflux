@@ -234,11 +234,11 @@ def register_group_notification(execution_id, group_id, name=None):
 # --- Stream messages (producer side: adapter → server) ---
 
 
-def stream_register(execution_id, index):
-    return {
-        "method": "stream_register",
-        "params": {"execution_id": execution_id, "index": index},
-    }
+def stream_register(execution_id, index, buffer=None):
+    params = {"execution_id": execution_id, "index": index}
+    if buffer is not None:
+        params["buffer"] = buffer
+    return {"method": "stream_register", "params": params}
 
 
 def stream_append(execution_id, index, sequence, value, format="json"):

@@ -209,10 +209,11 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:stream_opened, execution_external_id, index, created_at}
+         {:stream_opened, execution_external_id, index, buffer, created_at}
        ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:streams, Integer.to_string(index)], %{
+        buffer: buffer,
         openedAt: created_at,
         closedAt: nil,
         reason: nil,
@@ -551,22 +552,24 @@ defmodule Coflux.Topics.Run do
 
   defp build_streams(streams) do
     Map.new(streams, fn
-      {index, opened_at, nil, nil, nil} ->
+      {index, buffer, opened_at, nil, nil, nil} ->
         {Integer.to_string(index),
-         %{openedAt: opened_at, closedAt: nil, reason: nil, error: nil}}
+         %{buffer: buffer, openedAt: opened_at, closedAt: nil, reason: nil, error: nil}}
 
-      {index, opened_at, closed_at, reason, nil} ->
+      {index, buffer, opened_at, closed_at, reason, nil} ->
         {Integer.to_string(index),
          %{
+           buffer: buffer,
            openedAt: opened_at,
            closedAt: closed_at,
            reason: Atom.to_string(reason),
            error: nil
          }}
 
-      {index, opened_at, closed_at, reason, {type, message, _frames}} ->
+      {index, buffer, opened_at, closed_at, reason, {type, message, _frames}} ->
         {Integer.to_string(index),
          %{
+           buffer: buffer,
            openedAt: opened_at,
            closedAt: closed_at,
            reason: Atom.to_string(reason),

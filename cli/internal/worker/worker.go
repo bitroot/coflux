@@ -362,6 +362,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	conn.RegisterHandler("abort", w.handleAbort)
 	conn.RegisterHandler("stream_items", w.handleStreamItems)
 	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
+	conn.RegisterHandler("stream_demand", w.handleStreamDemand)
 	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
@@ -715,6 +716,33 @@ func (w *Worker) handleStreamClosed(params []any) error {
 		forwarded["error"] = errField
 	}
 	return w.pool.PushToExecutor(executionID, "stream_closed", forwarded)
+}
+
+// handleStreamDemand forwards a server-pushed demand grant to the producer
+// adapter. Params: [execution_id, index, n]. The producer's StreamDriver
+// adds ``n`` to its per-stream credit counter and wakes any waiting
+// worker thread.
+func (w *Worker) handleStreamDemand(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_demand: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_demand: execution_id is not a string (got %T)", params[0])
+	}
+	index, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: index is not a number (got %T)", params[1])
+	}
+	n, ok := params[2].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: n is not a number (got %T)", params[2])
+	}
+	return w.pool.PushToExecutor(executionID, "stream_demand", map[string]any{
+		"execution_id": executionID,
+		"index":        int(index),
+		"n":            int(n),
+	})
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context) {
@@ -1181,12 +1209,17 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int) error {
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	return conn.Notify("stream_register", executionID, index)
+	// The wire protocol takes buffer positionally; nil encodes to JSON null,
+	// which the server interprets as "no backpressure" (unbounded).
+	if buffer == nil {
+		return conn.Notify("stream_register", executionID, index, nil)
+	}
+	return conn.Notify("stream_register", executionID, index, *buffer)
 }
 
 func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {

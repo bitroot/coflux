@@ -254,10 +254,17 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_register" ->
-        [execution_id, index] = message["params"]
+        [execution_id, index | rest] = message["params"]
+        buffer = List.first(rest)
 
         if is_recognised_execution?(execution_id, state) do
-          case Orchestration.register_stream(state.project_id, execution_id, index) do
+          case Orchestration.register_stream(
+                 state.project_id,
+                 execution_id,
+                 index,
+                 buffer,
+                 state.session_id
+               ) do
             :ok -> {[], state}
             # Idempotent — a duplicate register is harmless.
             {:error, :already_registered} -> {[], state}
@@ -637,6 +644,10 @@ defmodule Coflux.Handlers.Worker do
       end)
 
     {[command_message("stream_items", [execution_external_id, subscription_id, encoded])], state}
+  end
+
+  def websocket_info({:stream_demand, execution_external_id, index, n}, state) do
+    {[command_message("stream_demand", [execution_external_id, index, n])], state}
   end
 
   def websocket_info({:stream_closed, execution_external_id, subscription_id, error}, state) do

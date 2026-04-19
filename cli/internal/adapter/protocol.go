@@ -255,10 +255,20 @@ type RegisterGroupParams struct {
 
 // StreamRegisterParams for stream_register notification.
 // Index is worker-assigned, monotonic per execution — it identifies the
-// stream within its producer execution.
+// stream within its producer execution. Buffer is the optional
+// backpressure budget; nil means unbounded (no flow control).
 type StreamRegisterParams struct {
 	ExecutionID string `json:"execution_id"`
 	Index       int    `json:"index"`
+	Buffer      *int   `json:"buffer,omitempty"`
+}
+
+// StreamDemandParams for stream_demand notification pushed CLI → adapter.
+// Grants the producer ``n`` more credits for the given stream.
+type StreamDemandParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	N           int    `json:"n"`
 }
 
 // StreamAppendParams for stream_append notification.

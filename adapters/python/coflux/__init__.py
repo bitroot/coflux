@@ -34,6 +34,7 @@ from .models import (
 )
 from .prompt import Prompt
 from .state import get_context
+from .streams import stream
 from .target import Cache, Defer, Retries
 
 __all__ = [
@@ -65,6 +66,8 @@ __all__ = [
     "AssetEntry",
     "AssetMetadata",
     "Stream",
+    # Producer-side stream helper
+    "stream",
     # Context functions
     "group",
     "suspense",

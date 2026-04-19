@@ -37,6 +37,51 @@ from .state import get_context
 # --- Producer side ---
 
 
+def stream(generator: Any, *, buffer: int | None = 0) -> Any:
+    """Register a generator as a Coflux stream and return a handle.
+
+    Use this when a task returns multiple streams or needs a buffer size
+    different from the task default. For the common case where a task
+    body is itself a generator, ``@cf.task(buffer=N)`` handles the
+    registration automatically — you don't need to call ``cf.stream``
+    explicitly.
+
+    Registration happens at call time: the driver thread starts, the
+    server is told about the stream, and any later serialisation sees a
+    regular ``Stream`` handle. That means ``cf.stream`` must be called
+    inside a task or workflow body (where an execution context is
+    active); calling it from module scope or outside a task raises.
+
+    Args:
+        generator: A sync or async generator. Other iterables aren't
+            accepted — wrapping a list in ``cf.stream`` doesn't make
+            sense; pass it as a value directly.
+        buffer: Backpressure budget. ``0`` (the default) means strict
+            lockstep — the producer emits an item, waits for a consumer
+            to acknowledge it, then emits the next. ``N`` allows the
+            producer to stay up to ``N`` items ahead of the fastest
+            consumer. ``None`` disables backpressure entirely.
+
+    Returns:
+        A ``Stream`` handle referencing the newly registered stream.
+        It serialises as ``{"type": "stream", "id": ...}`` and is
+        iterable by downstream tasks.
+    """
+    if not (inspect.isgenerator(generator) or inspect.isasyncgen(generator)):
+        raise TypeError(
+            f"cf.stream expects a generator, got {type(generator).__name__}"
+        )
+    if buffer is not None and buffer < 0:
+        raise ValueError(f"buffer must be non-negative or None, got {buffer}")
+    ctx = get_context()
+    stream_id = ctx.register_stream(generator, buffer)
+    # Local import to avoid a top-level cycle — models imports nothing
+    # from streams but streams already imports from models at top.
+    from .models import Stream as StreamHandle
+
+    return StreamHandle(stream_id)
+
+
 class StreamDriver:
     """Manages streams produced by a single execution."""
 
@@ -46,8 +91,17 @@ class StreamDriver:
         self._threads: list[threading.Thread] = []
         self._generators: list[Any] = []
         self._lock = threading.Lock()
+        # Demand tracking: each registered stream gets a per-index slot in
+        # `_demand`. Drivers wait on `_demand_cv` until credit is granted
+        # by the server (via stream_demand notifications) or the driver is
+        # asked to close. ``None`` means unbounded demand (buffer=None at
+        # registration time); the driver never waits.
+        self._demand_cv = threading.Condition()
+        self._demand: dict[int, int | None] = {}
+        self._closing = False
+        self._demand_handler_registered = False
 
-    def register(self, generator: Any) -> str:
+    def register(self, generator: Any, buffer: int | None) -> str:
         """Register a generator and start running it in a worker thread.
 
         Accepts both sync generators (``def`` + ``yield``) and async
@@ -55,14 +109,28 @@ class StreamDriver:
         async generators run inside a fresh event loop confined to that
         thread.
 
+        ``buffer`` is the producer-side backpressure budget. ``None``
+        means unbounded (no flow control); ``0`` means strict lockstep
+        (producer waits for a consumer to ack each item before emitting
+        the next); ``N>0`` allows the producer to stay up to N items
+        ahead of the fastest consumer.
+
         Returns the stream's opaque ``id`` (``<execution_id>_<index>``)
         for embedding in the serialized value as a stream reference.
         """
+        self._ensure_demand_handler_registered()
+
         with self._lock:
             index = self._next_index
             self._next_index += 1
 
-        protocol.send_stream_register(self._execution_id, index)
+        with self._demand_cv:
+            # Unbounded ⇒ driver never waits. Bounded ⇒ starts at 0; the
+            # server issues a credit grant once demand calculation warrants
+            # it (or on first consumer subscribing).
+            self._demand[index] = None if buffer is None else 0
+
+        protocol.send_stream_register(self._execution_id, index, buffer=buffer)
 
         is_async = inspect.isasyncgen(generator)
         target = self._run_async if is_async else self._run
@@ -80,11 +148,60 @@ class StreamDriver:
 
         return compose_stream_id(self._execution_id, index)
 
+    def _ensure_demand_handler_registered(self) -> None:
+        if self._demand_handler_registered:
+            return
+        get_dispatcher().register_notification("stream_demand", self._on_stream_demand)
+        self._demand_handler_registered = True
+
+    def _on_stream_demand(self, params: dict[str, Any]) -> None:
+        """Server granted additional demand for one of our streams.
+
+        The notification carries the delta (``n`` extra credits). We add
+        to the per-stream counter and wake any waiter.
+        """
+        index = params.get("index")
+        n = params.get("n", 0)
+        if index is None or n <= 0:
+            return
+        with self._demand_cv:
+            current = self._demand.get(index)
+            if current is None:
+                # Unbounded — nothing to account for.
+                return
+            self._demand[index] = current + n
+            self._demand_cv.notify_all()
+
+    def _acquire_demand(self, index: int) -> bool:
+        """Wait for a credit and consume it. Returns False if closed mid-wait."""
+        with self._demand_cv:
+            while True:
+                if self._closing:
+                    return False
+                current = self._demand.get(index)
+                if current is None:
+                    # Unbounded stream — never waits.
+                    return True
+                if current > 0:
+                    self._demand[index] = current - 1
+                    return True
+                self._demand_cv.wait()
+
     def _run(self, index: int, generator: Any) -> None:
         """Run one sync generator to exhaustion (or error)."""
         sequence = 0
         try:
-            for item in generator:
+            iterator = iter(generator)
+            while True:
+                # Block until the server grants a credit (or the driver is
+                # asked to close). For unbounded streams this returns
+                # immediately without consuming any credit.
+                if not self._acquire_demand(index):
+                    return
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
                 serialized = serialize_value(item)
                 protocol.send_stream_append(
                     self._execution_id,
@@ -124,7 +241,19 @@ class StreamDriver:
 
         async def iterate() -> None:
             sequence = 0
-            async for item in generator:
+            iterator = generator.__aiter__()
+            while True:
+                # The demand wait uses a threading.Condition, which would
+                # block the event loop. This loop is dedicated to one
+                # generator though — nothing else scheduled — so blocking
+                # in-thread is harmless and simpler than bridging to an
+                # asyncio primitive.
+                if not self._acquire_demand(index):
+                    return
+                try:
+                    item = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
                 serialized = serialize_value(item)
                 protocol.send_stream_append(
                     self._execution_id,
@@ -183,7 +312,15 @@ class StreamDriver:
         ``GeneratorExit`` at the current yield point. For async generators,
         we schedule ``aclose()`` onto the generator's own event loop so the
         awaiting coroutine is cancelled cleanly.
+
+        We also flip a closing flag and broadcast on the demand condition
+        so drivers parked in ``_acquire_demand`` (blocked for credits that
+        will never arrive) wake and exit.
         """
+        with self._demand_cv:
+            self._closing = True
+            self._demand_cv.notify_all()
+
         with self._lock:
             entries = list(self._generators)
         for entry in entries:

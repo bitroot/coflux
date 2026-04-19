@@ -460,16 +460,26 @@ def send_metric(
     get_protocol().send_message("metric", params)
 
 
-def send_stream_register(execution_id: str, index: int) -> None:
+def send_stream_register(
+    execution_id: str,
+    index: int,
+    buffer: int | None = None,
+) -> None:
     """Register a stream owned by this execution.
 
     ``index`` is worker-assigned and monotonic per execution (0, 1, 2, ...);
     it identifies the stream within its producer execution.
+
+    ``buffer`` is the producer-side backpressure budget. ``None`` opts out
+    of backpressure entirely; the server won't issue demand grants and
+    the producer emits freely. Any integer value tells the server to
+    pace the producer — it'll send ``stream_demand`` notifications as
+    credits become available.
     """
-    get_protocol().send_message(
-        "stream_register",
-        {"execution_id": execution_id, "index": index},
-    )
+    params: dict[str, Any] = {"execution_id": execution_id, "index": index}
+    if buffer is not None:
+        params["buffer"] = buffer
+    get_protocol().send_message("stream_register", params)
 
 
 def send_stream_append(

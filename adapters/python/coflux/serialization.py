@@ -43,7 +43,6 @@ def _write_temp_file(data: bytes) -> str:
 def _encode_value(
     value: Any,
     write_temp_file: Callable[[bytes], str] = _write_temp_file,
-    on_generator: Callable[[Any], tuple[str, int]] | None = None,
 ) -> tuple[Any, list[list[Any]]]:
     """Encode a Python value using the custom JSON value format.
 
@@ -55,36 +54,20 @@ def _encode_value(
         value: The Python value to encode.
         write_temp_file: Callable that writes bytes to a temp file and returns
             the path. Used for pickle fragment references.
-        on_generator: Callback invoked for each generator encountered. Should
-            register the generator (spawn its driver) and return the
-            stream's opaque `id`. If None, encountering a generator
-            raises TypeError.
 
     Returns:
         Tuple of (data, references) where data is JSON-serializable and
         references is a list of reference arrays.
+
+    Streams must be registered explicitly via ``cf.stream(...)`` (which
+    returns a ``Stream`` handle) before serialisation. A bare generator
+    encountered here is an error — the user probably meant to wrap it.
     """
     references: list[list[Any]] = []
 
     def _encode(v: Any) -> Any:
         if v is None or isinstance(v, (str, bool, int, float)):
             return v
-        elif inspect.isgenerator(v) or inspect.isasyncgen(v):
-            if on_generator is None:
-                raise TypeError(
-                    "Cannot serialize a generator: no stream driver is active."
-                )
-            stream_id = on_generator(v)
-            return {"type": "stream", "id": stream_id}
-        elif isinstance(v, Stream):
-            # Pass-through: a Stream handle received from another execution
-            # (possibly with partition/slice filters layered on top) is
-            # being forwarded as an argument. Preserve the filter chain so
-            # the downstream consumer subscribes with the same filters.
-            encoded: dict[str, Any] = {"type": "stream", "id": v.id}
-            if v._filters:
-                encoded["filters"] = list(v._filters)
-            return encoded
         elif isinstance(v, list):
             return [_encode(x) for x in v]
         elif isinstance(v, dict):
@@ -138,6 +121,22 @@ def _encode_value(
                 ]
             )
             return {"type": "ref", "index": len(references) - 1}
+        elif isinstance(v, Stream):
+            # Pass-through: a Stream handle received from another execution
+            # (possibly with partition/slice filters layered on top) is
+            # being forwarded as an argument. Preserve the filter chain so
+            # the downstream consumer subscribes with the same filters.
+            encoded: dict[str, Any] = {"type": "stream", "id": v.id}
+            if v._filters:
+                encoded["filters"] = list(v._filters)
+            return encoded
+        elif inspect.isgenerator(v) or inspect.isasyncgen(v):
+            raise TypeError(
+                "Bare generators aren't serialisable — wrap with "
+                "cf.stream(generator, buffer=...) to register a stream "
+                "first. Tasks whose body yields directly are handled "
+                "automatically via @cf.task(buffer=...)."
+            )
         elif HAS_PYDANTIC and isinstance(v, pydantic.BaseModel):
             model_class = v.__class__
             model_fqn = f"{model_class.__module__}.{model_class.__name__}"
@@ -177,24 +176,18 @@ def _encode_value(
     return data, references
 
 
-def serialize_value(
-    value: Any,
-    on_generator: Callable[[Any], tuple[str, int]] | None = None,
-) -> dict[str, Any]:
+def serialize_value(value: Any) -> dict[str, Any]:
     """Serialize a result value to the protocol format.
 
     Uses the custom JSON value encoding (dict/set/tuple types, fragment refs
-    for unsupported types). The result is always JSON-format data.
-
-    Args:
-        value: The Python value to serialize.
-        on_generator: Optional callback for generator objects. See
-            `_encode_value` for the contract. Without it, generators raise.
+    for unsupported types). The result is always JSON-format data. Bare
+    generators raise — streams must be registered explicitly via
+    ``cf.stream(...)`` first.
 
     Returns:
         Serialized value dict.
     """
-    data, references = _encode_value(value, on_generator=on_generator)
+    data, references = _encode_value(value)
     encoded = json.dumps(data, separators=(",", ":")).encode()
 
     if len(encoded) > TRANSFER_THRESHOLD:
