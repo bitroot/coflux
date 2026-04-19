@@ -23,6 +23,11 @@ class Protocol:
         # handlers) can emit messages concurrently; serialize writes so JSON
         # lines don't interleave.
         self._write_lock = threading.Lock()
+        # Guards `_next_id`. Separate from `_write_lock` so a slow write
+        # doesn't block other threads from minting their own ids — the
+        # Dispatcher routes responses by id so the order of wire writes
+        # doesn't matter to correctness.
+        self._id_lock = threading.Lock()
 
     def send_message(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a notification message (no response expected)."""
@@ -33,14 +38,17 @@ class Protocol:
 
     def send_request(self, method: str, params: dict[str, Any]) -> int:
         """Send a request and return the request ID."""
-        self._next_id += 1
-        req = {
-            "id": self._next_id,
-            "method": method,
-            "params": params,
-        }
-        self._write(req)
-        return self._next_id
+        with self._id_lock:
+            self._next_id += 1
+            request_id = self._next_id
+        self._write(
+            {
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        return request_id
 
     def send_response(
         self,
@@ -537,12 +545,16 @@ def send_stream_subscribe(
     producer_execution_id: str,
     index: int,
     from_sequence: int,
-    filter: dict[str, Any] | None = None,
+    stride: dict[str, Any] | None = None,
 ) -> None:
     """Open a consumer subscription to a stream owned by another execution.
 
-    ``execution_id`` is the consumer's own execution — the server uses it to
-    track who's subscribed and where to push items.
+    ``execution_id`` is the consumer's own execution — the server uses it
+    to track who's subscribed and where to push items. ``stride`` is an
+    optional ``{"start": int, "stop": int|None, "step": int}`` dict
+    restricting which sequence positions are delivered; any chain of
+    slice/partition/stride calls on the handle composes into a single
+    stride before reaching here.
     """
     params: dict[str, Any] = {
         "execution_id": execution_id,
@@ -551,8 +563,8 @@ def send_stream_subscribe(
         "index": index,
         "from_sequence": from_sequence,
     }
-    if filter is not None:
-        params["filter"] = filter
+    if stride is not None:
+        params["stride"] = stride
     get_protocol().send_message("stream_subscribe", params)
 
 

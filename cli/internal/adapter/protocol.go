@@ -296,16 +296,18 @@ type StreamCloseError struct {
 	Traceback string `json:"traceback"`
 }
 
-// StreamSubscribeParams for stream_subscribe notification.
-// Filter is one of nil, {"type": "slice", "start", "stop"},
-// or {"type": "partition", "n", "i"}.
+// StreamSubscribeParams for stream_subscribe notification. `Stride`
+// (when present) restricts which sequence positions are delivered: the
+// positions `start, start+step, start+2·step, …` up to (but not
+// including) `stop`. Any chain of slice/partition/stride calls on the
+// consumer side composes into a single stride before the wire.
 type StreamSubscribeParams struct {
 	ExecutionID         string         `json:"execution_id"` // consumer
 	SubscriptionID      int            `json:"subscription_id"`
 	ProducerExecutionID string         `json:"producer_execution_id"`
 	Index               int            `json:"index"`
 	FromSequence        int            `json:"from_sequence"`
-	Filter              map[string]any `json:"filter,omitempty"`
+	Stride              map[string]any `json:"stride,omitempty"`
 }
 
 // StreamUnsubscribeParams for stream_unsubscribe notification.

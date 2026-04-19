@@ -7,6 +7,7 @@ import datetime as dt
 import fnmatch as fnmatch
 import hashlib
 import json
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -93,6 +94,12 @@ class ExecutorContext:
         # poll_handle to avoid a round-trip for handles that have already
         # been seen in this context's lifetime.
         self._resolved: dict[tuple[str, str], dict[str, Any]] = {}
+        # Guards the mutable collections above. Stream driver threads, the
+        # main task thread, and any user-spawned threads may call methods
+        # on this context concurrently; the lock protects check-then-set
+        # patterns (metric definition, group registration, resolve cache)
+        # from racing.
+        self._lock = threading.Lock()
         # Owns generator streams for this execution. Generators encountered
         # during serialization (of the return value OR of submit arguments)
         # are registered here and driven in background threads.
@@ -211,7 +218,8 @@ class ExecutorContext:
         if winner is None:
             raise RuntimeError(f"Unexpected select response: {response}")
 
-        self._resolved[_handle_key(handles[winner])] = response
+        with self._lock:
+            self._resolved[_handle_key(handles[winner])] = response
         return winner
 
     def resolve_handle(self, handle: Any) -> Any:
@@ -223,13 +231,17 @@ class ExecutorContext:
         to the deserialized value.
         """
         key = _handle_key(handle)
-        if key not in self._resolved:
+        with self._lock:
+            cached = self._resolved.get(key)
+        if cached is None:
             if self.select([handle]) is None:
                 # The wait expired before the handle resolved. Only reachable
                 # from inside a `cf.suspense(timeout=...)` scope; otherwise the
                 # server either resolves or kills the process.
                 raise TimeoutError("timed out waiting for handle to resolve")
-        return _unwrap_response(self._resolved[key], handle._parser)
+            with self._lock:
+                cached = self._resolved[key]
+        return _unwrap_response(cached, handle._parser)
 
     def poll_handle(
         self,
@@ -244,11 +256,15 @@ class ExecutorContext:
         is applied to it.
         """
         key = _handle_key(handle)
-        if key not in self._resolved:
+        with self._lock:
+            cached = self._resolved.get(key)
+        if cached is None:
             timeout_ms = int(timeout * 1000) if timeout else 0
             if self.select([handle], suspend=False, timeout_ms=timeout_ms) is None:
                 return default
-        return _unwrap_response(self._resolved[key], handle._parser)
+            with self._lock:
+                cached = self._resolved[key]
+        return _unwrap_response(cached, handle._parser)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
@@ -511,8 +527,9 @@ class ExecutorContext:
     @contextmanager
     def group(self, name: str | None = None) -> Iterator[None]:
         """Context manager for grouping child executions."""
-        group_id = len(self._groups)
-        self._groups.append(name)
+        with self._lock:
+            group_id = len(self._groups)
+            self._groups.append(name)
         protocol.send_register_group(self.execution_id, group_id, name)
         token = _group_id.set(group_id)
         try:

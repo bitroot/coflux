@@ -60,9 +60,11 @@ type ExecutionHandler interface {
 	// StreamClose closes a stream. Error is nil for a clean close, or a (type, message, traceback)
 	// triple when the producer's generator raised.
 	StreamClose(ctx context.Context, executionID string, index int, err *adapter.StreamCloseError) error
-	// StreamSubscribe opens a consumer subscription to a stream owned by another execution.
-	// Filter is nil or a {"type": "slice", ...}/{"type": "partition", ...} map.
-	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, filter map[string]any) error
+	// StreamSubscribe opens a consumer subscription to a stream owned
+	// by another execution. `stride` is an optional
+	// {"start", "stop", "step"} map restricting which positions are
+	// delivered; nil means no filtering.
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error
 	// StreamUnsubscribe drops a consumer subscription.
 	StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error
 }
@@ -530,7 +532,7 @@ func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, pa
 		req.ProducerExecutionID,
 		req.Index,
 		req.FromSequence,
-		req.Filter,
+		req.Stride,
 	); err != nil {
 		logger.Error("failed to subscribe to stream", "error", err)
 	}

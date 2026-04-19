@@ -2126,7 +2126,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call(
         {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
-         producer_execution_external_id, index, from_sequence, filter},
+         producer_execution_external_id, index, from_sequence, stride},
         _from,
         state
       ) do
@@ -2153,7 +2153,7 @@ defmodule Coflux.Orchestration.Server do
         producer_execution_id: producer_execution_id,
         index: index,
         cursor: from_sequence,
-        filter: filter
+        stride: stride
       }
 
       state =
@@ -7867,32 +7867,27 @@ defmodule Coflux.Orchestration.Server do
   defp ok_or({:ok, val}, _reason), do: {:ok, val}
   defp ok_or(:error, reason), do: {:error, reason}
 
-  # Does a `sequence` pass a subscription's filter?
-  defp filter_matches?(nil, _sequence), do: true
+  # Does a `sequence` pass a subscription's stride? A stride is
+  # ``%{"start" => int, "stop" => int | nil, "step" => int}`` — the
+  # client composes any chain of slice/partition/stride calls into one
+  # before sending. `nil` means the trivial identity stride (everything).
+  defp stride_matches?(nil, _sequence), do: true
 
-  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => nil}, sequence),
-    do: sequence >= s
+  defp stride_matches?(%{"start" => start, "stop" => stop, "step" => step}, sequence) do
+    sequence >= start and
+      (stop == nil or sequence < stop) and
+      rem(sequence - start, step) == 0
+  end
 
-  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => e}, sequence),
-    do: sequence >= s and sequence < e
+  # Is `cursor` past the stride's stop? Lets us close the subscription
+  # early once nothing more can match (i.e. the upper bound is finite
+  # and we've reached it).
+  defp stride_exhausted?(nil, _cursor), do: false
 
-  defp filter_matches?(%{"type" => "partition", "n" => n, "i" => i}, sequence),
-    do: rem(sequence, n) == i
-
-  defp filter_matches?(%{"type" => "chain", "filters" => fs}, sequence),
-    do: Enum.all?(fs, &filter_matches?(&1, sequence))
-
-  defp filter_matches?(_filter, _sequence), do: true
-
-  # Is `sequence` past the end of the filter's effective range?
-  # Lets us close streams early once a slice's stop is reached.
-  defp filter_exhausted?(%{"type" => "slice", "stop" => stop}, cursor) when is_integer(stop),
+  defp stride_exhausted?(%{"stop" => stop}, cursor) when is_integer(stop),
     do: cursor >= stop
 
-  defp filter_exhausted?(%{"type" => "chain", "filters" => fs}, cursor),
-    do: Enum.any?(fs, &filter_exhausted?(&1, cursor))
-
-  defp filter_exhausted?(_filter, _cursor), do: false
+  defp stride_exhausted?(_stride, _cursor), do: false
 
   # Per-fetch page size when draining backlog for a newly subscribed
   # consumer. Keeps any single DB read bounded and lets us push each page
@@ -7945,8 +7940,10 @@ defmodule Coflux.Orchestration.Server do
 
     filtered =
       items
-      |> Enum.filter(fn {sequence, _value, _at} -> filter_matches?(sub.filter, sequence) end)
-      |> Enum.take_while(fn {sequence, _, _} -> not filter_exhausted?(sub.filter, sequence) end)
+      |> Enum.filter(fn {sequence, _value, _at} -> stride_matches?(sub.stride, sequence) end)
+      |> Enum.take_while(fn {sequence, _, _} ->
+        not stride_exhausted?(sub.stride, sequence)
+      end)
 
     # Advance cursor past the page even if no items matched this filter —
     # otherwise we'd re-fetch the same sequences forever.
@@ -7980,14 +7977,14 @@ defmodule Coflux.Orchestration.Server do
       )
 
     state =
-      if filter_exhausted?(sub.filter, advance_to) do
-        # If the filter is now exhausted (slice's stop reached), close the
-        # subscription synchronously — matches push_stream_item's
-        # behaviour. Without this, a consumer that subscribed after
-        # appends with a bounded filter would wait forever for a close
-        # that never comes. Filter-exhaustion is a "complete" outcome
-        # from the consumer's perspective: they've received everything
-        # that was addressed to them.
+      if stride_exhausted?(sub.stride, advance_to) do
+        # If the stride has reached its stop, close the subscription
+        # synchronously — matches push_stream_item's behaviour. Without
+        # this, a consumer that subscribed after appends with a bounded
+        # stride would wait forever for a close that never comes.
+        # Stride-exhaustion is a "complete" outcome from the consumer's
+        # perspective: they've received everything that was addressed
+        # to them.
         state
         |> send_to_consumer(
           sub,
@@ -8029,7 +8026,7 @@ defmodule Coflux.Orchestration.Server do
             # Consumer already has this sequence via backlog; skip.
             state
 
-          not filter_matches?(sub.filter, sequence) ->
+          not stride_matches?(sub.stride, sequence) ->
             state
 
           true ->
@@ -8052,11 +8049,11 @@ defmodule Coflux.Orchestration.Server do
                 &Map.put(&1, :cursor, sequence + 1)
               )
 
-            # If the filter is exhausted (e.g. slice reached its stop), close
-            # the subscription early — no more items will match. Treated
-            # as a "complete" close for the consumer (they got everything
-            # that was addressed to them).
-            if filter_exhausted?(sub.filter, sequence + 1) do
+            # If the stride has reached its stop, close the subscription
+            # early — no more items will match. Treated as a "complete"
+            # close for the consumer (they got everything that was
+            # addressed to them).
+            if stride_exhausted?(sub.stride, sequence + 1) do
               state
               |> send_to_consumer(
                 sub,

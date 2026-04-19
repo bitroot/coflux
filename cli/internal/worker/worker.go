@@ -1258,13 +1258,13 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, index int,
 	return conn.Notify("stream_close", executionID, index, errTuple)
 }
 
-func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, filter map[string]any) error {
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, filter]
-	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, filter)
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride)
 }
 
 func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {

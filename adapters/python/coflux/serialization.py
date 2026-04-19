@@ -123,12 +123,15 @@ def _encode_value(
             return {"type": "ref", "index": len(references) - 1}
         elif isinstance(v, Stream):
             # Pass-through: a Stream handle received from another execution
-            # (possibly with partition/slice filters layered on top) is
-            # being forwarded as an argument. Preserve the filter chain so
-            # the downstream consumer subscribes with the same filters.
+            # (possibly with slice/partition/stride layered on top) is
+            # being forwarded as an argument. Preserve the composed stride
+            # so the downstream consumer subscribes with the same view.
             encoded: dict[str, Any] = {"type": "stream", "id": v.id}
-            if v._filters:
-                encoded["filters"] = list(v._filters)
+            start, stop, step = v._stride
+            # Only include a stride entry if it's doing something — the
+            # trivial (0, None, 1) is the identity.
+            if (start, stop, step) != (0, None, 1):
+                encoded["stride"] = {"start": start, "stop": stop, "step": step}
             return encoded
         elif inspect.isgenerator(v) or inspect.isasyncgen(v):
             raise TypeError(
@@ -255,11 +258,19 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
             elif t == "stream":
                 # Producer-owned stream reference. Self-contained — the
                 # opaque `id` encodes the producer's execution id + the
-                # stream's index, and any filter chain (when the Stream
-                # was forwarded with partition/slice filters already
-                # applied) rides alongside.
-                filters = tuple(v.get("filters") or ())
-                return Stream(v["id"], filters)
+                # stream's index. An optional ``stride`` describes the
+                # composed slice/partition/stride view (identity when
+                # absent).
+                stride_raw = v.get("stride")
+                if stride_raw:
+                    stride = (
+                        stride_raw.get("start", 0),
+                        stride_raw.get("stop"),
+                        stride_raw.get("step", 1),
+                    )
+                else:
+                    stride = (0, None, 1)
+                return Stream(v["id"], stride)
             else:
                 return v
         else:

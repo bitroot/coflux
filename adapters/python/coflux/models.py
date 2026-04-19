@@ -210,6 +210,40 @@ class Execution(_Handle[T]):
         return self._target
 
 
+Stride = t.Tuple[int, t.Optional[int], int]
+"""A stride over the stream's sequence numbers: ``(start, stop, step)``.
+
+Matches positions ``start, start+step, start+2·step, …`` up to but not
+including ``stop`` (or unbounded when ``stop is None``). Composes with
+itself: any chain of ``slice``/``partition``/``stride`` calls reduces to
+a single stride, so the wire never sees more than one filter.
+"""
+
+
+def _compose_stride(outer: Stride, inner: Stride) -> Stride:
+    """Stride of a stride. Given that we already have stride ``outer``
+    selecting positions ``s₁ + k·step₁`` (``k < (e₁-s₁)/step₁``), apply
+    ``inner = (s₂, e₂, step₂)`` to those outputs: index ``k`` of the inner
+    result maps to index ``s₂ + k·step₂`` of the outer, which is original
+    position ``s₁ + (s₂ + k·step₂)·step₁``.
+
+    Combined: ``start = s₁ + s₂·step₁``, ``step = step₁·step₂``, ``stop``
+    is the tighter of the two constraints mapped back to original positions.
+    """
+    s1, e1, step1 = outer
+    s2, e2, step2 = inner
+    new_start = s1 + s2 * step1
+    new_step = step1 * step2
+    inner_stop_mapped = s1 + e2 * step1 if e2 is not None else None
+    if e1 is None:
+        new_stop = inner_stop_mapped
+    elif inner_stop_mapped is None:
+        new_stop = e1
+    else:
+        new_stop = min(e1, inner_stop_mapped)
+    return (new_start, new_stop, new_step)
+
+
 class Stream(t.Iterable[T]):
     """A handle to a stream produced by another execution.
 
@@ -218,52 +252,60 @@ class Stream(t.Iterable[T]):
     starts a fresh subscription from sequence 0, so a stream can be iterated
     multiple times and each iteration sees the whole sequence.
 
-    ``partition`` and ``slice`` return new ``Stream`` views with an additional
-    filter; no server round-trip happens until iteration begins.
+    ``partition``, ``slice``, and ``stride`` return new ``Stream`` views
+    with the stride adjusted. Chained calls compose into a single stride
+    on the wire — no server-side pipelining logic needed.
     """
 
     def __init__(
         self,
         id: str,
-        filters: tuple[dict[str, t.Any], ...] = (),
+        stride: Stride = (0, None, 1),
     ):
         # Opaque identifier of the form ``<producer_execution_id>_<index>``.
         # Users may see this in the CLI/Studio but shouldn't need to parse it.
         self._id = id
-        self._filters = filters
+        self._stride = stride
 
     @property
     def id(self) -> str:
         return self._id
 
+    def stride(
+        self,
+        start: int = 0,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> "Stream[T]":
+        """Return a view of this stream restricted to the positions
+        ``start, start+step, …`` up to (but not including) ``stop``.
+        Composes with any existing stride on this view.
+        """
+        if start < 0 or step < 1 or (stop is not None and stop < start):
+            raise ValueError(
+                f"invalid stride args: start={start}, stop={stop}, step={step}"
+            )
+        return Stream(self._id, _compose_stride(self._stride, (start, stop, step)))
+
+    def slice(self, start: int, stop: int | None = None) -> "Stream[T]":
+        """Return a view restricted to sequences ``[start, stop)`` —
+        shorthand for ``stride(start, stop, 1)``. Equivalent to
+        ``itertools.islice`` on the source stream's items.
+        """
+        return self.stride(start, stop, 1)
+
     def partition(self, n: int, i: int) -> "Stream[T]":
-        """Return a view of this stream where only sequences ``s`` with
-        ``s % n == i`` are delivered. Round-robin partitioning for parallel
-        consumers.
+        """Return a view where only sequences ``s`` with ``s % n == i``
+        are delivered — round-robin partitioning for parallel consumers.
+        Shorthand for ``stride(i, None, n)``.
         """
         if n < 1 or i < 0 or i >= n:
             raise ValueError(f"invalid partition args: n={n}, i={i}")
-        return Stream(
-            self._id,
-            self._filters + ({"type": "partition", "n": n, "i": i},),
-        )
-
-    def slice(self, start: int, stop: int | None = None) -> "Stream[T]":
-        """Return a view of this stream restricted to sequences ``[start, stop)``.
-
-        ``stop=None`` means unbounded. Equivalent to ``itertools.islice`` on
-        the source stream's items.
-        """
-        if start < 0 or (stop is not None and stop < start):
-            raise ValueError(f"invalid slice args: start={start}, stop={stop}")
-        return Stream(
-            self._id,
-            self._filters + ({"type": "slice", "start": start, "stop": stop},),
-        )
+        return self.stride(i, None, n)
 
     def __iter__(self) -> t.Iterator[T]:
         # Deferred import to avoid a cycle (streams.py imports serialization
         # which imports models for Execution/Input/Asset).
         from .streams import open_subscription
 
-        return open_subscription(self._id, self._filters)
+        return open_subscription(self._id, self._stride)

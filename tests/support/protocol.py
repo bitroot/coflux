@@ -282,7 +282,7 @@ def stream_subscribe(
     producer_execution_id,
     index,
     from_sequence=0,
-    filter=None,
+    stride=None,
 ):
     params = {
         "execution_id": execution_id,
@@ -291,8 +291,8 @@ def stream_subscribe(
         "index": index,
         "from_sequence": from_sequence,
     }
-    if filter is not None:
-        params["filter"] = filter
+    if stride is not None:
+        params["stride"] = stride
     return {"method": "stream_subscribe", "params": params}
 
 
@@ -309,16 +309,18 @@ def stream_unsubscribe(execution_id, subscription_id):
 # --- Filter builders ---
 
 
-def slice_filter(start, stop=None):
-    return {"type": "slice", "start": start, "stop": stop}
+def stride(start=0, stop=None, step=1):
+    return {"start": start, "stop": stop, "step": step}
 
 
-def partition_filter(n, i):
-    return {"type": "partition", "n": n, "i": i}
+def slice_stride(start, stop=None):
+    """Stride equivalent to the old ``slice(start, stop)`` filter."""
+    return stride(start=start, stop=stop, step=1)
 
 
-def chain_filter(*filters):
-    return {"type": "chain", "filters": list(filters)}
+def partition_stride(n, i):
+    """Stride equivalent to the old ``partition(n, i)`` filter."""
+    return stride(start=i, stop=None, step=n)
 
 
 def submit_input_request(

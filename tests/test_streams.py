@@ -20,9 +20,9 @@ from support.manifest import workflow
 from support.protocol import (
     execution_result,
     json_args,
-    partition_filter,
-    slice_filter,
-    chain_filter,
+    partition_stride,
+    slice_stride,
+    stride,
 )
 
 
@@ -138,7 +138,7 @@ def test_slice_filter_restricts_items(worker):
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
             index=0,
-            filter=slice_filter(1, 3),
+            stride=slice_stride(1, 3),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -168,7 +168,7 @@ def test_partition_filter_round_robin(worker):
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
             index=0,
-            filter=partition_filter(n=3, i=1),
+            stride=partition_stride(n=3, i=1),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -456,7 +456,7 @@ def test_slice_with_stop_closes_early(worker):
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
             index=0,
-            filter=slice_filter(0, 2),
+            stride=slice_stride(0, 2),
         )
 
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "a")
@@ -596,8 +596,9 @@ def test_lifecycle_close_on_completion_delivers_to_subscriber(worker):
         assert closed.get("error") is None  # clean close — execution completed normally
 
 
-def test_filter_chain_combines_slice_and_partition(worker):
-    """``chain(slice(0, 6), partition(2, 0))`` → positions 0, 2, 4."""
+def test_stride_combines_slice_and_partition(worker):
+    """The client composes ``slice(0, 6)`` then ``partition(2, 0)`` into
+    a single stride ``[0:6:2]``, which selects positions 0, 2, 4."""
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets) as ctx:
@@ -617,7 +618,7 @@ def test_filter_chain_combines_slice_and_partition(worker):
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
             index=0,
-            filter=chain_filter(slice_filter(0, 6), partition_filter(n=2, i=0)),
+            stride=stride(start=0, stop=6, step=2),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)

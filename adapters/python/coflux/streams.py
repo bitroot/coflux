@@ -21,6 +21,7 @@ calls from generator bodies don't race), and stdout writes go through
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import queue
 import threading
@@ -134,9 +135,15 @@ class StreamDriver:
 
         is_async = inspect.isasyncgen(generator)
         target = self._run_async if is_async else self._run
+        # Capture the context of the registering thread (usually the main
+        # executor thread) and run the generator body inside it, so any
+        # `cf.group` / `cf.suspense` scope active at registration time
+        # flows through to `cf.submit_task` and friends called from the
+        # generator body. Without this the driver thread sees a fresh
+        # context and would lose those settings.
+        parent_context = contextvars.copy_context()
         thread = threading.Thread(
-            target=target,
-            args=(index, generator),
+            target=lambda: parent_context.run(target, index, generator),
             name=f"stream-{self._execution_id}-{index}",
             daemon=False,
         )
@@ -421,16 +428,21 @@ class StreamRegistry:
     def _ensure_installed(self) -> None:
         # Register dispatcher handlers on first use. Deferred so importing
         # this module is free until a task actually iterates a stream.
-        if self._installed:
-            return
-        d = get_dispatcher()
-        d.register_notification("stream_items", self._on_items)
-        d.register_notification("stream_closed", self._on_closed)
-        # If stdin goes away before the server sends close messages,
-        # blocked iterators would hang on their queues forever. Push a
-        # synthetic closed sentinel into each so ``__next__`` raises.
-        d.add_close_callback(self._on_dispatcher_closed)
-        self._installed = True
+        # Locked so two consumer threads first-iterating a stream at the
+        # same time don't both register handlers — the dispatcher would
+        # silently replace the first, but registering `add_close_callback`
+        # twice would fire the close-handling twice on EOF.
+        with self._lock:
+            if self._installed:
+                return
+            d = get_dispatcher()
+            d.register_notification("stream_items", self._on_items)
+            d.register_notification("stream_closed", self._on_closed)
+            # If stdin goes away before the server sends close messages,
+            # blocked iterators would hang on their queues forever. Push
+            # a synthetic closed sentinel into each so ``__next__`` raises.
+            d.add_close_callback(self._on_dispatcher_closed)
+            self._installed = True
 
     def _on_dispatcher_closed(self) -> None:
         """Wake all active iterators — connection to the server is gone
@@ -504,12 +516,14 @@ def parse_stream_id(id: str) -> tuple[str, int]:
 
 def open_subscription(
     stream_id: str,
-    filters: tuple[dict[str, Any], ...],
+    stride: tuple[int, int | None, int],
 ) -> Iterator[Any]:
     """Begin iterating a stream. Called by ``Stream.__iter__``.
 
     Allocates a subscription id, sends the subscribe message, and returns
-    an iterator that yields as items arrive.
+    an iterator that yields as items arrive. ``stride`` is a
+    ``(start, stop, step)`` tuple — any chain of slice/partition/stride
+    calls on the handle collapses to a single stride before this point.
     """
     ctx = get_context()
     execution_id = ctx.execution_id
@@ -519,27 +533,15 @@ def open_subscription(
     # producer_execution_id + index positionally.
     producer_execution_id, index = parse_stream_id(stream_id)
 
-    filter = _compose_filter(filters)
+    start, stop, step = stride
+    wire_stride = {"start": start, "stop": stop, "step": step}
+
     protocol.send_stream_subscribe(
         execution_id,
         subscription_id,
         producer_execution_id,
         index,
         0,
-        filter,
+        stride=wire_stride,
     )
     return iterator
-
-
-def _compose_filter(
-    filters: tuple[dict[str, Any], ...],
-) -> dict[str, Any] | None:
-    """Collapse a list of filters for the wire.
-
-    Empty → null. Single → pass through. Many → wrap in {"type": "chain"}.
-    """
-    if not filters:
-        return None
-    if len(filters) == 1:
-        return filters[0]
-    return {"type": "chain", "filters": list(filters)}

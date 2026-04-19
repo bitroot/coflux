@@ -279,10 +279,13 @@ class ExecutorConnection:
         producer_execution_id,
         index,
         from_sequence=0,
-        filter=None,
+        stride=None,
     ):
-        """Subscribe to a stream. ``filter`` is an optional dict built via
-        protocol.slice_filter / partition_filter / chain_filter."""
+        """Subscribe to a stream. ``stride`` is an optional
+        ``{"start", "stop", "step"}`` dict restricting which positions
+        are delivered — built via ``protocol.stride`` /
+        ``slice_stride`` / ``partition_stride``. ``None`` means no
+        filtering (identity stride)."""
         self.send(
             protocol.stream_subscribe(
                 execution_id,
@@ -290,7 +293,7 @@ class ExecutorConnection:
                 producer_execution_id,
                 index,
                 from_sequence=from_sequence,
-                filter=filter,
+                stride=stride,
             )
         )
 

@@ -341,7 +341,7 @@ defmodule Coflux.Handlers.Worker do
           producer_execution_id,
           index,
           from_sequence,
-          filter
+          stride
         ] = message["params"]
 
         if is_recognised_execution?(consumer_execution_id, state) do
@@ -353,7 +353,7 @@ defmodule Coflux.Handlers.Worker do
                  producer_execution_id,
                  index,
                  from_sequence,
-                 filter
+                 stride
                ) do
             :ok ->
               {[], state}
