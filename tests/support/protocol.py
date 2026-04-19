@@ -234,25 +234,27 @@ def register_group_notification(execution_id, group_id, name=None):
 # --- Stream messages (producer side: adapter → server) ---
 
 
-def stream_register(execution_id, sequence):
+def stream_register(execution_id, index):
     return {
         "method": "stream_register",
-        "params": {"execution_id": execution_id, "sequence": sequence},
+        "params": {"execution_id": execution_id, "index": index},
     }
 
 
-def stream_append(execution_id, sequence, position, value, format="json"):
+def stream_append(execution_id, index, sequence, value, format="json"):
     """Append an item to a stream. ``value`` is the raw JSON value.
 
-    Builds a Value wire-form message with an empty references list. Tests
-    that need references should build the Value dict manually.
+    ``index`` identifies the stream within its execution; ``sequence``
+    identifies the item within the stream. Builds a Value wire-form
+    message with an empty references list. Tests that need references
+    should build the Value dict manually.
     """
     return {
         "method": "stream_append",
         "params": {
             "execution_id": execution_id,
+            "index": index,
             "sequence": sequence,
-            "position": position,
             "value": {
                 "type": "inline",
                 "format": format,
@@ -263,9 +265,9 @@ def stream_append(execution_id, sequence, position, value, format="json"):
     }
 
 
-def stream_close(execution_id, sequence, error=None):
+def stream_close(execution_id, index, error=None):
     """Close a stream. ``error`` is optional {type, message, traceback}."""
-    params = {"execution_id": execution_id, "sequence": sequence}
+    params = {"execution_id": execution_id, "index": index}
     if error is not None:
         params["error"] = error
     return {"method": "stream_close", "params": params}
@@ -278,16 +280,16 @@ def stream_subscribe(
     execution_id,
     subscription_id,
     producer_execution_id,
-    sequence,
-    from_position=0,
+    index,
+    from_sequence=0,
     filter=None,
 ):
     params = {
         "execution_id": execution_id,
         "subscription_id": subscription_id,
         "producer_execution_id": producer_execution_id,
-        "sequence": sequence,
-        "from_position": from_position,
+        "index": index,
+        "from_sequence": from_sequence,
     }
     if filter is not None:
         params["filter"] = filter

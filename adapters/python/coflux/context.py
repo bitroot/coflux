@@ -98,12 +98,11 @@ class ExecutorContext:
         # are registered here and driven in background threads.
         self._stream_driver = StreamDriver(execution_id)
 
-    def register_stream(self, generator: Any) -> tuple[str, int]:
+    def register_stream(self, generator: Any) -> str:
         """Callback for ``serialize_value(on_generator=...)``.
 
         Registers a generator with this execution's driver and returns the
-        ``(execution_id, sequence)`` stream reference to embed in the
-        serialized value.
+        opaque stream ``id`` to embed in the serialized value.
         """
         return self._stream_driver.register(generator)
 

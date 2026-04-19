@@ -254,10 +254,10 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_register" ->
-        [execution_id, sequence] = message["params"]
+        [execution_id, index] = message["params"]
 
         if is_recognised_execution?(execution_id, state) do
-          case Orchestration.register_stream(state.project_id, execution_id, sequence) do
+          case Orchestration.register_stream(state.project_id, execution_id, index) do
             :ok -> {[], state}
             # Idempotent — a duplicate register is harmless.
             {:error, :already_registered} -> {[], state}
@@ -268,14 +268,14 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_append" ->
-        [execution_id, sequence, position, value] = message["params"]
+        [execution_id, index, sequence, value] = message["params"]
 
         if is_recognised_execution?(execution_id, state) do
           case Orchestration.append_stream_item(
                  state.project_id,
                  execution_id,
+                 index,
                  sequence,
-                 position,
                  parse_value(value)
                ) do
             :ok ->
@@ -303,7 +303,7 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_close" ->
-        [execution_id, sequence, error] = message["params"]
+        [execution_id, index, error] = message["params"]
 
         if is_recognised_execution?(execution_id, state) do
           parsed_error =
@@ -315,7 +315,7 @@ defmodule Coflux.Handlers.Worker do
           case Orchestration.close_stream(
                  state.project_id,
                  execution_id,
-                 sequence,
+                 index,
                  parsed_error
                ) do
             :ok -> {[], state}
@@ -332,8 +332,8 @@ defmodule Coflux.Handlers.Worker do
           subscription_id,
           consumer_execution_id,
           producer_execution_id,
-          sequence,
-          from_position,
+          index,
+          from_sequence,
           filter
         ] = message["params"]
 
@@ -344,8 +344,8 @@ defmodule Coflux.Handlers.Worker do
                  subscription_id,
                  consumer_execution_id,
                  producer_execution_id,
-                 sequence,
-                 from_position,
+                 index,
+                 from_sequence,
                  filter
                ) do
             :ok ->
@@ -629,11 +629,11 @@ defmodule Coflux.Handlers.Worker do
   end
 
   def websocket_info({:stream_items, execution_external_id, subscription_id, items}, state) do
-    # Items arrive in resolved form ([[position, value_tuple], ...]); compose
+    # Items arrive in resolved form ([[sequence, value_tuple], ...]); compose
     # each value tuple to wire JSON here.
     encoded =
-      Enum.map(items, fn [position, value] ->
-        [position, compose_value(value)]
+      Enum.map(items, fn [sequence, value] ->
+        [sequence, compose_value(value)]
       end)
 
     {[command_message("stream_items", [execution_external_id, subscription_id, encoded])], state}

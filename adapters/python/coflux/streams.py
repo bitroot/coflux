@@ -42,12 +42,12 @@ class StreamDriver:
 
     def __init__(self, execution_id: str) -> None:
         self._execution_id = execution_id
-        self._next_sequence = 0
+        self._next_index = 0
         self._threads: list[threading.Thread] = []
         self._generators: list[Any] = []
         self._lock = threading.Lock()
 
-    def register(self, generator: Any) -> tuple[str, int]:
+    def register(self, generator: Any) -> str:
         """Register a generator and start running it in a worker thread.
 
         Accepts both sync generators (``def`` + ``yield``) and async
@@ -55,21 +55,21 @@ class StreamDriver:
         async generators run inside a fresh event loop confined to that
         thread.
 
-        Returns ``(execution_id, sequence)`` for embedding in the serialized
-        value as a stream reference.
+        Returns the stream's opaque ``id`` (``<execution_id>_<index>``)
+        for embedding in the serialized value as a stream reference.
         """
         with self._lock:
-            sequence = self._next_sequence
-            self._next_sequence += 1
+            index = self._next_index
+            self._next_index += 1
 
-        protocol.send_stream_register(self._execution_id, sequence)
+        protocol.send_stream_register(self._execution_id, index)
 
         is_async = inspect.isasyncgen(generator)
         target = self._run_async if is_async else self._run
         thread = threading.Thread(
             target=target,
-            args=(sequence, generator),
-            name=f"stream-{self._execution_id}-{sequence}",
+            args=(index, generator),
+            name=f"stream-{self._execution_id}-{index}",
             daemon=False,
         )
         entry = {"generator": generator, "is_async": is_async, "loop": None}
@@ -78,21 +78,21 @@ class StreamDriver:
             self._threads.append(thread)
         thread.start()
 
-        return self._execution_id, sequence
+        return compose_stream_id(self._execution_id, index)
 
-    def _run(self, sequence: int, generator: Any) -> None:
+    def _run(self, index: int, generator: Any) -> None:
         """Run one sync generator to exhaustion (or error)."""
-        position = 0
+        sequence = 0
         try:
             for item in generator:
                 serialized = serialize_value(item)
                 protocol.send_stream_append(
                     self._execution_id,
+                    index,
                     sequence,
-                    position,
                     serialized,
                 )
-                position += 1
+                sequence += 1
         except GeneratorExit:
             # Generator explicitly closed (via close_all on error path, or
             # server-initiated cancel). Skip send_stream_close — the server
@@ -104,15 +104,15 @@ class StreamDriver:
             tb = traceback.format_exc()
             protocol.send_stream_close(
                 self._execution_id,
-                sequence,
+                index,
                 error_type=error_type,
                 error_message=str(e),
                 traceback=tb,
             )
         else:
-            protocol.send_stream_close(self._execution_id, sequence)
+            protocol.send_stream_close(self._execution_id, index)
 
-    def _run_async(self, sequence: int, generator: Any) -> None:
+    def _run_async(self, index: int, generator: Any) -> None:
         """Run one async generator in a fresh event loop on this thread.
 
         The loop handle is recorded so ``close_all`` can schedule aclose()
@@ -123,16 +123,16 @@ class StreamDriver:
         asyncio.set_event_loop(loop)
 
         async def iterate() -> None:
-            position = 0
+            sequence = 0
             async for item in generator:
                 serialized = serialize_value(item)
                 protocol.send_stream_append(
                     self._execution_id,
+                    index,
                     sequence,
-                    position,
                     serialized,
                 )
-                position += 1
+                sequence += 1
 
         try:
             loop.run_until_complete(iterate())
@@ -143,13 +143,13 @@ class StreamDriver:
             tb = traceback.format_exc()
             protocol.send_stream_close(
                 self._execution_id,
-                sequence,
+                index,
                 error_type=error_type,
                 error_message=str(e),
                 traceback=tb,
             )
         else:
-            protocol.send_stream_close(self._execution_id, sequence)
+            protocol.send_stream_close(self._execution_id, index)
         finally:
             try:
                 loop.run_until_complete(generator.aclose())
@@ -229,14 +229,14 @@ class _StreamIterator(Iterator[Any]):
 
     def on_items(self, items: list[list[Any]]) -> None:
         """Called by the registry when the server pushes items for this
-        subscription. ``items`` is a list of ``[position, value_wire]``.
+        subscription. ``items`` is a list of ``[sequence, value_wire]``.
 
         Runs on the dispatcher reader thread — keep it cheap. The raw wire
         value goes onto the queue unmodified; deserialization happens in
         ``__next__`` on the consumer's thread so heavy decode work doesn't
         stall stdin reads.
         """
-        for _position, value in items:
+        for _sequence, value in items:
             self._queue.put(value)
 
     def on_closed(self, error: dict[str, Any] | None) -> None:
@@ -345,9 +345,27 @@ def _stream_registry() -> StreamRegistry:
     return _registry_instance
 
 
+def compose_stream_id(execution_id: str, index: int) -> str:
+    """Build the opaque stream id from its two components.
+
+    Joined with ``_`` because the alternatives are overloaded: ``:`` is
+    used inside the execution id, ``#`` is used for attempt numbers, ``/``
+    separates module/target. Execution ids use only alphanumerics, so
+    ``rpartition('_')`` is unambiguous on the parse side.
+    """
+    return f"{execution_id}_{index}"
+
+
+def parse_stream_id(id: str) -> tuple[str, int]:
+    """Reverse of ``compose_stream_id``. Raises ValueError on bad input."""
+    exec_id, sep, index = id.rpartition("_")
+    if not sep or not exec_id:
+        raise ValueError(f"invalid stream id: {id!r}")
+    return exec_id, int(index)
+
+
 def open_subscription(
-    producer_execution_id: str,
-    sequence: int,
+    stream_id: str,
     filters: tuple[dict[str, Any], ...],
 ) -> Iterator[Any]:
     """Begin iterating a stream. Called by ``Stream.__iter__``.
@@ -359,12 +377,16 @@ def open_subscription(
     execution_id = ctx.execution_id
     subscription_id, iterator = _stream_registry().allocate(execution_id)
 
+    # Split the opaque id for the wire message, which still takes
+    # producer_execution_id + index positionally.
+    producer_execution_id, index = parse_stream_id(stream_id)
+
     filter = _compose_filter(filters)
     protocol.send_stream_subscribe(
         execution_id,
         subscription_id,
         producer_execution_id,
-        sequence,
+        index,
         0,
         filter,
     )

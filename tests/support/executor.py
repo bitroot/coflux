@@ -258,17 +258,17 @@ class ExecutorConnection:
 
     # --- Stream producer helpers ---
 
-    def stream_register(self, execution_id, sequence):
+    def stream_register(self, execution_id, index):
         """Notify that a new stream exists."""
-        self.send(protocol.stream_register(execution_id, sequence))
+        self.send(protocol.stream_register(execution_id, index))
 
-    def stream_append(self, execution_id, sequence, position, value, format="json"):
+    def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""
-        self.send(protocol.stream_append(execution_id, sequence, position, value, format=format))
+        self.send(protocol.stream_append(execution_id, index, sequence, value, format=format))
 
-    def stream_close(self, execution_id, sequence, error=None):
+    def stream_close(self, execution_id, index, error=None):
         """Close a stream (optionally with an error {type, message, traceback})."""
-        self.send(protocol.stream_close(execution_id, sequence, error=error))
+        self.send(protocol.stream_close(execution_id, index, error=error))
 
     # --- Stream consumer helpers ---
 
@@ -277,8 +277,8 @@ class ExecutorConnection:
         execution_id,
         subscription_id,
         producer_execution_id,
-        sequence,
-        from_position=0,
+        index,
+        from_sequence=0,
         filter=None,
     ):
         """Subscribe to a stream. ``filter`` is an optional dict built via
@@ -288,8 +288,8 @@ class ExecutorConnection:
                 execution_id,
                 subscription_id,
                 producer_execution_id,
-                sequence,
-                from_position=from_position,
+                index,
+                from_sequence=from_sequence,
                 filter=filter,
             )
         )

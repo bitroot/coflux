@@ -20,14 +20,15 @@ INSERT INTO completions (execution_id, created_at)
   SELECT execution_id, created_at FROM results;
 
 -- Streams — ordered, append-only sequences of values produced by an
--- execution. Each stream is identified by (execution_id, sequence), where
--- sequence is assigned monotonically by the worker when serialising the
--- execution's return value. The worker manages allocation locally, so no
--- server round-trip is needed to mint an id.
+-- execution. Each stream is identified by (execution_id, index), where
+-- `index` is assigned monotonically by the worker when serialising the
+-- execution's return value. The worker manages allocation locally, so
+-- no server round-trip is needed to mint an id. The column is quoted
+-- with backticks throughout because INDEX is a SQLite keyword.
 --
 -- Invariants:
 --   • A stream is owned by exactly one execution (its producer).
---   • stream_items are append-only with monotonic position starting at 0.
+--   • stream_items are append-only with monotonic sequence starting at 0.
 --   • stream_closures are terminal — no items may be appended after closure.
 --   • On execution completion / cancellation / crash, every owned stream
 --     that lacks a closure receives one (clean, cancelled, or crashed).
@@ -35,24 +36,24 @@ INSERT INTO completions (execution_id, created_at)
 --     new execution_id ⇒ new rows). Consumer references are concrete to
 --     the original streams.
 --   • Consumer cursors are kept in-memory only; re-run consumers subscribe
---     fresh from position 0.
+--     fresh from sequence 0.
 
 CREATE TABLE streams (
   execution_id INTEGER NOT NULL,
-  sequence INTEGER NOT NULL,
+  `index` INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (execution_id, sequence),
+  PRIMARY KEY (execution_id, `index`),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE stream_items (
   execution_id INTEGER NOT NULL,
+  `index` INTEGER NOT NULL,
   sequence INTEGER NOT NULL,
-  position INTEGER NOT NULL,
   value_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (execution_id, sequence, position),
-  FOREIGN KEY (execution_id, sequence) REFERENCES streams (execution_id, sequence) ON DELETE CASCADE,
+  PRIMARY KEY (execution_id, `index`, sequence),
+  FOREIGN KEY (execution_id, `index`) REFERENCES streams (execution_id, `index`) ON DELETE CASCADE,
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
 ) STRICT;
 
@@ -65,12 +66,12 @@ CREATE TABLE stream_items (
 --                    so we don't duplicate that state here.
 CREATE TABLE stream_closures (
   execution_id INTEGER NOT NULL,
-  sequence INTEGER NOT NULL,
+  `index` INTEGER NOT NULL,
   reason INTEGER NOT NULL,
   error_id INTEGER,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (execution_id, sequence),
-  FOREIGN KEY (execution_id, sequence) REFERENCES streams (execution_id, sequence) ON DELETE CASCADE,
+  PRIMARY KEY (execution_id, `index`),
+  FOREIGN KEY (execution_id, `index`) REFERENCES streams (execution_id, `index`) ON DELETE CASCADE,
   FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
   CHECK ((reason = 1) = (error_id IS NOT NULL))
 ) STRICT;

@@ -460,34 +460,36 @@ def send_metric(
     get_protocol().send_message("metric", params)
 
 
-def send_stream_register(execution_id: str, sequence: int) -> None:
+def send_stream_register(execution_id: str, index: int) -> None:
     """Register a stream owned by this execution.
 
-    Sequence is worker-assigned and monotonic per execution (0, 1, 2, ...).
+    ``index`` is worker-assigned and monotonic per execution (0, 1, 2, ...);
+    it identifies the stream within its producer execution.
     """
     get_protocol().send_message(
         "stream_register",
-        {"execution_id": execution_id, "sequence": sequence},
+        {"execution_id": execution_id, "index": index},
     )
 
 
 def send_stream_append(
     execution_id: str,
+    index: int,
     sequence: int,
-    position: int,
     value: dict[str, Any],
 ) -> None:
-    """Append an item to a stream at the given (worker-assigned) position.
+    """Append an item to a stream.
 
-    Position is monotonic per stream (0, 1, 2, ...). Value uses the same
-    Value shape as execution results (type + format + value/path + refs).
+    ``sequence`` is monotonic per stream (0, 1, 2, ...); it identifies the
+    item within its stream. Value uses the same Value shape as execution
+    results (type + format + value/path + refs).
     """
     get_protocol().send_message(
         "stream_append",
         {
             "execution_id": execution_id,
+            "index": index,
             "sequence": sequence,
-            "position": position,
             "value": value,
         },
     )
@@ -495,7 +497,7 @@ def send_stream_append(
 
 def send_stream_close(
     execution_id: str,
-    sequence: int,
+    index: int,
     error_type: str | None = None,
     error_message: str = "",
     traceback: str = "",
@@ -508,7 +510,7 @@ def send_stream_close(
     """
     params: dict[str, Any] = {
         "execution_id": execution_id,
-        "sequence": sequence,
+        "index": index,
     }
     if error_type is not None:
         params["error"] = {
@@ -523,8 +525,8 @@ def send_stream_subscribe(
     execution_id: str,
     subscription_id: int,
     producer_execution_id: str,
-    sequence: int,
-    from_position: int,
+    index: int,
+    from_sequence: int,
     filter: dict[str, Any] | None = None,
 ) -> None:
     """Open a consumer subscription to a stream owned by another execution.
@@ -536,8 +538,8 @@ def send_stream_subscribe(
         "execution_id": execution_id,
         "subscription_id": subscription_id,
         "producer_execution_id": producer_execution_id,
-        "sequence": sequence,
-        "from_position": from_position,
+        "index": index,
+        "from_sequence": from_sequence,
     }
     if filter is not None:
         params["filter"] = filter

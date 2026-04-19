@@ -1,12 +1,12 @@
 defmodule Coflux.Topics.Stream do
   @moduledoc """
-  Inspection topic for a single stream, keyed by the producer's external
-  execution id and sequence. Used by the Studio UI when a user opens a
-  stream dialog — the topic keeps a bounded tail of items (with resolved
-  values) plus closure state, and receives live updates as items are
-  appended or the stream is closed.
+  Inspection topic for a single stream, keyed by the stream's opaque id
+  (``<producer_execution_id>_<index>``). Used by the Studio UI when a
+  user opens a stream dialog — the topic keeps a bounded tail of items
+  (with resolved values) plus closure state, and receives live updates
+  as items are appended or the stream is closed.
   """
-  use Topical.Topic, route: ["streams", :execution_id, :sequence]
+  use Topical.Topic, route: ["streams", :id]
 
   alias Coflux.Orchestration
   alias Coflux.TopicUtils
@@ -17,13 +17,21 @@ defmodule Coflux.Topics.Stream do
 
   def init(params) do
     project_id = Map.fetch!(params, :project)
-    execution_id = Map.fetch!(params, :execution_id)
-    sequence = parse_sequence(Map.fetch!(params, :sequence))
 
+    case parse_id(Map.fetch!(params, :id)) do
+      {:ok, execution_id, index} ->
+        do_init(project_id, execution_id, index)
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  defp do_init(project_id, execution_id, index) do
     case Orchestration.subscribe_stream_topic(
            project_id,
            execution_id,
-           sequence,
+           index,
            self()
          ) do
       {:ok, initial, ref} ->
@@ -32,10 +40,8 @@ defmodule Coflux.Topics.Stream do
            %{
              producer: initial.producer,
              openedAt: initial.openedAt,
-             closedAt: initial.closedAt,
              closure: build_closure(initial.closure),
              items: Enum.map(initial.items, &build_item/1),
-             firstPosition: initial.firstPosition,
              totalCount: initial.totalCount,
              tailSize: initial.tailSize
            },
@@ -52,48 +58,34 @@ defmodule Coflux.Topics.Stream do
     {:ok, topic}
   end
 
-  defp process_notification({:item_appended, position, value, created_at}, topic) do
+  defp process_notification({:item_appended, sequence, value, created_at}, topic) do
     tail_size = topic.state.tail_size || 200
 
-    item = build_item({position, value, created_at})
-
+    item = build_item({sequence, value, created_at})
     existing = topic.value.items
-    total = topic.value.totalCount + 1
 
-    # Keep items bounded: if we're already at capacity, drop the head.
-    # Otherwise append and leave firstPosition alone (or set it if empty).
-    {new_items, new_first_position} =
-      cond do
-        existing == [] ->
-          {[item], position}
-
-        length(existing) >= tail_size ->
-          [_dropped | rest] = existing
-          new_items = rest ++ [item]
-          [first_item | _] = new_items
-          {new_items, first_item.position}
-
-        true ->
-          {existing ++ [item], topic.value.firstPosition}
+    # Keep items bounded: drop the head once we're at capacity.
+    new_items =
+      if length(existing) >= tail_size do
+        [_dropped | rest] = existing
+        rest ++ [item]
+      else
+        existing ++ [item]
       end
 
     topic
     |> Topic.set([:items], new_items)
-    |> Topic.set([:firstPosition], new_first_position)
-    |> Topic.set([:totalCount], total)
+    |> Topic.set([:totalCount], topic.value.totalCount + 1)
   end
 
-  defp process_notification({:closed, error, closed_at}, topic) do
-    closure = build_closure_from_notification(error, closed_at)
-
-    topic
-    |> Topic.set([:closedAt], closed_at)
-    |> Topic.set([:closure], closure)
+  defp process_notification({:closed, reason, error, closed_at}, topic) do
+    closure = %{reason: reason, error: error, closedAt: closed_at}
+    Topic.set(topic, [:closure], closure)
   end
 
-  defp build_item({position, value, created_at}) do
+  defp build_item({sequence, value, created_at}) do
     %{
-      position: position,
+      sequence: sequence,
       value: TopicUtils.build_value(value),
       createdAt: created_at
     }
@@ -109,27 +101,26 @@ defmodule Coflux.Topics.Stream do
     }
   end
 
-  # The live-close notification carries the already-encoded error summary
-  # (type/message) and closedAt — it doesn't include the reason because
-  # the notification is the same shape used by the run topic. Default to
-  # "errored" when there's an error, "complete" otherwise; the distinction
-  # between errored/lifecycle is resolved server-side before we get here.
-  defp build_closure_from_notification(error, closed_at) do
-    reason = if error, do: "errored", else: "complete"
+  # Split an opaque stream id back into (execution_id, index). The
+  # separator is `_` — execution ids use alphanumerics + `:`, so the last
+  # `_` unambiguously marks the index suffix.
+  defp parse_id(id) when is_binary(id) do
+    case String.split(id, "_") do
+      parts when length(parts) >= 2 ->
+        {index_str, execution_parts} = List.pop_at(parts, -1)
 
-    %{
-      reason: reason,
-      error: error,
-      closedAt: closed_at
-    }
-  end
+        with {index, ""} when index >= 0 <- Integer.parse(index_str),
+             execution_id when execution_id != "" <-
+               Enum.join(execution_parts, "_") do
+          {:ok, execution_id, index}
+        else
+          _ -> :error
+        end
 
-  defp parse_sequence(s) when is_integer(s), do: s
-
-  defp parse_sequence(s) when is_binary(s) do
-    case Integer.parse(s) do
-      {n, ""} -> n
-      _ -> raise ArgumentError, "invalid stream sequence: #{inspect(s)}"
+      _ ->
+        :error
     end
   end
+
+  defp parse_id(_), do: :error
 end

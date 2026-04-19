@@ -651,8 +651,8 @@ func (w *Worker) handleAbort(params []any) error {
 
 // handleStreamItems forwards a server-pushed batch of stream items to the
 // adapter process owning the target execution. Params: [execution_id,
-// subscription_id, items]. Each item arrives as [position, value_array]
-// and is converted to [position, adapter.Value dict] so the Python side
+// subscription_id, items]. Each item arrives as [sequence, value_array]
+// and is converted to [sequence, adapter.Value dict] so the Python side
 // can deserialize_value it directly.
 func (w *Worker) handleStreamItems(params []any) error {
 	if len(params) < 3 {
@@ -1181,15 +1181,15 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) StreamRegister(ctx context.Context, executionID string, sequence int) error {
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	return conn.Notify("stream_register", executionID, sequence)
+	return conn.Notify("stream_register", executionID, index)
 }
 
-func (w *Worker) StreamAppend(ctx context.Context, executionID string, sequence int, position int, value *adapter.Value) error {
+func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
@@ -1199,10 +1199,10 @@ func (w *Worker) StreamAppend(ctx context.Context, executionID string, sequence 
 	if err != nil {
 		return err
 	}
-	return conn.Notify("stream_append", executionID, sequence, position, serverValue)
+	return conn.Notify("stream_append", executionID, index, sequence, serverValue)
 }
 
-func (w *Worker) StreamClose(ctx context.Context, executionID string, sequence int, streamErr *adapter.StreamCloseError) error {
+func (w *Worker) StreamClose(ctx context.Context, executionID string, index int, streamErr *adapter.StreamCloseError) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
@@ -1215,16 +1215,16 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, sequence i
 		frames := parseTraceback(streamErr.Traceback)
 		errTuple = []any{streamErr.Type, streamErr.Message, frames}
 	}
-	return conn.Notify("stream_close", executionID, sequence, errTuple)
+	return conn.Notify("stream_close", executionID, index, errTuple)
 }
 
-func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, sequence int, fromPosition int, filter map[string]any) error {
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, filter map[string]any) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Params: [subscription_id, consumer_execution_id, producer_execution_id, sequence, from_position, filter]
-	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, sequence, fromPosition, filter)
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, filter]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, filter)
 }
 
 func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {

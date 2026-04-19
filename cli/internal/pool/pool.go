@@ -50,16 +50,18 @@ type ExecutionHandler interface {
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
 	// StreamRegister declares a new stream owned by an execution.
-	// Sequence is worker-assigned, monotonic per execution.
-	StreamRegister(ctx context.Context, executionID string, sequence int) error
-	// StreamAppend appends an item to a stream at the given (worker-assigned) position.
-	StreamAppend(ctx context.Context, executionID string, sequence int, position int, value *adapter.Value) error
+	// Index is worker-assigned, monotonic per execution — it identifies
+	// the stream within its producer execution.
+	StreamRegister(ctx context.Context, executionID string, index int) error
+	// StreamAppend appends an item to a stream. Sequence is worker-assigned,
+	// monotonic per stream — it identifies the item within its stream.
+	StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error
 	// StreamClose closes a stream. Error is nil for a clean close, or a (type, message, traceback)
 	// triple when the producer's generator raised.
-	StreamClose(ctx context.Context, executionID string, sequence int, err *adapter.StreamCloseError) error
+	StreamClose(ctx context.Context, executionID string, index int, err *adapter.StreamCloseError) error
 	// StreamSubscribe opens a consumer subscription to a stream owned by another execution.
 	// Filter is nil or a {"type": "slice", ...}/{"type": "partition", ...} map.
-	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, sequence int, fromPosition int, filter map[string]any) error
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, filter map[string]any) error
 	// StreamUnsubscribe drops a consumer subscription.
 	StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error
 }
@@ -484,7 +486,7 @@ func (p *Pool) handleStreamRegister(ctx context.Context, executionID string, par
 		return
 	}
 
-	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Sequence); err != nil {
+	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Index); err != nil {
 		logger.Error("failed to register stream", "error", err)
 	}
 }
@@ -496,7 +498,7 @@ func (p *Pool) handleStreamAppend(ctx context.Context, executionID string, param
 		return
 	}
 
-	if err := p.handler.StreamAppend(ctx, req.ExecutionID, req.Sequence, req.Position, req.Value); err != nil {
+	if err := p.handler.StreamAppend(ctx, req.ExecutionID, req.Index, req.Sequence, req.Value); err != nil {
 		logger.Error("failed to append stream item", "error", err)
 	}
 }
@@ -508,7 +510,7 @@ func (p *Pool) handleStreamClose(ctx context.Context, executionID string, params
 		return
 	}
 
-	if err := p.handler.StreamClose(ctx, req.ExecutionID, req.Sequence, req.Error); err != nil {
+	if err := p.handler.StreamClose(ctx, req.ExecutionID, req.Index, req.Error); err != nil {
 		logger.Error("failed to close stream", "error", err)
 	}
 }
@@ -525,8 +527,8 @@ func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, pa
 		req.ExecutionID,
 		req.SubscriptionID,
 		req.ProducerExecutionID,
-		req.Sequence,
-		req.FromPosition,
+		req.Index,
+		req.FromSequence,
 		req.Filter,
 	); err != nil {
 		logger.Error("failed to subscribe to stream", "error", err)

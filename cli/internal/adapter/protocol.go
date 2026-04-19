@@ -254,18 +254,20 @@ type RegisterGroupParams struct {
 }
 
 // StreamRegisterParams for stream_register notification.
-// Sequence is worker-assigned, monotonic per execution.
+// Index is worker-assigned, monotonic per execution — it identifies the
+// stream within its producer execution.
 type StreamRegisterParams struct {
 	ExecutionID string `json:"execution_id"`
-	Sequence    int    `json:"sequence"`
+	Index       int    `json:"index"`
 }
 
 // StreamAppendParams for stream_append notification.
-// Position is worker-assigned, monotonic per stream.
+// Sequence is worker-assigned, monotonic per stream — it identifies the
+// item within its stream.
 type StreamAppendParams struct {
 	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
 	Sequence    int    `json:"sequence"`
-	Position    int    `json:"position"`
 	Value       *Value `json:"value"`
 }
 
@@ -273,7 +275,7 @@ type StreamAppendParams struct {
 // when the producer's generator raised an exception.
 type StreamCloseParams struct {
 	ExecutionID string            `json:"execution_id"`
-	Sequence    int               `json:"sequence"`
+	Index       int               `json:"index"`
 	Error       *StreamCloseError `json:"error,omitempty"`
 }
 
@@ -291,8 +293,8 @@ type StreamSubscribeParams struct {
 	ExecutionID         string         `json:"execution_id"` // consumer
 	SubscriptionID      int            `json:"subscription_id"`
 	ProducerExecutionID string         `json:"producer_execution_id"`
-	Sequence            int            `json:"sequence"`
-	FromPosition        int            `json:"from_position"`
+	Index               int            `json:"index"`
+	FromSequence        int            `json:"from_sequence"`
 	Filter              map[string]any `json:"filter,omitempty"`
 }
 
@@ -303,7 +305,7 @@ type StreamUnsubscribeParams struct {
 }
 
 // StreamItemsParams for stream_items notification pushed CLI → adapter.
-// Items are [[position, value], ...] where value is a wire Value.
+// Items are [[sequence, value], ...] where value is a wire Value.
 type StreamItemsParams struct {
 	ExecutionID    string `json:"execution_id"`
 	SubscriptionID int    `json:"subscription_id"`

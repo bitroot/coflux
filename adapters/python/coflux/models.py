@@ -215,7 +215,7 @@ class Stream(t.Iterable[T]):
 
     Iterating a ``Stream`` opens a subscription with the server; items arrive
     pushed over the WebSocket and yield from the iterator. Each ``__iter__``
-    starts a fresh subscription from position 0, so a stream can be iterated
+    starts a fresh subscription from sequence 0, so a stream can be iterated
     multiple times and each iteration sees the whole sequence.
 
     ``partition`` and ``slice`` return new ``Stream`` views with an additional
@@ -224,46 +224,40 @@ class Stream(t.Iterable[T]):
 
     def __init__(
         self,
-        producer_execution_id: str,
-        sequence: int,
+        id: str,
         filters: tuple[dict[str, t.Any], ...] = (),
     ):
-        self._producer_execution_id = producer_execution_id
-        self._sequence = sequence
+        # Opaque identifier of the form ``<producer_execution_id>_<index>``.
+        # Users may see this in the CLI/Studio but shouldn't need to parse it.
+        self._id = id
         self._filters = filters
 
     @property
-    def producer_execution_id(self) -> str:
-        return self._producer_execution_id
-
-    @property
-    def sequence(self) -> int:
-        return self._sequence
+    def id(self) -> str:
+        return self._id
 
     def partition(self, n: int, i: int) -> "Stream[T]":
-        """Return a view of this stream where only positions ``p`` with
-        ``p % n == i`` are delivered. Round-robin partitioning for parallel
+        """Return a view of this stream where only sequences ``s`` with
+        ``s % n == i`` are delivered. Round-robin partitioning for parallel
         consumers.
         """
         if n < 1 or i < 0 or i >= n:
             raise ValueError(f"invalid partition args: n={n}, i={i}")
         return Stream(
-            self._producer_execution_id,
-            self._sequence,
+            self._id,
             self._filters + ({"type": "partition", "n": n, "i": i},),
         )
 
     def slice(self, start: int, stop: int | None = None) -> "Stream[T]":
-        """Return a view of this stream restricted to positions ``[start, stop)``.
+        """Return a view of this stream restricted to sequences ``[start, stop)``.
 
         ``stop=None`` means unbounded. Equivalent to ``itertools.islice`` on
-        the source stream's positions.
+        the source stream's items.
         """
         if start < 0 or (stop is not None and stop < start):
             raise ValueError(f"invalid slice args: start={start}, stop={stop}")
         return Stream(
-            self._producer_execution_id,
-            self._sequence,
+            self._id,
             self._filters + ({"type": "slice", "start": start, "stop": stop},),
         )
 
@@ -272,8 +266,4 @@ class Stream(t.Iterable[T]):
         # which imports models for Execution/Input/Asset).
         from .streams import open_subscription
 
-        return open_subscription(
-            self._producer_execution_id,
-            self._sequence,
-            self._filters,
-        )
+        return open_subscription(self._id, self._filters)

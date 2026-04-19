@@ -182,19 +182,20 @@ defmodule Coflux.Orchestration do
   end
 
   # Stream producer messages — worker registers a stream, appends items,
-  # and closes the stream. Sequence and position are worker-assigned and
-  # monotonic per-execution / per-stream.
+  # and closes the stream. `index` identifies the stream within its
+  # producer execution; `sequence` identifies an item within the stream.
+  # Both are worker-assigned and monotonic from 0.
 
-  def register_stream(project_id, execution_id, sequence) do
-    call_server(project_id, {:register_stream, execution_id, sequence})
+  def register_stream(project_id, execution_id, index) do
+    call_server(project_id, {:register_stream, execution_id, index})
   end
 
-  def append_stream_item(project_id, execution_id, sequence, position, value) do
-    call_server(project_id, {:append_stream_item, execution_id, sequence, position, value})
+  def append_stream_item(project_id, execution_id, index, sequence, value) do
+    call_server(project_id, {:append_stream_item, execution_id, index, sequence, value})
   end
 
-  def close_stream(project_id, execution_id, sequence, error) do
-    call_server(project_id, {:close_stream, execution_id, sequence, error})
+  def close_stream(project_id, execution_id, index, error) do
+    call_server(project_id, {:close_stream, execution_id, index, error})
   end
 
   # Stream consumer messages — consumer opens a subscription to receive
@@ -207,14 +208,14 @@ defmodule Coflux.Orchestration do
         subscription_id,
         consumer_execution_id,
         producer_execution_id,
-        sequence,
-        from_position,
+        index,
+        from_sequence,
         filter
       ) do
     call_server(
       project_id,
       {:subscribe_stream, session_id, subscription_id, consumer_execution_id,
-       producer_execution_id, sequence, from_position, filter}
+       producer_execution_id, index, from_sequence, filter}
     )
   end
 
@@ -280,10 +281,10 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_run, run_id, pid})
   end
 
-  def subscribe_stream_topic(project_id, execution_external_id, sequence, pid) do
+  def subscribe_stream_topic(project_id, execution_external_id, index, pid) do
     call_server(
       project_id,
-      {:subscribe_stream_topic, execution_external_id, sequence, pid}
+      {:subscribe_stream_topic, execution_external_id, index, pid}
     )
   end
 

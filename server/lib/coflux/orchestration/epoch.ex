@@ -339,15 +339,15 @@ defmodule Coflux.Orchestration.Epoch do
                 {:ok, streams} =
                   query(
                     source_db,
-                    "SELECT sequence, created_at FROM streams WHERE execution_id = ?1",
+                    "SELECT `index`, created_at FROM streams WHERE execution_id = ?1",
                     {old_exec_id}
                   )
 
-                Enum.each(streams, fn {sequence, stream_created_at} ->
+                Enum.each(streams, fn {index, stream_created_at} ->
                   {:ok, _} =
                     insert_one(target_db, :streams, %{
                       execution_id: new_exec_id,
-                      sequence: sequence,
+                      index: index,
                       created_at: stream_created_at
                     })
 
@@ -355,21 +355,21 @@ defmodule Coflux.Orchestration.Epoch do
                     query(
                       source_db,
                       """
-                      SELECT position, value_id, created_at
+                      SELECT sequence, value_id, created_at
                       FROM stream_items
-                      WHERE execution_id = ?1 AND sequence = ?2
+                      WHERE execution_id = ?1 AND `index` = ?2
                       """,
-                      {old_exec_id, sequence}
+                      {old_exec_id, index}
                     )
 
-                  Enum.each(items, fn {position, value_id, item_created_at} ->
+                  Enum.each(items, fn {sequence, value_id, item_created_at} ->
                     new_value_id = ensure_value(source_db, target_db, value_id)
 
                     {:ok, _} =
                       insert_one(target_db, :stream_items, %{
                         execution_id: new_exec_id,
+                        index: index,
                         sequence: sequence,
-                        position: position,
                         value_id: new_value_id,
                         created_at: item_created_at
                       })
@@ -377,17 +377,18 @@ defmodule Coflux.Orchestration.Epoch do
 
                   case query_one(
                          source_db,
-                         "SELECT error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND sequence = ?2",
-                         {old_exec_id, sequence}
+                         "SELECT reason, error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND `index` = ?2",
+                         {old_exec_id, index}
                        ) do
-                    {:ok, {error_id, closure_created_at}} ->
+                    {:ok, {reason, error_id, closure_created_at}} ->
                       new_error_id =
                         if error_id, do: ensure_error(source_db, target_db, error_id)
 
                       {:ok, _} =
                         insert_one(target_db, :stream_closures, %{
                           execution_id: new_exec_id,
-                          sequence: sequence,
+                          index: index,
+                          reason: reason,
                           error_id: new_error_id,
                           created_at: closure_created_at
                         })

@@ -57,8 +57,8 @@ def _encode_value(
             the path. Used for pickle fragment references.
         on_generator: Callback invoked for each generator encountered. Should
             register the generator (spawn its driver) and return the
-            `(execution_id, sequence)` identifying the stream. If None,
-            encountering a generator raises TypeError.
+            stream's opaque `id`. If None, encountering a generator
+            raises TypeError.
 
     Returns:
         Tuple of (data, references) where data is JSON-serializable and
@@ -74,22 +74,14 @@ def _encode_value(
                 raise TypeError(
                     "Cannot serialize a generator: no stream driver is active."
                 )
-            execution_id, sequence = on_generator(v)
-            return {
-                "type": "stream",
-                "execution_id": execution_id,
-                "sequence": sequence,
-            }
+            stream_id = on_generator(v)
+            return {"type": "stream", "id": stream_id}
         elif isinstance(v, Stream):
             # Pass-through: a Stream handle received from another execution
             # (possibly with partition/slice filters layered on top) is
             # being forwarded as an argument. Preserve the filter chain so
             # the downstream consumer subscribes with the same filters.
-            encoded: dict[str, Any] = {
-                "type": "stream",
-                "execution_id": v.producer_execution_id,
-                "sequence": v.sequence,
-            }
+            encoded: dict[str, Any] = {"type": "stream", "id": v.id}
             if v._filters:
                 encoded["filters"] = list(v._filters)
             return encoded
@@ -268,12 +260,13 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
             elif t == "ref":
                 return _resolve_ref(v["index"])
             elif t == "stream":
-                # Producer-owned stream reference. Self-contained —
-                # execution_id, sequence, and any filter chain (when the
-                # Stream was forwarded with partition/slice filters
-                # already applied) are all in the descriptor.
+                # Producer-owned stream reference. Self-contained — the
+                # opaque `id` encodes the producer's execution id + the
+                # stream's index, and any filter chain (when the Stream
+                # was forwarded with partition/slice filters already
+                # applied) rides alongside.
                 filters = tuple(v.get("filters") or ())
-                return Stream(v["execution_id"], v["sequence"], filters)
+                return Stream(v["id"], filters)
             else:
                 return v
         else:

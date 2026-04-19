@@ -132,8 +132,8 @@ defmodule Coflux.Orchestration.Server do
               #
               # stream_subscriptions: {consumer_execution_id, subscription_id} ->
               #     %{consumer_execution_external_id, producer_execution_id,
-              #       sequence, cursor, filter}
-              # stream_subscribers: {producer_execution_id, sequence} -> MapSet of
+              #       index, cursor, filter}
+              # stream_subscribers: {producer_execution_id, index} -> MapSet of
               #     {consumer_execution_id, subscription_id}
               stream_subscriptions: %{},
               stream_subscribers: %{}
@@ -1830,13 +1830,13 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:register_stream, execution_external_id, sequence}, _from, state) do
+  def handle_call({:register_stream, execution_external_id, index}, _from, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        case Streams.register_stream(state.db, execution_id, sequence) do
+        case Streams.register_stream(state.db, execution_id, index) do
           {:ok, created_at} ->
             state =
-              notify_stream_opened(state, execution_id, sequence, created_at)
+              notify_stream_opened(state, execution_id, index, created_at)
               |> flush_notifications()
 
             {:reply, :ok, state}
@@ -1851,7 +1851,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:append_stream_item, execution_external_id, sequence, position, value},
+        {:append_stream_item, execution_external_id, index, sequence, value},
         _from,
         state
       ) do
@@ -1860,18 +1860,18 @@ defmodule Coflux.Orchestration.Server do
         case Streams.append_item(
                state.db,
                execution_id,
+               index,
                sequence,
-               position,
                normalize_value(value)
              ) do
           {:ok, created_at} ->
             state =
               state
-              |> push_stream_item(execution_id, sequence, position, value)
+              |> push_stream_item(execution_id, index, sequence, value)
               |> notify_stream_item_appended(
                 execution_id,
+                index,
                 sequence,
-                position,
                 value,
                 created_at
               )
@@ -1888,21 +1888,24 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:close_stream, execution_external_id, sequence, error}, _from, state) do
+  def handle_call({:close_stream, execution_external_id, index, error}, _from, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        spec =
+        {spec, reason} =
           case error do
-            nil -> :complete
-            {type, message, frames} -> {:errored, type, message, frames}
+            nil ->
+              {:complete, :complete}
+
+            {type, message, frames} ->
+              {{:errored, type, message, frames}, :errored}
           end
 
-        case Streams.close_stream(state.db, execution_id, sequence, spec) do
+        case Streams.close_stream(state.db, execution_id, index, spec) do
           {:ok, closed_at} ->
             state =
               state
-              |> push_stream_closed(execution_id, sequence, error)
-              |> notify_stream_closed(execution_id, sequence, error, closed_at)
+              |> push_stream_closed(execution_id, index, error)
+              |> notify_stream_closed(execution_id, index, reason, error, closed_at)
               |> flush_notifications()
 
             {:reply, :ok, state}
@@ -1918,7 +1921,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call(
         {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
-         producer_execution_external_id, sequence, from_position, filter},
+         producer_execution_external_id, index, from_sequence, filter},
         _from,
         state
       ) do
@@ -1937,14 +1940,14 @@ defmodule Coflux.Orchestration.Server do
            Map.fetch(state.execution_ids, consumer_execution_external_id)
            |> ok_or(:consumer_not_found),
          {:ok, producer_execution_id} <- producer_result,
-         {:ok, true} <- Streams.exists?(state.db, producer_execution_id, sequence),
+         {:ok, true} <- Streams.exists?(state.db, producer_execution_id, index),
          key = {consumer_execution_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
       subscription = %{
         consumer_execution_external_id: consumer_execution_external_id,
         producer_execution_id: producer_execution_id,
-        sequence: sequence,
-        cursor: from_position,
+        index: index,
+        cursor: from_sequence,
         filter: filter
       }
 
@@ -1954,7 +1957,7 @@ defmodule Coflux.Orchestration.Server do
         |> Map.update!(:stream_subscribers, fn m ->
           Map.update(
             m,
-            {producer_execution_id, sequence},
+            {producer_execution_id, index},
             MapSet.new([key]),
             &MapSet.put(&1, key)
           )
@@ -2685,14 +2688,14 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:subscribe_stream_topic, execution_external_id, sequence, pid},
+        {:subscribe_stream_topic, execution_external_id, index, pid},
         _from,
         state
       ) do
-    case build_stream_topic_initial(state, execution_external_id, sequence) do
+    case build_stream_topic_initial(state, execution_external_id, index) do
       {:ok, initial} ->
         {:ok, ref, state} =
-          add_listener(state, {:stream, execution_external_id, sequence}, pid)
+          add_listener(state, {:stream, execution_external_id, index}, pid)
 
         {:reply, {:ok, initial, ref}, state}
 
@@ -5904,15 +5907,15 @@ defmodule Coflux.Orchestration.Server do
   # on the closure row. Consumers that need to surface an error derive
   # it from the execution's recorded result (see derive_lifecycle_error).
   defp close_open_streams(state, execution_id) do
-    {:ok, sequences} = Streams.get_open_streams_for_execution(state.db, execution_id)
+    {:ok, indexes} = Streams.get_open_streams_for_execution(state.db, execution_id)
     push_error = derive_lifecycle_error(state.db, execution_id)
 
-    Enum.reduce(sequences, state, fn sequence, state ->
-      case Streams.close_stream(state.db, execution_id, sequence, :lifecycle) do
+    Enum.reduce(indexes, state, fn index, state ->
+      case Streams.close_stream(state.db, execution_id, index, :lifecycle) do
         {:ok, closed_at} ->
           state
-          |> push_stream_closed(execution_id, sequence, push_error)
-          |> notify_stream_closed(execution_id, sequence, push_error, closed_at)
+          |> push_stream_closed(execution_id, index, push_error)
+          |> notify_stream_closed(execution_id, index, :lifecycle, push_error, closed_at)
 
         {:error, :already_closed} ->
           state
@@ -5922,21 +5925,22 @@ defmodule Coflux.Orchestration.Server do
 
   # Returns the streams list for `execution_id` with :lifecycle closures'
   # errors resolved from the execution's recorded result. Shape:
-  # `{sequence, opened_at, closed_at | nil, error | nil}` — the same
-  # shape the topic module expects (reason is collapsed into error/nil
-  # once we've derived it).
+  # `{index, opened_at, closed_at | nil, reason | nil, error | nil}` —
+  # reason is retained so the topic can colour open vs complete vs
+  # errored vs lifecycle distinctly.
   defp streams_with_resolved_errors(db, execution_id) do
     {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
 
     Enum.map(rows, fn
-      {sequence, opened_at, nil, nil, nil} ->
-        {sequence, opened_at, nil, nil}
+      {index, opened_at, nil, nil, nil} ->
+        {index, opened_at, nil, nil, nil}
 
-      {sequence, opened_at, closed_at, :lifecycle, _} ->
-        {sequence, opened_at, closed_at, derive_lifecycle_error(db, execution_id)}
+      {index, opened_at, closed_at, :lifecycle, _} ->
+        {index, opened_at, closed_at, :lifecycle,
+         derive_lifecycle_error(db, execution_id)}
 
-      {sequence, opened_at, closed_at, _reason, error} ->
-        {sequence, opened_at, closed_at, error}
+      {index, opened_at, closed_at, reason, error} ->
+        {index, opened_at, closed_at, reason, error}
     end)
   end
 
@@ -7245,14 +7249,14 @@ defmodule Coflux.Orchestration.Server do
   # explicit pause/resume (e.g. an infinite producer with no subscribers
   # filling disk), the hooks go here:
   #   * On first subscriber for a stream: send_session(producer_session,
-  #     {:stream_resume, producer_exec_ext, sequence}).
+  #     {:stream_resume, producer_exec_ext, index}).
   #   * On last subscriber dropping: {:stream_pause, ...}.
   # Dispatcher on the adapter side already routes notifications by method;
   # the StreamDriver gets a per-stream Event to gate its next() calls.
 
   # --- Stream topic notifications (for Studio subscribers) ---
   # These flow through `notify_listeners` → the run topic and the
-  # per-stream `{:stream, execution_ext_id, sequence}` inspection topic,
+  # per-stream `{:stream, execution_ext_id, index}` inspection topic,
   # distinct from the session-directed `push_stream_*` helpers which
   # target subscribed consumer sessions' WebSockets.
 
@@ -7261,27 +7265,27 @@ defmodule Coflux.Orchestration.Server do
   # items on demand.
   @stream_topic_tail_size 200
 
-  defp notify_stream_opened(state, execution_id, sequence, created_at) do
+  defp notify_stream_opened(state, execution_id, index, created_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
 
     notify_listeners(
       state,
       {:run, r},
-      {:stream_opened, execution_ext_id, sequence, created_at}
+      {:stream_opened, execution_ext_id, index, created_at}
     )
   end
 
   defp notify_stream_item_appended(
          state,
          execution_id,
+         index,
          sequence,
-         position,
          value,
          created_at
        ) do
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
-    topic = {:stream, execution_ext_id, sequence}
+    topic = {:stream, execution_ext_id, index}
 
     # Skip the build_value (which hits the DB to resolve refs) when the
     # inspection topic has no active subscribers.
@@ -7291,14 +7295,14 @@ defmodule Coflux.Orchestration.Server do
       notify_listeners(
         state,
         topic,
-        {:item_appended, position, resolved, created_at}
+        {:item_appended, sequence, resolved, created_at}
       )
     else
       state
     end
   end
 
-  defp notify_stream_closed(state, execution_id, sequence, error, closed_at) do
+  defp notify_stream_closed(state, execution_id, index, reason, error, closed_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
 
@@ -7308,17 +7312,19 @@ defmodule Coflux.Orchestration.Server do
         {type, message, _frames} -> %{type: type, message: message}
       end
 
+    reason_str = Atom.to_string(reason)
+
     state =
       notify_listeners(
         state,
         {:run, r},
-        {:stream_closed, execution_ext_id, sequence, encoded_error, closed_at}
+        {:stream_closed, execution_ext_id, index, reason_str, encoded_error, closed_at}
       )
 
     notify_listeners(
       state,
-      {:stream, execution_ext_id, sequence},
-      {:closed, encoded_error, closed_at}
+      {:stream, execution_ext_id, index},
+      {:closed, reason_str, encoded_error, closed_at}
     )
   end
 
@@ -7326,36 +7332,28 @@ defmodule Coflux.Orchestration.Server do
   # Returns {:ok, state} with producer metadata, opened/closed timestamps,
   # closure info (with lifecycle errors already derived), bounded tail of
   # items, and the total item count.
-  defp build_stream_topic_initial(state, execution_ext_id, sequence) do
+  defp build_stream_topic_initial(state, execution_ext_id, index) do
     with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_ext_id),
-         {:ok, true} <- Streams.exists?(state.db, execution_id, sequence),
-         {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, sequence),
+         {:ok, true} <- Streams.exists?(state.db, execution_id, index),
+         {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, index),
          {:ok, {items, total_count}} <-
-           Streams.get_stream_tail(state.db, execution_id, sequence, @stream_topic_tail_size) do
+           Streams.get_stream_tail(state.db, execution_id, index, @stream_topic_tail_size) do
       # Keep the tuple shape here — the topic module runs TopicUtils.build_value
       # on each item's value to produce the JSON-encodable form, matching
       # how live :item_appended notifications are handled.
       resolved_items =
-        Enum.map(items, fn {position, value, created_at} ->
-          {position, build_value(value, state.db), created_at}
+        Enum.map(items, fn {sequence, value, created_at} ->
+          {sequence, build_value(value, state.db), created_at}
         end)
 
-      first_position =
-        case resolved_items do
-          [] -> nil
-          [{pos, _, _} | _] -> pos
-        end
-
-      closure = build_stream_topic_closure(state, execution_id, sequence)
+      closure = build_stream_topic_closure(state, execution_id, index)
 
       {:ok,
        %{
          producer: build_stream_producer(state.db, execution_ext_id, execution_id),
          openedAt: opened_at,
-         closedAt: closure && closure.closedAt,
          closure: closure,
          items: resolved_items,
-         firstPosition: first_position,
          totalCount: total_count,
          tailSize: @stream_topic_tail_size
        }}
@@ -7365,8 +7363,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp build_stream_topic_closure(state, execution_id, sequence) do
-    case Streams.get_stream_closure(state.db, execution_id, sequence) do
+  defp build_stream_topic_closure(state, execution_id, index) do
+    case Streams.get_stream_closure(state.db, execution_id, index) do
       {:ok, nil} ->
         nil
 
@@ -7392,16 +7390,11 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp build_stream_producer(db, execution_ext_id, execution_id) do
+    # The external execution_id already encodes run + step + attempt, so
+    # the producer reference only carries identifier + module/target —
+    # matching ExecutionReference on the wire.
     {:ok, step} = Runs.get_step_for_execution(db, execution_id)
-    {:ok, {run_ext_id}} = Runs.get_external_run_id_for_execution(db, execution_id)
-
-    %{
-      executionId: execution_ext_id,
-      runId: run_ext_id,
-      stepId: "#{run_ext_id}:#{step.number}",
-      module: step.module,
-      target: step.target
-    }
+    Coflux.TopicUtils.build_execution({execution_ext_id, step.module, step.target})
   end
 
   defp execution_external_id_for(db, execution_id) do
@@ -7416,24 +7409,24 @@ defmodule Coflux.Orchestration.Server do
   defp ok_or({:ok, val}, _reason), do: {:ok, val}
   defp ok_or(:error, reason), do: {:error, reason}
 
-  # Does a `position` pass a subscription's filter?
-  defp filter_matches?(nil, _position), do: true
+  # Does a `sequence` pass a subscription's filter?
+  defp filter_matches?(nil, _sequence), do: true
 
-  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => nil}, position),
-    do: position >= s
+  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => nil}, sequence),
+    do: sequence >= s
 
-  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => e}, position),
-    do: position >= s and position < e
+  defp filter_matches?(%{"type" => "slice", "start" => s, "stop" => e}, sequence),
+    do: sequence >= s and sequence < e
 
-  defp filter_matches?(%{"type" => "partition", "n" => n, "i" => i}, position),
-    do: rem(position, n) == i
+  defp filter_matches?(%{"type" => "partition", "n" => n, "i" => i}, sequence),
+    do: rem(sequence, n) == i
 
-  defp filter_matches?(%{"type" => "chain", "filters" => fs}, position),
-    do: Enum.all?(fs, &filter_matches?(&1, position))
+  defp filter_matches?(%{"type" => "chain", "filters" => fs}, sequence),
+    do: Enum.all?(fs, &filter_matches?(&1, sequence))
 
-  defp filter_matches?(_filter, _position), do: true
+  defp filter_matches?(_filter, _sequence), do: true
 
-  # Is `position` past the end of the filter's effective range?
+  # Is `sequence` past the end of the filter's effective range?
   # Lets us close streams early once a slice's stop is reached.
   defp filter_exhausted?(%{"type" => "slice", "stop" => stop}, cursor) when is_integer(stop),
     do: cursor >= stop
@@ -7462,7 +7455,7 @@ defmodule Coflux.Orchestration.Server do
       Streams.get_stream_items(
         state.db,
         sub.producer_execution_id,
-        sub.sequence,
+        sub.index,
         sub.cursor,
         @backlog_page_size
       )
@@ -7494,11 +7487,11 @@ defmodule Coflux.Orchestration.Server do
 
     filtered =
       items
-      |> Enum.filter(fn {position, _value, _at} -> filter_matches?(sub.filter, position) end)
-      |> Enum.take_while(fn {position, _, _} -> not filter_exhausted?(sub.filter, position) end)
+      |> Enum.filter(fn {sequence, _value, _at} -> filter_matches?(sub.filter, sequence) end)
+      |> Enum.take_while(fn {sequence, _, _} -> not filter_exhausted?(sub.filter, sequence) end)
 
     # Advance cursor past the page even if no items matched this filter —
-    # otherwise we'd re-fetch the same positions forever.
+    # otherwise we'd re-fetch the same sequences forever.
     advance_to =
       if filtered == [] do
         elem(List.last(items), 0) + 1
@@ -7511,8 +7504,8 @@ defmodule Coflux.Orchestration.Server do
         state
       else
         resolved_items =
-          Enum.map(filtered, fn {position, value, _at} ->
-            [position, build_value(value, state.db)]
+          Enum.map(filtered, fn {sequence, value, _at} ->
+            [sequence, build_value(value, state.db)]
           end)
 
         send_to_consumer(
@@ -7554,20 +7547,20 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Push a freshly-appended item to every subscriber of this stream.
-  defp push_stream_item(state, producer_execution_id, sequence, position, value) do
+  defp push_stream_item(state, producer_execution_id, index, sequence, value) do
     subscribers =
-      Map.get(state.stream_subscribers, {producer_execution_id, sequence}, MapSet.new())
+      Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
 
     Enum.reduce(subscribers, state, fn key, state ->
       {_consumer_execution_id, subscription_id} = key
       sub = Map.fetch!(state.stream_subscriptions, key)
 
       cond do
-        position < sub.cursor ->
-          # Consumer already has this position via backlog; skip.
+        sequence < sub.cursor ->
+          # Consumer already has this sequence via backlog; skip.
           state
 
-        not filter_matches?(sub.filter, position) ->
+        not filter_matches?(sub.filter, sequence) ->
           state
 
         true ->
@@ -7575,7 +7568,7 @@ defmodule Coflux.Orchestration.Server do
           # Normalise + resolve to match the form push_backlog sends; the WS
           # handler composes to wire JSON.
           resolved = build_value(normalize_value(value), state.db)
-          item = [position, resolved]
+          item = [sequence, resolved]
 
           state =
             send_to_consumer(
@@ -7587,12 +7580,12 @@ defmodule Coflux.Orchestration.Server do
           state =
             update_in(
               state.stream_subscriptions[key],
-              &Map.put(&1, :cursor, position + 1)
+              &Map.put(&1, :cursor, sequence + 1)
             )
 
           # If the filter is exhausted (e.g. slice reached its stop), close
           # the subscription early — no more items will match.
-          if filter_exhausted?(sub.filter, position + 1) do
+          if filter_exhausted?(sub.filter, sequence + 1) do
             state
             |> send_to_consumer(
               sub,
@@ -7608,9 +7601,9 @@ defmodule Coflux.Orchestration.Server do
 
   # On close, tell every subscriber. Error is either nil (clean close) or a
   # {type, message, frames} triple — same shape as Streams.close_stream takes.
-  defp push_stream_closed(state, producer_execution_id, sequence, error) do
+  defp push_stream_closed(state, producer_execution_id, index, error) do
     subscribers =
-      Map.get(state.stream_subscribers, {producer_execution_id, sequence}, MapSet.new())
+      Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
 
     encoded_error = encode_stream_error(error)
 
@@ -7658,7 +7651,7 @@ defmodule Coflux.Orchestration.Server do
   defp do_maybe_push_closure(state, sub, key) do
     {_consumer_execution_id, subscription_id} = key
 
-    case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.sequence) do
+    case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.index) do
       {:ok, nil} ->
         state
 
@@ -7685,7 +7678,7 @@ defmodule Coflux.Orchestration.Server do
         state
 
       {:ok, sub} ->
-        stream_key = {sub.producer_execution_id, sub.sequence}
+        stream_key = {sub.producer_execution_id, sub.index}
 
         state
         |> Map.update!(:stream_subscriptions, &Map.delete(&1, key))

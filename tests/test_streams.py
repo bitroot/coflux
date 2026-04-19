@@ -68,7 +68,7 @@ def test_producer_writes_and_consumer_reads_backlog(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
         items, closed = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -98,7 +98,7 @@ def test_consumer_sees_live_push(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         # Now producer appends + closes.
@@ -135,7 +135,7 @@ def test_slice_filter_restricts_items(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
             filter=slice_filter(1, 3),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
@@ -165,7 +165,7 @@ def test_partition_filter_round_robin(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
             filter=partition_filter(n=3, i=1),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
@@ -199,7 +199,7 @@ def test_producer_error_closes_with_error_info(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
         items, closed = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -224,7 +224,7 @@ def test_subscribe_to_unknown_producer_closes_immediately(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id="00000000:0:0",
-            sequence=0,
+            index=0,
         )
         _items, closed = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -261,8 +261,10 @@ def test_topic_exposes_stream_state(worker):
         assert "0" in streams and "1" in streams
         assert streams["0"]["openedAt"] is not None
         assert streams["0"]["closedAt"] is not None
+        assert streams["0"]["reason"] == "complete"
         assert streams["0"]["error"] is None
         assert streams["1"]["closedAt"] is not None
+        assert streams["1"]["reason"] == "errored"
         assert streams["1"]["error"] == {"type": "RuntimeError", "message": "bad"}
 
 
@@ -284,7 +286,7 @@ def test_cancellation_closes_streams_with_cancelled_error(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         ctx.cancel(prod_ex.execution_id)
@@ -323,7 +325,7 @@ def test_multiple_subscribers_get_independent_delivery(worker):
             a_ex.execution_id,
             subscription_id=7,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         b_resp = ctx.submit("test", "consumer")
@@ -332,7 +334,7 @@ def test_multiple_subscribers_get_independent_delivery(worker):
             b_ex.execution_id,
             subscription_id=42,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         a_items, _ = a_ex.conn.drain_stream(subscription_id=7)
@@ -369,7 +371,7 @@ def test_subscription_ids_can_collide_across_consumers(worker):
             a_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         b_resp = ctx.submit("test", "consumer")
@@ -378,7 +380,7 @@ def test_subscription_ids_can_collide_across_consumers(worker):
             b_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         a_items, a_closed = a_ex.conn.drain_stream(subscription_id=1)
@@ -410,7 +412,7 @@ def test_consumer_termination_drops_subscription(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "before")
@@ -452,7 +454,7 @@ def test_slice_with_stop_closes_early(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
             filter=slice_filter(0, 2),
         )
 
@@ -494,7 +496,7 @@ def test_unsubscribe_prevents_receiving_full_stream(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, 0)
@@ -511,22 +513,22 @@ def test_unsubscribe_prevents_receiving_full_stream(worker):
         # Collect anything still in flight. It might include the next
         # one or two items (racing with unsubscribe) but MUST NOT include
         # the tail — some positions drop out between unsubscribe and close.
-        received_positions = [0]
+        received_sequences = [0]
         try:
             while True:
                 msg = cons_ex.conn.recv_push(
                     "stream_items", subscription_id=1, timeout=0.5
                 )
                 for item in msg["items"]:
-                    received_positions.append(item[0])
+                    received_sequences.append(item[0])
         except TimeoutError:
             pass
 
         cons_ex.conn.complete(cons_ex.execution_id)
 
         # The consumer should have received strictly fewer than all 10 items.
-        assert len(received_positions) < 10, (
-            f"unsubscribe should stop further delivery; got {received_positions}"
+        assert len(received_sequences) < 10, (
+            f"unsubscribe should stop further delivery; got {received_sequences}"
         )
 
 
@@ -547,7 +549,7 @@ def test_close_while_subscribed_delivers_closure(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "only")
@@ -580,7 +582,7 @@ def test_lifecycle_close_on_completion_delivers_to_subscriber(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
         )
 
         # Producer completes *without* closing the stream.
@@ -613,7 +615,7 @@ def test_filter_chain_combines_slice_and_partition(worker):
             cons_ex.execution_id,
             subscription_id=1,
             producer_execution_id=prod_ex.execution_id,
-            sequence=0,
+            index=0,
             filter=chain_filter(slice_filter(0, 6), partition_filter(n=2, i=0)),
         )
         items, _ = cons_ex.conn.drain_stream(subscription_id=1)
