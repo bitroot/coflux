@@ -1864,8 +1864,19 @@ defmodule Coflux.Orchestration.Server do
                position,
                normalize_value(value)
              ) do
-          {:ok, _} ->
-            state = push_stream_item(state, execution_id, sequence, position, value)
+          {:ok, created_at} ->
+            state =
+              state
+              |> push_stream_item(execution_id, sequence, position, value)
+              |> notify_stream_item_appended(
+                execution_id,
+                sequence,
+                position,
+                value,
+                created_at
+              )
+              |> flush_notifications()
+
             {:reply, :ok, state}
 
           {:error, reason} ->
@@ -2670,6 +2681,23 @@ defmodule Coflux.Orchestration.Server do
 
       :not_found ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call(
+        {:subscribe_stream_topic, execution_external_id, sequence, pid},
+        _from,
+        state
+      ) do
+    case build_stream_topic_initial(state, execution_external_id, sequence) do
+      {:ok, initial} ->
+        {:ok, ref, state} =
+          add_listener(state, {:stream, execution_external_id, sequence}, pid)
+
+        {:reply, {:ok, initial, ref}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -7223,9 +7251,15 @@ defmodule Coflux.Orchestration.Server do
   # the StreamDriver gets a per-stream Event to gate its next() calls.
 
   # --- Stream topic notifications (for Studio subscribers) ---
-  # These flow through `notify_listeners` → the run topic, distinct from the
-  # session-directed `push_stream_*` helpers which target subscribed consumer
-  # sessions' WebSockets.
+  # These flow through `notify_listeners` → the run topic and the
+  # per-stream `{:stream, execution_ext_id, sequence}` inspection topic,
+  # distinct from the session-directed `push_stream_*` helpers which
+  # target subscribed consumer sessions' WebSockets.
+
+  # Bounded tail of items held by the stream inspection topic. Long
+  # streams don't need to materialise every item — the UI loads older
+  # items on demand.
+  @stream_topic_tail_size 200
 
   defp notify_stream_opened(state, execution_id, sequence, created_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
@@ -7238,6 +7272,32 @@ defmodule Coflux.Orchestration.Server do
     )
   end
 
+  defp notify_stream_item_appended(
+         state,
+         execution_id,
+         sequence,
+         position,
+         value,
+         created_at
+       ) do
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+    topic = {:stream, execution_ext_id, sequence}
+
+    # Skip the build_value (which hits the DB to resolve refs) when the
+    # inspection topic has no active subscribers.
+    if Map.has_key?(state.topics, topic) do
+      resolved = build_value(normalize_value(value), state.db)
+
+      notify_listeners(
+        state,
+        topic,
+        {:item_appended, position, resolved, created_at}
+      )
+    else
+      state
+    end
+  end
+
   defp notify_stream_closed(state, execution_id, sequence, error, closed_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
@@ -7248,11 +7308,100 @@ defmodule Coflux.Orchestration.Server do
         {type, message, _frames} -> %{type: type, message: message}
       end
 
+    state =
+      notify_listeners(
+        state,
+        {:run, r},
+        {:stream_closed, execution_ext_id, sequence, encoded_error, closed_at}
+      )
+
     notify_listeners(
       state,
-      {:run, r},
-      {:stream_closed, execution_ext_id, sequence, encoded_error, closed_at}
+      {:stream, execution_ext_id, sequence},
+      {:closed, encoded_error, closed_at}
     )
+  end
+
+  # Build the initial state for a newly-opened stream inspection topic.
+  # Returns {:ok, state} with producer metadata, opened/closed timestamps,
+  # closure info (with lifecycle errors already derived), bounded tail of
+  # items, and the total item count.
+  defp build_stream_topic_initial(state, execution_ext_id, sequence) do
+    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_ext_id),
+         {:ok, true} <- Streams.exists?(state.db, execution_id, sequence),
+         {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, sequence),
+         {:ok, {items, total_count}} <-
+           Streams.get_stream_tail(state.db, execution_id, sequence, @stream_topic_tail_size) do
+      # Keep the tuple shape here — the topic module runs TopicUtils.build_value
+      # on each item's value to produce the JSON-encodable form, matching
+      # how live :item_appended notifications are handled.
+      resolved_items =
+        Enum.map(items, fn {position, value, created_at} ->
+          {position, build_value(value, state.db), created_at}
+        end)
+
+      first_position =
+        case resolved_items do
+          [] -> nil
+          [{pos, _, _} | _] -> pos
+        end
+
+      closure = build_stream_topic_closure(state, execution_id, sequence)
+
+      {:ok,
+       %{
+         producer: build_stream_producer(state.db, execution_ext_id, execution_id),
+         openedAt: opened_at,
+         closedAt: closure && closure.closedAt,
+         closure: closure,
+         items: resolved_items,
+         firstPosition: first_position,
+         totalCount: total_count,
+         tailSize: @stream_topic_tail_size
+       }}
+    else
+      {:ok, false} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_stream_topic_closure(state, execution_id, sequence) do
+    case Streams.get_stream_closure(state.db, execution_id, sequence) do
+      {:ok, nil} ->
+        nil
+
+      {:ok, {reason, stored_error, closed_at}} ->
+        error =
+          case reason do
+            :lifecycle -> derive_lifecycle_error(state.db, execution_id)
+            _ -> stored_error
+          end
+
+        %{
+          reason: Atom.to_string(reason),
+          error: encode_stream_error_summary(error),
+          closedAt: closed_at
+        }
+    end
+  end
+
+  defp encode_stream_error_summary(nil), do: nil
+
+  defp encode_stream_error_summary({type, message, _frames}) do
+    %{type: type, message: message}
+  end
+
+  defp build_stream_producer(db, execution_ext_id, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(db, execution_id)
+    {:ok, {run_ext_id}} = Runs.get_external_run_id_for_execution(db, execution_id)
+
+    %{
+      executionId: execution_ext_id,
+      runId: run_ext_id,
+      stepId: "#{run_ext_id}:#{step.number}",
+      module: step.module,
+      target: step.target
+    }
   end
 
   defp execution_external_id_for(db, execution_id) do

@@ -140,6 +140,18 @@ defmodule Coflux.Orchestration.Streams do
     end
   end
 
+  # Returns the stream's registration timestamp, or `{:error, :not_found}`.
+  def get_opened_at(db, execution_id, sequence) do
+    case query_one(
+           db,
+           "SELECT created_at FROM streams WHERE execution_id = ?1 AND sequence = ?2",
+           {execution_id, sequence}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {created_at}} -> {:ok, created_at}
+    end
+  end
+
   def has_closure?(db, execution_id, sequence) do
     case query_one(
            db,
@@ -284,6 +296,41 @@ defmodule Coflux.Orchestration.Streams do
          ) do
       {:ok, {nil}} -> {:ok, -1}
       {:ok, {position}} -> {:ok, position}
+    end
+  end
+
+  # Returns the last `max_items` items of the stream, in position order,
+  # alongside the total item count. Used by the inspection topic to
+  # bootstrap its bounded tail buffer without materialising the full log.
+  def get_stream_tail(db, execution_id, sequence, max_items) do
+    {:ok, {total_count}} =
+      query_one(
+        db,
+        "SELECT COUNT(*) FROM stream_items WHERE execution_id = ?1 AND sequence = ?2",
+        {execution_id, sequence}
+      )
+
+    case query(
+           db,
+           """
+           SELECT position, value_id, created_at
+           FROM stream_items
+           WHERE execution_id = ?1 AND sequence = ?2
+           ORDER BY position DESC
+           LIMIT ?3
+           """,
+           {execution_id, sequence, max_items}
+         ) do
+      {:ok, rows} ->
+        items =
+          rows
+          |> Enum.reverse()
+          |> Enum.map(fn {position, value_id, created_at} ->
+            {:ok, value} = Values.get_value_by_id(db, value_id)
+            {position, value, created_at}
+          end)
+
+        {:ok, {items, total_count}}
     end
   end
 

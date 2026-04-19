@@ -280,6 +280,13 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_run, run_id, pid})
   end
 
+  def subscribe_stream_topic(project_id, execution_external_id, sequence, pid) do
+    call_server(
+      project_id,
+      {:subscribe_stream_topic, execution_external_id, sequence, pid}
+    )
+  end
+
   def subscribe_targets(project_id, workspace_id, pid) do
     call_server(project_id, {:subscribe_targets, workspace_id, pid})
   end
