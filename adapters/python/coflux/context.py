@@ -111,6 +111,13 @@ class ExecutorContext:
         """Block until every stream produced by this execution has drained."""
         self._stream_driver.wait_all()
 
+    def close_streams(self) -> None:
+        """Close every registered generator so driver threads exit promptly.
+
+        Used on the error path before reporting execution_error.
+        """
+        self._stream_driver.close_all()
+
     def submit_execution(
         self,
         module: str,

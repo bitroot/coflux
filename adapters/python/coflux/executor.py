@@ -76,6 +76,7 @@ def execute_target(
     # through it — individual threads block on the dispatcher rather than
     # racing on stdin directly.
     start_dispatcher(protocol.get_protocol())
+    ctx: ExecutorContext | None = None
     try:
         if working_dir:
             os.chdir(working_dir)
@@ -135,6 +136,17 @@ def execute_target(
                     retryable = bool(retries.when(e))
                 except Exception as callback_exc:
                     e = callback_exc
+
+        # Stop any in-flight stream producers and wait for their driver
+        # threads to exit before reporting the execution error. The server's
+        # close_open_streams will then synthesise a Coflux.ExecutionErrored
+        # close for any streams still open when the error is recorded.
+        if ctx is not None:
+            try:
+                ctx.close_streams()
+                ctx.wait_streams()
+            except Exception:
+                pass
 
         error_type = f"{type(e).__module__}.{type(e).__qualname__}"
         tb = _format_filtered_traceback(e)

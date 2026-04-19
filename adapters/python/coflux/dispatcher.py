@@ -51,6 +51,10 @@ class Dispatcher:
         # other threads).
         self._notification_handlers: dict[str, Callable[[dict[str, Any]], None]] = {}
 
+        # Callbacks invoked on EOF so subsystems with their own blocking
+        # queues (e.g. the stream registry) can wake their waiters.
+        self._close_callbacks: list[Callable[[], None]] = []
+
         # Set when stdin reaches EOF. Wakes all pending waiters.
         self._closed = threading.Event()
 
@@ -83,6 +87,27 @@ class Dispatcher:
     def unregister_notification(self, method: str) -> None:
         with self._lock:
             self._notification_handlers.pop(method, None)
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback to fire when stdin reaches EOF.
+
+        Fires on the reader thread, after ``_closed`` is set and response
+        waiters are woken. Use this to unblock subsystems that queue on
+        something other than a response event (e.g. per-iterator queues in
+        the stream registry).
+        """
+        with self._lock:
+            already_closed = self._closed.is_set()
+            if not already_closed:
+                self._close_callbacks.append(callback)
+        if already_closed:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def is_closed(self) -> bool:
+        return self._closed.is_set()
 
     def wait_for_response(
         self,
@@ -128,6 +153,13 @@ class Dispatcher:
                 with self._lock:
                     for event, _slot in self._waiting.values():
                         event.set()
+                    callbacks = list(self._close_callbacks)
+                    self._close_callbacks.clear()
+                for cb in callbacks:
+                    try:
+                        cb()
+                    except Exception:
+                        pass
                 return
 
             if "id" in msg:

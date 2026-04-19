@@ -1,14 +1,17 @@
 """Producer and consumer stream plumbing.
 
 The producer side owns ``StreamDriver``: each execution whose return value
-(or submitted arguments) contains generators uses one to drive each
-generator in a background thread.
+(or submitted arguments) contains generators uses one to run each
+generator in a background thread. Both sync (``def`` + ``yield``) and
+async (``async def`` + ``yield``) generators are supported; async
+generators get a fresh event loop confined to their worker thread.
 
 The consumer side owns a module-level ``StreamRegistry``: open consumer
 subscriptions are keyed by subscription id. The registry's dispatcher
 handlers (``stream_items``/``stream_closed``) route incoming pushes from
 the server to the right iterator's queue, which yields as the user
-iterates.
+iterates. On dispatcher EOF every active iterator is woken with a
+synthetic abandoned-close so user code doesn't hang forever.
 
 Both sides are thread-safe: the ``Dispatcher`` owns stdin (so subtask
 calls from generator bodies don't race), and stdout writes go through
@@ -17,6 +20,8 @@ calls from generator bodies don't race), and stdout writes go through
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import queue
 import threading
 import traceback
@@ -24,7 +29,7 @@ from typing import Any, Iterator
 
 from . import protocol
 from .dispatcher import get_dispatcher
-from .errors import create_execution_error
+from .errors import create_stream_error
 from .serialization import deserialize_value, serialize_value
 from .state import get_context
 
@@ -39,10 +44,16 @@ class StreamDriver:
         self._execution_id = execution_id
         self._next_sequence = 0
         self._threads: list[threading.Thread] = []
+        self._generators: list[Any] = []
         self._lock = threading.Lock()
 
     def register(self, generator: Any) -> tuple[str, int]:
-        """Register a generator, spawn its driver thread.
+        """Register a generator and start running it in a worker thread.
+
+        Accepts both sync generators (``def`` + ``yield``) and async
+        generators (``async def`` + ``yield``). Each gets its own thread;
+        async generators run inside a fresh event loop confined to that
+        thread.
 
         Returns ``(execution_id, sequence)`` for embedding in the serialized
         value as a stream reference.
@@ -53,19 +64,24 @@ class StreamDriver:
 
         protocol.send_stream_register(self._execution_id, sequence)
 
+        is_async = inspect.isasyncgen(generator)
+        target = self._run_async if is_async else self._run
         thread = threading.Thread(
-            target=self._drive,
+            target=target,
             args=(sequence, generator),
             name=f"stream-{self._execution_id}-{sequence}",
             daemon=False,
         )
+        entry = {"generator": generator, "is_async": is_async, "loop": None}
+        with self._lock:
+            self._generators.append(entry)
+            self._threads.append(thread)
         thread.start()
-        self._threads.append(thread)
 
         return self._execution_id, sequence
 
-    def _drive(self, sequence: int, generator: Any) -> None:
-        """Pump one generator to exhaustion (or error)."""
+    def _run(self, sequence: int, generator: Any) -> None:
+        """Run one sync generator to exhaustion (or error)."""
         position = 0
         try:
             for item in generator:
@@ -78,8 +94,10 @@ class StreamDriver:
                 )
                 position += 1
         except GeneratorExit:
-            # Generator explicitly closed (e.g. execution cancelled). The
-            # server already knows — no close message needed.
+            # Generator explicitly closed (via close_all on error path, or
+            # server-initiated cancel). Skip send_stream_close — the server
+            # records a lifecycle closure when the execution terminates and
+            # derives the error from the execution's outcome.
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             error_type = f"{type(e).__module__}.{type(e).__qualname__}"
@@ -94,12 +112,98 @@ class StreamDriver:
         else:
             protocol.send_stream_close(self._execution_id, sequence)
 
+    def _run_async(self, sequence: int, generator: Any) -> None:
+        """Run one async generator in a fresh event loop on this thread.
+
+        The loop handle is recorded so ``close_all`` can schedule aclose()
+        from another thread via ``run_coroutine_threadsafe``.
+        """
+        loop = asyncio.new_event_loop()
+        self._record_loop(generator, loop)
+        asyncio.set_event_loop(loop)
+
+        async def iterate() -> None:
+            position = 0
+            async for item in generator:
+                serialized = serialize_value(item)
+                protocol.send_stream_append(
+                    self._execution_id,
+                    sequence,
+                    position,
+                    serialized,
+                )
+                position += 1
+
+        try:
+            loop.run_until_complete(iterate())
+        except (GeneratorExit, asyncio.CancelledError):
+            return
+        except BaseException as e:  # noqa: BLE001 - we propagate all
+            error_type = f"{type(e).__module__}.{type(e).__qualname__}"
+            tb = traceback.format_exc()
+            protocol.send_stream_close(
+                self._execution_id,
+                sequence,
+                error_type=error_type,
+                error_message=str(e),
+                traceback=tb,
+            )
+        else:
+            protocol.send_stream_close(self._execution_id, sequence)
+        finally:
+            try:
+                loop.run_until_complete(generator.aclose())
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    def _record_loop(self, generator: Any, loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            for entry in self._generators:
+                if entry["generator"] is generator:
+                    entry["loop"] = loop
+                    return
+
     def wait_all(self) -> None:
-        """Block until every driver thread has finished."""
+        """Block until every worker thread has finished."""
         with self._lock:
             threads = list(self._threads)
         for t in threads:
             t.join()
+
+    def close_all(self) -> None:
+        """Close every registered generator so worker threads exit promptly.
+
+        Used on the error path: when the task body raises, we want in-flight
+        streams to stop producing rather than racing the execution_error
+        notification. For sync generators, ``generator.close()`` raises
+        ``GeneratorExit`` at the current yield point. For async generators,
+        we schedule ``aclose()`` onto the generator's own event loop so the
+        awaiting coroutine is cancelled cleanly.
+        """
+        with self._lock:
+            entries = list(self._generators)
+        for entry in entries:
+            try:
+                if entry["is_async"]:
+                    loop = entry["loop"]
+                    if loop is not None and not loop.is_closed():
+                        gen = entry["generator"]
+
+                        async def _close(g=gen) -> None:
+                            try:
+                                await g.aclose()
+                            except Exception:
+                                pass
+
+                        asyncio.run_coroutine_threadsafe(_close(), loop)
+                else:
+                    entry["generator"].close()
+            except Exception:
+                pass
 
 
 # --- Consumer side ---
@@ -126,10 +230,14 @@ class _StreamIterator(Iterator[Any]):
     def on_items(self, items: list[list[Any]]) -> None:
         """Called by the registry when the server pushes items for this
         subscription. ``items`` is a list of ``[position, value_wire]``.
+
+        Runs on the dispatcher reader thread — keep it cheap. The raw wire
+        value goes onto the queue unmodified; deserialization happens in
+        ``__next__`` on the consumer's thread so heavy decode work doesn't
+        stall stdin reads.
         """
         for _position, value in items:
-            # Decode eagerly so iteration cost is paid per-item as it arrives.
-            self._queue.put(deserialize_value(value))
+            self._queue.put(value)
 
     def on_closed(self, error: dict[str, Any] | None) -> None:
         """Called by the registry when the stream closes."""
@@ -145,14 +253,20 @@ class _StreamIterator(Iterator[Any]):
         if isinstance(item, _Closed):
             self._done = True
             _stream_registry().drop(self._subscription_id)
-            protocol.send_stream_unsubscribe(self._execution_id, self._subscription_id)
+            # Skip the unsubscribe roundtrip when the dispatcher is gone —
+            # stdout may still be writable but there's no one to receive it,
+            # and a closed pipe would raise from send_*.
+            if not get_dispatcher().is_closed():
+                try:
+                    protocol.send_stream_unsubscribe(
+                        self._execution_id, self._subscription_id
+                    )
+                except Exception:
+                    pass
             if item.error is not None:
-                raise create_execution_error(
-                    item.error.get("type", ""),
-                    item.error.get("message", ""),
-                )
+                raise create_stream_error(item.error)
             raise StopIteration
-        return item
+        return deserialize_value(item)
 
 
 class StreamRegistry:
@@ -172,7 +286,23 @@ class StreamRegistry:
         d = get_dispatcher()
         d.register_notification("stream_items", self._on_items)
         d.register_notification("stream_closed", self._on_closed)
+        # If stdin goes away before the server sends close messages,
+        # blocked iterators would hang on their queues forever. Push a
+        # synthetic closed sentinel into each so ``__next__`` raises.
+        d.add_close_callback(self._on_dispatcher_closed)
         self._installed = True
+
+    def _on_dispatcher_closed(self) -> None:
+        """Wake all active iterators with a connection-closed error."""
+        error = {
+            "type": "Coflux.ExecutionAbandoned",
+            "message": "connection closed",
+            "frames": [],
+        }
+        with self._lock:
+            iterators = list(self._iterators.values())
+        for it in iterators:
+            it.on_closed(error)
 
     def allocate(self, execution_id: str) -> tuple[int, _StreamIterator]:
         """Claim a subscription id and iterator."""

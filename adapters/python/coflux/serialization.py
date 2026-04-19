@@ -69,7 +69,7 @@ def _encode_value(
     def _encode(v: Any) -> Any:
         if v is None or isinstance(v, (str, bool, int, float)):
             return v
-        elif inspect.isgenerator(v):
+        elif inspect.isgenerator(v) or inspect.isasyncgen(v):
             if on_generator is None:
                 raise TypeError(
                     "Cannot serialize a generator: no stream driver is active."
@@ -93,11 +93,6 @@ def _encode_value(
             if v._filters:
                 encoded["filters"] = list(v._filters)
             return encoded
-        elif inspect.isasyncgen(v):
-            raise TypeError(
-                "Async generators aren't supported yet — use a sync generator "
-                "(def + yield) for now."
-            )
         elif isinstance(v, list):
             return [_encode(x) for x in v]
         elif isinstance(v, dict):

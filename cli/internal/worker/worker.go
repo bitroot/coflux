@@ -658,11 +658,17 @@ func (w *Worker) handleStreamItems(params []any) error {
 	if len(params) < 3 {
 		return fmt.Errorf("stream_items: insufficient params")
 	}
-	executionID := getString(params[0])
-	subscriptionID, _ := params[1].(float64)
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_items: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_items: subscription_id is not a number (got %T)", params[1])
+	}
 	rawItems, ok := params[2].([]any)
 	if !ok {
-		return fmt.Errorf("stream_items: items is not an array")
+		return fmt.Errorf("stream_items: items is not an array (got %T)", params[2])
 	}
 
 	converted := make([]any, len(rawItems))
@@ -691,8 +697,14 @@ func (w *Worker) handleStreamClosed(params []any) error {
 	if len(params) < 3 {
 		return fmt.Errorf("stream_closed: insufficient params")
 	}
-	executionID := getString(params[0])
-	subscriptionID, _ := params[1].(float64)
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_closed: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_closed: subscription_id is not a number (got %T)", params[1])
+	}
 	errField := params[2]
 
 	forwarded := map[string]any{
@@ -1220,7 +1232,10 @@ func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subs
 	if err != nil {
 		return err
 	}
-	return conn.Notify("stream_unsubscribe", subscriptionID)
+	// Server params: [consumer_execution_id, subscription_id]. The consumer
+	// id scopes the subscription key server-side, so two adapters in the
+	// same session can reuse subscription_id without colliding.
+	return conn.Notify("stream_unsubscribe", executionID, subscriptionID)
 }
 
 func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {

@@ -371,12 +371,13 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_unsubscribe" ->
-        [subscription_id] = message["params"]
+        [consumer_execution_id, subscription_id] = message["params"]
 
         :ok =
           Orchestration.unsubscribe_stream(
             state.project_id,
             state.session_id,
+            consumer_execution_id,
             subscription_id
           )
 

@@ -56,12 +56,21 @@ CREATE TABLE stream_items (
   FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT
 ) STRICT;
 
+-- Closure of a stream. `reason` records *why* it closed:
+--   0 = complete   — producer finished normally (no error)
+--   1 = errored    — producer raised an error (stored in errors via error_id)
+--   2 = lifecycle  — closed implicitly because the producer execution ended
+--                    (cancel/crash/abandon/error). The specific error is
+--                    derived on read by looking up the execution's result,
+--                    so we don't duplicate that state here.
 CREATE TABLE stream_closures (
   execution_id INTEGER NOT NULL,
   sequence INTEGER NOT NULL,
+  reason INTEGER NOT NULL,
   error_id INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (execution_id, sequence),
   FOREIGN KEY (execution_id, sequence) REFERENCES streams (execution_id, sequence) ON DELETE CASCADE,
-  FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT
+  FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
+  CHECK ((reason = 1) = (error_id IS NOT NULL))
 ) STRICT;

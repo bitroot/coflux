@@ -76,10 +76,16 @@ defmodule Coflux.Orchestration.Streams do
     end)
   end
 
-  # Closes the stream. `error` is either `nil` (clean close) or a
-  # `{type, message, frames}` triple (error close — re-uses the errors table
-  # via the same path as Results).
-  def close_stream(db, execution_id, sequence, error \\ nil) do
+  # Closes the stream. `spec` describes *why* it closed:
+  #
+  #   * `:complete` — producer finished normally
+  #   * `{:errored, type, message, frames}` — producer raised an error; the
+  #     error is stored via the errors table, same as Results
+  #   * `:lifecycle` — closed implicitly because the producer execution
+  #     ended (cancel/crash/abandon/error). No error is recorded here —
+  #     callers that need to surface an error derive it from the
+  #     execution's recorded result at read time.
+  def close_stream(db, execution_id, sequence, spec \\ :complete) do
     with_transaction(db, fn ->
       case exists?(db, execution_id, sequence) do
         {:ok, false} ->
@@ -87,16 +93,12 @@ defmodule Coflux.Orchestration.Streams do
 
         {:ok, true} ->
           now = current_timestamp()
-
-          error_id =
-            case error do
-              nil -> nil
-              {type, message, frames} -> Errors.get_or_create(db, type, message, frames)
-            end
+          {reason, error_id} = resolve_close_spec(db, spec)
 
           case insert_one(db, :stream_closures, %{
                  execution_id: execution_id,
                  sequence: sequence,
+                 reason: reason,
                  error_id: error_id,
                  created_at: now
                }) do
@@ -106,6 +108,26 @@ defmodule Coflux.Orchestration.Streams do
       end
     end)
   end
+
+  # Closure reason codes — kept in sync with the CHECK constraint in 4.sql.
+  @reason_complete 0
+  @reason_errored 1
+  @reason_lifecycle 2
+
+  defp resolve_close_spec(_db, :complete), do: {@reason_complete, nil}
+  defp resolve_close_spec(_db, :lifecycle), do: {@reason_lifecycle, nil}
+
+  defp resolve_close_spec(db, {:errored, type, message, frames}) do
+    error_id = Errors.get_or_create(db, type, message, frames)
+    {@reason_errored, error_id}
+  end
+
+  # Atom form of the reason integer — used by callers that want to decide
+  # whether to derive an error from the execution's result (:lifecycle)
+  # or use the stored one (:errored / :complete).
+  def reason_from_int(@reason_complete), do: :complete
+  def reason_from_int(@reason_errored), do: :errored
+  def reason_from_int(@reason_lifecycle), do: :lifecycle
 
   def exists?(db, execution_id, sequence) do
     case query_one(
@@ -164,23 +186,26 @@ defmodule Coflux.Orchestration.Streams do
   end
 
   # Returns closure info or `{:ok, nil}` if the stream is still open.
-  # Closure info: `{error | nil, created_at}` where error is
-  # `{type, message, frames}` when present.
+  # Closure info: `{reason, error | nil, created_at}` where
+  #   * reason is :complete | :errored | :lifecycle
+  #   * error is the `{type, message, frames}` triple for :errored, nil
+  #     otherwise (callers derive it from the execution's result on
+  #     :lifecycle)
   def get_stream_closure(db, execution_id, sequence) do
     case query_one(
            db,
-           "SELECT error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND sequence = ?2",
+           "SELECT reason, error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND sequence = ?2",
            {execution_id, sequence}
          ) do
       {:ok, nil} ->
         {:ok, nil}
 
-      {:ok, {nil, created_at}} ->
-        {:ok, {nil, created_at}}
+      {:ok, {reason_int, nil, created_at}} ->
+        {:ok, {reason_from_int(reason_int), nil, created_at}}
 
-      {:ok, {error_id, created_at}} ->
+      {:ok, {reason_int, error_id, created_at}} ->
         {:ok, error} = Errors.get_by_id(db, error_id)
-        {:ok, {error, created_at}}
+        {:ok, {reason_from_int(reason_int), error, created_at}}
     end
   end
 
@@ -211,15 +236,17 @@ defmodule Coflux.Orchestration.Streams do
   end
 
   # Returns one row per stream owned by `execution_id`:
-  # `{sequence, created_at, closed_at | nil, error | nil}` where error, when
-  # present, is a `{type, message, frames}` triple. Used when populating the
-  # topic state for a run — lets the UI render streams and their state in
-  # one query.
+  # `{sequence, created_at, closed_at | nil, reason | nil, error | nil}`.
+  #   * reason is :complete | :errored | :lifecycle when closed, nil when open
+  #   * error is the stored `{type, message, frames}` triple for :errored
+  #     closures only — callers that need to surface an error for a
+  #     :lifecycle closure derive it from the execution's result.
+  # Used when populating the topic state for a run.
   def get_streams_with_closures_for_execution(db, execution_id) do
     case query(
            db,
            """
-           SELECT s.sequence, s.created_at, c.created_at, c.error_id
+           SELECT s.sequence, s.created_at, c.created_at, c.reason, c.error_id
            FROM streams AS s
            LEFT JOIN stream_closures AS c
              ON c.execution_id = s.execution_id AND c.sequence = s.sequence
@@ -231,15 +258,15 @@ defmodule Coflux.Orchestration.Streams do
       {:ok, rows} ->
         streams =
           Enum.map(rows, fn
-            {sequence, created_at, nil, nil} ->
-              {sequence, created_at, nil, nil}
+            {sequence, created_at, nil, nil, nil} ->
+              {sequence, created_at, nil, nil, nil}
 
-            {sequence, created_at, closed_at, nil} ->
-              {sequence, created_at, closed_at, nil}
+            {sequence, created_at, closed_at, reason_int, nil} ->
+              {sequence, created_at, closed_at, reason_from_int(reason_int), nil}
 
-            {sequence, created_at, closed_at, error_id} ->
+            {sequence, created_at, closed_at, reason_int, error_id} ->
               {:ok, error} = Errors.get_by_id(db, error_id)
-              {sequence, created_at, closed_at, error}
+              {sequence, created_at, closed_at, reason_from_int(reason_int), error}
           end)
 
         {:ok, streams}

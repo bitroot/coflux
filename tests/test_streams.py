@@ -314,7 +314,55 @@ def test_multiple_subscribers_get_independent_delivery(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         ctx.result(prod_resp["runId"])
 
-        # Subscriber A
+        # Each consumer picks its own subscription id locally; they only
+        # need to be unique within each consumer execution. Use different
+        # values here so we'd also catch any stale cross-consumer routing.
+        a_resp = ctx.submit("test", "consumer")
+        a_ex = ctx.executor.next_execute()
+        a_ex.conn.stream_subscribe(
+            a_ex.execution_id,
+            subscription_id=7,
+            producer_execution_id=prod_ex.execution_id,
+            sequence=0,
+        )
+
+        b_resp = ctx.submit("test", "consumer")
+        b_ex = ctx.executor.next_execute()
+        b_ex.conn.stream_subscribe(
+            b_ex.execution_id,
+            subscription_id=42,
+            producer_execution_id=prod_ex.execution_id,
+            sequence=0,
+        )
+
+        a_items, _ = a_ex.conn.drain_stream(subscription_id=7)
+        b_items, _ = b_ex.conn.drain_stream(subscription_id=42)
+        a_ex.conn.complete(a_ex.execution_id)
+        b_ex.conn.complete(b_ex.execution_id)
+
+        assert [item[1]["value"] for item in a_items] == [0, 1, 2]
+        assert [item[1]["value"] for item in b_items] == [0, 1, 2]
+
+
+def test_subscription_ids_can_collide_across_consumers(worker):
+    """Two different consumer executions can each allocate the same
+    subscription id locally — the server scopes its routing map by
+    consumer_execution_id, so items for each consumer's subscription
+    reach the right executor.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        for i in range(3):
+            prod_ex.conn.stream_append(prod_ex.execution_id, 0, i, f"v{i}")
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+        # Both consumers use subscription_id=1 — they must not collide.
         a_resp = ctx.submit("test", "consumer")
         a_ex = ctx.executor.next_execute()
         a_ex.conn.stream_subscribe(
@@ -324,7 +372,6 @@ def test_multiple_subscribers_get_independent_delivery(worker):
             sequence=0,
         )
 
-        # Subscriber B
         b_resp = ctx.submit("test", "consumer")
         b_ex = ctx.executor.next_execute()
         b_ex.conn.stream_subscribe(
@@ -334,13 +381,55 @@ def test_multiple_subscribers_get_independent_delivery(worker):
             sequence=0,
         )
 
-        a_items, _ = a_ex.conn.drain_stream(subscription_id=1)
-        b_items, _ = b_ex.conn.drain_stream(subscription_id=1)
+        a_items, a_closed = a_ex.conn.drain_stream(subscription_id=1)
+        b_items, b_closed = b_ex.conn.drain_stream(subscription_id=1)
         a_ex.conn.complete(a_ex.execution_id)
         b_ex.conn.complete(b_ex.execution_id)
 
-        assert [item[1]["value"] for item in a_items] == [0, 1, 2]
-        assert [item[1]["value"] for item in b_items] == [0, 1, 2]
+        assert [item[1]["value"] for item in a_items] == ["v0", "v1", "v2"]
+        assert [item[1]["value"] for item in b_items] == ["v0", "v1", "v2"]
+        assert a_closed.get("error") is None
+        assert b_closed.get("error") is None
+
+
+def test_consumer_termination_drops_subscription(worker):
+    """When a consumer's notify_terminated arrives, the server must drop
+    its stream subscriptions so subsequent producer appends don't try to
+    route to a gone consumer.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            sequence=0,
+        )
+
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "before")
+        first = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=3)
+        assert first["items"][0][1]["value"] == "before"
+
+        # Consumer finishes without explicit unsubscribe — notify_terminated
+        # from the session should drop the subscription on the server side.
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(cons_resp["runId"])
+
+        # Producer keeps appending; these should not cause the server to
+        # error trying to route to the dead consumer. The producer finishes
+        # cleanly — the assertion is that the server doesn't crash.
+        for i in range(1, 5):
+            prod_ex.conn.stream_append(prod_ex.execution_id, 0, i, i)
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
 
 
 def test_slice_with_stop_closes_early(worker):

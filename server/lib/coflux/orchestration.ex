@@ -218,8 +218,11 @@ defmodule Coflux.Orchestration do
     )
   end
 
-  def unsubscribe_stream(project_id, session_id, subscription_id) do
-    call_server(project_id, {:unsubscribe_stream, session_id, subscription_id})
+  def unsubscribe_stream(project_id, session_id, consumer_execution_id, subscription_id) do
+    call_server(
+      project_id,
+      {:unsubscribe_stream, session_id, consumer_execution_id, subscription_id}
+    )
   end
 
   def select(

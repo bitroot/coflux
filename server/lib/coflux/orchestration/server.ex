@@ -119,17 +119,22 @@ defmodule Coflux.Orchestration.Server do
 
               # Active stream subscriptions — in-memory, session-scoped.
               # A consumer adapter opens a subscription by sending stream_subscribe
-              # with a session-unique subscription_id; we push items (stream_items
-              # command) as they arrive on the producer side, and a terminal
-              # stream_closed command when the stream ends. Dropped when the
-              # session disconnects, when the consumer unsubscribes, or when the
-              # stream closes.
+              # with a subscription_id unique within that consumer's adapter
+              # process; we push items (stream_items command) as they arrive on
+              # the producer side, and a terminal stream_closed command when the
+              # stream ends. Dropped when the session disconnects, when the
+              # consumer unsubscribes, when the consumer execution terminates,
+              # or when the stream closes.
               #
-              # stream_subscriptions: {session_id, subscription_id} -> %{
-              #     consumer_execution_id, producer_execution_id, sequence,
-              #     cursor, filter}
+              # The key includes consumer_execution_id so concurrent consumer
+              # adapters (each starting subscription counters from 0) can't
+              # collide.
+              #
+              # stream_subscriptions: {consumer_execution_id, subscription_id} ->
+              #     %{consumer_execution_external_id, producer_execution_id,
+              #       sequence, cursor, filter}
               # stream_subscribers: {producer_execution_id, sequence} -> MapSet of
-              #     {session_id, subscription_id}
+              #     {consumer_execution_id, subscription_id}
               stream_subscriptions: %{},
               stream_subscribers: %{}
   end
@@ -1760,7 +1765,9 @@ defmodule Coflux.Orchestration.Server do
         state =
           case Map.fetch(state.execution_ids, ext_id) do
             {:ok, execution_id} ->
-              complete_execution(state, execution_id)
+              state
+              |> complete_execution(execution_id)
+              |> drop_execution_subscriptions(execution_id)
 
             :error ->
               state
@@ -1873,7 +1880,13 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:close_stream, execution_external_id, sequence, error}, _from, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        case Streams.close_stream(state.db, execution_id, sequence, error) do
+        spec =
+          case error do
+            nil -> :complete
+            {type, message, frames} -> {:errored, type, message, frames}
+          end
+
+        case Streams.close_stream(state.db, execution_id, sequence, spec) do
           {:ok, closed_at} ->
             state =
               state
@@ -1906,7 +1919,7 @@ defmodule Coflux.Orchestration.Server do
         {:error, :not_found} -> {:error, :producer_not_found}
       end
 
-    with {:ok, session_id} <-
+    with {:ok, _session_id} <-
            Map.fetch(state.session_ids, session_external_id)
            |> ok_or(:session_not_found),
          {:ok, consumer_execution_id} <-
@@ -1914,10 +1927,9 @@ defmodule Coflux.Orchestration.Server do
            |> ok_or(:consumer_not_found),
          {:ok, producer_execution_id} <- producer_result,
          {:ok, true} <- Streams.exists?(state.db, producer_execution_id, sequence),
-         key = {session_id, subscription_id},
+         key = {consumer_execution_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
       subscription = %{
-        consumer_execution_id: consumer_execution_id,
         consumer_execution_external_id: consumer_execution_external_id,
         producer_execution_id: producer_execution_id,
         sequence: sequence,
@@ -1939,8 +1951,8 @@ defmodule Coflux.Orchestration.Server do
 
       # Push any items already in the log that match the filter, then (if
       # the stream has already closed) the terminal close record.
-      state = push_backlog(state, session_id, subscription_id)
-      state = maybe_push_closure_if_closed(state, session_id, subscription_id)
+      state = push_backlog(state, key)
+      state = maybe_push_closure_if_closed(state, key)
 
       {:reply, :ok, state}
     else
@@ -1950,11 +1962,17 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:unsubscribe_stream, session_external_id, subscription_id}, _from, state) do
-    case Map.fetch(state.session_ids, session_external_id) do
-      {:ok, session_id} ->
-        {:reply, :ok, drop_subscription(state, {session_id, subscription_id})}
-
+  def handle_call(
+        {:unsubscribe_stream, session_external_id, consumer_execution_external_id,
+         subscription_id},
+        _from,
+        state
+      ) do
+    with {:ok, _session_id} <- Map.fetch(state.session_ids, session_external_id),
+         {:ok, consumer_execution_id} <-
+           Map.fetch(state.execution_ids, consumer_execution_external_id) do
+      {:reply, :ok, drop_subscription(state, {consumer_execution_id, subscription_id})}
+    else
       :error ->
         {:reply, :ok, state}
     end
@@ -3627,9 +3645,9 @@ defmodule Coflux.Orchestration.Server do
 
     # Close any open streams so iterating consumers stop waiting. Any
     # subsequent `append_item` from the producer will fail with `:closed`,
-    # signalling the worker to stop. Push :cancelled so consumers raise
-    # ExecutionCancelled on iteration.
-    state = close_open_streams(state, execution_id, :cancelled)
+    # signalling the worker to stop. Recorded as :lifecycle — consumers
+    # derive the ExecutionCancelled error from the recorded result.
+    state = close_open_streams(state, execution_id)
 
     state =
       case Runs.get_execution_key(state.db, execution_id) do
@@ -4977,7 +4995,7 @@ defmodule Coflux.Orchestration.Server do
                    )
                  )
 
-               {:ok, streams} = Streams.get_streams_with_closures_for_execution(db, execution_id)
+               streams = streams_with_resolved_errors(db, execution_id)
 
                {attempt,
                 %{
@@ -5798,9 +5816,11 @@ defmodule Coflux.Orchestration.Server do
         case Results.has_result?(state.db, execution_id) do
           {:ok, true} ->
             # Close any streams left open by the producer. Generator tasks
-            # normally close their streams explicitly; this is the backstop
-            # for ones that didn't.
-            state = close_open_streams(state, execution_id, :complete)
+            # normally close their streams explicitly; this is the backstop.
+            # We record a :lifecycle closure — the error surfaced to
+            # consumers is derived from the execution's recorded result
+            # rather than stored separately.
+            state = close_open_streams(state, execution_id)
 
             case Results.record_completion(state.db, execution_id) do
               {:ok, completion_at} ->
@@ -5829,9 +5849,9 @@ defmodule Coflux.Orchestration.Server do
       decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
 
     # Streams that had been appended to before the worker died need to be
-    # closed so consumers don't wait forever. Push :crashed so consumers
-    # raise ExecutionCrashed on iteration.
-    state = close_open_streams(state, execution_id, :crashed)
+    # closed so consumers don't wait forever. Recorded as :lifecycle —
+    # consumers derive the specific error from the execution's outcome.
+    state = close_open_streams(state, execution_id)
 
     case Results.record_completion(state.db, execution_id) do
       {:ok, completion_at} ->
@@ -5849,28 +5869,18 @@ defmodule Coflux.Orchestration.Server do
 
   # Closes every stream owned by `execution_id` that doesn't yet have a
   # closure row, and pushes a `stream_closed` notification to every active
-  # subscriber. If a generator closed its stream with an explicit error,
-  # that closure already exists and is left untouched.
+  # subscriber. Streams already closed by the producer (clean or errored)
+  # are left untouched.
   #
-  # ``reason`` annotates the closure for the consumer's benefit. It's stored
-  # in the DB closure row as nil (execution disposition is the source of
-  # truth), but pushed synchronously to subscribers so they can raise the
-  # right exception on iteration:
-  #   * :complete  – no error, StopIteration on next()
-  #   * :cancelled – ExecutionCancelled on next()
-  #   * :crashed   – ExecutionCrashed on next()
-  defp close_open_streams(state, execution_id, reason) do
+  # The closure is recorded with reason :lifecycle — no error is stored
+  # on the closure row. Consumers that need to surface an error derive
+  # it from the execution's recorded result (see derive_lifecycle_error).
+  defp close_open_streams(state, execution_id) do
     {:ok, sequences} = Streams.get_open_streams_for_execution(state.db, execution_id)
-
-    push_error =
-      case reason do
-        :complete -> nil
-        :cancelled -> {"Coflux.ExecutionCancelled", "execution cancelled", []}
-        :crashed -> {"Coflux.ExecutionCrashed", "worker terminated", []}
-      end
+    push_error = derive_lifecycle_error(state.db, execution_id)
 
     Enum.reduce(sequences, state, fn sequence, state ->
-      case Streams.close_stream(state.db, execution_id, sequence) do
+      case Streams.close_stream(state.db, execution_id, sequence, :lifecycle) do
         {:ok, closed_at} ->
           state
           |> push_stream_closed(execution_id, sequence, push_error)
@@ -5880,6 +5890,55 @@ defmodule Coflux.Orchestration.Server do
           state
       end
     end)
+  end
+
+  # Returns the streams list for `execution_id` with :lifecycle closures'
+  # errors resolved from the execution's recorded result. Shape:
+  # `{sequence, opened_at, closed_at | nil, error | nil}` — the same
+  # shape the topic module expects (reason is collapsed into error/nil
+  # once we've derived it).
+  defp streams_with_resolved_errors(db, execution_id) do
+    {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
+
+    Enum.map(rows, fn
+      {sequence, opened_at, nil, nil, nil} ->
+        {sequence, opened_at, nil, nil}
+
+      {sequence, opened_at, closed_at, :lifecycle, _} ->
+        {sequence, opened_at, closed_at, derive_lifecycle_error(db, execution_id)}
+
+      {sequence, opened_at, closed_at, _reason, error} ->
+        {sequence, opened_at, closed_at, error}
+    end)
+  end
+
+  # Build a {type, message, frames} triple describing why a lifecycle
+  # closure happened, by looking at the execution's recorded result. Used
+  # both when pushing live closures to subscribers and when late
+  # subscribers attach to an already-closed stream. Returns nil if the
+  # execution has no result yet (shouldn't happen in practice — lifecycle
+  # closures are driven by complete_execution which only runs after a
+  # result is recorded).
+  defp derive_lifecycle_error(db, execution_id) do
+    case Results.get_result(db, execution_id) do
+      {:ok, {{:error, type, message, frames, _, _}, _, _, _}} ->
+        {type, message, frames}
+
+      {:ok, {:cancelled, _, _, _}} ->
+        {"Coflux.ExecutionCancelled", "execution cancelled", []}
+
+      {:ok, {{:abandoned, _}, _, _, _}} ->
+        {"Coflux.ExecutionAbandoned", "execution abandoned", []}
+
+      {:ok, {{:crashed, _}, _, _, _}} ->
+        {"Coflux.ExecutionCrashed", "worker terminated", []}
+
+      {:ok, {{:timeout, _}, _, _, _}} ->
+        {"Coflux.ExecutionTimeout", "execution timed out", []}
+
+      _ ->
+        nil
+    end
   end
 
   defp fire_completion_notification(state, execution_id, completion_at) do
@@ -7235,67 +7294,113 @@ defmodule Coflux.Orchestration.Server do
 
   defp filter_exhausted?(_filter, _cursor), do: false
 
-  # Send backlog items (those already in the DB) for a newly subscribed consumer.
-  defp push_backlog(state, session_id, subscription_id) do
-    key = {session_id, subscription_id}
+  # Per-fetch page size when draining backlog for a newly subscribed
+  # consumer. Keeps any single DB read bounded and lets us push each page
+  # to the session before loading the next.
+  @backlog_page_size 1024
+
+  # Send backlog items (those already in the DB) for a newly subscribed
+  # consumer. Pages the DB reads + session pushes so a very long stream
+  # doesn't materialise the entire tail in memory at once.
+  defp push_backlog(state, key) do
+    push_backlog_page(state, key)
+  end
+
+  defp push_backlog_page(state, key) do
     sub = Map.fetch!(state.stream_subscriptions, key)
 
-    # Conservative fetch cap: stream more in batches if needed on advance.
-    # For v1 (no flow control) we just drain the whole tail.
     {:ok, items} =
       Streams.get_stream_items(
         state.db,
         sub.producer_execution_id,
         sub.sequence,
         sub.cursor,
-        1_000_000
+        @backlog_page_size
       )
+
+    if items == [] do
+      state
+    else
+      state = push_backlog_items(state, key, sub, items)
+
+      # If the subscription was dropped (filter exhausted) or didn't
+      # advance (nothing in this page matched), stop. Otherwise keep
+      # paging until the tail empties.
+      case Map.fetch(state.stream_subscriptions, key) do
+        :error ->
+          state
+
+        {:ok, next_sub} ->
+          cond do
+            next_sub.cursor == sub.cursor -> state
+            length(items) < @backlog_page_size -> state
+            true -> push_backlog_page(state, key)
+          end
+      end
+    end
+  end
+
+  defp push_backlog_items(state, key, sub, items) do
+    {_consumer_execution_id, subscription_id} = key
 
     filtered =
       items
       |> Enum.filter(fn {position, _value, _at} -> filter_matches?(sub.filter, position) end)
       |> Enum.take_while(fn {position, _, _} -> not filter_exhausted?(sub.filter, position) end)
 
-    if filtered == [] do
-      state
-    else
-      last_pos = elem(List.last(filtered), 0)
-      next_cursor = last_pos + 1
+    # Advance cursor past the page even if no items matched this filter —
+    # otherwise we'd re-fetch the same positions forever.
+    advance_to =
+      if filtered == [] do
+        elem(List.last(items), 0) + 1
+      else
+        elem(List.last(filtered), 0) + 1
+      end
 
-      # Values are already in internal form (from DB) — resolve refs to
-      # external IDs. Final JSON encoding happens in the WS handler.
-      resolved_items =
-        Enum.map(filtered, fn {position, value, _at} ->
-          [position, build_value(value, state.db)]
-        end)
+    state =
+      if filtered == [] do
+        state
+      else
+        resolved_items =
+          Enum.map(filtered, fn {position, value, _at} ->
+            [position, build_value(value, state.db)]
+          end)
 
-      state =
-        send_session(
+        send_to_consumer(
           state,
-          session_id,
+          sub,
           {:stream_items, sub.consumer_execution_external_id, subscription_id, resolved_items}
         )
-
-      state =
-        update_in(
-          state.stream_subscriptions[key],
-          &Map.put(&1, :cursor, next_cursor)
-        )
-
-      # If the filter is now exhausted (slice's stop reached), close the
-      # subscription synchronously — matches push_stream_item's behaviour.
-      # Without this, a consumer that subscribed after appends with a
-      # bounded filter would wait forever for a close that never comes.
-      if filter_exhausted?(sub.filter, next_cursor) do
-        state
-        |> send_session(
-          session_id,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
-        )
-        |> drop_subscription(key)
-      else
-        state
       end
+
+    state =
+      update_in(
+        state.stream_subscriptions[key],
+        &Map.put(&1, :cursor, advance_to)
+      )
+
+    # If the filter is now exhausted (slice's stop reached), close the
+    # subscription synchronously — matches push_stream_item's behaviour.
+    # Without this, a consumer that subscribed after appends with a
+    # bounded filter would wait forever for a close that never comes.
+    if filter_exhausted?(sub.filter, advance_to) do
+      state
+      |> send_to_consumer(
+        sub,
+        {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
+      )
+      |> drop_subscription(key)
+    else
+      state
+    end
+  end
+
+  # Resolve the consumer's current session and send, skipping if the
+  # execution is no longer live on any session (reconnect window, etc.).
+  defp send_to_consumer(state, sub, payload) do
+    case find_session_for_execution(state, sub.consumer_execution_external_id) do
+      {:ok, session_id} -> send_session(state, session_id, payload)
+      :error -> state
     end
   end
 
@@ -7305,7 +7410,7 @@ defmodule Coflux.Orchestration.Server do
       Map.get(state.stream_subscribers, {producer_execution_id, sequence}, MapSet.new())
 
     Enum.reduce(subscribers, state, fn key, state ->
-      {session_id, subscription_id} = key
+      {_consumer_execution_id, subscription_id} = key
       sub = Map.fetch!(state.stream_subscriptions, key)
 
       cond do
@@ -7324,9 +7429,9 @@ defmodule Coflux.Orchestration.Server do
           item = [position, resolved]
 
           state =
-            send_session(
+            send_to_consumer(
               state,
-              session_id,
+              sub,
               {:stream_items, sub.consumer_execution_external_id, subscription_id, [item]}
             )
 
@@ -7340,8 +7445,8 @@ defmodule Coflux.Orchestration.Server do
           # the subscription early — no more items will match.
           if filter_exhausted?(sub.filter, position + 1) do
             state
-            |> send_session(
-              session_id,
+            |> send_to_consumer(
+              sub,
               {:stream_closed, sub.consumer_execution_external_id, subscription_id, nil}
             )
             |> drop_subscription(key)
@@ -7358,56 +7463,68 @@ defmodule Coflux.Orchestration.Server do
     subscribers =
       Map.get(state.stream_subscribers, {producer_execution_id, sequence}, MapSet.new())
 
-    encoded_error =
-      case error do
-        nil -> nil
-        {type, message, _frames} -> %{"type" => type, "message" => message}
-      end
+    encoded_error = encode_stream_error(error)
 
     Enum.reduce(subscribers, state, fn key, state ->
-      {session_id, subscription_id} = key
+      {_consumer_execution_id, subscription_id} = key
       sub = Map.fetch!(state.stream_subscriptions, key)
 
       state
-      |> send_session(
-        session_id,
+      |> send_to_consumer(
+        sub,
         {:stream_closed, sub.consumer_execution_external_id, subscription_id, encoded_error}
       )
       |> drop_subscription(key)
     end)
   end
 
+  # Common wire encoding for stream_closed errors. Frames are included so
+  # consumers can reconstruct tracebacks for debuggability.
+  defp encode_stream_error(nil), do: nil
+
+  defp encode_stream_error({type, message, frames}) do
+    %{
+      "type" => type,
+      "message" => message,
+      "frames" =>
+        Enum.map(frames, fn {file, line, name, code} ->
+          [file, line, name, code]
+        end)
+    }
+  end
+
   # If a subscription attaches to an already-closed stream, emit closure now.
   # If push_backlog already closed the subscription (e.g., a bounded filter
   # was exhausted by the backlog itself), this is a no-op.
-  defp maybe_push_closure_if_closed(state, session_id, subscription_id) do
-    key = {session_id, subscription_id}
-
+  defp maybe_push_closure_if_closed(state, key) do
     case Map.fetch(state.stream_subscriptions, key) do
       :error ->
         state
 
       {:ok, sub} ->
-        do_maybe_push_closure(state, sub, session_id, subscription_id, key)
+        do_maybe_push_closure(state, sub, key)
     end
   end
 
-  defp do_maybe_push_closure(state, sub, session_id, subscription_id, key) do
+  defp do_maybe_push_closure(state, sub, key) do
+    {_consumer_execution_id, subscription_id} = key
+
     case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.sequence) do
       {:ok, nil} ->
         state
 
-      {:ok, {error, _closed_at}} ->
-        encoded_error =
-          case error do
-            nil -> nil
-            {type, message, _frames} -> %{"type" => type, "message" => message}
+      {:ok, {reason, error, _closed_at}} ->
+        resolved_error =
+          case reason do
+            :lifecycle -> derive_lifecycle_error(state.db, sub.producer_execution_id)
+            _ -> error
           end
 
         state
-        |> send_session(
-          session_id,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, encoded_error}
+        |> send_to_consumer(
+          sub,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id,
+           encode_stream_error(resolved_error)}
         )
         |> drop_subscription(key)
     end
@@ -7441,12 +7558,31 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # Drop every subscription owned by a disconnected session.
+  # Drop every subscription held by the disconnected session's executions.
+  # Called just before the session is removed, so we can read its live
+  # execution set directly.
   defp drop_session_subscriptions(state, session_id) do
+    session = Map.fetch!(state.sessions, session_id)
+
+    session.starting
+    |> MapSet.union(session.executing)
+    |> Enum.reduce(state, fn ext_id, state ->
+      case Map.fetch(state.execution_ids, ext_id) do
+        {:ok, execution_id} -> drop_execution_subscriptions(state, execution_id)
+        :error -> state
+      end
+    end)
+  end
+
+  # Drop every subscription owned by a terminated consumer execution so the
+  # server stops pushing items and the subscription map doesn't leak. Called
+  # from notify_terminated — by that point the consumer's generator iterator
+  # (and thus the subscription) is definitely gone.
+  defp drop_execution_subscriptions(state, consumer_execution_id) do
     keys =
       state.stream_subscriptions
       |> Map.keys()
-      |> Enum.filter(fn {sid, _} -> sid == session_id end)
+      |> Enum.filter(fn {cons_id, _sub_id} -> cons_id == consumer_execution_id end)
 
     Enum.reduce(keys, state, &drop_subscription(&2, &1))
   end
