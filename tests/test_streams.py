@@ -231,9 +231,8 @@ def test_subscribe_to_unknown_producer_closes_immediately(worker):
         _items, closed = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
 
-        err = closed.get("error")
-        assert err is not None
-        assert err["type"] == "Coflux.StreamNotFound"
+        assert closed.get("reason") == "producer_not_found"
+        assert closed.get("error") is None
 
 
 def test_topic_exposes_stream_state(worker):
@@ -270,9 +269,10 @@ def test_topic_exposes_stream_state(worker):
         assert streams["1"]["error"] == {"type": "RuntimeError", "message": "bad"}
 
 
-def test_cancellation_closes_streams_with_cancelled_error(worker):
+def test_cancellation_closes_streams_with_cancelled_reason(worker):
     """Cancel an execution mid-stream: the subscriber receives a closure
-    carrying the ExecutionCancelled error synthesised by close_open_streams.
+    carrying reason="cancelled" — no fabricated exception type, the
+    adapter maps the reason to its own idiom.
     """
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
@@ -297,9 +297,8 @@ def test_cancellation_closes_streams_with_cancelled_error(worker):
         cons_ex.conn.complete(cons_ex.execution_id)
 
         assert [item[1]["value"] for item in items] == ["before"]
-        err = closed.get("error")
-        assert err is not None
-        assert err["type"] == "Coflux.ExecutionCancelled"
+        assert closed.get("reason") == "cancelled"
+        assert closed.get("error") is None
 
 
 def test_multiple_subscribers_get_independent_delivery(worker):

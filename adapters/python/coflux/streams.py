@@ -29,7 +29,7 @@ from typing import Any, Iterator
 
 from . import protocol
 from .dispatcher import get_dispatcher
-from .errors import create_stream_error
+from .errors import raise_for_close
 from .serialization import deserialize_value, serialize_value
 from .state import get_context
 
@@ -346,12 +346,16 @@ class StreamDriver:
 # --- Consumer side ---
 
 
-# Sentinel pushed onto a subscriber's queue to signal close. Carries the
-# optional error dict ({"type": str, "message": str} or None).
+# Sentinel pushed onto a subscriber's queue to signal close. `reason`
+# is the semantic close reason (``"complete"`` / ``"errored"`` /
+# ``"cancelled"`` / ``"abandoned"`` / ``"crashed"`` / ``"timeout"`` /
+# ``"not_found"``). ``error`` is only populated when ``reason ==
+# "errored"`` — it's the producer's actual ``{type, message, frames}``.
 class _Closed:
-    __slots__ = ("error",)
+    __slots__ = ("reason", "error")
 
-    def __init__(self, error: dict[str, Any] | None) -> None:
+    def __init__(self, reason: str, error: dict[str, Any] | None) -> None:
+        self.reason = reason
         self.error = error
 
 
@@ -376,9 +380,9 @@ class _StreamIterator(Iterator[Any]):
         for _sequence, value in items:
             self._queue.put(value)
 
-    def on_closed(self, error: dict[str, Any] | None) -> None:
+    def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         """Called by the registry when the stream closes."""
-        self._queue.put(_Closed(error))
+        self._queue.put(_Closed(reason, error))
 
     def __iter__(self) -> "_StreamIterator":
         return self
@@ -400,8 +404,7 @@ class _StreamIterator(Iterator[Any]):
                     )
                 except Exception:
                     pass
-            if item.error is not None:
-                raise create_stream_error(item.error)
+            raise_for_close(item.reason, item.error)
             raise StopIteration
         return deserialize_value(item)
 
@@ -430,16 +433,13 @@ class StreamRegistry:
         self._installed = True
 
     def _on_dispatcher_closed(self) -> None:
-        """Wake all active iterators with a connection-closed error."""
-        error = {
-            "type": "Coflux.ExecutionAbandoned",
-            "message": "connection closed",
-            "frames": [],
-        }
+        """Wake all active iterators — connection to the server is gone
+        so no close message is going to arrive. Treat as ``abandoned``
+        (we don't know anything more specific from this side)."""
         with self._lock:
             iterators = list(self._iterators.values())
         for it in iterators:
-            it.on_closed(error)
+            it.on_closed("abandoned", None)
 
     def allocate(self, execution_id: str) -> tuple[int, _StreamIterator]:
         """Claim a subscription id and iterator."""
@@ -465,11 +465,12 @@ class StreamRegistry:
 
     def _on_closed(self, params: dict[str, Any]) -> None:
         subscription_id = params.get("subscription_id")
+        reason = params.get("reason") or "complete"
         error = params.get("error")
         with self._lock:
             it = self._iterators.get(subscription_id)
         if it is not None:
-            it.on_closed(error)
+            it.on_closed(reason, error)
 
 
 _registry_instance: StreamRegistry | None = None

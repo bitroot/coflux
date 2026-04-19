@@ -1,23 +1,110 @@
--- Add completions table — a pure termination marker. The existing results
--- table continues to hold the disposition (including any successor), written
--- at result-arrival time. A completions row is written separately at
--- notify_terminated time, so its timestamp reflects when the worker's
--- process actually finished shutting down.
+-- Split the old `results` table into two:
 --
--- This enables streaming support: a results row can be written with stream
--- handles while the process keeps running, with completions written later
--- when streams have drained.
+--   * `results`      — pure payload: value_id XOR error_id (+ retryable flag
+--                       for errors). Written by the worker when the task body
+--                       produces a value/error.
+--   * `completions`  — terminal-state marker for the execution: kind (with
+--                       a broader vocabulary than results' old `type`),
+--                       optional successor (retry / suspended / recurred /
+--                       deferred / cached / spawned), and created_by (which
+--                       moved from results).
+--
+-- The lifecycle primary is the completion: an execution is "running" iff no
+-- completions row exists. A value result is available for downstream
+-- resolution as soon as it's written (before completion, so consumers don't
+-- block on stream drain); an error result can't resolve until the completion
+-- tells us whether there's a retry successor.
 
-CREATE TABLE completions (
+-- The new results table. Payload only. `value_id` and `error_id` are
+-- mutually exclusive, enforced by CHECK. `retryable` is the `when`-callback
+-- result from the worker and only meaningful for errors.
+CREATE TABLE results_new (
   execution_id INTEGER PRIMARY KEY,
+  value_id INTEGER,
+  error_id INTEGER,
+  retryable INTEGER,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT,
+  FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
+  CHECK ((value_id IS NULL) != (error_id IS NULL))
 ) STRICT;
 
--- Every existing results row represents a terminated execution, so each
--- produces a completions row with the same timestamp.
-INSERT INTO completions (execution_id, created_at)
-  SELECT execution_id, created_at FROM results;
+-- The completions table. Terminal state for the execution. `kind` values:
+--   0 = succeeded   — value result recorded, process ended cleanly
+--   1 = errored     — error result recorded, process ended cleanly
+--   2 = abandoned   — session expired before notify_terminated
+--   3 = crashed     — notify_terminated without prior result
+--   4 = timeout     — execution hit its timeout
+--   5 = cancelled   — user cancelled (may or may not have a result row)
+--   6 = suspended   — body called suspend; successor resumes later
+--   7 = recurred    — recurrent execution scheduled its next run
+--   8 = deferred    — execution deferred to another (memoisation / defer)
+--   9 = cached      — execution resolved to an existing cache hit
+--  10 = spawned     — execution spawned a continuation
+--
+-- `successor_id` points at an execution in the same epoch; used for retry
+-- chains and in-flight handoffs. `successor_ref_id` points at an
+-- `execution_refs` row and is used post-epoch-rotation, when the target
+-- integer id is no longer resolvable in the active DB. At most one is set.
+CREATE TABLE completions (
+  execution_id INTEGER PRIMARY KEY,
+  kind INTEGER NOT NULL,
+  successor_id INTEGER,
+  successor_ref_id INTEGER,
+  created_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES principals ON DELETE SET NULL,
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (successor_id) REFERENCES executions ON DELETE RESTRICT,
+  FOREIGN KEY (successor_ref_id) REFERENCES execution_refs ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX idx_completions_successor_id ON completions(successor_id);
+CREATE INDEX idx_completions_successor_ref_id ON completions(successor_ref_id);
+
+-- Migrate completions first (one row per existing results row). Map the old
+-- `type` enum onto the new `kind` enum. created_by moves from results to
+-- completions.
+INSERT INTO completions (execution_id, kind, successor_id, successor_ref_id, created_at, created_by)
+  SELECT
+    execution_id,
+    CASE type
+      WHEN 0 THEN 1   -- errored
+      WHEN 1 THEN 0   -- succeeded
+      WHEN 2 THEN 2   -- abandoned
+      WHEN 3 THEN 5   -- cancelled
+      WHEN 4 THEN 8   -- deferred
+      WHEN 5 THEN 9   -- cached
+      WHEN 6 THEN 6   -- suspended
+      WHEN 7 THEN 10  -- spawned
+      WHEN 8 THEN 4   -- timeout
+      WHEN 9 THEN 7   -- recurred
+    END,
+    successor_id,
+    successor_ref_id,
+    created_at,
+    created_by
+  FROM results;
+
+-- Migrate payloads into new results. Only rows that actually carry a value
+-- or error get copied — in-flight deferred/cached/spawned (types 4/5/7
+-- without a value_id) don't get a results row. `retryable` is cleared for
+-- non-error rows to keep the new CHECK/intent tight.
+INSERT INTO results_new (execution_id, value_id, error_id, retryable, created_at)
+  SELECT
+    execution_id,
+    value_id,
+    error_id,
+    CASE WHEN error_id IS NOT NULL THEN retryable ELSE NULL END,
+    created_at
+  FROM results
+  WHERE error_id IS NOT NULL OR value_id IS NOT NULL;
+
+-- Replace the old results table.
+DROP INDEX idx_results_successor_id;
+DROP INDEX idx_results_successor_ref_id;
+DROP TABLE results;
+ALTER TABLE results_new RENAME TO results;
 
 -- Streams — ordered, append-only sequences of values produced by an
 -- execution. Each stream is identified by (execution_id, index), where
@@ -68,7 +155,7 @@ CREATE TABLE stream_items (
 --   1 = errored    — producer raised an error (stored in errors via error_id)
 --   2 = lifecycle  — closed implicitly because the producer execution ended
 --                    (cancel/crash/abandon/error). The specific error is
---                    derived on read by looking up the execution's result,
+--                    derived on read by looking up the execution's completion,
 --                    so we don't duplicate that state here.
 CREATE TABLE stream_closures (
   execution_id INTEGER NOT NULL,

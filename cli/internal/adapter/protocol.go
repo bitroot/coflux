@@ -323,10 +323,18 @@ type StreamItemsParams struct {
 }
 
 // StreamClosedParams for stream_closed notification pushed CLI → adapter.
-// Error is nil for clean close or a {type, message} dict for errored close.
+//
+// `Reason` is a semantic string ("complete" / "errored" / "cancelled" /
+// "abandoned" / "crashed" / "timeout" / "not_found" / ...). The adapter
+// maps it to whatever exception/return value is idiomatic in the target
+// language — the CLI doesn't fabricate types.
+//
+// `Error` is non-nil only when `Reason == "errored"`, carrying the
+// producer's actual `{type, message, frames}`.
 type StreamClosedParams struct {
 	ExecutionID    string         `json:"execution_id"`
 	SubscriptionID int            `json:"subscription_id"`
+	Reason         string         `json:"reason"`
 	Error          map[string]any `json:"error,omitempty"`
 }
 

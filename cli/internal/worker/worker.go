@@ -693,9 +693,14 @@ func (w *Worker) handleStreamItems(params []any) error {
 }
 
 // handleStreamClosed forwards a server-pushed stream-closed notification.
-// Params: [execution_id, subscription_id, error_or_null].
+// Params: [execution_id, subscription_id, reason, error_or_null].
+//
+// `reason` is a string like "complete" / "errored" / "cancelled" /
+// "abandoned" / "crashed" / "timeout" / "not_found" — the adapter
+// decides how to represent each in its language idiom rather than the
+// server fabricating exception types.
 func (w *Worker) handleStreamClosed(params []any) error {
-	if len(params) < 3 {
+	if len(params) < 4 {
 		return fmt.Errorf("stream_closed: insufficient params")
 	}
 	executionID, ok := params[0].(string)
@@ -706,11 +711,13 @@ func (w *Worker) handleStreamClosed(params []any) error {
 	if !ok {
 		return fmt.Errorf("stream_closed: subscription_id is not a number (got %T)", params[1])
 	}
-	errField := params[2]
+	reason, _ := params[2].(string)
+	errField := params[3]
 
 	forwarded := map[string]any{
 		"execution_id":    executionID,
 		"subscription_id": int(subscriptionID),
+		"reason":          reason,
 	}
 	if errField != nil {
 		forwarded["error"] = errField
@@ -1728,6 +1735,15 @@ func (w *Worker) trySendResult(executionID string) {
 // Should only be called after the result has been queued to sendCh (either
 // via the write callback chain or from flushPending), so that FIFO ordering
 // ensures the result message precedes notify_terminated.
+//
+// The execution entry stays in w.executions (with pendingTerminated = true)
+// even after a successful send — "successful" here means the local write
+// didn't error, which doesn't guarantee delivery when the underlying TCP
+// connection is failing silently. The authoritative signal that the
+// server received the termination is the next session message: if the
+// execution isn't in the server's known set, handleSession drops it.
+// Until then, a reconnect triggers flushPending which re-sends both the
+// buffered result (via trySendResult) and this termination.
 func (w *Worker) trySendTerminated(executionID string) {
 	conn := w.getConn()
 	if conn == nil || !conn.IsConnected() {
@@ -1746,10 +1762,6 @@ func (w *Worker) trySendTerminated(executionID string) {
 		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
 		return
 	}
-
-	w.mu.Lock()
-	delete(w.executions, executionID)
-	w.mu.Unlock()
 }
 
 // NotifyTerminated is called by the pool after an execution's process has exited.
@@ -1809,8 +1821,6 @@ func (w *Worker) handleSession(executionIDs []string) {
 		known[id] = struct{}{}
 	}
 
-	// Prune executions not in the server's list (result was delivered, or
-	// server no longer cares about them).
 	w.mu.Lock()
 	for id := range w.executions {
 		if _, ok := known[id]; !ok {

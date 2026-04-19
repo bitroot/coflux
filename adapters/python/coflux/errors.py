@@ -163,46 +163,45 @@ def create_execution_error(error_type: str, error_message: str) -> ExecutionErro
         )
 
 
-# --- Stream error helpers ---
-
-# Server synthesises these types when closing streams due to the producer's
-# disposition (cancel, crash, etc.). The wire carries them as regular
-# {type, message, frames} errors; we route them here to specific
-# ExecutionTerminated subclasses rather than generic ExecutionError.
-_STREAM_SYNTHETIC_ERRORS: dict[str, type[Exception]] = {
-    "Coflux.ExecutionCancelled": ExecutionCancelled,
-    "Coflux.ExecutionAbandoned": ExecutionAbandoned,
-    "Coflux.ExecutionCrashed": ExecutionCrashed,
-    "Coflux.ExecutionErrored": ExecutionError,
-}
+# --- Stream close handling ---
 
 
-def create_stream_error(error: dict) -> Exception:
-    """Build an exception for a stream closure.
+def raise_for_close(reason: str, error: dict | None) -> None:
+    """Raise the appropriate exception for a stream-closed event.
 
-    Server-synthesised types (``Coflux.Execution*``) map to
-    ``ExecutionTerminated`` subclasses. Real user exceptions (raised by the
-    producer's generator) go through ``create_execution_error`` and get
-    the producer's frames attached as ``.frames`` for debuggability.
+    The server carries a semantic reason atom rather than a fabricated
+    exception type; we map it to the Python exception idiomatic for each
+    case. Only ``"errored"`` carries an error dict — the producer's
+    actual exception; other reasons raise a corresponding
+    ``ExecutionTerminated`` subclass with no further payload.
     """
-    error_type = error.get("type", "")
-    error_message = error.get("message", "")
-    frames = error.get("frames") or []
+    if reason == "complete":
+        return
 
-    synthetic = _STREAM_SYNTHETIC_ERRORS.get(error_type)
-    if synthetic is ExecutionError:
-        exc = ExecutionError(
-            error_message,
-            error_type=error_type,
-            error_message=error_message,
-        )
-    elif synthetic is not None:
-        exc = synthetic()
-    else:
+    if reason == "errored" and error is not None:
+        error_type = error.get("type", "")
+        error_message = error.get("message", "")
+        frames = error.get("frames") or []
         exc = create_execution_error(error_type, error_message)
+        if frames:
+            exc.frames = frames
+        raise exc
 
-    if frames:
-        # Frames are [file, line, name, code] lists — the same wire shape
-        # used by execution errors. Expose on the exception for inspection.
-        exc.frames = frames
-    return exc
+    if reason == "cancelled":
+        raise ExecutionCancelled()
+    if reason == "abandoned":
+        raise ExecutionAbandoned()
+    if reason == "crashed":
+        raise ExecutionCrashed()
+    if reason == "timeout":
+        raise ExecutionTimeout()
+
+    # Anything else (e.g. "not_found", "already_subscribed", or an
+    # unknown future reason) is a subscription problem rather than a
+    # producer-terminal event — surface as a generic ExecutionError so
+    # the consumer is at least aware the stream ended abnormally.
+    raise ExecutionError(
+        reason,
+        error_type="Coflux.StreamClosed",
+        error_message=reason,
+    )

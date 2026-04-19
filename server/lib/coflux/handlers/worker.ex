@@ -359,14 +359,17 @@ defmodule Coflux.Handlers.Worker do
               {[], state}
 
             # If the stream doesn't exist yet (or producer vanished), push an
-            # immediate close so the consumer doesn't wait forever.
+            # immediate close so the consumer doesn't wait forever. Carry
+            # the reason atom verbatim — consumers decide how to surface
+            # "not_found" / "already_subscribed" in their own idiom.
             {:error, reason}
             when reason in [:stream_not_found, :producer_not_found, :already_subscribed] ->
               {[
                  command_message("stream_closed", [
                    consumer_execution_id,
                    subscription_id,
-                   %{"type" => "Coflux.StreamNotFound", "message" => Atom.to_string(reason)}
+                   Atom.to_string(reason),
+                   nil
                  ])
                ], state}
 
@@ -650,8 +653,23 @@ defmodule Coflux.Handlers.Worker do
     {[command_message("stream_demand", [execution_external_id, index, n])], state}
   end
 
-  def websocket_info({:stream_closed, execution_external_id, subscription_id, error}, state) do
-    {[command_message("stream_closed", [execution_external_id, subscription_id, error])], state}
+  def websocket_info(
+        {:stream_closed, execution_external_id, subscription_id, reason, error},
+        state
+      ) do
+    # `reason` is a string ("complete" / "errored" / "cancelled" /
+    # "abandoned" / "crashed" / "timeout"); `error` is non-nil only for
+    # "errored" — the producer's actual `{type, message, frames}`. Other
+    # reasons travel as the string alone; the consumer adapter decides
+    # how to represent them.
+    {[
+       command_message("stream_closed", [
+         execution_external_id,
+         subscription_id,
+         reason,
+         error
+       ])
+     ], state}
   end
 
   def websocket_info(:stop, state) do

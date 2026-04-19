@@ -1,5 +1,5 @@
 defmodule Coflux.Orchestration.Runs do
-  alias Coflux.Orchestration.{Models, Values, TagSets, CacheConfigs, Utils}
+  alias Coflux.Orchestration.{Models, Results, Values, TagSets, CacheConfigs, Utils}
 
   import Coflux.Store
 
@@ -507,10 +507,10 @@ defmodule Coflux.Orchestration.Runs do
            """
            SELECT e.id
            FROM executions AS e
-           LEFT JOIN results AS r ON r.execution_id = e.id
+           LEFT JOIN completions AS c ON c.execution_id = e.id
            WHERE e.step_id = ?1
              AND e.workspace_id = ?2
-             AND r.execution_id IS NULL
+             AND c.execution_id IS NULL
            """,
            {step_id, workspace_id}
          ) do
@@ -650,8 +650,13 @@ defmodule Coflux.Orchestration.Runs do
       INNER JOIN steps AS s ON s.id = e.step_id
       INNER JOIN runs AS run ON run.id = s.run_id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
-      LEFT JOIN results AS r ON r.execution_id = e.id
-      WHERE a.created_at IS NULL AND r.created_at IS NULL
+      LEFT JOIN completions AS c ON c.execution_id = e.id
+      -- Unassigned = no worker has picked it up AND no terminal state has
+      -- been recorded. Server-initiated resolutions (deferred / cached /
+      -- cancelled) write only a completions row, so filtering on
+      -- completions (rather than results) is what stops the scheduler from
+      -- re-picking them.
+      WHERE a.created_at IS NULL AND c.created_at IS NULL
       ORDER BY e.execute_after, e.created_at, s.priority DESC
       """,
       {},
@@ -660,6 +665,9 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_queue_executions(db, workspace_id) do
+    # "Still in the queue" = no completion yet. An execution with a value
+    # result but no completion (streams draining) is still running from
+    # the lifecycle's point of view, so it stays visible on the queue.
     case query(
            db,
            """
@@ -678,8 +686,8 @@ defmodule Coflux.Orchestration.Runs do
            INNER JOIN steps AS s ON s.id = e.step_id
            INNER JOIN runs AS r ON r.id = s.run_id
            LEFT JOIN assignments AS a ON a.execution_id = e.id
-           LEFT JOIN results AS re ON re.execution_id = e.id
-           WHERE e.workspace_id = ?1 AND re.created_at IS NULL
+           LEFT JOIN completions AS c ON c.execution_id = e.id
+           WHERE e.workspace_id = ?1 AND c.created_at IS NULL
            """,
            {workspace_id}
          ) do
@@ -695,8 +703,8 @@ defmodule Coflux.Orchestration.Runs do
       SELECT e.id, s.run_id, s.module
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
-      LEFT JOIN results AS r ON r.execution_id = e.id
-      WHERE e.workspace_id = ?1 AND r.created_at IS NULL
+      LEFT JOIN completions AS c ON c.execution_id = e.id
+      WHERE e.workspace_id = ?1 AND c.created_at IS NULL
       """,
       {workspace_id}
     )
@@ -708,8 +716,8 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT a.session_id, a.execution_id
       FROM assignments AS a
-      LEFT JOIN results AS r ON r.execution_id = a.execution_id
-      WHERE r.created_at IS NULL
+      LEFT JOIN completions AS c ON c.execution_id = a.execution_id
+      WHERE c.created_at IS NULL
       """
     )
   end
@@ -729,17 +737,19 @@ defmodule Coflux.Orchestration.Runs do
           INNER JOIN executions AS e ON e.step_id = s.id
           WHERE s.parent_id IS NOT NULL
           UNION ALL
-          SELECT r.execution_id AS parent_id, r.successor_id AS child_id
-          FROM results AS r
-          WHERE r.type = 7 AND r.successor_id IS NOT NULL
+          -- Spawned completions (kind = 10) reference a child execution via
+          -- successor_id. Traversing these captures the full spawn tree.
+          SELECT c.execution_id AS parent_id, c.successor_id AS child_id
+          FROM completions AS c
+          WHERE c.kind = 10 AND c.successor_id IS NOT NULL
         ) AS edges ON edges.parent_id = d.execution_id
       )
-      SELECT e.id, s.module, a.created_at, r.created_at, e.workspace_id
+      SELECT e.id, s.module, a.created_at, c.created_at, e.workspace_id
       FROM descendants AS d
       INNER JOIN executions AS e ON e.id = d.execution_id
       INNER JOIN steps AS s ON s.id = e.step_id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
-      LEFT JOIN results AS r ON r.execution_id = e.id
+      LEFT JOIN completions AS c ON c.execution_id = e.id
       """,
       {execution_id}
     )
@@ -840,11 +850,13 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_active_run_workflows(db, workspace_id \\ nil) do
+    # Active = no completion yet. Matches the queue/lifecycle semantics:
+    # streams-draining executions still count as running.
     {where, params} =
       if workspace_id do
-        {"WHERE res.created_at IS NULL AND e.workspace_id = ?1", {workspace_id}}
+        {"WHERE c.created_at IS NULL AND e.workspace_id = ?1", {workspace_id}}
       else
-        {"WHERE res.created_at IS NULL", {}}
+        {"WHERE c.created_at IS NULL", {}}
       end
 
     query(
@@ -855,7 +867,7 @@ defmodule Coflux.Orchestration.Runs do
       INNER JOIN steps AS s ON s.id = e.step_id
       INNER JOIN runs AS r ON r.id = s.run_id
       INNER JOIN steps AS root_s ON root_s.run_id = r.id AND root_s.parent_id IS NULL
-      LEFT JOIN results AS res ON res.execution_id = e.id
+      LEFT JOIN completions AS c ON c.execution_id = e.id
       #{where}
       """,
       params
@@ -955,16 +967,18 @@ defmodule Coflux.Orchestration.Runs do
   # if it has either a results row or a completions row (the latter without
   # the former indicates the worker crashed without reporting).
   # For crashed executions, type is NULL.
-  def get_step_result_types(db, step_id, limit) do
+  # Returns `{execution_id, completion_kind}` pairs for recent attempts of a
+  # step, ordered newest first. `completion_kind` is the raw integer from
+  # the completions table (see Results.kind_atom/1). Used by the retry
+  # scheduler to count consecutive failures.
+  def get_step_completion_kinds(db, step_id, limit) do
     case query(
            db,
            """
-           SELECT e.id, r.type
+           SELECT e.id, c.kind
            FROM executions AS e
-           LEFT JOIN results AS r ON r.execution_id = e.id
-           LEFT JOIN completions AS c ON c.execution_id = e.id
+           INNER JOIN completions AS c ON c.execution_id = e.id
            WHERE e.step_id = ?1
-             AND (r.execution_id IS NOT NULL OR c.execution_id IS NOT NULL)
            ORDER BY e.created_at DESC
            LIMIT ?2
            """,
@@ -1107,11 +1121,18 @@ defmodule Coflux.Orchestration.Runs do
            FROM steps AS s
            INNER JOIN executions AS e ON e.step_id = s.id
            LEFT JOIN results AS r ON r.execution_id = e.id
+           LEFT JOIN completions AS c ON c.execution_id = e.id
            WHERE
              s.run_id = ?1
              AND e.workspace_id IN (#{build_placeholders(length(workspace_ids), 1)})
              AND s.memo_key = ?#{length(workspace_ids) + 2}
-             AND (r.type IS NULL OR r.type = 1)
+             -- Either no result yet (in-flight candidate) or a value
+             -- result. Errors disqualify. Cancelled-with-value also
+             -- disqualifies: a user-cancelled execution's work shouldn't
+             -- be reused, even though its value is still valid for
+             -- already-resolved consumers.
+             AND (r.execution_id IS NULL OR r.value_id IS NOT NULL)
+             AND (c.kind IS NULL OR c.kind != #{Results.atom_kind(:cancelled)})
            ORDER BY e.created_at DESC
            LIMIT 1
            """,
@@ -1147,10 +1168,19 @@ defmodule Coflux.Orchestration.Runs do
            FROM steps AS s
            INNER JOIN executions AS e ON e.step_id = s.id
            LEFT JOIN results AS r ON r.execution_id = e.id
+           LEFT JOIN completions AS c ON c.execution_id = e.id
            WHERE
              e.workspace_id IN (#{build_placeholders(length(workspace_ids))})
              AND s.cache_key = ?#{length(workspace_ids) + 1}
-             AND (r.type IS NULL OR (r.type = 1 AND r.created_at >= ?#{length(workspace_ids) + 2}))
+             -- Either no result yet (in-flight candidate) or a value result
+             -- recorded within the cache age window. Errors disqualify.
+             -- Cancelled-with-value also disqualifies: the value stays valid
+             -- for already-resolved consumers but shouldn't seed cache hits.
+             AND (
+               r.execution_id IS NULL
+               OR (r.value_id IS NOT NULL AND r.created_at >= ?#{length(workspace_ids) + 2})
+             )
+             AND (c.kind IS NULL OR c.kind != #{Results.atom_kind(:cancelled)})
              #{step_clause}
            ORDER BY e.created_at DESC
            LIMIT 1
@@ -1166,7 +1196,8 @@ defmodule Coflux.Orchestration.Runs do
   end
 
   def get_result_successors(db, execution_id) do
-    # First, find successors via the successor_id chain (same-run, internal)
+    # First, find successors via the successor_id chain (same-run, internal).
+    # Successors now live on the completions table.
     {:ok, rows1} =
       query(
         db,
@@ -1174,9 +1205,9 @@ defmodule Coflux.Orchestration.Runs do
         WITH RECURSIVE successors AS (
           SELECT ?1 AS execution_id
           UNION
-          SELECT r.execution_id
+          SELECT c.execution_id
           FROM successors AS ss
-          INNER JOIN results AS r ON r.successor_id = ss.execution_id
+          INNER JOIN completions AS c ON c.successor_id = ss.execution_id
         )
         SELECT run.external_id, ss.execution_id
         FROM successors AS ss
@@ -1198,10 +1229,10 @@ defmodule Coflux.Orchestration.Runs do
       query(
         db,
         """
-        SELECT run2.external_id, r.execution_id
-        FROM results AS r
-        INNER JOIN execution_refs AS ref ON r.successor_ref_id = ref.id
-        INNER JOIN executions AS e ON e.id = r.execution_id
+        SELECT run2.external_id, c.execution_id
+        FROM completions AS c
+        INNER JOIN execution_refs AS ref ON c.successor_ref_id = ref.id
+        INNER JOIN executions AS e ON e.id = c.execution_id
         INNER JOIN steps AS s ON s.id = e.step_id
         INNER JOIN runs AS run2 ON run2.id = s.run_id
         WHERE ref.run_external_id = ?1 AND ref.step_number = ?2 AND ref.attempt = ?3

@@ -375,10 +375,13 @@ defmodule Coflux.Orchestration.Inputs do
       INNER JOIN runs AS r ON r.id = i.run_id
       LEFT JOIN input_responses AS ir ON ir.input_id = i.id
       INNER JOIN input_dependencies AS id ON id.input_id = i.id
-      LEFT JOIN results AS dr ON dr.execution_id = id.execution_id
+      LEFT JOIN completions AS dc ON dc.execution_id = id.execution_id
       WHERE i.workspace_id = ?1
         AND ir.input_id IS NULL
-        AND (dr.execution_id IS NULL OR dr.successor_id IS NOT NULL)
+        -- An execution is still "active" if it hasn't completed yet, or if
+        -- its completion carries a successor (retry / suspended / deferred
+        -- chain that will resume somewhere).
+        AND (dc.execution_id IS NULL OR dc.successor_id IS NOT NULL)
       ORDER BY i.created_at DESC
       """,
       {workspace_id}
@@ -386,16 +389,17 @@ defmodule Coflux.Orchestration.Inputs do
   end
 
   def has_active_dependency?(db, input_id) do
-    # An execution is "active" if it has no result, or if its result has a
-    # successor (suspended/retried — the chain is still alive).
+    # An execution is "active" if it has no completion yet, or if its
+    # completion carries a successor (suspended/retried/deferred — the
+    # chain is still alive).
     case query_one(
            db,
            """
            SELECT 1
            FROM input_dependencies AS id
-           LEFT JOIN results AS r ON r.execution_id = id.execution_id
+           LEFT JOIN completions AS c ON c.execution_id = id.execution_id
            WHERE id.input_id = ?1
-             AND (r.execution_id IS NULL OR r.successor_id IS NOT NULL)
+             AND (c.execution_id IS NULL OR c.successor_id IS NOT NULL)
            LIMIT 1
            """,
            {input_id}

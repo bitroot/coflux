@@ -255,54 +255,84 @@ defmodule Coflux.Orchestration.Epoch do
                 end
               end)
 
-              # Copy results
+              # Copy result payloads. A results row may be present without a
+              # completion yet (mid-termination) — both are copied
+              # independently below.
+              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+                case query_one(
+                       source_db,
+                       """
+                       SELECT value_id, error_id, retryable, created_at
+                       FROM results
+                       WHERE execution_id = ?1
+                       """,
+                       {old_exec_id}
+                     ) do
+                  {:ok, {value_id, error_id, retryable, result_created_at}} ->
+                    new_value_id =
+                      if value_id, do: ensure_value(source_db, target_db, value_id)
+
+                    new_error_id =
+                      if error_id, do: ensure_error(source_db, target_db, error_id)
+
+                    {:ok, _} =
+                      insert_one(target_db, :results, %{
+                        execution_id: new_exec_id,
+                        value_id: new_value_id,
+                        error_id: new_error_id,
+                        retryable: retryable,
+                        created_at: result_created_at
+                      })
+
+                  {:ok, nil} ->
+                    :ok
+                end
+              end)
+
+              # Copy completions. Successors (same-epoch and cross-epoch) are
+              # remapped here — for in-flight deferred/cached/spawned that
+              # cross into another run, we may also need to inline a resolved
+              # value into the just-copied results row.
               visited =
                 Enum.reduce(execution_ids, visited, fn {old_exec_id, new_exec_id}, visited ->
                   case query_one(
                          source_db,
                          """
-                         SELECT type, error_id, value_id, successor_id, successor_ref_id,
-                                retryable, created_at, created_by
-                         FROM results
+                         SELECT kind, successor_id, successor_ref_id, created_at, created_by
+                         FROM completions
                          WHERE execution_id = ?1
                          """,
                          {old_exec_id}
                        ) do
                     {:ok,
-                     {type, error_id, value_id, successor_id, successor_ref_id, retryable,
-                      result_created_at, result_created_by}} ->
-                      new_error_id = if error_id, do: ensure_error(source_db, target_db, error_id)
-
-                      {new_value_id, new_successor_id, new_successor_ref_id, visited} =
-                        copy_result_successor(
+                     {kind, successor_id, successor_ref_id, completion_created_at, created_by}} ->
+                      {new_successor_id, new_successor_ref_id, inline_value_id, visited} =
+                        copy_completion_successor(
                           source_db,
                           target_db,
-                          type,
-                          value_id,
+                          kind,
                           successor_id,
                           successor_ref_id,
                           execution_ids,
                           visited
                         )
 
-                      new_value_id =
-                        cond do
-                          new_value_id -> new_value_id
-                          value_id && type == 1 -> ensure_value(source_db, target_db, value_id)
-                          true -> nil
-                        end
+                      if inline_value_id do
+                        # Cross-run resolved target — inline the value onto the
+                        # results row (which may or may not already exist).
+                        upsert_inline_value(target_db, new_exec_id, inline_value_id,
+                          created_at: completion_created_at
+                        )
+                      end
 
                       {:ok, _} =
-                        insert_one(target_db, :results, %{
+                        insert_one(target_db, :completions, %{
                           execution_id: new_exec_id,
-                          type: type,
-                          error_id: new_error_id,
-                          value_id: new_value_id,
+                          kind: kind,
                           successor_id: new_successor_id,
                           successor_ref_id: new_successor_ref_id,
-                          retryable: retryable,
-                          created_at: result_created_at,
-                          created_by: ensure_principal(source_db, target_db, result_created_by)
+                          created_at: completion_created_at,
+                          created_by: ensure_principal(source_db, target_db, created_by)
                         })
 
                       visited
@@ -311,26 +341,6 @@ defmodule Coflux.Orchestration.Epoch do
                       visited
                   end
                 end)
-
-              # Copy completions (where present — an execution may have results
-              # but no completion yet if it's mid-termination).
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
-                case query_one(
-                       source_db,
-                       "SELECT created_at FROM completions WHERE execution_id = ?1",
-                       {old_exec_id}
-                     ) do
-                  {:ok, {completion_created_at}} ->
-                    {:ok, _} =
-                      insert_one(target_db, :completions, %{
-                        execution_id: new_exec_id,
-                        created_at: completion_created_at
-                      })
-
-                  {:ok, nil} ->
-                    :ok
-                end
-              end)
 
               # Copy streams, their items, and any closure rows. An execution's
               # streams may be mid-production (items appended, no closure) —
@@ -1820,84 +1830,94 @@ defmodule Coflux.Orchestration.Epoch do
     ref_id
   end
 
-  # Handle successor copying for result types.
-  # Returns {new_value_id, new_successor_id, new_successor_ref_id}.
-  defp copy_result_successor(
+  # Copy the successor reference on a completion from source to target
+  # epoch. Returns `{new_successor_id, new_successor_ref_id, inline_value_id,
+  # visited}`. `inline_value_id` is non-nil when the target has resolved to a
+  # value; the caller inlines it onto the results row.
+  #
+  # Completion kinds (see Results.kind_atom):
+  #   * 0 succeeded, 1 errored — may have successor_id (retry).
+  #   * 2 abandoned, 3 crashed, 4 timeout — may have successor_id (retry).
+  #   * 5 cancelled — no successor.
+  #   * 6 suspended, 7 recurred — successor_id (same-run handoff).
+  #   * 8 deferred, 9 cached, 10 spawned — successor_id in-flight, or
+  #     successor_ref_id once resolved (value inlined on results).
+  defp copy_completion_successor(
          _source_db,
          _target_db,
-         type,
-         _value_id,
+         5,
          _successor_id,
          _successor_ref_id,
          _execution_ids,
          visited
-       )
-       when type in [1, 3] do
-    # Type 1 (value) and type 3 (cancelled) have no successor
+       ) do
+    # Cancelled — never has a successor.
     {nil, nil, nil, visited}
   end
 
-  defp copy_result_successor(
+  defp copy_completion_successor(
          _source_db,
          _target_db,
-         type,
-         _value_id,
+         kind,
          successor_id,
          _successor_ref_id,
          execution_ids,
          visited
        )
-       when type in [0, 2, 6] do
-    # Types 0 (error retry), 2 (abandoned retry), 6 (suspended) — same-run successor
-    new_successor_id = if successor_id, do: Map.fetch!(execution_ids, successor_id)
-    {nil, new_successor_id, nil, visited}
+       when kind in [0, 1, 2, 3, 4, 6, 7] do
+    # Succeeded / errored / abandoned / crashed / timeout / suspended /
+    # recurred — retry or same-run successor, if any.
+    new_successor_id =
+      if successor_id, do: Map.fetch!(execution_ids, successor_id)
+
+    {new_successor_id, nil, nil, visited}
   end
 
-  defp copy_result_successor(
+  defp copy_completion_successor(
          source_db,
          target_db,
-         _type,
-         value_id,
+         kind,
          successor_id,
          successor_ref_id,
          execution_ids,
          visited
-       ) do
-    # Types 4 (deferred), 5 (cached), 7 (spawned)
+       )
+       when kind in [8, 9, 10] do
+    # Deferred / cached / spawned.
     cond do
-      # Already resolved: successor_ref_id + value_id both set
       successor_ref_id != nil ->
+        # Already resolved to an execution_ref — copy the ref. Any inlined
+        # value on the source results row has already been copied by the
+        # results pass; no further inlining needed here.
         new_ref_id = ensure_execution_ref(source_db, target_db, successor_ref_id)
-        new_value_id = ensure_value(source_db, target_db, value_id)
-        {new_value_id, nil, new_ref_id, visited}
+        {nil, nil, new_ref_id, visited}
 
-      # In-flight, same run
       successor_id != nil and is_map_key(execution_ids, successor_id) ->
-        {nil, Map.fetch!(execution_ids, successor_id), nil, visited}
+        # Same-run in-flight — remap integer id.
+        {Map.fetch!(execution_ids, successor_id), nil, nil, visited}
 
-      # In-flight, cross-run — try to resolve the chain in source_db
       successor_id != nil ->
+        # Cross-run in-flight — try to resolve the chain in source_db; if
+        # resolved, inline the value and swap to an execution_ref.
         resolve_cross_run_successor(source_db, target_db, successor_id, visited)
 
-      # No successor (shouldn't happen for these types)
       true ->
         {nil, nil, nil, visited}
     end
   end
 
-  # For cross-run successors (types 4, 5, 7): try to resolve the result chain.
-  # If resolved to a value, copy the value and create an execution_ref.
-  # If still pending, copy the target run and remap the successor_id.
+  # For cross-run successors on deferred/cached/spawned: try to resolve the
+  # completion chain in source_db. If resolved to a value, create an
+  # execution_ref and return the value_id for inlining. Otherwise copy the
+  # target run and remap the successor_id.
   defp resolve_cross_run_successor(source_db, target_db, successor_id, visited) do
-    case resolve_result_chain(source_db, successor_id, MapSet.new()) do
+    case resolve_completion_chain(source_db, successor_id, MapSet.new()) do
       {:ok, chain_value_id} ->
-        # Resolved to a value — copy value and create execution_ref for the successor
         new_value_id = ensure_value(source_db, target_db, chain_value_id)
         new_ref_id = create_execution_ref_for_id(source_db, target_db, successor_id)
-        {new_value_id, nil, new_ref_id, visited}
+        {nil, new_ref_id, new_value_id, visited}
 
       _ ->
-        # Pending or cancelled — copy the target run, then remap successor_id
         {:ok, {run_ext_id, step_num, attempt}} =
           query_one!(
             source_db,
@@ -1925,54 +1945,88 @@ defmodule Coflux.Orchestration.Epoch do
                """,
                {run_ext_id, step_num, attempt}
              ) do
-          {:ok, {new_id}} -> {nil, new_id, nil, visited}
+          {:ok, {new_id}} -> {new_id, nil, nil, visited}
           {:ok, nil} -> {nil, nil, nil, visited}
         end
     end
   end
 
-  # Follow the result successor chain in a single DB to find a terminal value.
-  defp resolve_result_chain(db, execution_id, visited) do
+  # Follow the completion-successor chain in a single DB to find a terminal
+  # value. Returns `{:ok, value_id}` if resolved, `:pending`/`:cancelled`/
+  # `:timeout` otherwise. The caller uses this to decide whether to inline a
+  # value onto the deferred/cached/spawned target's results row.
+  defp resolve_completion_chain(db, execution_id, visited) do
     if MapSet.member?(visited, execution_id) do
       :pending
     else
       visited = MapSet.put(visited, execution_id)
 
-      case query_one(
-             db,
-             "SELECT type, value_id, successor_id, successor_ref_id FROM results WHERE execution_id = ?1",
-             {execution_id}
-           ) do
-        {:ok, nil} ->
+      # Value comes from results; kind + successor from completions.
+      result_row =
+        query_one(
+          db,
+          "SELECT value_id, error_id FROM results WHERE execution_id = ?1",
+          {execution_id}
+        )
+
+      completion_row =
+        query_one(
+          db,
+          "SELECT kind, successor_id, successor_ref_id FROM completions WHERE execution_id = ?1",
+          {execution_id}
+        )
+
+      case {result_row, completion_row} do
+        {_, {:ok, nil}} ->
+          # No completion yet.
           :pending
 
-        # Plain value
-        {:ok, {1, value_id, nil, nil}} ->
+        {{:ok, {value_id, nil}}, _} when not is_nil(value_id) ->
+          # Value payload recorded — treat as resolved regardless of kind
+          # (covers :succeeded and resolved :deferred/:cached/:spawned).
           {:ok, value_id}
 
-        # Cancelled
-        {:ok, {3, nil, nil, nil}} ->
+        {_, {:ok, {5, _, _}}} ->
           :cancelled
 
-        # Timeout (follow retry chain if successor_id set)
-        {:ok, {8, nil, successor_id, nil}} when not is_nil(successor_id) ->
-          resolve_result_chain(db, successor_id, visited)
-
-        {:ok, {8, nil, nil, nil}} ->
+        {_, {:ok, {4, nil, _}}} ->
           :timeout
 
-        # Types 4, 5, 7 already resolved (successor_ref_id + value_id)
-        {:ok, {type, value_id, nil, successor_ref_id}}
-        when type in [4, 5, 7] and not is_nil(successor_ref_id) and not is_nil(value_id) ->
-          {:ok, value_id}
-
-        # Any type with successor_id — follow the chain
-        {:ok, {_type, nil, successor_id, nil}} when not is_nil(successor_id) ->
-          resolve_result_chain(db, successor_id, visited)
+        {_, {:ok, {_kind, successor_id, nil}}} when not is_nil(successor_id) ->
+          resolve_completion_chain(db, successor_id, visited)
 
         _ ->
           :pending
       end
+    end
+  end
+
+  # Write or update a results row to inline a resolved value. Used during
+  # cross-run rotation when we resolve a deferred/cached/spawned target to
+  # a concrete value: the completion records the kind, the results row
+  # records the inlined payload.
+  defp upsert_inline_value(target_db, execution_id, value_id, opts) do
+    created_at = Keyword.fetch!(opts, :created_at)
+
+    case query_one(
+           target_db,
+           "SELECT 1 FROM results WHERE execution_id = ?1",
+           {execution_id}
+         ) do
+      {:ok, nil} ->
+        {:ok, _} =
+          insert_one(target_db, :results, %{
+            execution_id: execution_id,
+            value_id: value_id,
+            error_id: nil,
+            retryable: nil,
+            created_at: created_at
+          })
+
+      {:ok, {1}} ->
+        # Already has a payload (shouldn't happen for fresh cross-run
+        # resolution, but be idempotent).
+        :ok
     end
   end
 end

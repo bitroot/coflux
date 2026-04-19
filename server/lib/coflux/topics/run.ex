@@ -94,6 +94,7 @@ defmodule Coflux.Topics.Run do
           executeAfter: execute_after,
           assignedAt: nil,
           completedAt: nil,
+          completion: nil,
           groups: %{},
           assets: %{},
           dependencies:
@@ -200,10 +201,15 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:completion, execution_external_id, completion_at}
+         {:completion, execution_external_id, kind, successor, completion_at}
        ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
-      Topic.set(topic, base_path ++ [:completedAt], completion_at)
+      topic
+      |> Topic.set(base_path ++ [:completedAt], completion_at)
+      |> Topic.set(base_path ++ [:completion], %{
+        kind: Atom.to_string(kind),
+        successor: successor
+      })
     end)
   end
 
@@ -387,6 +393,7 @@ defmodule Coflux.Topics.Run do
                     assignedAt: execution.assigned_at,
                     resultAt: execution.result_at,
                     completedAt: execution.completed_at,
+                    completion: execution.completion,
                     groups: execution.groups,
                     assets:
                       Map.new(execution.assets, fn {external_asset_id, asset} ->
