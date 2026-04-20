@@ -33,6 +33,8 @@ from .dispatcher import get_dispatcher
 from .errors import raise_for_close
 from .serialization import deserialize_value, serialize_value
 from .state import get_context
+from .models import Stream
+from .target import Streams, _validate_buffer, _validate_timeout
 
 
 # --- Producer side ---
@@ -91,8 +93,6 @@ def stream(
             f"cf.stream expects a generator, got {type(generator).__name__}"
         )
 
-    from .target import Streams, _validate_buffer, _validate_timeout
-
     ctx = get_context()
     default = ctx.get_default_streams() or Streams()
     resolved_buffer = (
@@ -104,11 +104,7 @@ def stream(
         else default.timeout
     )
     stream_id = ctx.register_stream(generator, resolved_buffer, resolved_timeout)
-    # Local import to avoid a top-level cycle — models imports nothing
-    # from streams but streams already imports from models at top.
-    from .models import Stream as StreamHandle
-
-    return StreamHandle(stream_id)
+    return Stream(stream_id)
 
 
 class StreamDriver:

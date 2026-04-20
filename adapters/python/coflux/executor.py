@@ -18,6 +18,8 @@ from .state import set_context
 from .output import capture_output
 from .models import Input
 from .serialization import deserialize_value, serialize_value
+from .streams import stream as _register_stream
+from .target import Streams
 
 _COFLUX_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -47,8 +49,6 @@ def _resolve_execute_streams(target_obj: Any, streams_from_wire: dict[str, Any] 
 
     Returns a ``Streams`` instance or ``None`` (no stream config).
     """
-    from .target import Streams  # local import to avoid cycles
-
     if streams_from_wire is not None:
         buffer = streams_from_wire.get("buffer", 0)
         timeout_ms = streams_from_wire.get("timeout_ms")
@@ -162,8 +162,6 @@ def execute_target(
         if (inspect.isgenerator(result) or inspect.isasyncgen(result)) and hasattr(
             target_obj, "definition"
         ):
-            from .streams import stream as _register_stream
-
             kwargs: dict[str, Any] = {}
             if effective_streams is not None:
                 kwargs["buffer"] = effective_streams.buffer

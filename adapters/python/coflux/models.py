@@ -1,4 +1,4 @@
-"""Models for the Coflux Python SDK."""
+"""Reference types returned to user code: assets, handles, and streams."""
 
 from __future__ import annotations
 
@@ -9,23 +9,11 @@ from pathlib import Path
 
 from .state import get_context
 
-
 T = t.TypeVar("T")
 D = t.TypeVar("D")
 
 
-class ModelSchema(t.Protocol):
-    """Protocol for schema classes that can validate JSON data.
-
-    Compatible with Pydantic BaseModel and any class providing
-    model_json_schema() and model_validate() classmethods.
-    """
-
-    @classmethod
-    def model_json_schema(cls) -> dict[str, t.Any]: ...
-
-    @classmethod
-    def model_validate(cls, obj: t.Any) -> t.Any: ...
+# --- Assets ---
 
 
 class AssetEntry(t.NamedTuple):
@@ -118,6 +106,9 @@ class Asset:
         return {e.path: e.restore(at=at) for e in entries}
 
 
+# --- Handles (resolve via cf.select) ---
+
+
 class _Handle(t.Generic[T]):
     """Base for handles that resolve via ``cf.select``.
 
@@ -208,6 +199,9 @@ class Execution(_Handle[T]):
     @property
     def target(self) -> str:
         return self._target
+
+
+# --- Streams ---
 
 
 Stride = t.Tuple[int, t.Optional[int], int]
@@ -304,8 +298,9 @@ class Stream(t.Iterable[T]):
         return self.stride(i, None, n)
 
     def __iter__(self) -> t.Iterator[T]:
-        # Deferred import to avoid a cycle (streams.py imports serialization
-        # which imports models for Execution/Input/Asset).
+        # Local import: ``streams`` imports ``serialization`` at top, and
+        # ``serialization`` imports ``Stream`` from here — a top-level
+        # ``from .streams import ...`` would cycle.
         from .streams import open_subscription
 
         return open_subscription(self._id, self._stride)

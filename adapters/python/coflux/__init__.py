@@ -23,15 +23,7 @@ from .errors import (
     InputDismissed,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
-from .models import (
-    Asset,
-    AssetEntry,
-    AssetMetadata,
-    Execution,
-    Input,
-    ModelSchema,
-    Stream,
-)
+from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, Stream
 from .prompt import Prompt
 from .state import get_context
 from .streams import stream
@@ -54,7 +46,6 @@ __all__ = [
     "ExecutionCrashed",
     "InputDismissed",
     "Input",
-    "ModelSchema",
     "Metric",
     "MetricGroup",
     "MetricScale",
