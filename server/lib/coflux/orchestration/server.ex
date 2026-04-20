@@ -6207,9 +6207,11 @@ defmodule Coflux.Orchestration.Server do
 
   # A stream owned by this execution closed with an error, but the function
   # body returned a value. Promote to `:stream_errored`: drives the retry
-  # policy and excludes the execution from cache lookups, while leaving the
-  # value in `results` so any consumer that already resolved against it
-  # keeps its reference (mirrors the cancellation precedent at do_cancel_execution).
+  # policy and excludes the execution from cache lookups. The value result
+  # stays untouched in `results` — the execution's "result" remains the
+  # value (the stream reference). The stream's error info is surfaced via
+  # the streams panel; the completion kind alone tells the UI to render
+  # this as a failure-with-value (mirrors `do_cancel_execution`).
   defp finalize_stream_errored_completion(state, execution_id, error_id) do
     {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
@@ -6228,18 +6230,6 @@ defmodule Coflux.Orchestration.Server do
            successor_id: retry_id
          ) do
       {:ok, completion_at} ->
-        # Re-fire :result so the UI's value-result entry picks up the new
-        # error overlay (the resolve_logical path returns :error for
-        # :stream_errored kinds with a value present).
-        state =
-          fire_result_notifications(
-            state,
-            execution_id,
-            {:error, type, message, frames, retry_id, nil},
-            nil,
-            nil
-          )
-
         fire_completion_notification(state, execution_id, completion_at)
 
       {:error, :already_completed} ->

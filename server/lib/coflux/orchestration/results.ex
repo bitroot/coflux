@@ -1,7 +1,7 @@
 defmodule Coflux.Orchestration.Results do
   import Coflux.Store
 
-  alias Coflux.Orchestration.{Errors, Streams, Values}
+  alias Coflux.Orchestration.{Errors, Values}
 
   # --- Completion kinds ---
   #
@@ -464,20 +464,6 @@ defmodule Coflux.Orchestration.Results do
   defp decode_retryable(1), do: true
   defp decode_retryable(0), do: false
 
-  # Look up the first errored stream closure's error triple for a
-  # :stream_errored execution. Returns `nil` if no errored closure exists
-  # (shouldn't happen if the kind is :stream_errored, but defensive).
-  defp fetch_stream_error(db, execution_id) do
-    case Streams.get_closure_summary_for_execution(db, execution_id) do
-      {:ok, %{errored: nil}} ->
-        nil
-
-      {:ok, %{errored: error_id}} when not is_nil(error_id) ->
-        {:ok, triple} = Errors.get_by_id(db, error_id)
-        triple
-    end
-  end
-
   # Builds the legacy "logical result" tuple from the split tables. Used
   # by most callers (UI, topic state, consumer resolution). Returns `nil`
   # only when nothing has been recorded yet.
@@ -490,46 +476,30 @@ defmodule Coflux.Orchestration.Results do
 
   # Value payload present. Returns the appropriate tagged tuple, picking
   # the successor-flavoured form when the completion says this was a
-  # deferred/cached/spawned resolution.
+  # deferred/cached/spawned resolution. For `:stream_errored` and
+  # `:stream_timeout`, the execution's *result* is still the value (the
+  # stream reference) — the stream's error/timeout state is surfaced
+  # through the streams panel rather than the result. The completion kind
+  # alone carries the "this is broken/incomplete" signal for the UI badge
+  # and for cache eligibility (handled in `find_cached_execution`).
   defp resolve_logical(
          db,
-         execution_id,
+         _execution_id,
          kind,
          value_id,
          nil,
-         retryable,
-         successor_id,
+         _retryable,
+         _successor_id,
          successor_ref_id
        )
        when not is_nil(value_id) do
     {:ok, value} = Values.get_value_by_id(db, value_id)
 
     case kind && kind_atom(kind) do
-      :deferred when not is_nil(successor_ref_id) ->
-        {:deferred, successor_ref_id, value}
-
-      :cached when not is_nil(successor_ref_id) ->
-        {:cached, successor_ref_id, value}
-
-      :spawned when not is_nil(successor_ref_id) ->
-        {:spawned, successor_ref_id, value}
-
-      :stream_errored ->
-        # Value result + a stream errored mid-flight. Surface as an error
-        # for consumer resolution, using the first errored stream closure's
-        # stored error triple. (The cancellation precedent leaves the value
-        # in place — consumers that already resolved against it keep their
-        # reference; this branch governs only late lookups.)
-        case fetch_stream_error(db, execution_id) do
-          nil ->
-            {:value, value}
-
-          {type, message, frames} ->
-            {:error, type, message, frames, successor_id, decode_retryable(retryable)}
-        end
-
-      _ ->
-        {:value, value}
+      :deferred when not is_nil(successor_ref_id) -> {:deferred, successor_ref_id, value}
+      :cached when not is_nil(successor_ref_id) -> {:cached, successor_ref_id, value}
+      :spawned when not is_nil(successor_ref_id) -> {:spawned, successor_ref_id, value}
+      _ -> {:value, value}
     end
   end
 
