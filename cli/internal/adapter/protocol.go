@@ -24,8 +24,17 @@ type TargetDefinition struct {
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	Streams     *StreamsConfig      `json:"streams,omitempty"`
 	IsStub      bool                `json:"is_stub,omitempty"`
 	Instruction *string             `json:"instruction,omitempty"`
+}
+
+// StreamsConfig is the wire form of cf.Streams: default buffer + idle
+// timeout for streams produced by the target. Either field may be
+// absent; the adapter falls back to the decorator default.
+type StreamsConfig struct {
+	Buffer    *int `json:"buffer,omitempty"`
+	TimeoutMs *int `json:"timeout_ms,omitempty"`
 }
 
 // Parameter describes a function parameter
@@ -63,11 +72,12 @@ type ExecuteRequest struct {
 
 // ExecuteRequestParams contains execution parameters
 type ExecuteRequestParams struct {
-	ExecutionID string     `json:"execution_id"`
-	Module      string     `json:"module"`
-	Target      string     `json:"target"`
-	Arguments   []Argument `json:"arguments"`
-	WorkingDir  string     `json:"working_dir,omitempty"`
+	ExecutionID string         `json:"execution_id"`
+	Module      string         `json:"module"`
+	Target      string         `json:"target"`
+	Arguments   []Argument     `json:"arguments"`
+	WorkingDir  string         `json:"working_dir,omitempty"`
+	Streams     *StreamsConfig `json:"streams,omitempty"`
 }
 
 // Argument is the same structure as Value (used for arguments to distinguish context)
@@ -194,6 +204,7 @@ type SubmitExecutionParams struct {
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	Streams     *StreamsConfig      `json:"streams,omitempty"`
 }
 
 // SubmitExecutionResult is the response to submit_execution
@@ -256,15 +267,17 @@ type RegisterGroupParams struct {
 // StreamRegisterParams for stream_register notification.
 // Index is worker-assigned, monotonic per execution — it identifies the
 // stream within its producer execution. Buffer is the optional
-// backpressure budget; nil means unbounded (no flow control).
+// backpressure budget; nil means unbounded (no flow control). TimeoutMs
+// is the optional idle-timeout budget (milliseconds) — nil disables it.
 type StreamRegisterParams struct {
 	ExecutionID string `json:"execution_id"`
 	Index       int    `json:"index"`
 	Buffer      *int   `json:"buffer,omitempty"`
+	TimeoutMs   *int   `json:"timeout_ms,omitempty"`
 }
 
 // StreamDemandParams for stream_demand notification pushed CLI → adapter.
-// Grants the producer ``n`` more credits for the given stream.
+// Grants the producer “n“ more credits for the given stream.
 type StreamDemandParams struct {
 	ExecutionID string `json:"execution_id"`
 	Index       int    `json:"index"`
@@ -322,6 +335,18 @@ type StreamItemsParams struct {
 	ExecutionID    string `json:"execution_id"`
 	SubscriptionID int    `json:"subscription_id"`
 	Items          []any  `json:"items"`
+}
+
+// StreamForceCloseParams for stream_force_close notification pushed
+// CLI → adapter. Tells the producer side that its stream has already
+// been closed externally (typically by the worker's idle-timeout
+// timer), so it should stop producing and skip sending its own
+// stream_close. “Reason“ is a semantic string — today just
+// “"timeout"“ but kept as a string for future extension.
+type StreamForceCloseParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	Reason      string `json:"reason"`
 }
 
 // StreamClosedParams for stream_closed notification pushed CLI → adapter.

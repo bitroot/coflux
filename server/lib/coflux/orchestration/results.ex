@@ -430,8 +430,7 @@ defmodule Coflux.Orchestration.Results do
   defp decode_completion_row(
          {:ok, {kind, successor_id, successor_ref_id, created_at, user_ext, token_ext}}
        ) do
-    {:ok, created_at, kind, successor_id, successor_ref_id,
-     decode_principal(user_ext, token_ext)}
+    {:ok, created_at, kind, successor_id, successor_ref_id, decode_principal(user_ext, token_ext)}
   end
 
   defp decode_principal(nil, nil), do: nil

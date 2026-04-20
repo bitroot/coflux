@@ -39,7 +39,11 @@ def _unwrap_select_result(result):
         return {"status": status}
     return result
 
-Execution = namedtuple("Execution", ["conn", "execution_id", "module", "target", "arguments"])
+Execution = namedtuple(
+    "Execution",
+    ["conn", "execution_id", "module", "target", "arguments", "streams"],
+    defaults=[None],
+)
 
 
 class ExecutorConnection:
@@ -92,11 +96,17 @@ class ExecutorConnection:
             self.send(response)
 
     def recv_execute(self, **kwargs):
-        """Receive an execute message, return (execution_id, module, target, arguments)."""
+        """Receive an execute message, return (execution_id, module, target, arguments, streams)."""
         msg = self.recv(**kwargs)
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         p = msg["params"]
-        return p["execution_id"], p.get("module", ""), p["target"], p.get("arguments", [])
+        return (
+            p["execution_id"],
+            p.get("module", ""),
+            p["target"],
+            p.get("arguments", []),
+            p.get("streams"),
+        )
 
     def _request(self, msg):
         """Send a request message (with auto-assigned ID) and return the response.
@@ -258,9 +268,15 @@ class ExecutorConnection:
 
     # --- Stream producer helpers ---
 
-    def stream_register(self, execution_id, index, buffer=None):
-        """Notify that a new stream exists. ``buffer`` enables backpressure."""
-        self.send(protocol.stream_register(execution_id, index, buffer=buffer))
+    def stream_register(self, execution_id, index, buffer=None, timeout_ms=None):
+        """Notify that a new stream exists. ``buffer`` enables
+        backpressure; ``timeout_ms`` enables idle-timeout enforcement
+        at the worker."""
+        self.send(
+            protocol.stream_register(
+                execution_id, index, buffer=buffer, timeout_ms=timeout_ms
+            )
+        )
 
     def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""
@@ -461,9 +477,9 @@ class Executor:
                 if idx in self._consumed:
                     continue
                 try:
-                    eid, module, target, args = conn.recv_execute(timeout=0.1)
+                    eid, module, target, args, streams = conn.recv_execute(timeout=0.1)
                     self._consumed.add(idx)
-                    return Execution(conn, eid, module, target, args)
+                    return Execution(conn, eid, module, target, args, streams)
                 except TimeoutError:
                     continue
                 except (ConnectionError, OSError):

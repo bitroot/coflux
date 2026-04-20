@@ -234,10 +234,12 @@ def register_group_notification(execution_id, group_id, name=None):
 # --- Stream messages (producer side: adapter → server) ---
 
 
-def stream_register(execution_id, index, buffer=None):
+def stream_register(execution_id, index, buffer=None, timeout_ms=None):
     params = {"execution_id": execution_id, "index": index}
     if buffer is not None:
         params["buffer"] = buffer
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
     return {"method": "stream_register", "params": params}
 
 

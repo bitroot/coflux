@@ -25,6 +25,7 @@ from .errors import (
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
 from .serialization import deserialize_value, serialize_value
 from .streams import StreamDriver
+from .target import Streams
 
 
 def _handle_key(handle: Any) -> tuple[str, str]:
@@ -69,6 +70,14 @@ def _unwrap_response(
     raise RuntimeError(f"Unexpected select status: {status}")
 
 
+def _timeout_to_ms(timeout: float | dt.timedelta | None) -> int | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, dt.timedelta):
+        return int(timeout.total_seconds() * 1000)
+    return int(timeout * 1000)
+
+
 # Context variable for group tracking
 _group_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_group_id", default=None
@@ -104,15 +113,34 @@ class ExecutorContext:
         # during serialization (of the return value OR of submit arguments)
         # are registered here and driven in background threads.
         self._stream_driver = StreamDriver(execution_id)
+        # Default stream config for this execution, populated by the
+        # executor from the target's ``@cf.task(streams=...)`` setting.
+        # Used by ``cf.stream(...)`` to fill in unspecified options.
+        self._default_streams: Streams | None = None
 
-    def register_stream(self, generator: Any, buffer: int | None) -> str:
+    def set_default_streams(self, streams: Streams | None) -> None:
+        """Record the decorator's stream config so ``cf.stream(...)`` can
+        inherit from it. Called once by the executor before running the
+        target function."""
+        self._default_streams = streams
+
+    def get_default_streams(self) -> Streams | None:
+        return self._default_streams
+
+    def register_stream(
+        self,
+        generator: Any,
+        buffer: int | None,
+        timeout: float | dt.timedelta | None = None,
+    ) -> str:
         """Register a generator with this execution's stream driver and
         return the resulting opaque stream id.
 
         Called from ``cf.stream(...)``; also from the executor when the
         task body itself is a generator.
         """
-        return self._stream_driver.register(generator, buffer)
+        timeout_ms = _timeout_to_ms(timeout)
+        return self._stream_driver.register(generator, buffer, timeout_ms)
 
     def wait_streams(self) -> None:
         """Block until every stream produced by this execution has drained."""
@@ -141,6 +169,7 @@ class ExecutorContext:
         recurrent: bool = False,
         requires: dict[str, list[str]] | None = None,
         timeout: int = 0,
+        streams: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 
@@ -165,6 +194,7 @@ class ExecutorContext:
             recurrent=recurrent,
             requires=requires,
             timeout=timeout,
+            streams=streams,
         )
         return self._wait_response(request_id)
 

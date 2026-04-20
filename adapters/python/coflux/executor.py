@@ -36,6 +36,31 @@ def _format_filtered_traceback(exc: Exception) -> str:
     return "".join(lines)
 
 
+def _resolve_execute_streams(target_obj: Any, streams_from_wire: dict[str, Any] | None):
+    """Decide the effective stream config for this execution.
+
+    Precedence:
+      1. ``streams_from_wire`` — the execute message's ``streams`` param.
+         Carries either the caller's ``with_streams(...)`` override or
+         the manifest default copied at submit time.
+      2. ``target_obj.definition.streams`` — the decorator-level default.
+
+    Returns a ``Streams`` instance or ``None`` (no stream config).
+    """
+    from .target import Streams  # local import to avoid cycles
+
+    if streams_from_wire is not None:
+        buffer = streams_from_wire.get("buffer", 0)
+        timeout_ms = streams_from_wire.get("timeout_ms")
+        timeout = timeout_ms / 1000 if timeout_ms is not None else None
+        return Streams(buffer=buffer, timeout=timeout)
+
+    if hasattr(target_obj, "definition"):
+        return target_obj.definition.streams
+
+    return None
+
+
 def _apply_type_hints(fn: Any, args: list[Any]) -> list[Any]:
     """Upgrade deserialized args using the function's type hints.
 
@@ -69,8 +94,17 @@ def execute_target(
     target_name: str,
     arguments: list[dict[str, Any]],
     working_dir: str | None = None,
+    streams: dict[str, Any] | None = None,
 ) -> None:
-    """Execute a target with the given arguments."""
+    """Execute a target with the given arguments.
+
+    ``streams`` is the streams config passed in the execute message —
+    either the call-site override from ``with_streams(...)`` or the
+    workflow manifest default. When present it wins over the
+    decorator's static config; it's applied both to the auto-registered
+    stream for generator-bodied tasks and to ``cf.stream(...)`` calls
+    inside the body.
+    """
     original_dir = os.getcwd()
     # Start the stdin dispatcher. From here on, all incoming messages flow
     # through it — individual threads block on the dispatcher rather than
@@ -101,6 +135,13 @@ def execute_target(
         ctx = ExecutorContext(
             execution_id, working_dir=Path(working_dir) if working_dir else None
         )
+        # Resolve the effective stream config. The execute message's
+        # ``streams`` carries either the caller's ``with_streams(...)``
+        # override or the workflow manifest default; when absent we
+        # fall back to the decorator's static config.
+        effective_streams = _resolve_execute_streams(target_obj, streams)
+        if effective_streams is not None or hasattr(target_obj, "definition"):
+            ctx.set_default_streams(effective_streams)
         set_context(ctx)
 
         with capture_output(execution_id):
@@ -114,8 +155,8 @@ def execute_target(
 
         # If the task body was itself a generator (``def`` + ``yield``
         # or ``async def`` + ``yield``), the call above returned an
-        # unstarted generator object. Register it with the task's
-        # configured buffer so callers don't have to wrap explicitly.
+        # unstarted generator object. Register it with the effective
+        # stream defaults so callers don't have to wrap explicitly.
         # Streams created via cf.stream(...) are already registered;
         # they appear here as Stream handles, not generators.
         if (inspect.isgenerator(result) or inspect.isasyncgen(result)) and hasattr(
@@ -123,9 +164,12 @@ def execute_target(
         ):
             from .streams import stream as _register_stream
 
-            result = _register_stream(
-                result, buffer=target_obj.definition.buffer
-            )
+            kwargs: dict[str, Any] = {}
+            if effective_streams is not None:
+                kwargs["buffer"] = effective_streams.buffer
+                if effective_streams.timeout is not None:
+                    kwargs["timeout"] = effective_streams.timeout
+            result = _register_stream(result, **kwargs)
 
         # Serialize result. Any streams returned (directly, or embedded
         # in the result structure) were already registered via
@@ -201,6 +245,7 @@ def run_executor() -> int:
             target_name=params["target"],
             arguments=params.get("arguments", []),
             working_dir=params.get("working_dir"),
+            streams=params.get("streams"),
         )
         return 0
 

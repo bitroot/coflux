@@ -186,10 +186,10 @@ defmodule Coflux.Orchestration do
   # producer execution; `sequence` identifies an item within the stream.
   # Both are worker-assigned and monotonic from 0.
 
-  def register_stream(project_id, execution_id, index, buffer, session_id) do
+  def register_stream(project_id, execution_id, index, buffer, timeout_ms, session_id) do
     call_server(
       project_id,
-      {:register_stream, execution_id, index, buffer, session_id}
+      {:register_stream, execution_id, index, buffer, timeout_ms, session_id}
     )
   end
 
@@ -197,8 +197,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:append_stream_item, execution_id, index, sequence, value})
   end
 
-  def close_stream(project_id, execution_id, index, error) do
-    call_server(project_id, {:close_stream, execution_id, index, error})
+  def close_stream(project_id, execution_id, index, spec) do
+    call_server(project_id, {:close_stream, execution_id, index, spec})
   end
 
   # Stream consumer messages — consumer opens a subscription to receive

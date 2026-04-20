@@ -36,15 +36,19 @@ defmodule Coflux.Orchestration.Streams do
   # Registers a new stream owned by `execution_id` at `index` (monotonic
   # per-execution, worker-assigned). ``buffer`` is the persisted flow-
   # control budget — ``nil`` means no backpressure, integer N means the
-  # producer may be up to N items ahead of the fastest consumer. Returns
+  # producer may be up to N items ahead of the fastest consumer.
+  # ``timeout_ms`` is the idle-timeout budget (milliseconds) — ``nil``
+  # disables the timeout. The server only stores it (for display in
+  # Studio); enforcement happens at the worker (CLI). Returns
   # ``{:error, :already_registered}`` if the index was already used.
-  def register_stream(db, execution_id, index, buffer \\ nil) do
+  def register_stream(db, execution_id, index, buffer \\ nil, timeout_ms \\ nil) do
     now = current_timestamp()
 
     case insert_one(db, :streams, %{
            execution_id: execution_id,
            index: index,
            buffer: buffer,
+           timeout_ms: timeout_ms,
            created_at: now
          }) do
       {:ok, _} -> {:ok, now}
@@ -63,6 +67,20 @@ defmodule Coflux.Orchestration.Streams do
          ) do
       {:ok, nil} -> {:error, :not_found}
       {:ok, {buffer}} -> {:ok, buffer}
+    end
+  end
+
+  # Returns the persisted timeout (milliseconds) for a stream.
+  # ``{:ok, nil}`` means no timeout. ``{:error, :not_found}`` if the
+  # stream doesn't exist.
+  def get_timeout_ms(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT timeout_ms FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {timeout_ms}} -> {:ok, timeout_ms}
     end
   end
 
@@ -110,6 +128,8 @@ defmodule Coflux.Orchestration.Streams do
   #     ended (cancel/crash/abandon/error). No error is recorded here —
   #     callers that need to surface an error derive it from the
   #     execution's recorded result at read time.
+  #   * `:timeout` — the worker closed the stream because its idle
+  #     timeout elapsed without a new item being appended.
   def close_stream(db, execution_id, index, spec \\ :complete) do
     with_transaction(db, fn ->
       case exists?(db, execution_id, index) do
@@ -138,9 +158,11 @@ defmodule Coflux.Orchestration.Streams do
   @reason_complete 0
   @reason_errored 1
   @reason_lifecycle 2
+  @reason_timeout 3
 
   defp resolve_close_spec(_db, :complete), do: {@reason_complete, nil}
   defp resolve_close_spec(_db, :lifecycle), do: {@reason_lifecycle, nil}
+  defp resolve_close_spec(_db, :timeout), do: {@reason_timeout, nil}
 
   defp resolve_close_spec(db, {:errored, type, message, frames}) do
     error_id = Errors.get_or_create(db, type, message, frames)
@@ -149,10 +171,11 @@ defmodule Coflux.Orchestration.Streams do
 
   # Atom form of the reason integer — used by callers that want to decide
   # whether to derive an error from the execution's result (:lifecycle)
-  # or use the stored one (:errored / :complete).
+  # or use the stored one (:errored / :complete / :timeout).
   def reason_from_int(@reason_complete), do: :complete
   def reason_from_int(@reason_errored), do: :errored
   def reason_from_int(@reason_lifecycle), do: :lifecycle
+  def reason_from_int(@reason_timeout), do: :timeout
 
   def exists?(db, execution_id, index) do
     case query_one(
@@ -273,9 +296,10 @@ defmodule Coflux.Orchestration.Streams do
   end
 
   # Returns one row per stream owned by `execution_id`:
-  # `{index, buffer, created_at, closed_at | nil, reason | nil, error | nil}`.
+  # `{index, buffer, timeout_ms, created_at, closed_at | nil, reason | nil, error | nil}`.
   #   * buffer is the persisted backpressure budget (integer or nil)
-  #   * reason is :complete | :errored | :lifecycle when closed, nil when open
+  #   * timeout_ms is the persisted idle-timeout budget (integer or nil)
+  #   * reason is :complete | :errored | :lifecycle | :timeout when closed, nil when open
   #   * error is the stored `{type, message, frames}` triple for :errored
   #     closures only — callers that need to surface an error for a
   #     :lifecycle closure derive it from the execution's result.
@@ -284,7 +308,7 @@ defmodule Coflux.Orchestration.Streams do
     case query(
            db,
            """
-           SELECT s.`index`, s.buffer, s.created_at, c.created_at, c.reason, c.error_id
+           SELECT s.`index`, s.buffer, s.timeout_ms, s.created_at, c.created_at, c.reason, c.error_id
            FROM streams AS s
            LEFT JOIN stream_closures AS c
              ON c.execution_id = s.execution_id AND c.`index` = s.`index`
@@ -296,16 +320,16 @@ defmodule Coflux.Orchestration.Streams do
       {:ok, rows} ->
         streams =
           Enum.map(rows, fn
-            {index, buffer, created_at, nil, nil, nil} ->
-              {index, buffer, created_at, nil, nil, nil}
+            {index, buffer, timeout_ms, created_at, nil, nil, nil} ->
+              {index, buffer, timeout_ms, created_at, nil, nil, nil}
 
-            {index, buffer, created_at, closed_at, reason_int, nil} ->
-              {index, buffer, created_at, closed_at, reason_from_int(reason_int), nil}
+            {index, buffer, timeout_ms, created_at, closed_at, reason_int, nil} ->
+              {index, buffer, timeout_ms, created_at, closed_at, reason_from_int(reason_int), nil}
 
-            {index, buffer, created_at, closed_at, reason_int, error_id} ->
+            {index, buffer, timeout_ms, created_at, closed_at, reason_int, error_id} ->
               {:ok, error} = Errors.get_by_id(db, error_id)
 
-              {index, buffer, created_at, closed_at, reason_from_int(reason_int),
+              {index, buffer, timeout_ms, created_at, closed_at, reason_from_int(reason_int),
                error}
           end)
 

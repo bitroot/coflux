@@ -198,6 +198,7 @@ def request_submit_execution(
     recurrent: bool = False,
     requires: dict[str, list[str]] | None = None,
     timeout: int = 0,
+    streams: dict[str, Any] | None = None,
 ) -> int:
     """Request to submit a child execution."""
     params: dict[str, Any] = {
@@ -228,6 +229,8 @@ def request_submit_execution(
         params["requires"] = requires
     if timeout:
         params["timeout"] = timeout
+    if streams is not None:
+        params["streams"] = streams
     return get_protocol().send_request("submit_execution", params)
 
 
@@ -472,6 +475,7 @@ def send_stream_register(
     execution_id: str,
     index: int,
     buffer: int | None = None,
+    timeout_ms: int | None = None,
 ) -> None:
     """Register a stream owned by this execution.
 
@@ -483,10 +487,17 @@ def send_stream_register(
     the producer emits freely. Any integer value tells the server to
     pace the producer — it'll send ``stream_demand`` notifications as
     credits become available.
+
+    ``timeout_ms`` is the idle-timeout budget (milliseconds). If set, the
+    worker (CLI) force-closes the stream with reason "timeout" when no
+    item has been appended for that long. Purely informational for the
+    server; enforcement happens in the worker.
     """
     params: dict[str, Any] = {"execution_id": execution_id, "index": index}
     if buffer is not None:
         params["buffer"] = buffer
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
     get_protocol().send_message("stream_register", params)
 
 

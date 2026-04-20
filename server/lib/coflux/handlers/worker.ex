@@ -138,7 +138,8 @@ defmodule Coflux.Handlers.Worker do
           | rest
         ] = message["params"]
 
-        timeout = List.first(rest) || 0
+        timeout = Enum.at(rest, 0) || 0
+        streams = parse_streams(Enum.at(rest, 1))
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
@@ -157,7 +158,8 @@ defmodule Coflux.Handlers.Worker do
                  retries: parse_retries(retries),
                  recurrent: recurrent == true,
                  requires: requires,
-                 timeout: timeout
+                 timeout: timeout,
+                 streams: streams
                ) do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
@@ -255,7 +257,8 @@ defmodule Coflux.Handlers.Worker do
 
       "stream_register" ->
         [execution_id, index | rest] = message["params"]
-        buffer = List.first(rest)
+        buffer = Enum.at(rest, 0)
+        timeout_ms = Enum.at(rest, 1)
 
         if is_recognised_execution?(execution_id, state) do
           case Orchestration.register_stream(
@@ -263,6 +266,7 @@ defmodule Coflux.Handlers.Worker do
                  execution_id,
                  index,
                  buffer,
+                 timeout_ms,
                  state.session_id
                ) do
             :ok -> {[], state}
@@ -310,20 +314,27 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "stream_close" ->
-        [execution_id, index, error] = message["params"]
+        [execution_id, index, error | rest] = message["params"]
+        reason = Enum.at(rest, 0)
 
         if is_recognised_execution?(execution_id, state) do
-          parsed_error =
-            case parse_error(error) do
-              nil -> nil
-              {type, message, frames, _retryable} -> {type, message, frames}
+          close_spec =
+            case {reason, parse_error(error)} do
+              {"timeout", _} ->
+                :timeout
+
+              {_, nil} ->
+                nil
+
+              {_, {type, msg, frames, _retryable}} ->
+                {type, msg, frames}
             end
 
           case Orchestration.close_stream(
                  state.project_id,
                  execution_id,
                  index,
-                 parsed_error
+                 close_spec
                ) do
             :ok -> {[], state}
             {:error, :already_closed} -> {[], state}
@@ -610,7 +621,7 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
-         workspace_external_id, timeout},
+         workspace_external_id, timeout, streams},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
@@ -625,7 +636,8 @@ defmodule Coflux.Handlers.Worker do
          arguments,
          run_id,
          workspace_external_id,
-         timeout
+         timeout,
+         compose_streams(streams)
        ])
      ], state}
   end
@@ -785,6 +797,23 @@ defmodule Coflux.Handlers.Worker do
         backoff_max: Map.get(value, "backoff_max")
       }
     end
+  end
+
+  def parse_streams(value) do
+    if value do
+      %{
+        buffer: Map.get(value, "buffer"),
+        timeout_ms: Map.get(value, "timeout_ms")
+      }
+    end
+  end
+
+  # Encode a streams config (as stored on the execution) for the wire
+  # format going CLI-ward. nil stays nil (compact).
+  defp compose_streams(nil), do: nil
+
+  defp compose_streams(streams) do
+    Map.new(streams, fn {k, v} -> {Atom.to_string(k), v} end)
   end
 
   defp compose_references(references) do

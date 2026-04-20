@@ -35,7 +35,7 @@ from .models import (
 from .prompt import Prompt
 from .state import get_context
 from .streams import stream
-from .target import Cache, Defer, Retries
+from .target import Cache, Defer, Retries, Streams
 
 __all__ = [
     # Version
@@ -62,6 +62,7 @@ __all__ = [
     "Cache",
     "Defer",
     "Retries",
+    "Streams",
     "Asset",
     "AssetEntry",
     "AssetMetadata",

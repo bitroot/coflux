@@ -106,6 +106,20 @@ DROP INDEX idx_results_successor_ref_id;
 DROP TABLE results;
 ALTER TABLE results_new RENAME TO results;
 
+-- Stream config attached to a workflow definition (from the manifest)
+-- and to each step (copied at submit time, optionally overridden per
+-- call via cf.Target.with_streams). NULL means "unset" — the adapter
+-- falls back to the decorator-level default.
+--
+-- streams_buffer: backpressure budget in number of items (0 = strict
+-- lockstep, N = allow N items ahead, NULL = unbounded).
+-- streams_timeout_ms: idle-timeout budget in milliseconds; NULL means
+-- no timeout.
+ALTER TABLE workflows ADD COLUMN streams_buffer INTEGER;
+ALTER TABLE workflows ADD COLUMN streams_timeout_ms INTEGER;
+ALTER TABLE steps ADD COLUMN streams_buffer INTEGER;
+ALTER TABLE steps ADD COLUMN streams_timeout_ms INTEGER;
+
 -- Streams — ordered, append-only sequences of values produced by an
 -- execution. Each stream is identified by (execution_id, index), where
 -- `index` is assigned monotonically by the worker when serialising the
@@ -134,6 +148,10 @@ CREATE TABLE streams (
   -- Persisted so the server can reconstruct per-stream flow-control
   -- state on restart and so Studio can display the configuration.
   buffer INTEGER,
+  -- Idle-timeout budget in milliseconds. NULL disables the timeout.
+  -- Enforced at the worker (CLI) level; persisted here only so Studio
+  -- can display the configured value.
+  timeout_ms INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (execution_id, `index`),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
@@ -157,6 +175,8 @@ CREATE TABLE stream_items (
 --                    (cancel/crash/abandon/error). The specific error is
 --                    derived on read by looking up the execution's completion,
 --                    so we don't duplicate that state here.
+--   3 = timeout    — closed by the worker because the configured idle
+--                    timeout elapsed without a new item being appended.
 CREATE TABLE stream_closures (
   execution_id INTEGER NOT NULL,
   `index` INTEGER NOT NULL,

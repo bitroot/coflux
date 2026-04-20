@@ -12,6 +12,7 @@ def _target(
     wait_for=None,
     requires=None,
     timeout=None,
+    streams=None,
 ):
     target = {
         "module": module,
@@ -35,6 +36,8 @@ def _target(
         target["requires"] = requires
     if timeout is not None:
         target["timeout"] = timeout
+    if streams is not None:
+        target["streams"] = streams
     return target
 
 

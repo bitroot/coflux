@@ -506,6 +506,25 @@ func (w *Worker) handleExecute(params []any) error {
 		}
 	}
 
+	// Optional streams config (8th param). A map with string keys
+	// "buffer" and/or "timeout_ms"; either may be absent. Passed to
+	// the adapter so ``cf.stream(...)`` / generator-bodied tasks
+	// inherit the caller's override (or the workflow manifest default).
+	var streams *adapter.StreamsConfig
+	if len(params) > 7 && params[7] != nil {
+		if m, ok := params[7].(map[string]any); ok {
+			streams = &adapter.StreamsConfig{}
+			if v, ok := m["buffer"].(float64); ok {
+				buf := int(v)
+				streams.Buffer = &buf
+			}
+			if v, ok := m["timeout_ms"].(float64); ok {
+				t := int(v)
+				streams.TimeoutMs = &t
+			}
+		}
+	}
+
 	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID, "timeout_ms", timeoutMs)
 
 	// Track execution
@@ -545,7 +564,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs, streams); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
@@ -727,7 +746,7 @@ func (w *Worker) handleStreamClosed(params []any) error {
 
 // handleStreamDemand forwards a server-pushed demand grant to the producer
 // adapter. Params: [execution_id, index, n]. The producer's StreamDriver
-// adds ``n`` to its per-stream credit counter and wakes any waiting
+// adds “n“ to its per-stream credit counter and wakes any waiting
 // worker thread.
 func (w *Worker) handleStreamDemand(params []any) error {
 	if len(params) < 3 {
@@ -876,7 +895,24 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		timeout = params.Timeout
 	}
 
-	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout
+	// Streams config (buffer + idle timeout_ms defaults for streams
+	// produced by this execution). Encoded as a map with keys that the
+	// Elixir handler reads positionally; nil omits the option entirely.
+	var streams any
+	if params.Streams != nil {
+		s := map[string]any{}
+		if params.Streams.Buffer != nil {
+			s["buffer"] = *params.Streams.Buffer
+		}
+		if params.Streams.TimeoutMs != nil {
+			s["timeout_ms"] = *params.Streams.TimeoutMs
+		}
+		if len(s) > 0 {
+			streams = s
+		}
+	}
+
+	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -897,6 +933,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		params.Recurrent,   // recurrent
 		params.Requires,    // requires
 		timeout,            // timeout
+		streams,            // streams
 	)
 	if err != nil {
 		return nil, err
@@ -1216,17 +1253,23 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int) error {
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// The wire protocol takes buffer positionally; nil encodes to JSON null,
-	// which the server interprets as "no backpressure" (unbounded).
-	if buffer == nil {
-		return conn.Notify("stream_register", executionID, index, nil)
+	// The wire protocol takes buffer and timeout_ms positionally; nil
+	// encodes to JSON null. Server reads [execution_id, index, buffer,
+	// timeout_ms?]; omitting the trailing timeout_ms keeps compat with
+	// older server builds that don't read it.
+	var bufferArg any
+	if buffer != nil {
+		bufferArg = *buffer
 	}
-	return conn.Notify("stream_register", executionID, index, *buffer)
+	if timeoutMs == nil {
+		return conn.Notify("stream_register", executionID, index, bufferArg)
+	}
+	return conn.Notify("stream_register", executionID, index, bufferArg, *timeoutMs)
 }
 
 func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {
@@ -1242,7 +1285,7 @@ func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int
 	return conn.Notify("stream_append", executionID, index, sequence, serverValue)
 }
 
-func (w *Worker) StreamClose(ctx context.Context, executionID string, index int, streamErr *adapter.StreamCloseError) error {
+func (w *Worker) StreamClose(ctx context.Context, executionID string, index int, streamErr *adapter.StreamCloseError, reason *string) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
@@ -1255,7 +1298,14 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, index int,
 		frames := parseTraceback(streamErr.Traceback)
 		errTuple = []any{streamErr.Type, streamErr.Message, frames}
 	}
-	return conn.Notify("stream_close", executionID, index, errTuple)
+	// Wire: [execution_id, index, error, reason?]. When reason is nil
+	// the server infers close kind from error presence (nil→complete,
+	// object→errored). A non-nil reason (today only "timeout") is
+	// passed through explicitly.
+	if reason == nil {
+		return conn.Notify("stream_close", executionID, index, errTuple)
+	}
+	return conn.Notify("stream_close", executionID, index, errTuple, *reason)
 }
 
 func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error {
@@ -1938,6 +1988,22 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		// Build timeout (0 = not set, same as delay)
 		timeout := int(t.Timeout)
 
+		// Build streams (nil if not set) — keys snake_case to match the
+		// Python adapter's wire format for register_manifests.
+		var streams any
+		if t.Streams != nil {
+			m := map[string]any{}
+			if t.Streams.Buffer != nil {
+				m["buffer"] = *t.Streams.Buffer
+			}
+			if t.Streams.TimeoutMs != nil {
+				m["timeout_ms"] = *t.Streams.TimeoutMs
+			}
+			if len(m) > 0 {
+				streams = m
+			}
+		}
+
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
 			"waitFor":     waitFor,
@@ -1950,6 +2016,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,
+			"streams":     streams,
 		}
 
 		manifests[t.Module][t.Name] = def

@@ -1855,13 +1855,13 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call(
-        {:register_stream, execution_external_id, index, buffer, session_external_id},
+        {:register_stream, execution_external_id, index, buffer, timeout_ms, session_external_id},
         _from,
         state
       ) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        case Streams.register_stream(state.db, execution_id, index, buffer) do
+        case Streams.register_stream(state.db, execution_id, index, buffer, timeout_ms) do
           {:ok, created_at} ->
             # Resolve the session's external id to the internal one —
             # send_session (which delivers stream_demand) indexes by the
@@ -1878,7 +1878,7 @@ defmodule Coflux.Orchestration.Server do
                 buffer,
                 internal_session_id
               )
-              |> notify_stream_opened(execution_id, index, buffer, created_at)
+              |> notify_stream_opened(execution_id, index, buffer, timeout_ms, created_at)
               |> maybe_send_initial_demand(execution_id, index)
               |> flush_notifications()
 
@@ -2092,16 +2092,19 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:close_stream, execution_external_id, index, error}, _from, state) do
+  def handle_call({:close_stream, execution_external_id, index, close_spec}, _from, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        {spec, reason} =
-          case error do
+        {spec, reason, error} =
+          case close_spec do
             nil ->
-              {:complete, :complete}
+              {:complete, :complete, nil}
+
+            :timeout ->
+              {:timeout, :timeout, nil}
 
             {type, message, frames} ->
-              {{:errored, type, message, frames}, :errored}
+              {{:errored, type, message, frames}, :errored, {type, message, frames}}
           end
 
         case Streams.close_stream(state.db, execution_id, index, spec) do
@@ -3202,7 +3205,11 @@ defmodule Coflux.Orchestration.Server do
                           session_id,
                           {:execute, execution_external_id, execution.module, execution.target,
                            enriched_arguments, execution.run_external_id, workspace_external_id,
-                           execution.timeout}
+                           execution.timeout,
+                           build_streams_config(
+                             execution.streams_buffer,
+                             execution.streams_timeout_ms
+                           )}
                         )
 
                       # Notify sessions topic of updated total
@@ -5718,6 +5725,18 @@ defmodule Coflux.Orchestration.Server do
     "#{run_external_id}:#{step_number}:#{attempt}"
   end
 
+  # Build the map passed to workers in the :execute message, describing
+  # the execution's default stream config. Returns nil when neither
+  # option is set — keeps the wire message compact for the common case.
+  defp build_streams_config(nil, nil), do: nil
+
+  defp build_streams_config(buffer, timeout_ms) do
+    map = %{}
+    map = if buffer != nil, do: Map.put(map, :buffer, buffer), else: map
+    map = if timeout_ms != nil, do: Map.put(map, :timeout_ms, timeout_ms), else: map
+    map
+  end
+
   defp input_external_id(run_external_id, input_number) do
     "#{run_external_id}/i#{input_number}"
   end
@@ -6177,9 +6196,7 @@ defmodule Coflux.Orchestration.Server do
 
     state = close_open_streams(state, execution_id)
 
-    case Results.record_completion(state.db, execution_id, :errored,
-           successor_id: retry_id
-         ) do
+    case Results.record_completion(state.db, execution_id, :errored, successor_id: retry_id) do
       {:ok, completion_at} ->
         # Re-fire :result on the run topic so the error entry in the UI
         # picks up the newly-created retry successor. We only need to do
@@ -6222,9 +6239,7 @@ defmodule Coflux.Orchestration.Server do
     # consumers derive the specific error from the execution's outcome.
     state = close_open_streams(state, execution_id)
 
-    case Results.record_completion(state.db, execution_id, :crashed,
-           successor_id: retry_id
-         ) do
+    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
       {:ok, completion_at} ->
         # Result-time notifications weren't fired (no results row was ever
         # written), so fire them now alongside the completion notification.
@@ -6286,15 +6301,15 @@ defmodule Coflux.Orchestration.Server do
     {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
 
     Enum.map(rows, fn
-      {index, buffer, opened_at, nil, nil, nil} ->
-        {index, buffer, opened_at, nil, nil, nil}
+      {index, buffer, timeout_ms, opened_at, nil, nil, nil} ->
+        {index, buffer, timeout_ms, opened_at, nil, nil, nil}
 
-      {index, buffer, opened_at, closed_at, :lifecycle, _} ->
+      {index, buffer, timeout_ms, opened_at, closed_at, :lifecycle, _} ->
         {resolved_reason, resolved_error} = derive_lifecycle_info(db, execution_id)
-        {index, buffer, opened_at, closed_at, resolved_reason, resolved_error}
+        {index, buffer, timeout_ms, opened_at, closed_at, resolved_reason, resolved_error}
 
-      {index, buffer, opened_at, closed_at, reason, error} ->
-        {index, buffer, opened_at, closed_at, reason, error}
+      {index, buffer, timeout_ms, opened_at, closed_at, reason, error} ->
+        {index, buffer, timeout_ms, opened_at, closed_at, reason, error}
     end)
   end
 
@@ -7711,14 +7726,14 @@ defmodule Coflux.Orchestration.Server do
   # items on demand.
   @stream_topic_tail_size 200
 
-  defp notify_stream_opened(state, execution_id, index, buffer, created_at) do
+  defp notify_stream_opened(state, execution_id, index, buffer, timeout_ms, created_at) do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
 
     notify_listeners(
       state,
       {:run, r},
-      {:stream_opened, execution_ext_id, index, buffer, created_at}
+      {:stream_opened, execution_ext_id, index, buffer, timeout_ms, created_at}
     )
   end
 
@@ -7788,6 +7803,7 @@ defmodule Coflux.Orchestration.Server do
          {:ok, true} <- Streams.exists?(state.db, execution_id, index),
          {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, index),
          {:ok, buffer} <- Streams.get_buffer(state.db, execution_id, index),
+         {:ok, timeout_ms} <- Streams.get_timeout_ms(state.db, execution_id, index),
          {:ok, {items, total_count}} <-
            Streams.get_stream_tail(state.db, execution_id, index, @stream_topic_tail_size) do
       # Keep the tuple shape here — the topic module runs TopicUtils.build_value
@@ -7804,6 +7820,7 @@ defmodule Coflux.Orchestration.Server do
        %{
          producer: build_stream_producer(state.db, execution_ext_id, execution_id),
          buffer: buffer,
+         timeoutMs: timeout_ms,
          openedAt: opened_at,
          closure: closure,
          items: resolved_items,
@@ -7988,8 +8005,7 @@ defmodule Coflux.Orchestration.Server do
         state
         |> send_to_consumer(
           sub,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete",
-           nil}
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete", nil}
         )
         |> drop_subscription(key)
       else
@@ -8240,9 +8256,7 @@ defmodule Coflux.Orchestration.Server do
           end
 
         unless already_completed? do
-          Logger.warning(
-            "Couldn't locate session for execution #{execution_ext_id}. Ignoring."
-          )
+          Logger.warning("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
         end
 
         state

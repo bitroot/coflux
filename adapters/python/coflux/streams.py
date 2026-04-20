@@ -38,14 +38,22 @@ from .state import get_context
 # --- Producer side ---
 
 
-def stream(generator: Any, *, buffer: int | None = 0) -> Any:
+_STREAM_OPT_UNSET: Any = object()
+
+
+def stream(
+    generator: Any,
+    *,
+    buffer: Any = _STREAM_OPT_UNSET,
+    timeout: Any = _STREAM_OPT_UNSET,
+) -> Any:
     """Register a generator as a Coflux stream and return a handle.
 
-    Use this when a task returns multiple streams or needs a buffer size
-    different from the task default. For the common case where a task
-    body is itself a generator, ``@cf.task(buffer=N)`` handles the
-    registration automatically — you don't need to call ``cf.stream``
-    explicitly.
+    Use this when a task returns multiple streams or needs to override
+    the task-level stream configuration. For the common case where a
+    task body is itself a generator, ``@cf.task(streams=cf.Streams(...))``
+    handles the registration automatically — you don't need to call
+    ``cf.stream`` explicitly.
 
     Registration happens at call time: the driver thread starts, the
     server is told about the stream, and any later serialisation sees a
@@ -53,15 +61,25 @@ def stream(generator: Any, *, buffer: int | None = 0) -> Any:
     inside a task or workflow body (where an execution context is
     active); calling it from module scope or outside a task raises.
 
+    Unspecified options inherit from the enclosing task's
+    ``streams=cf.Streams(...)``. Explicit options override per-call.
+
     Args:
         generator: A sync or async generator. Other iterables aren't
             accepted — wrapping a list in ``cf.stream`` doesn't make
             sense; pass it as a value directly.
-        buffer: Backpressure budget. ``0`` (the default) means strict
-            lockstep — the producer emits an item, waits for a consumer
-            to acknowledge it, then emits the next. ``N`` allows the
-            producer to stay up to ``N`` items ahead of the fastest
-            consumer. ``None`` disables backpressure entirely.
+        buffer: Backpressure budget. ``0`` (the default if neither
+            ``cf.stream(buffer=...)`` nor the task-level default sets
+            it) means strict lockstep — the producer emits an item,
+            waits for a consumer to acknowledge it, then emits the
+            next. ``N`` allows the producer to stay up to ``N`` items
+            ahead of the fastest consumer. ``None`` disables
+            backpressure entirely.
+        timeout: Idle-timeout budget. If the producer doesn't append a
+            new item within this window (including when blocked on
+            consumer demand), the stream is force-closed with reason
+            ``"timeout"``. Accepts a positive number of seconds, a
+            ``timedelta``, or ``None`` to disable.
 
     Returns:
         A ``Stream`` handle referencing the newly registered stream.
@@ -72,10 +90,20 @@ def stream(generator: Any, *, buffer: int | None = 0) -> Any:
         raise TypeError(
             f"cf.stream expects a generator, got {type(generator).__name__}"
         )
-    if buffer is not None and buffer < 0:
-        raise ValueError(f"buffer must be non-negative or None, got {buffer}")
+
+    from .target import Streams, _validate_buffer, _validate_timeout
+
     ctx = get_context()
-    stream_id = ctx.register_stream(generator, buffer)
+    default = ctx.get_default_streams() or Streams()
+    resolved_buffer = (
+        _validate_buffer(buffer) if buffer is not _STREAM_OPT_UNSET else default.buffer
+    )
+    resolved_timeout = (
+        _validate_timeout(timeout)
+        if timeout is not _STREAM_OPT_UNSET
+        else default.timeout
+    )
+    stream_id = ctx.register_stream(generator, resolved_buffer, resolved_timeout)
     # Local import to avoid a top-level cycle — models imports nothing
     # from streams but streams already imports from models at top.
     from .models import Stream as StreamHandle
@@ -101,8 +129,22 @@ class StreamDriver:
         self._demand: dict[int, int | None] = {}
         self._closing = False
         self._demand_handler_registered = False
+        self._force_close_handler_registered = False
+        # Indexes of streams the worker (CLI) has force-closed — typically
+        # because their idle timeout elapsed. Read by ``_acquire_demand``
+        # and by the producer loop so the driver thread exits promptly
+        # and skips sending its own stream_close (the server already
+        # recorded the closure).
+        self._force_closed: dict[int, str] = {}
+        # Per-index generator entry, for clean close on force-close.
+        self._by_index: dict[int, dict[str, Any]] = {}
 
-    def register(self, generator: Any, buffer: int | None) -> str:
+    def register(
+        self,
+        generator: Any,
+        buffer: int | None,
+        timeout_ms: int | None = None,
+    ) -> str:
         """Register a generator and start running it in a worker thread.
 
         Accepts both sync generators (``def`` + ``yield``) and async
@@ -116,10 +158,15 @@ class StreamDriver:
         the next); ``N>0`` allows the producer to stay up to N items
         ahead of the fastest consumer.
 
+        ``timeout_ms`` is the idle-timeout budget (milliseconds). The
+        worker (CLI) closes the stream with reason "timeout" if no item
+        is appended within that window. ``None`` disables the timeout.
+
         Returns the stream's opaque ``id`` (``<execution_id>_<index>``)
         for embedding in the serialized value as a stream reference.
         """
         self._ensure_demand_handler_registered()
+        self._ensure_force_close_handler_registered()
 
         with self._lock:
             index = self._next_index
@@ -131,7 +178,9 @@ class StreamDriver:
             # it (or on first consumer subscribing).
             self._demand[index] = None if buffer is None else 0
 
-        protocol.send_stream_register(self._execution_id, index, buffer=buffer)
+        protocol.send_stream_register(
+            self._execution_id, index, buffer=buffer, timeout_ms=timeout_ms
+        )
 
         is_async = inspect.isasyncgen(generator)
         target = self._run_async if is_async else self._run
@@ -151,6 +200,7 @@ class StreamDriver:
         with self._lock:
             self._generators.append(entry)
             self._threads.append(thread)
+            self._by_index[index] = entry
         thread.start()
 
         return compose_stream_id(self._execution_id, index)
@@ -160,6 +210,14 @@ class StreamDriver:
             return
         get_dispatcher().register_notification("stream_demand", self._on_stream_demand)
         self._demand_handler_registered = True
+
+    def _ensure_force_close_handler_registered(self) -> None:
+        if self._force_close_handler_registered:
+            return
+        get_dispatcher().register_notification(
+            "stream_force_close", self._on_stream_force_close
+        )
+        self._force_close_handler_registered = True
 
     def _on_stream_demand(self, params: dict[str, Any]) -> None:
         """Server granted additional demand for one of our streams.
@@ -179,11 +237,54 @@ class StreamDriver:
             self._demand[index] = current + n
             self._demand_cv.notify_all()
 
+    def _on_stream_force_close(self, params: dict[str, Any]) -> None:
+        """CLI is telling us to stop producing for a specific stream.
+
+        Fires when the worker's stream-timer has elapsed and it has
+        already informed the server. We mark the stream force-closed so
+        ``_acquire_demand`` returns False and the producer thread exits
+        without sending its own ``stream_close`` (that would race the
+        closure the server already recorded).
+
+        Also closes the generator so any work it's doing (e.g., a long
+        ``next()``) is interrupted at the next yield point.
+        """
+        index = params.get("index")
+        reason = params.get("reason") or "timeout"
+        if index is None:
+            return
+        with self._demand_cv:
+            self._force_closed[index] = reason
+            self._demand_cv.notify_all()
+        # Close the generator off the dispatcher thread to avoid blocking
+        # on a long-running next() call there.
+        with self._lock:
+            entry = self._by_index.get(index)
+        if entry is None:
+            return
+        try:
+            if entry["is_async"]:
+                loop = entry["loop"]
+                if loop is not None and not loop.is_closed():
+                    gen = entry["generator"]
+
+                    async def _close(g=gen) -> None:
+                        try:
+                            await g.aclose()
+                        except Exception:
+                            pass
+
+                    asyncio.run_coroutine_threadsafe(_close(), loop)
+            else:
+                entry["generator"].close()
+        except Exception:
+            pass
+
     def _acquire_demand(self, index: int) -> bool:
         """Wait for a credit and consume it. Returns False if closed mid-wait."""
         with self._demand_cv:
             while True:
-                if self._closing:
+                if self._closing or index in self._force_closed:
                     return False
                 current = self._demand.get(index)
                 if current is None:
@@ -193,6 +294,10 @@ class StreamDriver:
                     self._demand[index] = current - 1
                     return True
                 self._demand_cv.wait()
+
+    def _is_force_closed(self, index: int) -> bool:
+        with self._demand_cv:
+            return index in self._force_closed
 
     def _run(self, index: int, generator: Any) -> None:
         """Run one sync generator to exhaustion (or error)."""
@@ -219,11 +324,15 @@ class StreamDriver:
                 sequence += 1
         except GeneratorExit:
             # Generator explicitly closed (via close_all on error path, or
-            # server-initiated cancel). Skip send_stream_close — the server
-            # records a lifecycle closure when the execution terminates and
-            # derives the error from the execution's outcome.
+            # by the force-close handler for a worker-initiated timeout).
+            # Skip send_stream_close — the server either records a
+            # lifecycle closure on execution-end, or has already recorded
+            # the force-close reason (e.g. "timeout").
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
+            if self._is_force_closed(index):
+                # Worker already recorded the close; don't overwrite.
+                return
             error_type = f"{type(e).__module__}.{type(e).__qualname__}"
             tb = traceback.format_exc()
             protocol.send_stream_close(
@@ -234,6 +343,8 @@ class StreamDriver:
                 traceback=tb,
             )
         else:
+            if self._is_force_closed(index):
+                return
             protocol.send_stream_close(self._execution_id, index)
 
     def _run_async(self, index: int, generator: Any) -> None:
@@ -275,6 +386,8 @@ class StreamDriver:
         except (GeneratorExit, asyncio.CancelledError):
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
+            if self._is_force_closed(index):
+                return
             error_type = f"{type(e).__module__}.{type(e).__qualname__}"
             tb = traceback.format_exc()
             protocol.send_stream_close(
@@ -285,6 +398,8 @@ class StreamDriver:
                 traceback=tb,
             )
         else:
+            if self._is_force_closed(index):
+                return
             protocol.send_stream_close(self._execution_id, index)
         finally:
             try:

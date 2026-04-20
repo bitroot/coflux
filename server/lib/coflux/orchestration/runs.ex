@@ -374,6 +374,7 @@ defmodule Coflux.Orchestration.Runs do
     recurrent = Keyword.get(opts, :recurrent, false)
     delay = Keyword.get(opts, :delay, 0)
     timeout = Keyword.get(opts, :timeout, 0)
+    streams = Keyword.get(opts, :streams)
     requires = Keyword.get(opts, :requires) || %{}
 
     # Calculate execute_after from delay
@@ -423,6 +424,9 @@ defmodule Coflux.Orchestration.Runs do
             if defer,
               do: build_key(defer.params, arguments, "#{module}:#{target}")
 
+          streams_buffer = if streams, do: streams[:buffer]
+          streams_timeout_ms = if streams, do: streams[:timeout_ms]
+
           # TODO: validate parent belongs to run?
           {:ok, step_id, step_number} =
             insert_step(
@@ -445,6 +449,8 @@ defmodule Coflux.Orchestration.Runs do
               delay,
               timeout,
               requires_tag_set_id,
+              streams_buffer,
+              streams_timeout_ms,
               now
             )
 
@@ -642,6 +648,8 @@ defmodule Coflux.Orchestration.Runs do
         s.retry_backoff_min,
         s.retry_backoff_max,
         s.timeout,
+        s.streams_buffer,
+        s.streams_timeout_ms,
         e.workspace_id,
         e.execute_after,
         e.attempt,
@@ -1289,6 +1297,8 @@ defmodule Coflux.Orchestration.Runs do
          delay,
          timeout,
          requires_tag_set_id,
+         streams_buffer,
+         streams_timeout_ms,
          now
        ) do
     {:ok, step_number} = get_next_step_number(db, run_id)
@@ -1313,6 +1323,8 @@ defmodule Coflux.Orchestration.Runs do
            delay: delay,
            timeout: timeout,
            requires_tag_set_id: requires_tag_set_id,
+           streams_buffer: streams_buffer,
+           streams_timeout_ms: streams_timeout_ms,
            created_at: now
          }) do
       {:ok, step_id} ->

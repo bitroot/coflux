@@ -739,3 +739,129 @@ def test_backpressure_unbounded_sends_no_demand(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         cons_ex.conn.complete(cons_ex.execution_id)
         ctx.result(prod_resp["runId"])
+
+
+# --- Idle timeout -------------------------------------------------------
+
+
+def test_timeout_fires_when_producer_idle(worker):
+    """A stream registered with ``timeout_ms`` is force-closed by the
+    worker after that many milliseconds without an append. The
+    adapter receives a ``stream_force_close`` push and any consumer
+    sees a ``stream_closed`` push with reason=``"timeout"``.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=150
+        )
+
+        # Consumer subscribes so it'll see the timeout close.
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+
+        # Producer is idle. Within a second (well past 150ms), the CLI
+        # should push force-close to the producer and the consumer
+        # should see the stream closed with reason="timeout".
+        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
+        assert force["index"] == 0
+        assert force["reason"] == "timeout"
+
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "timeout"
+        assert closed.get("error") is None
+
+        # Producer should skip its own stream_close now (server already
+        # recorded it); we simulate the real adapter by just completing.
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_timeout_resets_on_append(worker):
+    """Each append resets the idle deadline — a producer that emits
+    items at a steady pace faster than the timeout does not fire.
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=250
+        )
+
+        # Emit 3 items with 100ms gaps — each append resets the
+        # deadline, so the total 300ms elapsed doesn't trigger a fire.
+        import time as _t
+
+        for seq in range(3):
+            _t.sleep(0.1)
+            prod_ex.conn.stream_append(prod_ex.execution_id, 0, seq, f"v{seq}")
+
+        # No force-close should have been pushed.
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_force_close", timeout=0.1)
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_manifest_streams_propagates_to_execute(worker):
+    """Workflow registered with ``streams`` in the manifest: when
+    submitted (mimicking Studio/CLI), the execute message delivered to
+    the worker carries the same ``streams`` config. This is the full
+    propagation path — adapter manifest → server → execute dispatch.
+    """
+    targets = [
+        workflow("test", "producer", streams={"buffer": 5, "timeout_ms": 250}),
+    ]
+
+    with worker(targets) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+
+        assert prod_ex.streams is not None
+        assert prod_ex.streams.get("buffer") == 5
+        assert prod_ex.streams.get("timeout_ms") == 250
+
+        prod_ex.conn.complete(prod_ex.execution_id)
+
+
+def test_timeout_visible_in_topic(worker):
+    """Studio's run topic surfaces ``timeoutMs`` on the stream state,
+    and a timeout closure shows ``reason: "timeout"``.
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=120
+        )
+
+        # Wait for the timeout to fire.
+        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+        snapshot = ctx.inspect(prod_resp["runId"])
+        step = next(iter(snapshot["steps"].values()))
+        execution = next(iter(step["executions"].values()))
+        stream = execution["streams"]["0"]
+        assert stream["timeoutMs"] == 120
+        assert stream["reason"] == "timeout"
+        assert stream["error"] is None

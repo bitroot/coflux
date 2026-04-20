@@ -40,6 +40,7 @@ defmodule Coflux.Topics.Stream do
            %{
              producer: initial.producer,
              buffer: initial.buffer,
+             timeoutMs: initial.timeoutMs,
              openedAt: initial.openedAt,
              closure: build_closure(initial.closure),
              items: Enum.map(initial.items, &build_item/1),
