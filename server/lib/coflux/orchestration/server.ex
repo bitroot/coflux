@@ -7855,11 +7855,7 @@ defmodule Coflux.Orchestration.Server do
     {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
     {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
 
-    encoded_error =
-      case error do
-        nil -> nil
-        {type, message, _frames} -> %{type: type, message: message}
-      end
+    encoded_error = encode_stream_error_summary(error)
 
     reason_str = if reason, do: Atom.to_string(reason)
 
@@ -7943,8 +7939,15 @@ defmodule Coflux.Orchestration.Server do
 
   defp encode_stream_error_summary(nil), do: nil
 
-  defp encode_stream_error_summary({type, message, _frames}) do
-    %{type: type, message: message}
+  defp encode_stream_error_summary({type, message, frames}) do
+    %{
+      type: type,
+      message: message,
+      frames:
+        Enum.map(frames, fn {file, line, name, code} ->
+          %{file: file, line: line, name: name, code: code}
+        end)
+    }
   end
 
   defp build_stream_producer(db, execution_ext_id, execution_id) do

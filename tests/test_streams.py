@@ -319,7 +319,9 @@ def test_topic_exposes_stream_state(worker):
         assert streams["0"]["error"] is None
         assert streams["1"]["closedAt"] is not None
         assert streams["1"]["reason"] == "errored"
-        assert streams["1"]["error"] == {"type": "RuntimeError", "message": "bad"}
+        assert streams["1"]["error"]["type"] == "RuntimeError"
+        assert streams["1"]["error"]["message"] == "bad"
+        assert isinstance(streams["1"]["error"]["frames"], list)
 
 
 def test_cancellation_closes_streams_with_cancelled_reason(worker):

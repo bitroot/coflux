@@ -582,7 +582,7 @@ defmodule Coflux.Topics.Run do
            error: nil
          }}
 
-      {index, buffer, timeout_ms, opened_at, closed_at, reason, {type, message, _frames}} ->
+      {index, buffer, timeout_ms, opened_at, closed_at, reason, {type, message, frames}} ->
         {Integer.to_string(index),
          %{
            buffer: buffer,
@@ -590,7 +590,7 @@ defmodule Coflux.Topics.Run do
            openedAt: opened_at,
            closedAt: closed_at,
            reason: Atom.to_string(reason),
-           error: %{type: type, message: message}
+           error: %{type: type, message: message, frames: build_frames(frames)}
          }}
     end)
   end
