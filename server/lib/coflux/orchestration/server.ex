@@ -19,6 +19,7 @@ defmodule Coflux.Orchestration.Server do
     Workers,
     Manifests,
     Principals,
+    Errors,
     Epoch
   }
 
@@ -6173,11 +6174,85 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # Value result + clean drain: no retry, kind=:succeeded.
+  # Value result + drain: dispatch on stream closure outcomes.
+  #   * any owned stream closed `:errored` → `:stream_errored` (retried)
+  #   * else any owned stream closed `:timeout` → `:partial` (not retried,
+  #     not cacheable)
+  #   * else `:succeeded`
+  # `close_open_streams` runs first so any still-open streams get a
+  # `:lifecycle` row (which doesn't influence the dispatch — only the
+  # explicit `:errored`/`:timeout` reasons do).
   defp finalize_success_completion(state, execution_id) do
     state = close_open_streams(state, execution_id)
 
-    case Results.record_completion(state.db, execution_id, :succeeded) do
+    {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
+
+    cond do
+      not is_nil(summary.errored) ->
+        finalize_stream_errored_completion(state, execution_id, summary.errored)
+
+      summary.timed_out ->
+        finalize_stream_timeout_completion(state, execution_id)
+
+      true ->
+        case Results.record_completion(state.db, execution_id, :succeeded) do
+          {:ok, completion_at} ->
+            fire_completion_notification(state, execution_id, completion_at)
+
+          {:error, :already_completed} ->
+            state
+        end
+    end
+  end
+
+  # A stream owned by this execution closed with an error, but the function
+  # body returned a value. Promote to `:stream_errored`: drives the retry
+  # policy and excludes the execution from cache lookups, while leaving the
+  # value in `results` so any consumer that already resolved against it
+  # keeps its reference (mirrors the cancellation precedent at do_cancel_execution).
+  defp finalize_stream_errored_completion(state, execution_id, error_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    {:ok, {type, message, frames}} = Errors.get_by_id(state.db, error_id)
+
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(
+        state,
+        execution_id,
+        step,
+        workspace_id,
+        {:error, type, message, frames, nil}
+      )
+
+    case Results.record_completion(state.db, execution_id, :stream_errored,
+           successor_id: retry_id
+         ) do
+      {:ok, completion_at} ->
+        # Re-fire :result so the UI's value-result entry picks up the new
+        # error overlay (the resolve_logical path returns :error for
+        # :stream_errored kinds with a value present).
+        state =
+          fire_result_notifications(
+            state,
+            execution_id,
+            {:error, type, message, frames, retry_id, nil},
+            nil,
+            nil
+          )
+
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  # A stream owned by this execution closed via idle timeout. The execution
+  # itself succeeded; promote to `:stream_timeout` to exclude it from cache
+  # lookups (consumer-shaped cache contents would be wrong) without
+  # surfacing as a failure or triggering a retry.
+  defp finalize_stream_timeout_completion(state, execution_id) do
+    case Results.record_completion(state.db, execution_id, :stream_timeout) do
       {:ok, completion_at} ->
         fire_completion_notification(state, execution_id, completion_at)
 

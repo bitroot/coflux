@@ -16,7 +16,7 @@ Two common patterns:
 
 import pytest
 
-from support.manifest import workflow
+from support.manifest import task, workflow
 from support.protocol import (
     execution_result,
     json_args,
@@ -918,3 +918,231 @@ def test_timeout_visible_in_topic(worker):
         assert stream["timeoutMs"] == 120
         assert stream["reason"] == "timeout"
         assert stream["error"] is None
+
+
+# --- Stream outcomes promoted to execution completion --------------------
+
+
+def test_clean_stream_keeps_completion_succeeded(worker):
+    """Sanity: a value-result + cleanly-closed streams still completes as
+    `:succeeded`. (Guards against the new dispatch in
+    `finalize_success_completion` regressing the happy path.)
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "ok")
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value=1)
+        ctx.result(prod_resp["runId"])
+
+        snapshot = ctx.inspect(prod_resp["runId"])
+        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        assert execution["completion"]["kind"] == "succeeded"
+
+
+def test_stream_error_promotes_completion_to_stream_errored(worker):
+    """When a stream owned by an execution closes with an error but the
+    function body returned a value, the execution's completion is
+    promoted to `:stream_errored` (so the result is not cacheable and
+    the step's retry policy applies).
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "ok")
+        prod_ex.conn.stream_close(
+            prod_ex.execution_id,
+            0,
+            error={"type": "ValueError", "message": "boom", "traceback": ""},
+        )
+        prod_ex.conn.complete(prod_ex.execution_id, value=1)
+        ctx.result(prod_resp["runId"])
+
+        snapshot = ctx.inspect(prod_resp["runId"])
+        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        assert execution["completion"]["kind"] == "stream_errored"
+
+
+def test_stream_timeout_promotes_completion_to_stream_timeout(worker):
+    """When a stream owned by an execution closes via idle timeout but the
+    function body returned a value, the completion is promoted to
+    `:stream_timeout` (logically a success, but ineligible for cache).
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=100
+        )
+
+        # Wait for the timeout to fire on the producer side.
+        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+
+        prod_ex.conn.complete(prod_ex.execution_id, value=1)
+        ctx.result(prod_resp["runId"])
+
+        snapshot = ctx.inspect(prod_resp["runId"])
+        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        assert execution["completion"]["kind"] == "stream_timeout"
+
+
+def test_stream_error_outranks_timeout(worker):
+    """If one stream errored and another timed out on the same execution,
+    `:stream_errored` takes precedence — error is the stronger signal.
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        # Stream 0: will time out (no appends).
+        prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=100
+        )
+        # Stream 1: will be closed with an error.
+        prod_ex.conn.stream_register(prod_ex.execution_id, 1)
+
+        # Drain the timeout signal so we're past it.
+        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+
+        prod_ex.conn.stream_close(
+            prod_ex.execution_id,
+            1,
+            error={"type": "RuntimeError", "message": "bad", "traceback": ""},
+        )
+        prod_ex.conn.complete(prod_ex.execution_id, value=1)
+        ctx.result(prod_resp["runId"])
+
+        snapshot = ctx.inspect(prod_resp["runId"])
+        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        assert execution["completion"]["kind"] == "stream_errored"
+
+
+def _wait_for_completion(ctx, run_id, step_num, timeout=5):
+    """Poll the run topic until the given step's first execution has a
+    completion row recorded, then return the completion kind. Used by
+    cache-lookup tests that need to be sure the prior execution has
+    transitioned past `:draining` (otherwise the in-flight cache lookup
+    matches the value-result before the new completion-kind dispatch
+    runs)."""
+    import time as _t
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        snapshot = ctx.inspect(run_id)
+        executions = snapshot["steps"][f"{run_id}:{step_num}"]["executions"]
+        execution = next(iter(executions.values()))
+        completion = execution.get("completion")
+        if completion is not None:
+            return completion["kind"]
+        _t.sleep(0.05)
+    raise AssertionError(f"step {run_id}:{step_num} not completed within {timeout}s")
+
+
+def test_stream_errored_execution_not_used_as_cache_hit(worker):
+    """A `:stream_errored` execution is not eligible for cache lookup — a
+    second submission with the same args re-executes the task.
+    """
+    targets = [
+        workflow("test", "main"),
+        task("test", "produce", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+        wf = ctx.executor.next_execute()
+
+        ref1 = wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            cache={"params": True},
+        )
+
+        # First execution: returns a value, but its stream closes with an error.
+        prod = ctx.executor.next_execute()
+        prod.conn.stream_register(prod.execution_id, 0)
+        prod.conn.stream_close(
+            prod.execution_id,
+            0,
+            error={"type": "ValueError", "message": "oops", "traceback": ""},
+        )
+        prod.conn.complete(prod.execution_id, value="v")
+        assert wf.conn.resolve(wf.execution_id, ref1)["value"] == "v"
+
+        # Wait for the completion to be promoted before the second submit —
+        # otherwise the in-flight (`:draining`) cache lookup matches the
+        # value-result first and our promotion logic never gets to run.
+        assert _wait_for_completion(ctx, run_id, 2) == "stream_errored"
+
+        # Second submission with same args: should NOT cache-hit — the
+        # previous execution's completion is :stream_errored.
+        wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            cache={"params": True},
+        )
+        # A cache hit would skip the execute; we expect a fresh dispatch.
+        prod2 = ctx.executor.next_execute(timeout=3)
+        prod2.conn.complete(prod2.execution_id, value="v2")
+
+        wf.conn.complete(wf.execution_id)
+
+
+def test_stream_timeout_execution_not_used_as_cache_hit(worker):
+    """A `:stream_timeout` execution (stream timed out) is not eligible
+    for cache lookup — a second submission with the same args re-executes.
+    """
+    targets = [
+        workflow("test", "main"),
+        task("test", "produce", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+        wf = ctx.executor.next_execute()
+
+        ref1 = wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            cache={"params": True},
+        )
+
+        prod = ctx.executor.next_execute()
+        prod.conn.stream_register(
+            prod.execution_id, 0, buffer=None, timeout_ms=100
+        )
+        force = prod.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+        prod.conn.complete(prod.execution_id, value="v")
+        assert wf.conn.resolve(wf.execution_id, ref1)["value"] == "v"
+
+        assert _wait_for_completion(ctx, run_id, 2) == "stream_timeout"
+
+        # Second submission with same args: previous completion is
+        # :stream_timeout, not cacheable — expect a fresh execution.
+        wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            cache={"params": True},
+        )
+        prod2 = ctx.executor.next_execute(timeout=3)
+        prod2.conn.complete(prod2.execution_id, value="v2")
+
+        wf.conn.complete(wf.execution_id)

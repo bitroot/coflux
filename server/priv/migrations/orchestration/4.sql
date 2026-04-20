@@ -31,17 +31,22 @@ CREATE TABLE results_new (
 ) STRICT;
 
 -- The completions table. Terminal state for the execution. `kind` values:
---   0 = succeeded   — value result recorded, process ended cleanly
---   1 = errored     — error result recorded, process ended cleanly
---   2 = abandoned   — session expired before notify_terminated
---   3 = crashed     — notify_terminated without prior result
---   4 = timeout     — execution hit its timeout
---   5 = cancelled   — user cancelled (may or may not have a result row)
---   6 = suspended   — body called suspend; successor resumes later
---   7 = recurred    — recurrent execution scheduled its next run
---   8 = deferred    — execution deferred to another (memoisation / defer)
---   9 = cached      — execution resolved to an existing cache hit
---  10 = spawned     — execution spawned a continuation
+--   0 = succeeded       — value result recorded, process ended cleanly
+--   1 = errored         — error result recorded, process ended cleanly
+--   2 = abandoned       — session expired before notify_terminated
+--   3 = crashed         — notify_terminated without prior result
+--   4 = timeout         — execution hit its timeout
+--   5 = cancelled       — user cancelled (may or may not have a result row)
+--   6 = suspended       — body called suspend; successor resumes later
+--   7 = recurred        — recurrent execution scheduled its next run
+--   8 = deferred        — execution deferred to another (memoisation / defer)
+--   9 = cached          — execution resolved to an existing cache hit
+--  10 = spawned         — execution spawned a continuation
+--  11 = stream_errored  — value result recorded but a stream errored mid-flight;
+--                         counted as a failure for retry / cache eligibility
+--  12 = stream_timeout  — value result recorded but a stream timed out;
+--                         logically a success but ineligible for cache.
+--                         Distinct from (execution-level) `timeout` = 4.
 --
 -- `successor_id` points at an execution in the same epoch; used for retry
 -- chains and in-flight handoffs. `successor_ref_id` points at an

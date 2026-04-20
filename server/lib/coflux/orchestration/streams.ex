@@ -224,6 +224,42 @@ defmodule Coflux.Orchestration.Streams do
     end
   end
 
+  # Returns a summary of how the streams owned by `execution_id` closed.
+  # Used by `complete_execution` to decide whether to promote a value-result
+  # to `:stream_errored` / `:partial`.
+  #
+  # Shape: `{:ok, %{errored: integer | nil, timed_out: boolean}}`
+  #   * `errored` — the `errors.id` for the *first* errored stream closure
+  #     (in stream-index order), or `nil` if none errored
+  #   * `timed_out` — true if any stream closed via idle timeout
+  #
+  # Lifecycle / complete closures are ignored: the former inherit the
+  # execution's eventual outcome, the latter are the success case.
+  def get_closure_summary_for_execution(db, execution_id) do
+    case query(
+           db,
+           """
+           SELECT reason, error_id
+           FROM stream_closures
+           WHERE execution_id = ?1
+           ORDER BY `index`
+           """,
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        summary =
+          Enum.reduce(rows, %{errored: nil, timed_out: false}, fn {reason, error_id}, acc ->
+            case reason_from_int(reason) do
+              :errored -> if acc.errored, do: acc, else: %{acc | errored: error_id}
+              :timeout -> %{acc | timed_out: true}
+              _ -> acc
+            end
+          end)
+
+        {:ok, summary}
+    end
+  end
+
   # Returns indexes of streams owned by `execution_id` that don't yet have
   # a closure row. Used by the lifecycle code to discover which streams to
   # close on completion / cancel / crash.

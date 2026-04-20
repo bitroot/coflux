@@ -1169,6 +1169,20 @@ defmodule Coflux.Orchestration.Runs do
         workspace_ids ++ [{:blob, cache_key}, recorded_after]
       end
 
+    # Disqualifying completion kinds: cancellation, plus the two
+    # value-result-but-stream-broke kinds. These all have a value row
+    # (so the value-id check above wouldn't reject them) but the cached
+    # value is unsafe to reuse — cancelled = explicit user override,
+    # stream_errored = producer failure, stream_timeout = consumer-shaped
+    # output. Each is excluded as soon as its completion is recorded;
+    # in-flight executions (no completion row yet) remain candidates.
+    disqualified_kinds =
+      Enum.map_join(
+        [:cancelled, :stream_errored, :stream_timeout],
+        ", ",
+        &Integer.to_string(Results.atom_kind(&1))
+      )
+
     case query(
            db,
            """
@@ -1181,14 +1195,14 @@ defmodule Coflux.Orchestration.Runs do
              e.workspace_id IN (#{build_placeholders(length(workspace_ids))})
              AND s.cache_key = ?#{length(workspace_ids) + 1}
              -- Either no result yet (in-flight candidate) or a value result
-             -- recorded within the cache age window. Errors disqualify.
-             -- Cancelled-with-value also disqualifies: the value stays valid
-             -- for already-resolved consumers but shouldn't seed cache hits.
+             -- recorded within the cache age window. Errors disqualify
+             -- (no value_id). See `disqualified_kinds` for completion-kind
+             -- exclusions that survive having a value.
              AND (
                r.execution_id IS NULL
                OR (r.value_id IS NOT NULL AND r.created_at >= ?#{length(workspace_ids) + 2})
              )
-             AND (c.kind IS NULL OR c.kind != #{Results.atom_kind(:cancelled)})
+             AND (c.kind IS NULL OR c.kind NOT IN (#{disqualified_kinds}))
              #{step_clause}
            ORDER BY e.created_at DESC
            LIMIT 1

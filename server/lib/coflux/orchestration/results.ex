@@ -1,7 +1,7 @@
 defmodule Coflux.Orchestration.Results do
   import Coflux.Store
 
-  alias Coflux.Orchestration.{Errors, Values}
+  alias Coflux.Orchestration.{Errors, Streams, Values}
 
   # --- Completion kinds ---
   #
@@ -19,8 +19,26 @@ defmodule Coflux.Orchestration.Results do
   @kind_deferred 8
   @kind_cached 9
   @kind_spawned 10
+  # `:stream_errored` — execution returned a value but at least one of its
+  # streams closed with an error. Treated as a failure (retried via the
+  # step's retry policy, ineligible for cache lookup) but the result row
+  # still carries the original value so consumers that already resolved
+  # against it keep working.
+  @kind_stream_errored 11
+  # `:stream_timeout` — execution returned a value but at least one of its
+  # streams closed via idle timeout. Logically a success (resolves to the
+  # value) but ineligible for cache lookup, since the cached stream
+  # contents would be shaped by the original consumer's demand pattern.
+  # Not retried. Distinct from execution-level `:timeout`.
+  @kind_stream_timeout 12
 
-  @failure_kinds [@kind_errored, @kind_abandoned, @kind_crashed, @kind_timeout]
+  @failure_kinds [
+    @kind_errored,
+    @kind_abandoned,
+    @kind_crashed,
+    @kind_timeout,
+    @kind_stream_errored
+  ]
 
   def kind_atom(0), do: :succeeded
   def kind_atom(1), do: :errored
@@ -33,6 +51,8 @@ defmodule Coflux.Orchestration.Results do
   def kind_atom(8), do: :deferred
   def kind_atom(9), do: :cached
   def kind_atom(10), do: :spawned
+  def kind_atom(11), do: :stream_errored
+  def kind_atom(12), do: :stream_timeout
 
   def atom_kind(:succeeded), do: @kind_succeeded
   def atom_kind(:errored), do: @kind_errored
@@ -45,6 +65,8 @@ defmodule Coflux.Orchestration.Results do
   def atom_kind(:deferred), do: @kind_deferred
   def atom_kind(:cached), do: @kind_cached
   def atom_kind(:spawned), do: @kind_spawned
+  def atom_kind(:stream_errored), do: @kind_stream_errored
+  def atom_kind(:stream_timeout), do: @kind_stream_timeout
 
   def failure_kinds, do: @failure_kinds
 
@@ -307,6 +329,7 @@ defmodule Coflux.Orchestration.Results do
 
     case resolve_logical(
            db,
+           execution_id,
            kind,
            value_id,
            error_id,
@@ -441,6 +464,20 @@ defmodule Coflux.Orchestration.Results do
   defp decode_retryable(1), do: true
   defp decode_retryable(0), do: false
 
+  # Look up the first errored stream closure's error triple for a
+  # :stream_errored execution. Returns `nil` if no errored closure exists
+  # (shouldn't happen if the kind is :stream_errored, but defensive).
+  defp fetch_stream_error(db, execution_id) do
+    case Streams.get_closure_summary_for_execution(db, execution_id) do
+      {:ok, %{errored: nil}} ->
+        nil
+
+      {:ok, %{errored: error_id}} when not is_nil(error_id) ->
+        {:ok, triple} = Errors.get_by_id(db, error_id)
+        triple
+    end
+  end
+
   # Builds the legacy "logical result" tuple from the split tables. Used
   # by most callers (UI, topic state, consumer resolution). Returns `nil`
   # only when nothing has been recorded yet.
@@ -449,34 +486,73 @@ defmodule Coflux.Orchestration.Results do
   # safe to follow a successor — error results without a completion carry
   # `nil` as their successor here, and the server treats that as "still
   # pending".
-  defp resolve_logical(_db, nil, nil, nil, _, _, _), do: nil
+  defp resolve_logical(_db, _exec_id, nil, nil, nil, _, _, _), do: nil
 
   # Value payload present. Returns the appropriate tagged tuple, picking
   # the successor-flavoured form when the completion says this was a
   # deferred/cached/spawned resolution.
-  defp resolve_logical(db, kind, value_id, nil, _retryable, _successor_id, successor_ref_id)
+  defp resolve_logical(
+         db,
+         execution_id,
+         kind,
+         value_id,
+         nil,
+         retryable,
+         successor_id,
+         successor_ref_id
+       )
        when not is_nil(value_id) do
     {:ok, value} = Values.get_value_by_id(db, value_id)
 
     case kind && kind_atom(kind) do
-      :deferred when not is_nil(successor_ref_id) -> {:deferred, successor_ref_id, value}
-      :cached when not is_nil(successor_ref_id) -> {:cached, successor_ref_id, value}
-      :spawned when not is_nil(successor_ref_id) -> {:spawned, successor_ref_id, value}
-      _ -> {:value, value}
+      :deferred when not is_nil(successor_ref_id) ->
+        {:deferred, successor_ref_id, value}
+
+      :cached when not is_nil(successor_ref_id) ->
+        {:cached, successor_ref_id, value}
+
+      :spawned when not is_nil(successor_ref_id) ->
+        {:spawned, successor_ref_id, value}
+
+      :stream_errored ->
+        # Value result + a stream errored mid-flight. Surface as an error
+        # for consumer resolution, using the first errored stream closure's
+        # stored error triple. (The cancellation precedent leaves the value
+        # in place — consumers that already resolved against it keep their
+        # reference; this branch governs only late lookups.)
+        case fetch_stream_error(db, execution_id) do
+          nil ->
+            {:value, value}
+
+          {type, message, frames} ->
+            {:error, type, message, frames, successor_id, decode_retryable(retryable)}
+        end
+
+      _ ->
+        {:value, value}
     end
   end
 
   # Error payload without a completion yet. We return the error so UI can
   # display it; the successor slot is nil so consumer resolution treats
   # it as still pending (the retry decision happens at completion time).
-  defp resolve_logical(db, nil, nil, error_id, retryable, _successor_id, _successor_ref_id)
+  defp resolve_logical(db, _exec_id, nil, nil, error_id, retryable, _successor_id, _successor_ref_id)
        when not is_nil(error_id) do
     {:ok, {type, message, frames}} = Errors.get_by_id(db, error_id)
     {:error, type, message, frames, nil, decode_retryable(retryable)}
   end
 
   # Completion present (possibly with no results row).
-  defp resolve_logical(db, kind, _value_id, error_id, retryable, successor_id, successor_ref_id) do
+  defp resolve_logical(
+         db,
+         _exec_id,
+         kind,
+         _value_id,
+         error_id,
+         retryable,
+         successor_id,
+         successor_ref_id
+       ) do
     case kind_atom(kind) do
       :succeeded ->
         nil
