@@ -1948,6 +1948,14 @@ defmodule Coflux.Orchestration.Server do
       :error ->
         state
 
+      {:ok, %{session_id: nil}} ->
+        # Producer's session is gone — typically because the producer
+        # execution has long since terminated and we rebuilt its in-memory
+        # state for a late subscriber. There's nothing to grant demand to;
+        # the stream is durable in the DB and backlog reads don't consume
+        # credits.
+        state
+
       {:ok, producer} ->
         has_subscribers = has_stream_subscribers?(state, key)
         max_cursor = current_max_cursor(state, key)

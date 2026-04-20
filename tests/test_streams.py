@@ -80,6 +80,59 @@ def test_producer_writes_and_consumer_reads_backlog(worker):
         assert closed.get("error") is None
 
 
+def test_backlog_replay_after_producer_terminated_with_buffer(worker):
+    """Regression: subscribing to a closed bounded-buffer stream whose
+    producer execution has terminated must replay the backlog and close.
+
+    Previously, ``ensure_stream_producer`` rebuilt the producer's
+    in-memory state with ``session_id=nil`` for the vanished execution.
+    After ``push_backlog_items`` advanced the consumer's cursor past
+    ``demand_granted``, ``refresh_stream_demand`` would compute a
+    positive delta and call ``send_session(state, nil, ...)``, crashing
+    the project GenServer with ``KeyError :connection`` and leaving the
+    consumer hung. The unbounded (``buffer=null``) path didn't trigger
+    it because ``ensure_stream_producer`` no-ops in that case.
+    """
+    targets = [
+        workflow("test", "producer"),
+        workflow("test", "consumer"),
+    ]
+
+    with worker(targets) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+        # First subscriber to a buffer=0 stream needs a credit before the
+        # producer can append; the demand grant arrives once the consumer
+        # subscribes. To keep the test focused on the post-termination
+        # replay, append items here without waiting on demand — the test
+        # adapter doesn't enforce credit accounting on appends.
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "a")
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "b")
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 2, "c")
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value=42)
+
+        # Producer execution must be fully gone — its session entry for
+        # this execution removed — before the consumer subscribes.
+        ctx.result(prod_resp["runId"])
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+        items, closed = cons_ex.conn.drain_stream(subscription_id=1)
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+        assert [item[0] for item in items] == [0, 1, 2]
+        assert [item[1]["value"] for item in items] == ["a", "b", "c"]
+        assert closed.get("error") is None
+
+
 def test_consumer_sees_live_push(worker):
     """Consumer subscribes *before* the producer appends. Items arrive live."""
     targets = [
