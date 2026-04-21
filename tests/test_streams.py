@@ -1252,3 +1252,97 @@ def test_stream_timeout_execution_not_used_as_cache_hit(worker):
         prod2.conn.complete(prod2.execution_id, value="v2")
 
         wf.conn.complete(wf.execution_id)
+
+
+def test_stream_errored_execution_not_used_as_memo_hit(worker):
+    """A `:stream_errored` execution is not eligible for memo lookup
+    either — a second memoised call within the same run re-executes
+    once the first attempt's completion records the stream error.
+    """
+    targets = [
+        workflow("test", "main"),
+        task("test", "produce", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+        wf = ctx.executor.next_execute()
+
+        ref1 = wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            memo=True,
+        )
+
+        prod = ctx.executor.next_execute()
+        prod.conn.stream_register(prod.execution_id, 0)
+        prod.conn.stream_close(
+            prod.execution_id,
+            0,
+            error={"type": "ValueError", "message": "oops", "traceback": ""},
+        )
+        prod.conn.complete(prod.execution_id, value="v")
+        assert wf.conn.resolve(wf.execution_id, ref1)["value"] == "v"
+
+        # Wait for the completion so the memo lookup sees :stream_errored,
+        # not the in-flight :draining state (which would still match).
+        assert _wait_for_completion(ctx, run_id, 2) == "stream_errored"
+
+        # Same memo key, but the prior attempt is :stream_errored — expect
+        # a fresh execution rather than a memo hit on the broken stream.
+        wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            memo=True,
+        )
+        prod2 = ctx.executor.next_execute(timeout=3)
+        prod2.conn.complete(prod2.execution_id, value="v2")
+
+        wf.conn.complete(wf.execution_id)
+
+
+def test_stream_timeout_execution_not_used_as_memo_hit(worker):
+    """A `:stream_timeout` execution is not eligible for memo lookup —
+    a second memoised call within the same run re-executes.
+    """
+    targets = [
+        workflow("test", "main"),
+        task("test", "produce", parameters=["x"]),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+        wf = ctx.executor.next_execute()
+
+        ref1 = wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            memo=True,
+        )
+
+        prod = ctx.executor.next_execute()
+        prod.conn.stream_register(
+            prod.execution_id, 0, buffer=None, timeout_ms=100
+        )
+        force = prod.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+        prod.conn.complete(prod.execution_id, value="v")
+        assert wf.conn.resolve(wf.execution_id, ref1)["value"] == "v"
+
+        assert _wait_for_completion(ctx, run_id, 2) == "stream_timeout"
+
+        wf.conn.submit_task(
+            wf.execution_id,
+            "test", "produce",
+            json_args(1),
+            memo=True,
+        )
+        prod2 = ctx.executor.next_execute(timeout=3)
+        prod2.conn.complete(prod2.execution_id, value="v2")
+
+        wf.conn.complete(wf.execution_id)
