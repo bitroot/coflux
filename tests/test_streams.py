@@ -14,10 +14,13 @@ Two common patterns:
     taking turns over different connections.
 """
 
+import time
+
 import pytest
 
 from support.manifest import task, workflow
 from support.protocol import (
+    execution_handle,
     execution_result,
     json_args,
     partition_stride,
@@ -764,6 +767,107 @@ def test_backpressure_subscribe_unblocks_producer(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         cons_ex.conn.complete(cons_ex.execution_id)
         ctx.result(prod_resp["runId"])
+
+
+def test_workflow_produces_stream_while_awaiting_consumer(worker):
+    """Regression: a workflow that produces a stream *and* synchronously
+    awaits a consumer of that stream must not deadlock.
+
+    Reproduces the ``inline_producer`` pattern from
+    ``examples/python/examples/streams.py``: the workflow registers an
+    inline stream, submits a consumer task with the stream as its
+    argument, then calls ``select`` (blocking) to wait for the
+    consumer's result. The producer driver keeps emitting items on the
+    same session while the select is in flight.
+
+    Before the fix, the CLI's per-executor message loop handled
+    ``select`` synchronously: while waiting on the server's response,
+    the loop couldn't read the adapter's subsequent ``stream_append``
+    notifications from stdout. The appends stayed in the readLoop's
+    channel, the consumer never received any items, and the select
+    never resolved — a full deadlock.
+    """
+    targets = [
+        workflow("test", "producer_workflow"),
+        task("test", "consumer"),
+    ]
+
+    with worker(targets, concurrency=2) as ctx:
+        resp = ctx.submit("test", "producer_workflow")
+        wf = ctx.executor.next_execute()
+
+        # Workflow registers an inline stream and submits the consumer
+        # task with that stream handle as its argument.
+        wf.conn.stream_register(wf.execution_id, 0, buffer=0)
+        stream_arg = {
+            "type": "inline",
+            "format": "json",
+            "value": {"type": "stream", "id": f"{wf.execution_id}_0"},
+            "references": [],
+        }
+        consumer_id = wf.conn.submit_task(
+            wf.execution_id, "test", "consumer", [stream_arg]
+        )
+
+        # Send the select ourselves so we can interleave stream_appends
+        # behind it without racing a background thread. The real adapter
+        # does exactly this: its main thread blocks in _wait_response
+        # while the stream driver thread keeps calling send_stream_append
+        # on the same stdout.
+        select_id = wf.conn._next_request_id
+        wf.conn._next_request_id += 1
+        wf.conn.send(
+            {
+                "id": select_id,
+                "method": "select",
+                "params": {
+                    "execution_id": wf.execution_id,
+                    "handles": [execution_handle(consumer_id)],
+                    "suspend": False,
+                },
+            }
+        )
+
+        # Consumer picks up and subscribes before any items are emitted.
+        cons = ctx.executor.next_execute()
+        cons.conn.stream_subscribe(
+            cons.execution_id,
+            subscription_id=1,
+            producer_execution_id=wf.execution_id,
+            index=0,
+        )
+
+        # Emit items on the workflow's connection while its select is
+        # pending. Each of these requires the CLI to read and forward
+        # the notification *while* the select request is still in
+        # flight — the exact path that used to deadlock.
+        for i in range(3):
+            wf.conn.stream_append(wf.execution_id, 0, i, i * 10)
+        wf.conn.stream_close(wf.execution_id, 0)
+
+        # Consumer drains — reaching the close means every append made
+        # it through the CLI while select was holding the loop.
+        items, closed = cons.conn.drain_stream(subscription_id=1, timeout=5)
+        cons.conn.complete(cons.execution_id, value=len(items))
+
+        # Read directly from the socket (not via _buffer, which would
+        # re-pop anything we stored) until the select response arrives.
+        # If the bug is present this never happens and _recv_raw times
+        # out.
+        deadline = time.time() + 5
+        while True:
+            remaining = max(0.01, deadline - time.time())
+            msg = wf.conn._recv_raw(remaining)
+            if msg.get("id") == select_id:
+                assert "error" not in msg, f"select errored: {msg['error']}"
+                break
+
+        wf.conn.complete(wf.execution_id, value=len(items))
+        ctx.result(resp["runId"])
+
+        assert [item[1]["value"] for item in items] == [0, 10, 20]
+        assert closed.get("error") is None
+        assert closed.get("reason") != "timeout"
 
 
 def test_backpressure_unbounded_sends_no_demand(worker):

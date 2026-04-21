@@ -328,7 +328,14 @@ loop:
 			p.handleMetric(execCtx, executionID, params, logger)
 
 		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input":
-			p.handleRequest(execCtx, exec, method, *id, params, logger)
+			// Dispatch async: these can block on the server (e.g. a
+			// `select` that waits for a child execution). Blocking the
+			// message loop here would stop us reading the adapter's
+			// subsequent messages — including stream_append from a
+			// stream-producing task that hasn't finished yet — creating
+			// a deadlock between the waiting select and the consumer
+			// that's holding it up.
+			go p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
 			p.handleRegisterGroup(execCtx, executionID, params, logger)
