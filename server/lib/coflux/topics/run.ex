@@ -178,6 +178,30 @@ defmodule Coflux.Topics.Run do
     )
   end
 
+  defp process_notification(
+         topic,
+         {:stream_dependency, execution_external_id, producer_execution_id, index,
+          producer_metadata}
+       ) do
+    dependency = %{
+      type: "stream",
+      execution: build_execution(producer_metadata),
+      index: index
+    }
+
+    update_execution(
+      topic,
+      execution_external_id,
+      fn topic, base_path ->
+        Topic.merge(
+          topic,
+          base_path ++ [:dependencies, "#{producer_execution_id}:#{index}"],
+          dependency
+        )
+      end
+    )
+  end
+
   defp process_notification(topic, {:child, parent_execution_external_id, child}) do
     child = build_child(child, topic.state.external_run_id)
 
@@ -437,6 +461,14 @@ defmodule Coflux.Topics.Run do
 
       {id, {:asset, asset}} ->
         {id, %{type: "asset", assetId: id, asset: build_asset(asset)}}
+
+      {id, {:stream, index, execution}} ->
+        {id,
+         %{
+           type: "stream",
+           execution: build_execution(execution),
+           index: index
+         }}
     end)
   end
 

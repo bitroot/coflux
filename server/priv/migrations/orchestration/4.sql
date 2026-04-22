@@ -193,3 +193,22 @@ CREATE TABLE stream_closures (
   FOREIGN KEY (error_id) REFERENCES errors ON DELETE RESTRICT,
   CHECK ((reason = 1) = (error_id IS NOT NULL))
 ) STRICT;
+
+-- Track stream subscriptions as a lineage edge between executions, mirroring
+-- result_dependencies / asset_dependencies. A row is written when a consumer
+-- subscribes to a producer's stream (regardless of whether items are read),
+-- so data lineage is preserved even for subscriptions that yield no values.
+--
+-- The producer side is referenced via `execution_refs` (not the live
+-- `executions` row) so the edge survives epoch rotation, and by `stream_index`
+-- so we can distinguish between multiple streams produced by the same
+-- execution.
+CREATE TABLE stream_dependencies (
+  execution_id INTEGER NOT NULL,
+  stream_ref_id INTEGER NOT NULL,
+  stream_index INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (execution_id, stream_ref_id, stream_index),
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (stream_ref_id) REFERENCES execution_refs ON DELETE RESTRICT
+) STRICT;

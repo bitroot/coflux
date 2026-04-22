@@ -624,6 +624,22 @@ defmodule Coflux.Orchestration.Runs do
     end)
   end
 
+  def record_stream_dependency(db, execution_id, stream_ref_id, stream_index) do
+    with_transaction(db, fn ->
+      insert_one(
+        db,
+        :stream_dependencies,
+        %{
+          execution_id: execution_id,
+          stream_ref_id: stream_ref_id,
+          stream_index: stream_index,
+          created_at: current_timestamp()
+        },
+        on_conflict: "DO NOTHING"
+      )
+    end)
+  end
+
   def get_unassigned_executions(db) do
     query(
       db,
@@ -948,6 +964,28 @@ defmodule Coflux.Orchestration.Runs do
          ) do
       {:ok, rows} ->
         {:ok, Enum.group_by(rows, &elem(&1, 0), &elem(&1, 1))}
+    end
+  end
+
+  def get_run_stream_dependencies(db, run_id) do
+    case query(
+           db,
+           """
+           SELECT d.execution_id, d.stream_ref_id, d.stream_index
+           FROM stream_dependencies AS d
+           INNER JOIN executions AS e ON e.id = d.execution_id
+           INNER JOIN steps AS s ON s.id = e.step_id
+           WHERE s.run_id = ?1
+           """,
+           {run_id}
+         ) do
+      {:ok, rows} ->
+        {:ok,
+         Enum.group_by(
+           rows,
+           fn {execution_id, _ref_id, _index} -> execution_id end,
+           fn {_execution_id, ref_id, index} -> {ref_id, index} end
+         )}
     end
   end
 

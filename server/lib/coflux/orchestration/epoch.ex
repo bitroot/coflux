@@ -448,6 +448,7 @@ defmodule Coflux.Orchestration.Epoch do
                 copy_execution_result_deps(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_assets(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_asset_deps(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_stream_deps(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id)
                 copy_execution_input_deps(source_db, target_db, old_exec_id, new_exec_id)
               end)
@@ -556,6 +557,32 @@ defmodule Coflux.Orchestration.Epoch do
           target_db,
           :asset_dependencies,
           %{execution_id: new_exec_id, asset_id: new_asset_id, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
+  defp copy_execution_stream_deps(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, stream_deps} =
+      query(
+        source_db,
+        "SELECT stream_ref_id, stream_index, created_at FROM stream_dependencies WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(stream_deps, fn {old_ref_id, stream_index, created_at} ->
+      new_ref_id = ensure_execution_ref(source_db, target_db, old_ref_id)
+
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :stream_dependencies,
+          %{
+            execution_id: new_exec_id,
+            stream_ref_id: new_ref_id,
+            stream_index: stream_index,
+            created_at: created_at
+          },
           on_conflict: "DO NOTHING"
         )
     end)

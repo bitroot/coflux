@@ -506,7 +506,16 @@ defmodule Coflux.Orchestration.Results do
   # Error payload without a completion yet. We return the error so UI can
   # display it; the successor slot is nil so consumer resolution treats
   # it as still pending (the retry decision happens at completion time).
-  defp resolve_logical(db, _exec_id, nil, nil, error_id, retryable, _successor_id, _successor_ref_id)
+  defp resolve_logical(
+         db,
+         _exec_id,
+         nil,
+         nil,
+         error_id,
+         retryable,
+         _successor_id,
+         _successor_ref_id
+       )
        when not is_nil(error_id) do
     {:ok, {type, message, frames}} = Errors.get_by_id(db, error_id)
     {:error, type, message, frames, nil, decode_retryable(retryable)}
