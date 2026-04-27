@@ -119,9 +119,19 @@ defmodule Coflux.Topics.Workflow do
         recurrent: workflow.recurrent,
         timeout: workflow.timeout,
         requires: workflow.requires,
-        memo: workflow.memo
+        memo: workflow.memo,
+        streams: build_streams_configuration(workflow[:streams])
       }
     end
+  end
+
+  defp build_streams_configuration(nil), do: nil
+
+  defp build_streams_configuration(streams) do
+    %{
+      buffer: streams[:buffer],
+      timeoutMs: streams[:timeout_ms]
+    }
   end
 
   defp build_runs(runs) do

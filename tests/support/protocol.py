@@ -231,6 +231,100 @@ def register_group_notification(execution_id, group_id, name=None):
     return {"method": "register_group", "params": params}
 
 
+# --- Stream messages (producer side: adapter → server) ---
+
+
+def stream_register(execution_id, index, buffer=None, timeout_ms=None):
+    params = {"execution_id": execution_id, "index": index}
+    if buffer is not None:
+        params["buffer"] = buffer
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    return {"method": "stream_register", "params": params}
+
+
+def stream_append(execution_id, index, sequence, value, format="json"):
+    """Append an item to a stream. ``value`` is the raw JSON value.
+
+    ``index`` identifies the stream within its execution; ``sequence``
+    identifies the item within the stream. Builds a Value wire-form
+    message with an empty references list. Tests that need references
+    should build the Value dict manually.
+    """
+    return {
+        "method": "stream_append",
+        "params": {
+            "execution_id": execution_id,
+            "index": index,
+            "sequence": sequence,
+            "value": {
+                "type": "inline",
+                "format": format,
+                "value": value,
+                "references": [],
+            },
+        },
+    }
+
+
+def stream_close(execution_id, index, error=None):
+    """Close a stream. ``error`` is optional {type, message, traceback}."""
+    params = {"execution_id": execution_id, "index": index}
+    if error is not None:
+        params["error"] = error
+    return {"method": "stream_close", "params": params}
+
+
+# --- Stream messages (consumer side: adapter → server) ---
+
+
+def stream_subscribe(
+    execution_id,
+    subscription_id,
+    producer_execution_id,
+    index,
+    from_sequence=0,
+    stride=None,
+):
+    params = {
+        "execution_id": execution_id,
+        "subscription_id": subscription_id,
+        "producer_execution_id": producer_execution_id,
+        "index": index,
+        "from_sequence": from_sequence,
+    }
+    if stride is not None:
+        params["stride"] = stride
+    return {"method": "stream_subscribe", "params": params}
+
+
+def stream_unsubscribe(execution_id, subscription_id):
+    return {
+        "method": "stream_unsubscribe",
+        "params": {
+            "execution_id": execution_id,
+            "subscription_id": subscription_id,
+        },
+    }
+
+
+# --- Filter builders ---
+
+
+def stride(start=0, stop=None, step=1):
+    return {"start": start, "stop": stop, "step": step}
+
+
+def slice_stride(start, stop=None):
+    """Stride equivalent to the old ``slice(start, stop)`` filter."""
+    return stride(start=start, stop=stop, step=1)
+
+
+def partition_stride(n, i):
+    """Stride equivalent to the old ``partition(n, i)`` filter."""
+    return stride(start=i, stop=None, step=n)
+
+
 def submit_input_request(
     request_id,
     execution_id,

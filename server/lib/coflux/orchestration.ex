@@ -181,6 +181,54 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:record_result, execution_id, result})
   end
 
+  # Stream producer messages — worker registers a stream, appends items,
+  # and closes the stream. `index` identifies the stream within its
+  # producer execution; `sequence` identifies an item within the stream.
+  # Both are worker-assigned and monotonic from 0.
+
+  def register_stream(project_id, execution_id, index, buffer, timeout_ms, session_id) do
+    call_server(
+      project_id,
+      {:register_stream, execution_id, index, buffer, timeout_ms, session_id}
+    )
+  end
+
+  def append_stream_item(project_id, execution_id, index, sequence, value) do
+    call_server(project_id, {:append_stream_item, execution_id, index, sequence, value})
+  end
+
+  def close_stream(project_id, execution_id, index, spec) do
+    call_server(project_id, {:close_stream, execution_id, index, spec})
+  end
+
+  # Stream consumer messages — consumer opens a subscription to receive
+  # items from a producer's stream; server pushes stream_items /
+  # stream_closed commands to the consumer's session.
+
+  def subscribe_stream(
+        project_id,
+        session_id,
+        subscription_id,
+        consumer_execution_id,
+        producer_execution_id,
+        index,
+        from_sequence,
+        filter
+      ) do
+    call_server(
+      project_id,
+      {:subscribe_stream, session_id, subscription_id, consumer_execution_id,
+       producer_execution_id, index, from_sequence, filter}
+    )
+  end
+
+  def unsubscribe_stream(project_id, session_id, consumer_execution_id, subscription_id) do
+    call_server(
+      project_id,
+      {:unsubscribe_stream, session_id, consumer_execution_id, subscription_id}
+    )
+  end
+
   def select(
         project_id,
         handles,
@@ -234,6 +282,13 @@ defmodule Coflux.Orchestration do
 
   def subscribe_run(project_id, run_id, pid) do
     call_server(project_id, {:subscribe_run, run_id, pid})
+  end
+
+  def subscribe_stream_topic(project_id, execution_external_id, index, pid) do
+    call_server(
+      project_id,
+      {:subscribe_stream_topic, execution_external_id, index, pid}
+    )
   end
 
   def subscribe_targets(project_id, workspace_id, pid) do

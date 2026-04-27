@@ -1,0 +1,428 @@
+defmodule Coflux.Orchestration.Streams do
+  @moduledoc """
+  Storage for execution-produced streams.
+
+  A stream is an ordered, append-only sequence of values produced by an
+  execution. Each stream is identified by `(execution_id, index)` where
+  `index` is assigned monotonically by the worker during return-value
+  serialisation — the worker mints ids locally, no server round-trip.
+
+  Items within a stream are identified by `sequence` — a 0-based,
+  monotonically increasing per-item counter.
+
+  The SQL column is quoted with backticks (``` `index` ```) throughout
+  queries because `INDEX` is a SQLite keyword; at the Elixir level we
+  just pass `:index` as a map key — the Store helper handles quoting
+  for inserts.
+
+  Invariants enforced here (and by schema FKs):
+
+    * A stream is owned by exactly one execution (its producer).
+    * Items are append-only with monotonic `sequence` starting at 0.
+    * A closure is terminal — no items may be appended after one is recorded.
+    * On execution completion / cancel / crash, every owned stream that lacks
+      a closure receives one (clean, cancelled, or crashed). Enforced by the
+      lifecycle code in `Server`, not by this module.
+    * Re-running a producer execution creates fresh streams (new attempt ⇒
+      new execution_id ⇒ new rows). Consumer refs pin to the original streams.
+    * Consumer cursors are kept in-memory only; re-run consumers subscribe
+      fresh from sequence 0.
+  """
+
+  import Coflux.Store
+
+  alias Coflux.Orchestration.{Errors, Values}
+
+  # Registers a new stream owned by `execution_id` at `index` (monotonic
+  # per-execution, worker-assigned). ``buffer`` is the persisted flow-
+  # control budget — ``nil`` means no backpressure, integer N means the
+  # producer may be up to N items ahead of the fastest consumer.
+  # ``timeout_ms`` is the idle-timeout budget (milliseconds) — ``nil``
+  # disables the timeout. The server only stores it (for display in
+  # Studio); enforcement happens at the worker (CLI). Returns
+  # ``{:error, :already_registered}`` if the index was already used.
+  def register_stream(db, execution_id, index, buffer \\ nil, timeout_ms \\ nil) do
+    now = current_timestamp()
+
+    case insert_one(db, :streams, %{
+           execution_id: execution_id,
+           index: index,
+           buffer: buffer,
+           timeout_ms: timeout_ms,
+           created_at: now
+         }) do
+      {:ok, _} -> {:ok, now}
+      {:error, "UNIQUE constraint failed: " <> _} -> {:error, :already_registered}
+    end
+  end
+
+  # Returns the persisted buffer for a stream. Result is ``{:ok, buffer}``
+  # where ``buffer`` is either an integer or ``nil`` (no backpressure).
+  # ``{:error, :not_found}`` if the stream doesn't exist.
+  def get_buffer(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT buffer FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {buffer}} -> {:ok, buffer}
+    end
+  end
+
+  # Returns the persisted timeout (milliseconds) for a stream.
+  # ``{:ok, nil}`` means no timeout. ``{:error, :not_found}`` if the
+  # stream doesn't exist.
+  def get_timeout_ms(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT timeout_ms FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {timeout_ms}} -> {:ok, timeout_ms}
+    end
+  end
+
+  # Appends an item at `sequence` to the stream. Caller supplies the sequence
+  # (worker-assigned, monotonic). Returns:
+  #   * `{:error, :not_registered}` if the stream doesn't exist
+  #   * `{:error, :closed}` if the stream has a closure row
+  #   * `{:error, :already_appended}` if sequence collides with an existing item
+  def append_item(db, execution_id, index, sequence, value) do
+    with_transaction(db, fn ->
+      case has_closure?(db, execution_id, index) do
+        {:ok, true} ->
+          {:error, :closed}
+
+        {:ok, false} ->
+          case exists?(db, execution_id, index) do
+            {:ok, false} ->
+              {:error, :not_registered}
+
+            {:ok, true} ->
+              {:ok, value_id} = Values.get_or_create_value(db, value)
+              now = current_timestamp()
+
+              case insert_one(db, :stream_items, %{
+                     execution_id: execution_id,
+                     index: index,
+                     sequence: sequence,
+                     value_id: value_id,
+                     created_at: now
+                   }) do
+                {:ok, _} -> {:ok, now}
+                {:error, "UNIQUE constraint failed: " <> _} -> {:error, :already_appended}
+              end
+          end
+      end
+    end)
+  end
+
+  # Closes the stream. `spec` describes *why* it closed:
+  #
+  #   * `:complete` — producer finished normally
+  #   * `{:errored, type, message, frames}` — producer raised an error; the
+  #     error is stored via the errors table, same as Results
+  #   * `:lifecycle` — closed implicitly because the producer execution
+  #     ended (cancel/crash/abandon/error). No error is recorded here —
+  #     callers that need to surface an error derive it from the
+  #     execution's recorded result at read time.
+  #   * `:timeout` — the worker closed the stream because its idle
+  #     timeout elapsed without a new item being appended.
+  def close_stream(db, execution_id, index, spec \\ :complete) do
+    with_transaction(db, fn ->
+      case exists?(db, execution_id, index) do
+        {:ok, false} ->
+          {:error, :not_registered}
+
+        {:ok, true} ->
+          now = current_timestamp()
+          {reason, error_id} = resolve_close_spec(db, spec)
+
+          case insert_one(db, :stream_closures, %{
+                 execution_id: execution_id,
+                 index: index,
+                 reason: reason,
+                 error_id: error_id,
+                 created_at: now
+               }) do
+            {:ok, _} -> {:ok, now}
+            {:error, "UNIQUE constraint failed: " <> _} -> {:error, :already_closed}
+          end
+      end
+    end)
+  end
+
+  # Closure reason codes — kept in sync with the CHECK constraint in 4.sql.
+  @reason_complete 0
+  @reason_errored 1
+  @reason_lifecycle 2
+  @reason_timeout 3
+
+  defp resolve_close_spec(_db, :complete), do: {@reason_complete, nil}
+  defp resolve_close_spec(_db, :lifecycle), do: {@reason_lifecycle, nil}
+  defp resolve_close_spec(_db, :timeout), do: {@reason_timeout, nil}
+
+  defp resolve_close_spec(db, {:errored, type, message, frames}) do
+    error_id = Errors.get_or_create(db, type, message, frames)
+    {@reason_errored, error_id}
+  end
+
+  # Atom form of the reason integer — used by callers that want to decide
+  # whether to derive an error from the execution's result (:lifecycle)
+  # or use the stored one (:errored / :complete / :timeout).
+  def reason_from_int(@reason_complete), do: :complete
+  def reason_from_int(@reason_errored), do: :errored
+  def reason_from_int(@reason_lifecycle), do: :lifecycle
+  def reason_from_int(@reason_timeout), do: :timeout
+
+  def exists?(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT 1 FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:ok, false}
+      {:ok, {1}} -> {:ok, true}
+    end
+  end
+
+  # Returns the stream's registration timestamp, or `{:error, :not_found}`.
+  def get_opened_at(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT created_at FROM streams WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, {created_at}} -> {:ok, created_at}
+    end
+  end
+
+  def has_closure?(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT 1 FROM stream_closures WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} -> {:ok, false}
+      {:ok, {1}} -> {:ok, true}
+    end
+  end
+
+  # Returns `{:ok, [index, ...]}` for every stream owned by `execution_id`,
+  # in index order.
+  def get_streams_for_execution(db, execution_id) do
+    case query(
+           db,
+           "SELECT `index` FROM streams WHERE execution_id = ?1 ORDER BY `index`",
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        {:ok, Enum.map(rows, fn {index} -> index end)}
+    end
+  end
+
+  # Returns a summary of how the streams owned by `execution_id` closed.
+  # Used by `complete_execution` to decide whether to promote a value-result
+  # to `:stream_errored` / `:partial`.
+  #
+  # Shape: `{:ok, %{errored: integer | nil, timed_out: boolean}}`
+  #   * `errored` — the `errors.id` for the *first* errored stream closure
+  #     (in stream-index order), or `nil` if none errored
+  #   * `timed_out` — true if any stream closed via idle timeout
+  #
+  # Lifecycle / complete closures are ignored: the former inherit the
+  # execution's eventual outcome, the latter are the success case.
+  def get_closure_summary_for_execution(db, execution_id) do
+    case query(
+           db,
+           """
+           SELECT reason, error_id
+           FROM stream_closures
+           WHERE execution_id = ?1
+           ORDER BY `index`
+           """,
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        summary =
+          Enum.reduce(rows, %{errored: nil, timed_out: false}, fn {reason, error_id}, acc ->
+            case reason_from_int(reason) do
+              :errored -> if acc.errored, do: acc, else: %{acc | errored: error_id}
+              :timeout -> %{acc | timed_out: true}
+              _ -> acc
+            end
+          end)
+
+        {:ok, summary}
+    end
+  end
+
+  # Returns indexes of streams owned by `execution_id` that don't yet have
+  # a closure row. Used by the lifecycle code to discover which streams to
+  # close on completion / cancel / crash.
+  def get_open_streams_for_execution(db, execution_id) do
+    case query(
+           db,
+           """
+           SELECT s.`index`
+           FROM streams AS s
+           LEFT JOIN stream_closures AS c
+             ON c.execution_id = s.execution_id AND c.`index` = s.`index`
+           WHERE s.execution_id = ?1 AND c.execution_id IS NULL
+           ORDER BY s.`index`
+           """,
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        {:ok, Enum.map(rows, fn {index} -> index end)}
+    end
+  end
+
+  # Returns closure info or `{:ok, nil}` if the stream is still open.
+  # Closure info: `{reason, error | nil, created_at}` where
+  #   * reason is :complete | :errored | :lifecycle
+  #   * error is the `{type, message, frames}` triple for :errored, nil
+  #     otherwise (callers derive it from the execution's result on
+  #     :lifecycle)
+  def get_stream_closure(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT reason, error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, {reason_int, nil, created_at}} ->
+        {:ok, {reason_from_int(reason_int), nil, created_at}}
+
+      {:ok, {reason_int, error_id, created_at}} ->
+        {:ok, error} = Errors.get_by_id(db, error_id)
+        {:ok, {reason_from_int(reason_int), error, created_at}}
+    end
+  end
+
+  # Fetches up to `max_items` items from the stream starting at `from_sequence`.
+  # Returns `{:ok, [{sequence, value, created_at}, ...]}` in sequence order.
+  # The caller (Server) layers filter logic (slice / partition) on top of this.
+  def get_stream_items(db, execution_id, index, from_sequence, max_items) do
+    case query(
+           db,
+           """
+           SELECT sequence, value_id, created_at
+           FROM stream_items
+           WHERE execution_id = ?1 AND `index` = ?2 AND sequence >= ?3
+           ORDER BY sequence
+           LIMIT ?4
+           """,
+           {execution_id, index, from_sequence, max_items}
+         ) do
+      {:ok, rows} ->
+        items =
+          Enum.map(rows, fn {sequence, value_id, created_at} ->
+            {:ok, value} = Values.get_value_by_id(db, value_id)
+            {sequence, value, created_at}
+          end)
+
+        {:ok, items}
+    end
+  end
+
+  # Returns one row per stream owned by `execution_id`:
+  # `{index, buffer, timeout_ms, created_at, closed_at | nil, reason | nil, error | nil}`.
+  #   * buffer is the persisted backpressure budget (integer or nil)
+  #   * timeout_ms is the persisted idle-timeout budget (integer or nil)
+  #   * reason is :complete | :errored | :lifecycle | :timeout when closed, nil when open
+  #   * error is the stored `{type, message, frames}` triple for :errored
+  #     closures only — callers that need to surface an error for a
+  #     :lifecycle closure derive it from the execution's result.
+  # Used when populating the topic state for a run.
+  def get_streams_with_closures_for_execution(db, execution_id) do
+    case query(
+           db,
+           """
+           SELECT s.`index`, s.buffer, s.timeout_ms, s.created_at, c.created_at, c.reason, c.error_id
+           FROM streams AS s
+           LEFT JOIN stream_closures AS c
+             ON c.execution_id = s.execution_id AND c.`index` = s.`index`
+           WHERE s.execution_id = ?1
+           ORDER BY s.`index`
+           """,
+           {execution_id}
+         ) do
+      {:ok, rows} ->
+        streams =
+          Enum.map(rows, fn
+            {index, buffer, timeout_ms, created_at, nil, nil, nil} ->
+              {index, buffer, timeout_ms, created_at, nil, nil, nil}
+
+            {index, buffer, timeout_ms, created_at, closed_at, reason_int, nil} ->
+              {index, buffer, timeout_ms, created_at, closed_at, reason_from_int(reason_int), nil}
+
+            {index, buffer, timeout_ms, created_at, closed_at, reason_int, error_id} ->
+              {:ok, error} = Errors.get_by_id(db, error_id)
+
+              {index, buffer, timeout_ms, created_at, closed_at, reason_from_int(reason_int),
+               error}
+          end)
+
+        {:ok, streams}
+    end
+  end
+
+  # Returns the highest sequence recorded for the stream, or `-1` if empty.
+  # Used by the worker protocol to report "head" for flow control without
+  # requiring the caller to scan all items.
+  def get_stream_head(db, execution_id, index) do
+    case query_one(
+           db,
+           "SELECT MAX(sequence) FROM stream_items WHERE execution_id = ?1 AND `index` = ?2",
+           {execution_id, index}
+         ) do
+      {:ok, {nil}} -> {:ok, -1}
+      {:ok, {sequence}} -> {:ok, sequence}
+    end
+  end
+
+  # Returns the last `max_items` items of the stream, in sequence order,
+  # alongside the total item count. Used by the inspection topic to
+  # bootstrap its bounded tail buffer without materialising the full log.
+  def get_stream_tail(db, execution_id, index, max_items) do
+    {:ok, {total_count}} =
+      query_one(
+        db,
+        "SELECT COUNT(*) FROM stream_items WHERE execution_id = ?1 AND `index` = ?2",
+        {execution_id, index}
+      )
+
+    case query(
+           db,
+           """
+           SELECT sequence, value_id, created_at
+           FROM stream_items
+           WHERE execution_id = ?1 AND `index` = ?2
+           ORDER BY sequence DESC
+           LIMIT ?3
+           """,
+           {execution_id, index, max_items}
+         ) do
+      {:ok, rows} ->
+        items =
+          rows
+          |> Enum.reverse()
+          |> Enum.map(fn {sequence, value_id, created_at} ->
+            {:ok, value} = Values.get_value_by_id(db, value_id)
+            {sequence, value, created_at}
+          end)
+
+        {:ok, {items, total_count}}
+    end
+  end
+
+  defp current_timestamp() do
+    System.os_time(:millisecond)
+  end
+end

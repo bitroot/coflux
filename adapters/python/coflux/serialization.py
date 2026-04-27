@@ -7,6 +7,7 @@ import collections
 import datetime
 import decimal
 import importlib
+import inspect
 import io
 import json
 import pickle
@@ -15,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import Asset, AssetMetadata, Execution, Input
+from .models import Asset, AssetMetadata, Execution, Input, Stream
 
 # Try to import pydantic
 try:
@@ -57,6 +58,10 @@ def _encode_value(
     Returns:
         Tuple of (data, references) where data is JSON-serializable and
         references is a list of reference arrays.
+
+    Streams must be registered explicitly via ``cf.stream(...)`` (which
+    returns a ``Stream`` handle) before serialisation. A bare generator
+    encountered here is an error — the user probably meant to wrap it.
     """
     references: list[list[Any]] = []
 
@@ -116,6 +121,25 @@ def _encode_value(
                 ]
             )
             return {"type": "ref", "index": len(references) - 1}
+        elif isinstance(v, Stream):
+            # Pass-through: a Stream handle received from another execution
+            # (possibly with slice/partition/stride layered on top) is
+            # being forwarded as an argument. Preserve the composed stride
+            # so the downstream consumer subscribes with the same view.
+            encoded: dict[str, Any] = {"type": "stream", "id": v.id}
+            start, stop, step = v._stride
+            # Only include a stride entry if it's doing something — the
+            # trivial (0, None, 1) is the identity.
+            if (start, stop, step) != (0, None, 1):
+                encoded["stride"] = {"start": start, "stop": stop, "step": step}
+            return encoded
+        elif inspect.isgenerator(v) or inspect.isasyncgen(v):
+            raise TypeError(
+                "Bare generators aren't serialisable — wrap with "
+                "cf.stream(generator, buffer=...) to register a stream "
+                "first. Tasks whose body yields directly are handled "
+                "automatically via @cf.task(buffer=...)."
+            )
         elif HAS_PYDANTIC and isinstance(v, pydantic.BaseModel):
             model_class = v.__class__
             model_fqn = f"{model_class.__module__}.{model_class.__name__}"
@@ -159,10 +183,9 @@ def serialize_value(value: Any) -> dict[str, Any]:
     """Serialize a result value to the protocol format.
 
     Uses the custom JSON value encoding (dict/set/tuple types, fragment refs
-    for unsupported types). The result is always JSON-format data.
-
-    Args:
-        value: The Python value to serialize.
+    for unsupported types). The result is always JSON-format data. Bare
+    generators raise — streams must be registered explicitly via
+    ``cf.stream(...)`` first.
 
     Returns:
         Serialized value dict.
@@ -232,6 +255,22 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                 return uuid.UUID(v["value"])
             elif t == "ref":
                 return _resolve_ref(v["index"])
+            elif t == "stream":
+                # Producer-owned stream reference. Self-contained — the
+                # opaque `id` encodes the producer's execution id + the
+                # stream's index. An optional ``stride`` describes the
+                # composed slice/partition/stride view (identity when
+                # absent).
+                stride_raw = v.get("stride")
+                if stride_raw:
+                    stride = (
+                        stride_raw.get("start", 0),
+                        stride_raw.get("stop"),
+                        stride_raw.get("step", 1),
+                    )
+                else:
+                    stride = (0, None, 1)
+                return Stream(v["id"], stride)
             else:
                 return v
         else:

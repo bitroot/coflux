@@ -162,40 +162,45 @@ class Metric:
         }
 
     def _ensure_defined(self, ctx: Any) -> None:
+        # Hold the context lock for the whole check-then-send-then-record
+        # cycle so two threads racing to define the same metric don't both
+        # send a `define_metric` notification (and so the config-equality
+        # checks are evaluated against a consistent snapshot).
         config = self._build_config()
-        existing = ctx._defined_metrics.get(self._key)
-        if existing is not None:
-            if existing != config:
-                raise ValueError(
-                    f"Metric '{self._key}' already defined in this execution "
-                    f"with different configuration"
-                )
-            return
+        with ctx._lock:
+            existing = ctx._defined_metrics.get(self._key)
+            if existing is not None:
+                if existing != config:
+                    raise ValueError(
+                        f"Metric '{self._key}' already defined in this execution "
+                        f"with different configuration"
+                    )
+                return
 
-        if self._group is not None:
-            group_config = self._group._config()
-            existing_group = ctx._defined_groups.get(self._group.name)
-            if existing_group is not None and existing_group != group_config:
-                raise ValueError(
-                    f"Group '{self._group.name}' already defined in this execution "
-                    f"with inconsistent configuration"
-                )
-            ctx._defined_groups[self._group.name] = group_config
+            if self._group is not None:
+                group_config = self._group._config()
+                existing_group = ctx._defined_groups.get(self._group.name)
+                if existing_group is not None and existing_group != group_config:
+                    raise ValueError(
+                        f"Group '{self._group.name}' already defined in this "
+                        f"execution with inconsistent configuration"
+                    )
+                ctx._defined_groups[self._group.name] = group_config
 
-        if self._scale is not None and self._scale.name is not None:
-            scale_config = self._scale._config()
-            existing_scale = ctx._defined_scales.get(self._scale.name)
-            if existing_scale is not None and existing_scale != scale_config:
-                raise ValueError(
-                    f"Scale '{self._scale.name}' already defined in this execution "
-                    f"with inconsistent configuration"
-                )
-            ctx._defined_scales[self._scale.name] = scale_config
+            if self._scale is not None and self._scale.name is not None:
+                scale_config = self._scale._config()
+                existing_scale = ctx._defined_scales.get(self._scale.name)
+                if existing_scale is not None and existing_scale != scale_config:
+                    raise ValueError(
+                        f"Scale '{self._scale.name}' already defined in this "
+                        f"execution with inconsistent configuration"
+                    )
+                ctx._defined_scales[self._scale.name] = scale_config
 
-        protocol.send_define_metric(
-            ctx.execution_id, self._key, self._build_definition()
-        )
-        ctx._defined_metrics[self._key] = config
+            protocol.send_define_metric(
+                ctx.execution_id, self._key, self._build_definition()
+            )
+            ctx._defined_metrics[self._key] = config
 
 
 def progress(

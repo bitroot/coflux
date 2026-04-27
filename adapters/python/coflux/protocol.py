@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import Any
 
 from ._version import __version__
@@ -18,6 +19,15 @@ class Protocol:
         # even when stdout/stderr are redirected for output capture
         self._stdout = sys.stdout
         self._stdin = sys.stdin
+        # Multiple threads (main + stream drivers + dispatcher-invoked
+        # handlers) can emit messages concurrently; serialize writes so JSON
+        # lines don't interleave.
+        self._write_lock = threading.Lock()
+        # Guards `_next_id`. Separate from `_write_lock` so a slow write
+        # doesn't block other threads from minting their own ids — the
+        # Dispatcher routes responses by id so the order of wire writes
+        # doesn't matter to correctness.
+        self._id_lock = threading.Lock()
 
     def send_message(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a notification message (no response expected)."""
@@ -28,14 +38,17 @@ class Protocol:
 
     def send_request(self, method: str, params: dict[str, Any]) -> int:
         """Send a request and return the request ID."""
-        self._next_id += 1
-        req = {
-            "id": self._next_id,
-            "method": method,
-            "params": params,
-        }
-        self._write(req)
-        return self._next_id
+        with self._id_lock:
+            self._next_id += 1
+            request_id = self._next_id
+        self._write(
+            {
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        return request_id
 
     def send_response(
         self,
@@ -61,8 +74,9 @@ class Protocol:
     def _write(self, obj: dict[str, Any]) -> None:
         """Write a JSON object as a line to stdout."""
         line = json.dumps(obj, separators=(",", ":"))
-        self._stdout.write(line + "\n")
-        self._stdout.flush()
+        with self._write_lock:
+            self._stdout.write(line + "\n")
+            self._stdout.flush()
 
 
 # Global protocol instance for convenience
@@ -184,6 +198,7 @@ def request_submit_execution(
     recurrent: bool = False,
     requires: dict[str, list[str]] | None = None,
     timeout: int = 0,
+    streams: dict[str, Any] | None = None,
 ) -> int:
     """Request to submit a child execution."""
     params: dict[str, Any] = {
@@ -214,6 +229,8 @@ def request_submit_execution(
         params["requires"] = requires
     if timeout:
         params["timeout"] = timeout
+    if streams is not None:
+        params["streams"] = streams
     return get_protocol().send_request("submit_execution", params)
 
 
@@ -452,6 +469,122 @@ def send_metric(
     if at is not None:
         params["at"] = at
     get_protocol().send_message("metric", params)
+
+
+def send_stream_register(
+    execution_id: str,
+    index: int,
+    buffer: int | None = None,
+    timeout_ms: int | None = None,
+) -> None:
+    """Register a stream owned by this execution.
+
+    ``index`` is worker-assigned and monotonic per execution (0, 1, 2, ...);
+    it identifies the stream within its producer execution.
+
+    ``buffer`` is the producer-side backpressure budget. ``None`` opts out
+    of backpressure entirely; the server won't issue demand grants and
+    the producer emits freely. Any integer value tells the server to
+    pace the producer — it'll send ``stream_demand`` notifications as
+    credits become available.
+
+    ``timeout_ms`` is the idle-timeout budget (milliseconds). If set, the
+    worker (CLI) force-closes the stream with reason "timeout" when no
+    item has been appended for that long. Purely informational for the
+    server; enforcement happens in the worker.
+    """
+    params: dict[str, Any] = {"execution_id": execution_id, "index": index}
+    if buffer is not None:
+        params["buffer"] = buffer
+    if timeout_ms is not None:
+        params["timeout_ms"] = timeout_ms
+    get_protocol().send_message("stream_register", params)
+
+
+def send_stream_append(
+    execution_id: str,
+    index: int,
+    sequence: int,
+    value: dict[str, Any],
+) -> None:
+    """Append an item to a stream.
+
+    ``sequence`` is monotonic per stream (0, 1, 2, ...); it identifies the
+    item within its stream. Value uses the same Value shape as execution
+    results (type + format + value/path + refs).
+    """
+    get_protocol().send_message(
+        "stream_append",
+        {
+            "execution_id": execution_id,
+            "index": index,
+            "sequence": sequence,
+            "value": value,
+        },
+    )
+
+
+def send_stream_close(
+    execution_id: str,
+    index: int,
+    error_type: str | None = None,
+    error_message: str = "",
+    traceback: str = "",
+) -> None:
+    """Close a stream.
+
+    With no error args, signals a clean close (generator exhausted). With
+    error args set, signals that the generator raised — consumers will see
+    the exception on their next iteration.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "index": index,
+    }
+    if error_type is not None:
+        params["error"] = {
+            "type": error_type,
+            "message": error_message,
+            "traceback": traceback,
+        }
+    get_protocol().send_message("stream_close", params)
+
+
+def send_stream_subscribe(
+    execution_id: str,
+    subscription_id: int,
+    producer_execution_id: str,
+    index: int,
+    from_sequence: int,
+    stride: dict[str, Any] | None = None,
+) -> None:
+    """Open a consumer subscription to a stream owned by another execution.
+
+    ``execution_id`` is the consumer's own execution — the server uses it
+    to track who's subscribed and where to push items. ``stride`` is an
+    optional ``{"start": int, "stop": int|None, "step": int}`` dict
+    restricting which sequence positions are delivered; any chain of
+    slice/partition/stride calls on the handle composes into a single
+    stride before reaching here.
+    """
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "subscription_id": subscription_id,
+        "producer_execution_id": producer_execution_id,
+        "index": index,
+        "from_sequence": from_sequence,
+    }
+    if stride is not None:
+        params["stride"] = stride
+    get_protocol().send_message("stream_subscribe", params)
+
+
+def send_stream_unsubscribe(execution_id: str, subscription_id: int) -> None:
+    """Drop a consumer subscription."""
+    get_protocol().send_message(
+        "stream_unsubscribe",
+        {"execution_id": execution_id, "subscription_id": subscription_id},
+    )
 
 
 def receive_message() -> dict[str, Any] | None:

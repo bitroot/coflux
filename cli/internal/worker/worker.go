@@ -360,6 +360,9 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	)
 	conn.RegisterHandler("execute", w.handleExecute)
 	conn.RegisterHandler("abort", w.handleAbort)
+	conn.RegisterHandler("stream_items", w.handleStreamItems)
+	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
+	conn.RegisterHandler("stream_demand", w.handleStreamDemand)
 	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
@@ -503,6 +506,25 @@ func (w *Worker) handleExecute(params []any) error {
 		}
 	}
 
+	// Optional streams config (8th param). A map with string keys
+	// "buffer" and/or "timeout_ms"; either may be absent. Passed to
+	// the adapter so ``cf.stream(...)`` / generator-bodied tasks
+	// inherit the caller's override (or the workflow manifest default).
+	var streams *adapter.StreamsConfig
+	if len(params) > 7 && params[7] != nil {
+		if m, ok := params[7].(map[string]any); ok {
+			streams = &adapter.StreamsConfig{}
+			if v, ok := m["buffer"].(float64); ok {
+				buf := int(v)
+				streams.Buffer = &buf
+			}
+			if v, ok := m["timeout_ms"].(float64); ok {
+				t := int(v)
+				streams.TimeoutMs = &t
+			}
+		}
+	}
+
 	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID, "timeout_ms", timeoutMs)
 
 	// Track execution
@@ -542,7 +564,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs, streams); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
@@ -553,45 +575,55 @@ func (w *Worker) handleExecute(params []any) error {
 func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 	result := make([]adapter.Argument, len(args))
 	for i, arg := range args {
-		arr, ok := arg.([]any)
-		if !ok {
-			return nil, fmt.Errorf("argument %d: expected array", i)
-		}
-
-		value, err := api.ParseValue(arr)
+		value, err := w.convertValueFromServer(arg)
 		if err != nil {
 			return nil, fmt.Errorf("argument %d: %w", i, err)
 		}
-
-		// Convert to adapter argument
-		adapterRefs, err := w.refsToAdapter(value.References)
-		if err != nil {
-			return nil, fmt.Errorf("argument %d: %w", i, err)
-		}
-		switch value.Type {
-		case api.ValueTypeRaw:
-			result[i] = adapter.Argument{
-				Type:       "inline",
-				Format:     "json",
-				Value:      value.Content,
-				References: adapterRefs,
-			}
-		case api.ValueTypeBlob:
-			// Download blob to cache
-			path, err := w.blobs.Download(value.Key)
-			if err != nil {
-				return nil, fmt.Errorf("argument %d: failed to download blob: %w", i, err)
-			}
-			format := "json"
-			result[i] = adapter.Argument{
-				Type:       "file",
-				Format:     format,
-				Path:       path,
-				References: adapterRefs,
-			}
-		}
+		result[i] = *value
 	}
 	return result, nil
+}
+
+// convertValueFromServer turns a wire-form value array (["raw", data, refs]
+// or ["blob", key, size, refs]) into an adapter-side Value struct suitable
+// for forwarding to the Python adapter.
+func (w *Worker) convertValueFromServer(arg any) (*adapter.Value, error) {
+	arr, ok := arg.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected array")
+	}
+
+	value, err := api.ParseValue(arr)
+	if err != nil {
+		return nil, err
+	}
+
+	adapterRefs, err := w.refsToAdapter(value.References)
+	if err != nil {
+		return nil, err
+	}
+
+	switch value.Type {
+	case api.ValueTypeRaw:
+		return &adapter.Value{
+			Type:       "inline",
+			Format:     "json",
+			Value:      value.Content,
+			References: adapterRefs,
+		}, nil
+	case api.ValueTypeBlob:
+		path, err := w.blobs.Download(value.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download blob: %w", err)
+		}
+		return &adapter.Value{
+			Type:       "file",
+			Format:     "json",
+			Path:       path,
+			References: adapterRefs,
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown value type: %v", value.Type)
 }
 
 func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
@@ -635,6 +667,108 @@ func (w *Worker) handleAbort(params []any) error {
 
 	// Abort on pool
 	return w.pool.Abort(executionID)
+}
+
+// handleStreamItems forwards a server-pushed batch of stream items to the
+// adapter process owning the target execution. Params: [execution_id,
+// subscription_id, items]. Each item arrives as [sequence, value_array]
+// and is converted to [sequence, adapter.Value dict] so the Python side
+// can deserialize_value it directly.
+func (w *Worker) handleStreamItems(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_items: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_items: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_items: subscription_id is not a number (got %T)", params[1])
+	}
+	rawItems, ok := params[2].([]any)
+	if !ok {
+		return fmt.Errorf("stream_items: items is not an array (got %T)", params[2])
+	}
+
+	converted := make([]any, len(rawItems))
+	for i, raw := range rawItems {
+		itemArr, ok := raw.([]any)
+		if !ok || len(itemArr) != 2 {
+			return fmt.Errorf("stream_items: item %d malformed", i)
+		}
+		value, err := w.convertValueFromServer(itemArr[1])
+		if err != nil {
+			return fmt.Errorf("stream_items: item %d value: %w", i, err)
+		}
+		converted[i] = []any{itemArr[0], value}
+	}
+
+	return w.pool.PushToExecutor(executionID, "stream_items", map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+		"items":           converted,
+	})
+}
+
+// handleStreamClosed forwards a server-pushed stream-closed notification.
+// Params: [execution_id, subscription_id, reason, error_or_null].
+//
+// `reason` is a string like "complete" / "errored" / "cancelled" /
+// "abandoned" / "crashed" / "timeout" / "not_found" — the adapter
+// decides how to represent each in its language idiom rather than the
+// server fabricating exception types.
+func (w *Worker) handleStreamClosed(params []any) error {
+	if len(params) < 4 {
+		return fmt.Errorf("stream_closed: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_closed: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_closed: subscription_id is not a number (got %T)", params[1])
+	}
+	reason, _ := params[2].(string)
+	errField := params[3]
+
+	forwarded := map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+		"reason":          reason,
+	}
+	if errField != nil {
+		forwarded["error"] = errField
+	}
+	return w.pool.PushToExecutor(executionID, "stream_closed", forwarded)
+}
+
+// handleStreamDemand forwards a server-pushed demand grant to the producer
+// adapter. Params: [execution_id, index, n]. The producer's StreamDriver
+// adds “n“ to its per-stream credit counter and wakes any waiting
+// worker thread.
+func (w *Worker) handleStreamDemand(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_demand: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_demand: execution_id is not a string (got %T)", params[0])
+	}
+	index, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: index is not a number (got %T)", params[1])
+	}
+	n, ok := params[2].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: n is not a number (got %T)", params[2])
+	}
+	return w.pool.PushToExecutor(executionID, "stream_demand", map[string]any{
+		"execution_id": executionID,
+		"index":        int(index),
+		"n":            int(n),
+	})
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context) {
@@ -761,7 +895,24 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		timeout = params.Timeout
 	}
 
-	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout
+	// Streams config (buffer + idle timeout_ms defaults for streams
+	// produced by this execution). Encoded as a map with keys that the
+	// Elixir handler reads positionally; nil omits the option entirely.
+	var streams any
+	if params.Streams != nil {
+		s := map[string]any{}
+		if params.Streams.Buffer != nil {
+			s["buffer"] = *params.Streams.Buffer
+		}
+		if params.Streams.TimeoutMs != nil {
+			s["timeout_ms"] = *params.Streams.TimeoutMs
+		}
+		if len(s) > 0 {
+			streams = s
+		}
+	}
+
+	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -782,6 +933,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		params.Recurrent,   // recurrent
 		params.Requires,    // requires
 		timeout,            // timeout
+		streams,            // streams
 	)
 	if err != nil {
 		return nil, err
@@ -1099,6 +1251,81 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	}
 	// Python params: (parent_id, group_id, name)
 	return conn.Notify("register_group", executionID, groupID, name)
+}
+
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// The wire protocol takes buffer and timeout_ms positionally; nil
+	// encodes to JSON null. Server reads [execution_id, index, buffer,
+	// timeout_ms?]; omitting the trailing timeout_ms keeps compat with
+	// older server builds that don't read it.
+	var bufferArg any
+	if buffer != nil {
+		bufferArg = *buffer
+	}
+	if timeoutMs == nil {
+		return conn.Notify("stream_register", executionID, index, bufferArg)
+	}
+	return conn.Notify("stream_register", executionID, index, bufferArg, *timeoutMs)
+}
+
+func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Apply blob threshold + upload fragment references just like ReportResult.
+	serverValue, err := w.convertValueToServerFormat(value)
+	if err != nil {
+		return err
+	}
+	return conn.Notify("stream_append", executionID, index, sequence, serverValue)
+}
+
+func (w *Worker) StreamClose(ctx context.Context, executionID string, index int, streamErr *adapter.StreamCloseError, reason *string) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	var errTuple any
+	if streamErr != nil {
+		// Match the shape used for put_error: [type, message, frames].
+		// Stream closures never carry a retryable flag — retry decisions
+		// live at the execution level, not per-stream.
+		frames := parseTraceback(streamErr.Traceback)
+		errTuple = []any{streamErr.Type, streamErr.Message, frames}
+	}
+	// Wire: [execution_id, index, error, reason?]. When reason is nil
+	// the server infers close kind from error presence (nil→complete,
+	// object→errored). A non-nil reason (today only "timeout") is
+	// passed through explicitly.
+	if reason == nil {
+		return conn.Notify("stream_close", executionID, index, errTuple)
+	}
+	return conn.Notify("stream_close", executionID, index, errTuple, *reason)
+}
+
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride)
+}
+
+func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Server params: [consumer_execution_id, subscription_id]. The consumer
+	// id scopes the subscription key server-side, so two adapters in the
+	// same session can reuse subscription_id without colliding.
+	return conn.Notify("stream_unsubscribe", executionID, subscriptionID)
 }
 
 func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {
@@ -1558,6 +1785,15 @@ func (w *Worker) trySendResult(executionID string) {
 // Should only be called after the result has been queued to sendCh (either
 // via the write callback chain or from flushPending), so that FIFO ordering
 // ensures the result message precedes notify_terminated.
+//
+// The execution entry stays in w.executions (with pendingTerminated = true)
+// even after a successful send — "successful" here means the local write
+// didn't error, which doesn't guarantee delivery when the underlying TCP
+// connection is failing silently. The authoritative signal that the
+// server received the termination is the next session message: if the
+// execution isn't in the server's known set, handleSession drops it.
+// Until then, a reconnect triggers flushPending which re-sends both the
+// buffered result (via trySendResult) and this termination.
 func (w *Worker) trySendTerminated(executionID string) {
 	conn := w.getConn()
 	if conn == nil || !conn.IsConnected() {
@@ -1576,10 +1812,6 @@ func (w *Worker) trySendTerminated(executionID string) {
 		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
 		return
 	}
-
-	w.mu.Lock()
-	delete(w.executions, executionID)
-	w.mu.Unlock()
 }
 
 // NotifyTerminated is called by the pool after an execution's process has exited.
@@ -1639,8 +1871,6 @@ func (w *Worker) handleSession(executionIDs []string) {
 		known[id] = struct{}{}
 	}
 
-	// Prune executions not in the server's list (result was delivered, or
-	// server no longer cares about them).
 	w.mu.Lock()
 	for id := range w.executions {
 		if _, ok := known[id]; !ok {
@@ -1758,6 +1988,22 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		// Build timeout (0 = not set, same as delay)
 		timeout := int(t.Timeout)
 
+		// Build streams (nil if not set) — keys snake_case to match the
+		// Python adapter's wire format for register_manifests.
+		var streams any
+		if t.Streams != nil {
+			m := map[string]any{}
+			if t.Streams.Buffer != nil {
+				m["buffer"] = *t.Streams.Buffer
+			}
+			if t.Streams.TimeoutMs != nil {
+				m["timeout_ms"] = *t.Streams.TimeoutMs
+			}
+			if len(m) > 0 {
+				streams = m
+			}
+		}
+
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
 			"waitFor":     waitFor,
@@ -1770,6 +2016,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,
+			"streams":     streams,
 		}
 
 		manifests[t.Module][t.Name] = def

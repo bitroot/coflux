@@ -7,20 +7,25 @@ import datetime as dt
 import fnmatch as fnmatch
 import hashlib
 import json
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import protocol
+from .dispatcher import get_dispatcher
 from .errors import (
     ExecutionAbandoned,
     ExecutionCancelled,
+    ExecutionCrashed,
     ExecutionTimeout,
     InputDismissed,
     create_execution_error,
 )
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
 from .serialization import deserialize_value, serialize_value
+from .streams import StreamDriver
+from .target import Streams
 
 
 def _handle_key(handle: Any) -> tuple[str, str]:
@@ -60,7 +65,17 @@ def _unwrap_response(
         raise ExecutionTimeout()
     if status == "abandoned":
         raise ExecutionAbandoned()
+    if status == "crashed":
+        raise ExecutionCrashed()
     raise RuntimeError(f"Unexpected select status: {status}")
+
+
+def _timeout_to_ms(timeout: float | dt.timedelta | None) -> int | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, dt.timedelta):
+        return int(timeout.total_seconds() * 1000)
+    return int(timeout * 1000)
 
 
 # Context variable for group tracking
@@ -78,7 +93,6 @@ class ExecutorContext:
 
     def __init__(self, execution_id: str, working_dir: Path | None = None):
         self.execution_id = execution_id
-        self._pending_requests: dict[int, Any] = {}
         self._groups: list[str | None] = []
         self._working_dir = working_dir or Path.cwd()
         self._defined_metrics: dict[str, dict] = {}
@@ -89,6 +103,55 @@ class ExecutorContext:
         # poll_handle to avoid a round-trip for handles that have already
         # been seen in this context's lifetime.
         self._resolved: dict[tuple[str, str], dict[str, Any]] = {}
+        # Guards the mutable collections above. Stream driver threads, the
+        # main task thread, and any user-spawned threads may call methods
+        # on this context concurrently; the lock protects check-then-set
+        # patterns (metric definition, group registration, resolve cache)
+        # from racing.
+        self._lock = threading.Lock()
+        # Owns generator streams for this execution. Generators encountered
+        # during serialization (of the return value OR of submit arguments)
+        # are registered here and driven in background threads.
+        self._stream_driver = StreamDriver(execution_id)
+        # Default stream config for this execution, populated by the
+        # executor from the target's ``@cf.task(streams=...)`` setting.
+        # Used by ``cf.stream(...)`` to fill in unspecified options.
+        self._default_streams: Streams | None = None
+
+    def set_default_streams(self, streams: Streams | None) -> None:
+        """Record the decorator's stream config so ``cf.stream(...)`` can
+        inherit from it. Called once by the executor before running the
+        target function."""
+        self._default_streams = streams
+
+    def get_default_streams(self) -> Streams | None:
+        return self._default_streams
+
+    def register_stream(
+        self,
+        generator: Any,
+        buffer: int | None,
+        timeout: float | dt.timedelta | None = None,
+    ) -> str:
+        """Register a generator with this execution's stream driver and
+        return the resulting opaque stream id.
+
+        Called from ``cf.stream(...)``; also from the executor when the
+        task body itself is a generator.
+        """
+        timeout_ms = _timeout_to_ms(timeout)
+        return self._stream_driver.register(generator, buffer, timeout_ms)
+
+    def wait_streams(self) -> None:
+        """Block until every stream produced by this execution has drained."""
+        self._stream_driver.wait_all()
+
+    def close_streams(self) -> None:
+        """Close every registered generator so driver threads exit promptly.
+
+        Used on the error path before reporting execution_error.
+        """
+        self._stream_driver.close_all()
 
     def submit_execution(
         self,
@@ -106,6 +169,7 @@ class ExecutorContext:
         recurrent: bool = False,
         requires: dict[str, list[str]] | None = None,
         timeout: int = 0,
+        streams: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 
@@ -130,6 +194,7 @@ class ExecutorContext:
             recurrent=recurrent,
             requires=requires,
             timeout=timeout,
+            streams=streams,
         )
         return self._wait_response(request_id)
 
@@ -183,7 +248,8 @@ class ExecutorContext:
         if winner is None:
             raise RuntimeError(f"Unexpected select response: {response}")
 
-        self._resolved[_handle_key(handles[winner])] = response
+        with self._lock:
+            self._resolved[_handle_key(handles[winner])] = response
         return winner
 
     def resolve_handle(self, handle: Any) -> Any:
@@ -195,13 +261,17 @@ class ExecutorContext:
         to the deserialized value.
         """
         key = _handle_key(handle)
-        if key not in self._resolved:
+        with self._lock:
+            cached = self._resolved.get(key)
+        if cached is None:
             if self.select([handle]) is None:
                 # The wait expired before the handle resolved. Only reachable
                 # from inside a `cf.suspense(timeout=...)` scope; otherwise the
                 # server either resolves or kills the process.
                 raise TimeoutError("timed out waiting for handle to resolve")
-        return _unwrap_response(self._resolved[key], handle._parser)
+            with self._lock:
+                cached = self._resolved[key]
+        return _unwrap_response(cached, handle._parser)
 
     def poll_handle(
         self,
@@ -216,11 +286,15 @@ class ExecutorContext:
         is applied to it.
         """
         key = _handle_key(handle)
-        if key not in self._resolved:
+        with self._lock:
+            cached = self._resolved.get(key)
+        if cached is None:
             timeout_ms = int(timeout * 1000) if timeout else 0
             if self.select([handle], suspend=False, timeout_ms=timeout_ms) is None:
                 return default
-        return _unwrap_response(self._resolved[key], handle._parser)
+            with self._lock:
+                cached = self._resolved[key]
+        return _unwrap_response(cached, handle._parser)
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
@@ -483,8 +557,9 @@ class ExecutorContext:
     @contextmanager
     def group(self, name: str | None = None) -> Iterator[None]:
         """Context manager for grouping child executions."""
-        group_id = len(self._groups)
-        self._groups.append(name)
+        with self._lock:
+            group_id = len(self._groups)
+            self._groups.append(name)
         protocol.send_register_group(self.execution_id, group_id, name)
         token = _group_id.set(group_id)
         try:
@@ -517,8 +592,7 @@ class ExecutorContext:
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
         # Suspension confirmed. Block until the server aborts this execution.
-        while protocol.receive_message() is not None:
-            pass
+        get_dispatcher().wait_closed()
         raise SystemExit(0)
 
     def _parse_response(self, msg: dict) -> Any:
@@ -529,22 +603,12 @@ class ExecutorContext:
         return msg.get("result", {})
 
     def _wait_response(self, request_id: int) -> Any:
-        """Wait for a response to a request."""
-        if request_id in self._pending_requests:
-            return self._parse_response(self._pending_requests.pop(request_id))
-        while True:
-            msg = protocol.receive_message()
-            if msg is None:
-                raise RuntimeError("Connection closed while waiting for response")
+        """Wait for a response to a request.
 
-            # Check if this is a response
-            if "id" in msg:
-                if msg["id"] == request_id:
-                    return self._parse_response(msg)
-                # Store other responses for later
-                self._pending_requests[msg["id"]] = msg
-            else:
-                # Unexpected message during wait
-                raise RuntimeError(
-                    f"Unexpected message while waiting for response: {msg}"
-                )
+        Delegates to the dispatcher, which owns stdin and routes the matching
+        response to this caller. Safe to call from any thread.
+        """
+        msg = get_dispatcher().wait_for_response(request_id)
+        if msg is None:
+            raise RuntimeError("Timed out waiting for response")
+        return self._parse_response(msg)
