@@ -1,3 +1,7 @@
+## 0.11.2
+
+No changes.
+
 ## 0.11.1
 
 No changes.
