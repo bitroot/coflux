@@ -1,6 +1,8 @@
 ## 0.11.1
 
-No changes.
+Fixes:
+
+- Fixes a path traversal vulnerability in the blob endpoint.
 
 ## 0.11.0
 
