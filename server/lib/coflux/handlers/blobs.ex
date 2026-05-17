@@ -3,6 +3,8 @@ defmodule Coflux.Handlers.Blobs do
 
   alias Coflux.{Auth, Utils}
 
+  @key_regex ~r/\A[0-9a-f]{64}\z/
+
   def init(req, opts) do
     bindings = :cowboy_req.bindings(req)
     req = set_cors_headers(req)
@@ -39,46 +41,59 @@ defmodule Coflux.Handlers.Blobs do
   end
 
   defp handle(req, "HEAD", key, opts) do
-    exists = File.exists?(blob_path(key))
-    status = if exists, do: 200, else: 404
+    status =
+      cond do
+        not valid_key?(key) -> 404
+        File.exists?(blob_path(key)) -> 200
+        true -> 404
+      end
+
     req = :cowboy_req.reply(status, %{}, req)
     {:ok, req, opts}
   end
 
   defp handle(req, "GET", key, opts) do
-    case File.read(blob_path(key)) do
-      {:ok, content} ->
-        req = :cowboy_req.reply(200, %{}, content, req)
-        {:ok, req, opts}
-
-      {:error, :enoent} ->
+    with true <- valid_key?(key),
+         {:ok, content} <- File.read(blob_path(key)) do
+      req = :cowboy_req.reply(200, %{}, content, req)
+      {:ok, req, opts}
+    else
+      _ ->
         req = :cowboy_req.reply(404, %{}, "Not found", req)
         {:ok, req, opts}
     end
   end
 
   defp handle(req, "PUT", key, opts) do
-    {:ok, temp_path} = Briefly.create()
+    if valid_key?(key) do
+      {:ok, temp_path} = Briefly.create()
 
-    case File.open!(temp_path, [:write], &read_body(req, &1)) do
-      {:ok, req, hash} ->
-        req =
-          if key == Base.encode16(hash, case: :lower) do
-            path = blob_path(key)
-            path |> Path.dirname() |> File.mkdir_p!()
-            :ok = move_file(temp_path, path)
-            :cowboy_req.reply(204, req)
-          else
-            json_error_response(req, "hash_mismatch")
-          end
+      case File.open!(temp_path, [:write], &read_body(req, &1)) do
+        {:ok, req, hash} ->
+          req =
+            if key == Base.encode16(hash, case: :lower) do
+              path = blob_path(key)
+              path |> Path.dirname() |> File.mkdir_p!()
+              :ok = move_file(temp_path, path)
+              :cowboy_req.reply(204, req)
+            else
+              json_error_response(req, "hash_mismatch")
+            end
 
-        {:ok, req, opts}
+          {:ok, req, opts}
+      end
+    else
+      req = json_error_response(req, "invalid_key")
+      {:ok, req, opts}
     end
   end
 
   defp blob_path(<<a::binary-size(2), b::binary-size(2)>> <> c) do
     Utils.data_path("blobs/#{a}/#{b}/#{c}")
   end
+
+  defp valid_key?(key) when is_binary(key), do: Regex.match?(@key_regex, key)
+  defp valid_key?(_), do: false
 
   defp read_body(req, file, hash \\ nil) do
     hash = hash || :crypto.hash_init(:sha256)
