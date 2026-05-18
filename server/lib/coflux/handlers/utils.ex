@@ -189,12 +189,18 @@ defmodule Coflux.Handlers.Utils do
   end
 
   def read_json_body(req) do
+    {:ok, data, req} = read_full_body(req)
+
+    case Jason.decode(data) do
+      {:ok, result} -> {:ok, result, req}
+      {:error, _} -> {:error, :invalid_json, req}
+    end
+  end
+
+  defp read_full_body(req, acc \\ []) do
     case :cowboy_req.read_body(req) do
-      {:ok, data, req} ->
-        case Jason.decode(data) do
-          {:ok, result} -> {:ok, result, req}
-          {:error, _} -> {:error, :invalid_json, req}
-        end
+      {:ok, data, req} -> {:ok, IO.iodata_to_binary([acc | [data]]), req}
+      {:more, data, req} -> read_full_body(req, [acc | [data]])
     end
   end
 
