@@ -189,11 +189,18 @@ defmodule Coflux.Handlers.Utils do
   end
 
   def read_json_body(req) do
+    {:ok, data, req} = read_full_body(req)
+
+    case Jason.decode(data) do
+      {:ok, result} -> {:ok, result, req}
+      {:error, _} -> {:error, :invalid_json, req}
+    end
+  end
+
+  defp read_full_body(req, acc \\ []) do
     case :cowboy_req.read_body(req) do
-      {:ok, data, req} ->
-        with {:ok, result} <- Jason.decode(data) do
-          {:ok, result, req}
-        end
+      {:ok, data, req} -> {:ok, IO.iodata_to_binary([acc | [data]]), req}
+      {:more, data, req} -> read_full_body(req, [acc | [data]])
     end
   end
 
@@ -206,48 +213,48 @@ defmodule Coflux.Handlers.Utils do
   end
 
   def read_arguments(req, required_specs, optional_specs \\ %{}) do
-    {:ok, body, req} = read_json_body(req)
-
-    {values, errors} =
-      Enum.reduce(
-        %{true: required_specs, false: optional_specs},
-        {%{}, %{}},
-        fn {required, specs}, {values, errors} ->
-          Enum.reduce(specs, {values, errors}, fn {key, spec}, {values, errors} ->
-            {field, parser} =
-              case spec do
-                {field, parser} -> {field, parser}
-                field when is_binary(field) -> {field, &default_parser/1}
-              end
-
-            case Map.fetch(body, field) do
-              {:ok, nil} when not required ->
-                {values, errors}
-
-              {:ok, value} ->
-                case parser.(value) do
-                  {:ok, value} ->
-                    {Map.put(values, key, value), errors}
-
-                  {:error, error} ->
-                    {values, merge_error(errors, key, error)}
+    with {:ok, body, req} <- read_json_body(req) do
+      {values, errors} =
+        Enum.reduce(
+          %{true: required_specs, false: optional_specs},
+          {%{}, %{}},
+          fn {required, specs}, {values, errors} ->
+            Enum.reduce(specs, {values, errors}, fn {key, spec}, {values, errors} ->
+              {field, parser} =
+                case spec do
+                  {field, parser} -> {field, parser}
+                  field when is_binary(field) -> {field, &default_parser/1}
                 end
 
-              :error ->
-                if required do
-                  {values, merge_error(errors, key, :required)}
-                else
+              case Map.fetch(body, field) do
+                {:ok, nil} when not required ->
                   {values, errors}
-                end
-            end
-          end)
-        end
-      )
 
-    if Enum.empty?(errors) do
-      {:ok, values, req}
-    else
-      {:error, errors, req}
+                {:ok, value} ->
+                  case parser.(value) do
+                    {:ok, value} ->
+                      {Map.put(values, key, value), errors}
+
+                    {:error, error} ->
+                      {values, merge_error(errors, key, error)}
+                  end
+
+                :error ->
+                  if required do
+                    {values, merge_error(errors, key, :required)}
+                  else
+                    {values, errors}
+                  end
+              end
+            end)
+          end
+        )
+
+      if Enum.empty?(errors) do
+        {:ok, values, req}
+      else
+        {:error, errors, req}
+      end
     end
   end
 

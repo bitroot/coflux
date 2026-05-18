@@ -79,7 +79,7 @@ defmodule Coflux.Handlers.Logs do
             {:ok, req, opts}
         end
 
-      {:error, :invalid_json} ->
+      {:error, :invalid_json, req} ->
         req = json_error_response(req, "invalid_json")
         {:ok, req, opts}
     end
