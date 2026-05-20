@@ -94,6 +94,7 @@ defmodule Coflux.Topics.Run do
           executeAfter: execute_after,
           assignedAt: nil,
           completedAt: nil,
+          completion: nil,
           groups: %{},
           assets: %{},
           dependencies:
@@ -103,7 +104,8 @@ defmodule Coflux.Topics.Run do
           children: [],
           inputs: %{},
           result: nil,
-          metrics: %{}
+          metrics: %{},
+          streams: %{}
         }
       )
     else
@@ -176,6 +178,30 @@ defmodule Coflux.Topics.Run do
     )
   end
 
+  defp process_notification(
+         topic,
+         {:stream_dependency, execution_external_id, producer_execution_id, index,
+          producer_metadata}
+       ) do
+    dependency = %{
+      type: "stream",
+      execution: build_execution(producer_metadata),
+      index: index
+    }
+
+    update_execution(
+      topic,
+      execution_external_id,
+      fn topic, base_path ->
+        Topic.merge(
+          topic,
+          base_path ++ [:dependencies, "#{producer_execution_id}:#{index}"],
+          dependency
+        )
+      end
+    )
+  end
+
   defp process_notification(topic, {:child, parent_execution_external_id, child}) do
     child = build_child(child, topic.state.external_run_id)
 
@@ -186,14 +212,58 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:result, execution_external_id, result, created_at, created_by}
+         {:result, execution_external_id, result, result_at, created_by}
        ) do
     result = build_result(result, created_by)
 
     update_execution(topic, execution_external_id, fn topic, base_path ->
       topic
       |> Topic.set(base_path ++ [:result], result)
-      |> Topic.set(base_path ++ [:completedAt], created_at)
+      |> Topic.set(base_path ++ [:resultAt], result_at)
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:completion, execution_external_id, kind, successor, completion_at}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      topic
+      |> Topic.set(base_path ++ [:completedAt], completion_at)
+      |> Topic.set(base_path ++ [:completion], %{
+        kind: Atom.to_string(kind),
+        successor: successor
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:stream_opened, execution_external_id, index, buffer, timeout_ms, created_at}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:streams, Integer.to_string(index)], %{
+        buffer: buffer,
+        timeoutMs: timeout_ms,
+        openedAt: created_at,
+        closedAt: nil,
+        reason: nil,
+        error: nil
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:stream_closed, execution_external_id, index, reason, error, closed_at}
+       ) do
+    index_key = Integer.to_string(index)
+
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      topic
+      |> Topic.set(base_path ++ [:streams, index_key, :closedAt], closed_at)
+      |> Topic.set(base_path ++ [:streams, index_key, :reason], reason)
+      |> Topic.set(base_path ++ [:streams, index_key, :error], error)
     end)
   end
 
@@ -346,7 +416,9 @@ defmodule Coflux.Topics.Run do
                     createdBy: build_principal(execution.created_by),
                     executeAfter: execution.execute_after,
                     assignedAt: execution.assigned_at,
+                    resultAt: execution.result_at,
                     completedAt: execution.completed_at,
+                    completion: execution.completion,
                     groups: execution.groups,
                     assets:
                       Map.new(execution.assets, fn {external_asset_id, asset} ->
@@ -370,7 +442,8 @@ defmodule Coflux.Topics.Run do
                            lower: def_data.lower,
                            upper: def_data.upper
                          }}
-                      end)
+                      end),
+                    streams: build_streams(execution.streams)
                   }}
                end)
            }}
@@ -388,6 +461,14 @@ defmodule Coflux.Topics.Run do
 
       {id, {:asset, asset}} ->
         {id, %{type: "asset", assetId: id, asset: build_asset(asset)}}
+
+      {id, {:stream, index, execution}} ->
+        {id,
+         %{
+           type: "stream",
+           execution: build_execution(execution),
+           index: index
+         }}
     end)
   end
 
@@ -449,6 +530,13 @@ defmodule Coflux.Topics.Run do
           retry: if(retry, do: execution_attempt(retry))
         }
 
+      {:crashed, retry} ->
+        %{
+          type: "crashed",
+          createdBy: created_by,
+          retry: if(retry, do: execution_attempt(retry))
+        }
+
       :cancelled ->
         %{type: "cancelled", createdBy: created_by}
 
@@ -500,6 +588,43 @@ defmodule Coflux.Topics.Run do
       nil ->
         nil
     end
+  end
+
+  defp build_streams(streams) do
+    Map.new(streams, fn
+      {index, buffer, timeout_ms, opened_at, nil, nil, nil} ->
+        {Integer.to_string(index),
+         %{
+           buffer: buffer,
+           timeoutMs: timeout_ms,
+           openedAt: opened_at,
+           closedAt: nil,
+           reason: nil,
+           error: nil
+         }}
+
+      {index, buffer, timeout_ms, opened_at, closed_at, reason, nil} ->
+        {Integer.to_string(index),
+         %{
+           buffer: buffer,
+           timeoutMs: timeout_ms,
+           openedAt: opened_at,
+           closedAt: closed_at,
+           reason: Atom.to_string(reason),
+           error: nil
+         }}
+
+      {index, buffer, timeout_ms, opened_at, closed_at, reason, {type, message, frames}} ->
+        {Integer.to_string(index),
+         %{
+           buffer: buffer,
+           timeoutMs: timeout_ms,
+           openedAt: opened_at,
+           closedAt: closed_at,
+           reason: Atom.to_string(reason),
+           error: %{type: type, message: message, frames: build_frames(frames)}
+         }}
+    end)
   end
 
   defp execution_attempt({ext_id, _module, _target}) do

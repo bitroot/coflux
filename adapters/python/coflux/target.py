@@ -50,6 +50,33 @@ class Retries:
     ) = None
 
 
+@dataclasses.dataclass(frozen=True)
+class Streams:
+    """Default stream configuration for a task or workflow.
+
+    Applies to:
+      * Streams created explicitly with ``cf.stream(...)`` — each option
+        (``buffer``, ``timeout``) can be overridden per-call.
+      * Generator-bodied tasks, where the task itself produces the stream.
+
+    ``buffer`` is the producer-side backpressure budget. ``0`` (the
+    default) means strict lockstep: the producer emits an item, waits
+    for a consumer to ack, then emits the next. ``N`` allows the
+    producer to run up to ``N`` items ahead of the fastest consumer.
+    ``None`` disables backpressure entirely.
+
+    ``timeout`` is the idle-timeout budget — if the producer hasn't
+    appended a new item within this window (including when blocked
+    waiting for consumer demand), the stream is force-closed with
+    reason ``"timeout"``. Enforced at the worker level. ``None``
+    disables the timeout.
+    """
+
+    _: dataclasses.KW_ONLY
+    buffer: int | None = 0
+    timeout: float | dt.timedelta | None = None
+
+
 class Parameter(t.NamedTuple):
     name: str
     annotation: str | None
@@ -70,6 +97,12 @@ class TargetDefinition(t.NamedTuple):
     timeout: float | dt.timedelta
     instruction: str | None
     is_stub: bool
+    # Default stream configuration. Used for generator-bodied tasks
+    # (where the task itself produces a stream) and as the default for
+    # ``cf.stream(...)`` calls within the task body. Individual
+    # ``cf.stream`` kwargs override these per-call. ``None`` means the
+    # task never deals with streams — validated at decoration time.
+    streams: Streams | None
 
 
 def _json_dumps(obj: t.Any) -> str:
@@ -195,6 +228,69 @@ def _parse_requires(
     return {k: _parse_require(v) for k, v in requires.items()} if requires else None
 
 
+_STREAMS_UNSET = object()
+
+
+def _validate_buffer(buffer: t.Any) -> int | None:
+    if buffer is None:
+        return None
+    if not isinstance(buffer, int) or isinstance(buffer, bool) or buffer < 0:
+        raise ValueError(
+            f"buffer must be a non-negative integer or None, got {buffer!r}"
+        )
+    return buffer
+
+
+def _validate_timeout(
+    timeout: t.Any,
+) -> float | dt.timedelta | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, dt.timedelta):
+        if timeout.total_seconds() <= 0:
+            raise ValueError(f"timeout must be positive, got {timeout!r}")
+        return timeout
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        if timeout <= 0:
+            raise ValueError(f"timeout must be positive, got {timeout!r}")
+        return timeout
+    raise TypeError(
+        f"timeout must be a positive number, timedelta, or None, got {timeout!r}"
+    )
+
+
+def _resolve_streams(
+    streams: t.Any,
+    fn: t.Callable,
+) -> Streams | None:
+    """Validate the decorator's ``streams=`` and return the resolved value.
+
+    A non-generator task gets ``None`` (no stream config makes sense).
+    A generator-bodied task with no explicit ``streams=`` gets a default
+    ``Streams()`` (buffer=0 strict lockstep, no timeout). Passing
+    ``streams=`` on a non-generator task raises.
+    """
+    is_generator = inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn)
+    if streams is _STREAMS_UNSET:
+        return Streams() if is_generator else None
+    if not is_generator:
+        raise TypeError(
+            f"@cf.task/@cf.workflow(streams=...) only applies to generator functions "
+            f"(def + yield or async def + yield); {fn.__name__} is not."
+        )
+    if streams is None:
+        return None
+    if not isinstance(streams, Streams):
+        raise TypeError(
+            f"streams= must be a cf.Streams instance or None, got {type(streams).__name__}"
+        )
+    # Re-validate the options (defensive — Streams itself is a plain dataclass).
+    return Streams(
+        buffer=_validate_buffer(streams.buffer),
+        timeout=_validate_timeout(streams.timeout),
+    )
+
+
 def _build_definition(
     type: TargetType,
     fn: t.Callable,
@@ -208,6 +304,7 @@ def _build_definition(
     requires: dict[str, str | bool | list[str]] | None,
     timeout: float | dt.timedelta,
     is_stub: bool,
+    streams: t.Any = _STREAMS_UNSET,
 ) -> TargetDefinition:
     parameters = inspect.signature(fn).parameters.values()
     for p in parameters:
@@ -228,6 +325,7 @@ def _build_definition(
         timeout,
         inspect.getdoc(fn),
         is_stub,
+        _resolve_streams(streams, fn),
     )
 
 
@@ -279,6 +377,18 @@ def serialize_retries(retries: Retries) -> dict:
     return result
 
 
+def serialize_streams(streams: Streams) -> dict | None:
+    """Serialise a Streams dataclass to the wire format used in the
+    manifest and in submit_execution requests. Returns ``None`` if
+    neither option is set (so the key is omitted from the wire)."""
+    result: dict[str, t.Any] = {}
+    if streams.buffer is not None:
+        result["buffer"] = streams.buffer
+    if streams.timeout is not None:
+        result["timeout_ms"] = _to_ms(streams.timeout)
+    return result if result else None
+
+
 class Target(t.Generic[P, T]):
     """Wrapper for a decorated task or workflow function.
 
@@ -320,6 +430,7 @@ class Target(t.Generic[P, T]):
         requires: dict[str, str | bool | list[str]] | None = None,
         timeout: float | dt.timedelta = 0,
         is_stub: bool = False,
+        streams: t.Any = _STREAMS_UNSET,
     ):
         self._fn = fn
         self._name = name or fn.__name__
@@ -337,6 +448,7 @@ class Target(t.Generic[P, T]):
             requires,
             timeout,
             is_stub,
+            streams,
         )
         functools.update_wrapper(self, fn)
 
@@ -386,6 +498,35 @@ class Target(t.Generic[P, T]):
         """Return a new Target with routing tags overridden for this call site."""
         return self._copy(requires=_parse_requires(requires))
 
+    def with_streams(self, streams: Streams | None) -> Target[P, T]:
+        """Return a new Target with stream config overridden for this call site.
+
+        Only meaningful for targets that produce streams (generator
+        functions, or bodies that call ``cf.stream(...)``). The new
+        config becomes the default for ``cf.stream(...)`` inside the
+        task; per-call ``cf.stream(buffer=..., timeout=...)`` overrides
+        still win.
+        """
+        if self._definition.streams is None:
+            raise TypeError(
+                f"with_streams is only applicable to stream-producing targets; "
+                f"{self._name} was declared without a streams config."
+            )
+        if streams is not None and not isinstance(streams, Streams):
+            raise TypeError(
+                f"with_streams expects a cf.Streams instance or None, got "
+                f"{type(streams).__name__}"
+            )
+        resolved = (
+            None
+            if streams is None
+            else Streams(
+                buffer=_validate_buffer(streams.buffer),
+                timeout=_validate_timeout(streams.timeout),
+            )
+        )
+        return self._copy(streams=resolved)
+
     @property
     def name(self) -> str:
         return self._name
@@ -409,7 +550,10 @@ class Target(t.Generic[P, T]):
 
         ctx = get_context()
 
-        # Serialize arguments
+        # Serialize arguments. Streams passed as args must already have
+        # been registered via cf.stream(...) — the caller becomes the
+        # producer, the callee gets a Stream handle. Bare generators
+        # raise; the user should wrap them explicitly.
         serialized_args = [serialize_value(arg) for arg in args]
 
         # Use only the declared wait_for from the decorator
@@ -436,6 +580,12 @@ class Target(t.Generic[P, T]):
             else None
         )
 
+        streams_dict = (
+            serialize_streams(self._definition.streams)
+            if self._definition.streams
+            else None
+        )
+
         # Get memo value (bool or list of indices)
         memo_val = self._definition.memo if self._definition.memo else None
 
@@ -454,6 +604,7 @@ class Target(t.Generic[P, T]):
             recurrent=self._definition.recurrent,
             requires=self._definition.requires,
             timeout=_to_ms(self._definition.timeout) if self._definition.timeout else 0,
+            streams=streams_dict,
         )
         return Execution(result["execution_id"], result["module"], result["target"])
 

@@ -138,7 +138,8 @@ defmodule Coflux.Handlers.Worker do
           | rest
         ] = message["params"]
 
-        timeout = List.first(rest) || 0
+        timeout = Enum.at(rest, 0) || 0
+        streams = parse_streams(Enum.at(rest, 1))
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
@@ -157,7 +158,8 @@ defmodule Coflux.Handlers.Worker do
                  retries: parse_retries(retries),
                  recurrent: recurrent == true,
                  requires: requires,
-                 timeout: timeout
+                 timeout: timeout,
+                 streams: streams
                ) do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
@@ -252,6 +254,155 @@ defmodule Coflux.Handlers.Worker do
         else
           {[{:close, 4000, "execution_invalid"}], nil}
         end
+
+      "stream_register" ->
+        [execution_id, index | rest] = message["params"]
+        buffer = Enum.at(rest, 0)
+        timeout_ms = Enum.at(rest, 1)
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.register_stream(
+                 state.project_id,
+                 execution_id,
+                 index,
+                 buffer,
+                 timeout_ms,
+                 state.session_id
+               ) do
+            :ok -> {[], state}
+            # Idempotent — a duplicate register is harmless.
+            {:error, :already_registered} -> {[], state}
+            {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_append" ->
+        [execution_id, index, sequence, value] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.append_stream_item(
+                 state.project_id,
+                 execution_id,
+                 index,
+                 sequence,
+                 parse_value(value)
+               ) do
+            :ok ->
+              {[], state}
+
+            # Worker is trying to append to a stream the server has already
+            # closed (e.g., owner execution was cancelled). Surfacing this to
+            # the adapter would let it stop producing; for now, swallow so
+            # the stream-close propagation to the worker (task #10) is the
+            # canonical signal.
+            {:error, :closed} ->
+              {[], state}
+
+            {:error, :not_registered} ->
+              {[], state}
+
+            {:error, :already_appended} ->
+              {[], state}
+
+            {:error, :not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_close" ->
+        [execution_id, index, error | rest] = message["params"]
+        reason = Enum.at(rest, 0)
+
+        if is_recognised_execution?(execution_id, state) do
+          close_spec =
+            case {reason, parse_error(error)} do
+              {"timeout", _} ->
+                :timeout
+
+              {_, nil} ->
+                nil
+
+              {_, {type, msg, frames, _retryable}} ->
+                {type, msg, frames}
+            end
+
+          case Orchestration.close_stream(
+                 state.project_id,
+                 execution_id,
+                 index,
+                 close_spec
+               ) do
+            :ok -> {[], state}
+            {:error, :already_closed} -> {[], state}
+            {:error, :not_registered} -> {[], state}
+            {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_subscribe" ->
+        [
+          subscription_id,
+          consumer_execution_id,
+          producer_execution_id,
+          index,
+          from_sequence,
+          stride
+        ] = message["params"]
+
+        if is_recognised_execution?(consumer_execution_id, state) do
+          case Orchestration.subscribe_stream(
+                 state.project_id,
+                 state.session_id,
+                 subscription_id,
+                 consumer_execution_id,
+                 producer_execution_id,
+                 index,
+                 from_sequence,
+                 stride
+               ) do
+            :ok ->
+              {[], state}
+
+            # If the stream doesn't exist yet (or producer vanished), push an
+            # immediate close so the consumer doesn't wait forever. Carry
+            # the reason atom verbatim — consumers decide how to surface
+            # "not_found" / "already_subscribed" in their own idiom.
+            {:error, reason}
+            when reason in [:stream_not_found, :producer_not_found, :already_subscribed] ->
+              {[
+                 command_message("stream_closed", [
+                   consumer_execution_id,
+                   subscription_id,
+                   Atom.to_string(reason),
+                   nil
+                 ])
+               ], state}
+
+            {:error, :consumer_not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "stream_unsubscribe" ->
+        [consumer_execution_id, subscription_id] = message["params"]
+
+        :ok =
+          Orchestration.unsubscribe_stream(
+            state.project_id,
+            state.session_id,
+            consumer_execution_id,
+            subscription_id
+          )
+
+        {[], state}
 
       "put_error" ->
         [execution_id, error] = message["params"]
@@ -470,7 +621,7 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
-         workspace_external_id, timeout},
+         workspace_external_id, timeout, streams},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
@@ -485,7 +636,8 @@ defmodule Coflux.Handlers.Worker do
          arguments,
          run_id,
          workspace_external_id,
-         timeout
+         timeout,
+         compose_streams(streams)
        ])
      ], state}
   end
@@ -496,6 +648,40 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info({:abort, execution_external_id}, state) do
     {[command_message("abort", [execution_external_id])], state}
+  end
+
+  def websocket_info({:stream_items, execution_external_id, subscription_id, items}, state) do
+    # Items arrive in resolved form ([[sequence, value_tuple], ...]); compose
+    # each value tuple to wire JSON here.
+    encoded =
+      Enum.map(items, fn [sequence, value] ->
+        [sequence, compose_value(value)]
+      end)
+
+    {[command_message("stream_items", [execution_external_id, subscription_id, encoded])], state}
+  end
+
+  def websocket_info({:stream_demand, execution_external_id, index, n}, state) do
+    {[command_message("stream_demand", [execution_external_id, index, n])], state}
+  end
+
+  def websocket_info(
+        {:stream_closed, execution_external_id, subscription_id, reason, error},
+        state
+      ) do
+    # `reason` is a string ("complete" / "errored" / "cancelled" /
+    # "abandoned" / "crashed" / "timeout"); `error` is non-nil only for
+    # "errored" — the producer's actual `{type, message, frames}`. Other
+    # reasons travel as the string alone; the consumer adapter decides
+    # how to represent them.
+    {[
+       command_message("stream_closed", [
+         execution_external_id,
+         subscription_id,
+         reason,
+         error
+       ])
+     ], state}
   end
 
   def websocket_info(:stop, state) do
@@ -613,6 +799,23 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
+  def parse_streams(value) do
+    if value do
+      %{
+        buffer: Map.get(value, "buffer"),
+        timeout_ms: Map.get(value, "timeout_ms")
+      }
+    end
+  end
+
+  # Encode a streams config (as stored on the execution) for the wire
+  # format going CLI-ward. nil stays nil (compact).
+  defp compose_streams(nil), do: nil
+
+  defp compose_streams(streams) do
+    Map.new(streams, fn {k, v} -> {Atom.to_string(k), v} end)
+  end
+
   defp compose_references(references) do
     Enum.map(references, fn
       {:fragment, format, blob_key, size, metadata} ->
@@ -648,7 +851,8 @@ defmodule Coflux.Handlers.Worker do
   #     where result_detail is one of:
   #       {:value, value}
   #       {:error, type, message, frames, retry_id, retryable?}
-  #       :cancelled | :dismissed | {:abandoned, nil} | {:timeout, nil} | :suspended
+  #       :cancelled | :dismissed | {:abandoned, _} | {:crashed, _} |
+  #       {:timeout, _} | :suspended
   defp compose_select_result(:timeout) do
     nil
   end
@@ -680,6 +884,9 @@ defmodule Coflux.Handlers.Worker do
 
       {:abandoned, _} ->
         Map.put(base, "status", "abandoned")
+
+      {:crashed, _} ->
+        Map.put(base, "status", "crashed")
 
       {:timeout, _} ->
         Map.put(base, "status", "timeout")

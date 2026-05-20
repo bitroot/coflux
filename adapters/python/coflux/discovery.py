@@ -8,7 +8,14 @@ import pkgutil
 import sys
 from typing import Any
 
-from .target import Target, _to_ms, serialize_cache, serialize_defer, serialize_retries
+from .target import (
+    Target,
+    _to_ms,
+    serialize_cache,
+    serialize_defer,
+    serialize_retries,
+    serialize_streams,
+)
 
 
 def _expand_modules(module_names: list[str]) -> list[str]:
@@ -138,6 +145,11 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
 
     if definition.instruction:
         result["instruction"] = definition.instruction
+
+    if definition.streams is not None:
+        streams_dict = serialize_streams(definition.streams)
+        if streams_dict is not None:
+            result["streams"] = streams_dict
 
     return result
 

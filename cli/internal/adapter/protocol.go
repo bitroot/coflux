@@ -24,8 +24,17 @@ type TargetDefinition struct {
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	Streams     *StreamsConfig      `json:"streams,omitempty"`
 	IsStub      bool                `json:"is_stub,omitempty"`
 	Instruction *string             `json:"instruction,omitempty"`
+}
+
+// StreamsConfig is the wire form of cf.Streams: default buffer + idle
+// timeout for streams produced by the target. Either field may be
+// absent; the adapter falls back to the decorator default.
+type StreamsConfig struct {
+	Buffer    *int `json:"buffer,omitempty"`
+	TimeoutMs *int `json:"timeout_ms,omitempty"`
 }
 
 // Parameter describes a function parameter
@@ -63,11 +72,12 @@ type ExecuteRequest struct {
 
 // ExecuteRequestParams contains execution parameters
 type ExecuteRequestParams struct {
-	ExecutionID string     `json:"execution_id"`
-	Module      string     `json:"module"`
-	Target      string     `json:"target"`
-	Arguments   []Argument `json:"arguments"`
-	WorkingDir  string     `json:"working_dir,omitempty"`
+	ExecutionID string         `json:"execution_id"`
+	Module      string         `json:"module"`
+	Target      string         `json:"target"`
+	Arguments   []Argument     `json:"arguments"`
+	WorkingDir  string         `json:"working_dir,omitempty"`
+	Streams     *StreamsConfig `json:"streams,omitempty"`
 }
 
 // Argument is the same structure as Value (used for arguments to distinguish context)
@@ -194,6 +204,7 @@ type SubmitExecutionParams struct {
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	Streams     *StreamsConfig      `json:"streams,omitempty"`
 }
 
 // SubmitExecutionResult is the response to submit_execution
@@ -251,6 +262,107 @@ type RegisterGroupParams struct {
 	ExecutionID string  `json:"execution_id"`
 	GroupID     int     `json:"group_id"`
 	Name        *string `json:"name,omitempty"`
+}
+
+// StreamRegisterParams for stream_register notification.
+// Index is worker-assigned, monotonic per execution — it identifies the
+// stream within its producer execution. Buffer is the optional
+// backpressure budget; nil means unbounded (no flow control). TimeoutMs
+// is the optional idle-timeout budget (milliseconds) — nil disables it.
+type StreamRegisterParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	Buffer      *int   `json:"buffer,omitempty"`
+	TimeoutMs   *int   `json:"timeout_ms,omitempty"`
+}
+
+// StreamDemandParams for stream_demand notification pushed CLI → adapter.
+// Grants the producer “n“ more credits for the given stream.
+type StreamDemandParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	N           int    `json:"n"`
+}
+
+// StreamAppendParams for stream_append notification.
+// Sequence is worker-assigned, monotonic per stream — it identifies the
+// item within its stream.
+type StreamAppendParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	Sequence    int    `json:"sequence"`
+	Value       *Value `json:"value"`
+}
+
+// StreamCloseParams for stream_close notification. Error is present only
+// when the producer's generator raised an exception.
+type StreamCloseParams struct {
+	ExecutionID string            `json:"execution_id"`
+	Index       int               `json:"index"`
+	Error       *StreamCloseError `json:"error,omitempty"`
+}
+
+// StreamCloseError describes an error that terminated a stream.
+type StreamCloseError struct {
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	Traceback string `json:"traceback"`
+}
+
+// StreamSubscribeParams for stream_subscribe notification. `Stride`
+// (when present) restricts which sequence positions are delivered: the
+// positions `start, start+step, start+2·step, …` up to (but not
+// including) `stop`. Any chain of slice/partition/stride calls on the
+// consumer side composes into a single stride before the wire.
+type StreamSubscribeParams struct {
+	ExecutionID         string         `json:"execution_id"` // consumer
+	SubscriptionID      int            `json:"subscription_id"`
+	ProducerExecutionID string         `json:"producer_execution_id"`
+	Index               int            `json:"index"`
+	FromSequence        int            `json:"from_sequence"`
+	Stride              map[string]any `json:"stride,omitempty"`
+}
+
+// StreamUnsubscribeParams for stream_unsubscribe notification.
+type StreamUnsubscribeParams struct {
+	ExecutionID    string `json:"execution_id"`
+	SubscriptionID int    `json:"subscription_id"`
+}
+
+// StreamItemsParams for stream_items notification pushed CLI → adapter.
+// Items are [[sequence, value], ...] where value is a wire Value.
+type StreamItemsParams struct {
+	ExecutionID    string `json:"execution_id"`
+	SubscriptionID int    `json:"subscription_id"`
+	Items          []any  `json:"items"`
+}
+
+// StreamForceCloseParams for stream_force_close notification pushed
+// CLI → adapter. Tells the producer side that its stream has already
+// been closed externally (typically by the worker's idle-timeout
+// timer), so it should stop producing and skip sending its own
+// stream_close. “Reason“ is a semantic string — today just
+// “"timeout"“ but kept as a string for future extension.
+type StreamForceCloseParams struct {
+	ExecutionID string `json:"execution_id"`
+	Index       int    `json:"index"`
+	Reason      string `json:"reason"`
+}
+
+// StreamClosedParams for stream_closed notification pushed CLI → adapter.
+//
+// `Reason` is a semantic string ("complete" / "errored" / "cancelled" /
+// "abandoned" / "crashed" / "timeout" / "not_found" / ...). The adapter
+// maps it to whatever exception/return value is idiomatic in the target
+// language — the CLI doesn't fabricate types.
+//
+// `Error` is non-nil only when `Reason == "errored"`, carrying the
+// producer's actual `{type, message, frames}`.
+type StreamClosedParams struct {
+	ExecutionID    string         `json:"execution_id"`
+	SubscriptionID int            `json:"subscription_id"`
+	Reason         string         `json:"reason"`
+	Error          map[string]any `json:"error,omitempty"`
 }
 
 // DownloadBlobParams for download_blob request

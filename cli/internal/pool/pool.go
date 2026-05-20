@@ -49,6 +49,26 @@ type ExecutionHandler interface {
 	SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error)
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
+	// StreamRegister declares a new stream owned by an execution.
+	// Index is worker-assigned, monotonic per execution — it identifies
+	// the stream within its producer execution. Buffer is the optional
+	// backpressure budget; nil means unbounded (no flow control).
+	// TimeoutMs is the optional idle-timeout budget (milliseconds);
+	// purely informational for the server (enforced at the worker/CLI).
+	StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error
+	// StreamAppend appends an item to a stream. Sequence is worker-assigned,
+	// monotonic per stream — it identifies the item within its stream.
+	StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error
+	// StreamClose closes a stream. ``reason`` is "complete" | "errored" | "timeout".
+	// When nil, inferred from ``err`` (nil→complete, non-nil→errored).
+	StreamClose(ctx context.Context, executionID string, index int, err *adapter.StreamCloseError, reason *string) error
+	// StreamSubscribe opens a consumer subscription to a stream owned
+	// by another execution. `stride` is an optional
+	// {"start", "stop", "step"} map restricting which positions are
+	// delivered; nil means no filtering.
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error
+	// StreamUnsubscribe drops a consumer subscription.
+	StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error
 }
 
 // Pool manages executor processes. Each executor handles one execution then
@@ -70,6 +90,13 @@ type Pool struct {
 	cancel   context.CancelFunc
 	ctx      context.Context
 	wg       sync.WaitGroup // tracks runExecution goroutines
+
+	// Idle-timeout timers for registered streams. Registered when the
+	// adapter sends stream_register with a timeout_ms, reset on each
+	// stream_append, cleared on stream_close or execution end. On fire,
+	// the pool reports a close with reason="timeout" to the server and
+	// pushes stream_force_close to the adapter.
+	streamTimers *streamTimers
 }
 
 // NewPool creates a new executor pool.
@@ -83,7 +110,7 @@ func NewPool(adp adapter.Adapter, concurrency int, handler ExecutionHandler, log
 	if warmTarget > 4 {
 		warmTarget = 4
 	}
-	return &Pool{
+	p := &Pool{
 		adapter:     adp,
 		concurrency: concurrency,
 		warmTarget:  warmTarget,
@@ -91,6 +118,32 @@ func NewPool(adp adapter.Adapter, concurrency int, handler ExecutionHandler, log
 		logger:      logger,
 		busy:        make(map[string]*adapter.Executor),
 		aborted:     make(map[string]bool),
+	}
+	p.streamTimers = newStreamTimers(p.onStreamTimeout)
+	return p
+}
+
+// onStreamTimeout is invoked by the stream-timers registry when a
+// stream's idle deadline elapses. Reports the close to the server with
+// reason="timeout" and notifies the adapter so its producer thread
+// stops trying to append. Runs on a goroutine owned by time.AfterFunc.
+func (p *Pool) onStreamTimeout(key streamKey) {
+	logger := p.logger.With("execution_id", key.executionID, "stream_index", key.index)
+	logger.Info("stream idle timeout elapsed")
+
+	reason := "timeout"
+	if err := p.handler.StreamClose(p.ctx, key.executionID, key.index, nil, &reason); err != nil {
+		logger.Error("failed to report stream timeout close", "error", err)
+	}
+
+	// Tell the adapter so its producer thread stops. Best-effort —
+	// PushToExecutor is a no-op if the adapter has already exited.
+	if err := p.PushToExecutor(key.executionID, "stream_force_close", map[string]any{
+		"execution_id": key.executionID,
+		"index":        key.index,
+		"reason":       "timeout",
+	}); err != nil {
+		logger.Warn("failed to push stream_force_close", "error", err)
 	}
 }
 
@@ -130,7 +183,9 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 // Execute runs a target. Uses a warm executor if available, otherwise spawns
 // one on demand. Returns an error if spawning fails (caller should report to server).
 // timeoutMs, if > 0, enforces a wall-clock timeout on the execution.
-func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) error {
+// streams (if non-nil) is the default stream config — forwarded to the
+// adapter so generator-bodied tasks and cf.stream(...) calls pick it up.
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig) error {
 	p.mu.Lock()
 	if p.shutdown {
 		p.mu.Unlock()
@@ -161,12 +216,12 @@ func (p *Pool) Execute(ctx context.Context, executionID, module, target string, 
 	p.wg.Add(1)
 	p.mu.Unlock()
 
-	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs)
+	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs, streams)
 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig) {
 	defer p.wg.Done()
 
 	// Create a temporary directory for this execution
@@ -182,7 +237,7 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 	logger := p.logger.With("execution_id", executionID, "module", module, "target", target)
 
 	// Send execute command
-	if err := exec.SendExecute(executionID, module, target, arguments, workingDir); err != nil {
+	if err := exec.SendExecute(executionID, module, target, arguments, workingDir, streams); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 		os.RemoveAll(workingDir)
@@ -201,6 +256,10 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 		defer cancelTimeout()
 	}
 	timedOut := false
+	// Once the adapter has reported a result, a subsequent EOF is the
+	// expected natural exit (after any stream drain completes). Don't
+	// treat that as a failure to receive.
+	resultReported := false
 
 	// Handle messages until execution completes
 loop:
@@ -227,6 +286,9 @@ loop:
 			if aborted {
 				logger.Info("execution aborted")
 				logger.Debug("aborted executor exit", "error", err)
+			} else if resultReported {
+				// Clean exit after result + stream drain.
+				logger.Debug("executor exited after result", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
 				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
@@ -242,10 +304,17 @@ loop:
 
 		switch method {
 		case "execution_result":
+			// Don't break the loop here — a streaming task keeps sending
+			// stream_append/stream_close messages after the result is
+			// committed. Stop reading only when the adapter process exits
+			// (Receive returns an error), which happens after wait_all in
+			// the adapter drains every generator.
 			p.handleExecutionResult(execCtx, executionID, params, logger)
-			break loop
+			resultReported = true
 
 		case "execution_error":
+			// Error is terminal — a task that raised before yielding any
+			// generators has nothing to stream. Stop reading.
 			p.handleExecutionError(execCtx, executionID, params, logger)
 			break loop
 
@@ -259,10 +328,32 @@ loop:
 			p.handleMetric(execCtx, executionID, params, logger)
 
 		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input":
-			p.handleRequest(execCtx, exec, method, *id, params, logger)
+			// Dispatch async: these can block on the server (e.g. a
+			// `select` that waits for a child execution). Blocking the
+			// message loop here would stop us reading the adapter's
+			// subsequent messages — including stream_append from a
+			// stream-producing task that hasn't finished yet — creating
+			// a deadlock between the waiting select and the consumer
+			// that's holding it up.
+			go p.handleRequest(execCtx, exec, method, *id, params, logger)
 
 		case "register_group":
 			p.handleRegisterGroup(execCtx, executionID, params, logger)
+
+		case "stream_register":
+			p.handleStreamRegister(execCtx, executionID, params, logger)
+
+		case "stream_append":
+			p.handleStreamAppend(execCtx, executionID, params, logger)
+
+		case "stream_close":
+			p.handleStreamClose(execCtx, executionID, params, logger)
+
+		case "stream_subscribe":
+			p.handleStreamSubscribe(execCtx, executionID, params, logger)
+
+		case "stream_unsubscribe":
+			p.handleStreamUnsubscribe(execCtx, executionID, params, logger)
 
 		default:
 			err := fmt.Errorf("unknown message method: %s", method)
@@ -305,6 +396,11 @@ func (p *Pool) finishExecution(executionID string, execToClose *adapter.Executor
 	delete(p.busy, executionID)
 	delete(p.aborted, executionID)
 	p.mu.Unlock()
+
+	// Drop any lingering stream timers for this execution. The server
+	// will synthesise :lifecycle closures for streams still open at
+	// this point — we don't want a timer fire racing that.
+	p.streamTimers.ClearExecution(executionID)
 
 	if execToClose != nil {
 		_ = execToClose.Close()
@@ -432,6 +528,89 @@ func (p *Pool) handleRegisterGroup(ctx context.Context, executionID string, para
 
 	if err := p.handler.RegisterGroup(ctx, req.ExecutionID, req.GroupID, req.Name); err != nil {
 		logger.Error("failed to register group", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamRegister(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamRegisterParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_register message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Index, req.Buffer, req.TimeoutMs); err != nil {
+		logger.Error("failed to register stream", "error", err)
+		return
+	}
+	if req.TimeoutMs != nil {
+		p.streamTimers.Register(streamKey{req.ExecutionID, req.Index}, *req.TimeoutMs)
+	}
+}
+
+func (p *Pool) handleStreamAppend(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamAppendParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_append message", "error", err)
+		return
+	}
+
+	// Reset the idle-timeout timer first so an in-flight timer fire
+	// doesn't race a successful append. Harmless if no timer is
+	// registered for this stream.
+	p.streamTimers.Reset(streamKey{req.ExecutionID, req.Index})
+
+	if err := p.handler.StreamAppend(ctx, req.ExecutionID, req.Index, req.Sequence, req.Value); err != nil {
+		logger.Error("failed to append stream item", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamClose(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamCloseParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_close message", "error", err)
+		return
+	}
+
+	// Clear the timer; harmless if none was registered. If the timer
+	// had already fired (Clear returns false), the timeout path has
+	// already reported the close and the server will dedupe this
+	// forward via ``:already_closed``.
+	p.streamTimers.Clear(streamKey{req.ExecutionID, req.Index})
+
+	if err := p.handler.StreamClose(ctx, req.ExecutionID, req.Index, req.Error, nil); err != nil {
+		logger.Error("failed to close stream", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamSubscribeParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_subscribe message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamSubscribe(
+		ctx,
+		req.ExecutionID,
+		req.SubscriptionID,
+		req.ProducerExecutionID,
+		req.Index,
+		req.FromSequence,
+		req.Stride,
+	); err != nil {
+		logger.Error("failed to subscribe to stream", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamUnsubscribe(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamUnsubscribeParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_unsubscribe message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamUnsubscribe(ctx, req.ExecutionID, req.SubscriptionID); err != nil {
+		logger.Error("failed to unsubscribe from stream", "error", err)
 	}
 }
 
@@ -591,6 +770,26 @@ func (p *Pool) Abort(executionID string) error {
 
 	_ = exec.Close()
 	return nil
+}
+
+// PushToExecutor forwards a server-originated notification to the adapter
+// process handling the given execution. Used for stream_items / stream_closed
+// pushes and, later, stream_produce_until flow-control signals. Silently
+// no-ops if the execution isn't active — a late push after the adapter exited
+// isn't an error condition.
+func (p *Pool) PushToExecutor(executionID, method string, params any) error {
+	p.mu.Lock()
+	exec, ok := p.busy[executionID]
+	p.mu.Unlock()
+
+	if !ok {
+		return nil
+	}
+
+	return exec.Send(map[string]any{
+		"method": method,
+		"params": params,
+	})
 }
 
 // Drain marks the pool as draining (stops spawning warm executors),

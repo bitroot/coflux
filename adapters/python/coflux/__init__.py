@@ -16,16 +16,18 @@ from .decorators import stub, task, workflow
 from .errors import (
     ExecutionAbandoned,
     ExecutionCancelled,
+    ExecutionCrashed,
     ExecutionError,
     ExecutionTerminated,
     ExecutionTimeout,
     InputDismissed,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
-from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, ModelSchema
+from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, Stream
 from .prompt import Prompt
 from .state import get_context
-from .target import Cache, Defer, Retries
+from .streams import stream
+from .target import Cache, Defer, Retries, Streams
 
 __all__ = [
     # Version
@@ -41,9 +43,9 @@ __all__ = [
     "ExecutionCancelled",
     "ExecutionTimeout",
     "ExecutionAbandoned",
+    "ExecutionCrashed",
     "InputDismissed",
     "Input",
-    "ModelSchema",
     "Metric",
     "MetricGroup",
     "MetricScale",
@@ -51,9 +53,13 @@ __all__ = [
     "Cache",
     "Defer",
     "Retries",
+    "Streams",
     "Asset",
     "AssetEntry",
     "AssetMetadata",
+    "Stream",
+    # Producer-side stream helper
+    "stream",
     # Context functions
     "group",
     "suspense",

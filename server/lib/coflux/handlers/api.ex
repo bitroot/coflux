@@ -509,6 +509,7 @@ defmodule Coflux.Handlers.Api do
              timeout: {"timeout", &parse_integer(&1, optional: true)},
              requires: {"requires", &parse_tag_set/1},
              memo: {"memo", &parse_boolean(&1, optional: true)},
+             streams: {"streams", &parse_streams_config/1},
              idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)}
            }
          ) do
@@ -530,6 +531,7 @@ defmodule Coflux.Handlers.Api do
                timeout: arguments[:timeout] || 0,
                requires: arguments[:requires],
                memo: arguments[:memo],
+               streams: arguments[:streams],
                idempotency_key: arguments[:idempotency_key]
              ) do
           {:ok, run_id, step_number, execution_external_id} ->
@@ -1744,6 +1746,30 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # Parse a ``streams`` config object from an HTTP request body. Both
+  # ``buffer`` and ``timeoutMs`` are optional; returns nil when the
+  # caller omits streams entirely.
+  defp parse_streams_config(value) do
+    cond do
+      is_nil(value) ->
+        {:ok, nil}
+
+      is_map(value) ->
+        with {:ok, buffer} <- parse_integer(Map.get(value, "buffer"), optional: true),
+             {:ok, timeout_ms} <-
+               parse_integer(Map.get(value, "timeoutMs"), optional: true) do
+          if buffer == nil and timeout_ms == nil do
+            {:ok, nil}
+          else
+            {:ok, %{buffer: buffer, timeout_ms: timeout_ms}}
+          end
+        end
+
+      true ->
+        {:error, :invalid}
+    end
+  end
+
   defp parse_workflow(value) do
     if is_map(value) do
       with {:ok, parameters} <- parse_parameters(Map.get(value, "parameters")),
@@ -1756,6 +1782,7 @@ defmodule Coflux.Handlers.Api do
            {:ok, timeout} <- parse_integer(Map.get(value, "timeout"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, memo} <- parse_boolean(Map.get(value, "memo"), optional: true),
+           {:ok, streams} <- parse_manifest_streams(Map.get(value, "streams")),
            {:ok, instruction} <-
              parse_string(
                Map.get(value, "instruction"),
@@ -1774,6 +1801,7 @@ defmodule Coflux.Handlers.Api do
            timeout: timeout || 0,
            requires: requires,
            memo: memo == true,
+           streams: streams,
            instruction: instruction
          }}
       else
@@ -1782,6 +1810,31 @@ defmodule Coflux.Handlers.Api do
       end
     else
       {:error, :invalid}
+    end
+  end
+
+  # Parse the ``streams`` field on a manifest workflow. The Python
+  # adapter serialises this as ``{"buffer": int?, "timeout_ms": int?}``
+  # (snake_case, since it's the wire format shared with worker protocol
+  # not the HTTP-specific camelCase).
+  defp parse_manifest_streams(value) do
+    cond do
+      is_nil(value) ->
+        {:ok, nil}
+
+      is_map(value) ->
+        with {:ok, buffer} <- parse_integer(Map.get(value, "buffer"), optional: true),
+             {:ok, timeout_ms} <-
+               parse_integer(Map.get(value, "timeout_ms"), optional: true) do
+          if buffer == nil and timeout_ms == nil do
+            {:ok, nil}
+          else
+            {:ok, %{buffer: buffer, timeout_ms: timeout_ms}}
+          end
+        end
+
+      true ->
+        {:error, :invalid}
     end
   end
 

@@ -124,6 +124,9 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if timeout, ok := workflow["timeout"].(float64); ok && timeout > 0 {
 		options["timeout"] = int64(timeout)
 	}
+	if streams, ok := workflow["streams"].(map[string]any); ok && streams != nil {
+		options["streams"] = streams
+	}
 
 	// Apply per-run overrides from flags.
 	if cmd.Flags().Changed("requires") {

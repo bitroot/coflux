@@ -10,6 +10,7 @@ defmodule Coflux.Orchestration.Server do
     Sessions,
     Runs,
     Results,
+    Streams,
     Assets,
     Inputs,
     Values,
@@ -18,6 +19,7 @@ defmodule Coflux.Orchestration.Server do
     Workers,
     Manifests,
     Principals,
+    Errors,
     Epoch
   }
 
@@ -114,7 +116,45 @@ defmodule Coflux.Orchestration.Server do
               pending_dependencies: %{},
 
               # execution_id -> MapSet of execution_ids that are waiting on this execution
-              dependency_waiters: %{}
+              dependency_waiters: %{},
+
+              # Active stream subscriptions — in-memory, session-scoped.
+              # A consumer adapter opens a subscription by sending stream_subscribe
+              # with a subscription_id unique within that consumer's adapter
+              # process; we push items (stream_items command) as they arrive on
+              # the producer side, and a terminal stream_closed command when the
+              # stream ends. Dropped when the session disconnects, when the
+              # consumer unsubscribes, when the consumer execution terminates,
+              # or when the stream closes.
+              #
+              # The key includes consumer_execution_id so concurrent consumer
+              # adapters (each starting subscription counters from 0) can't
+              # collide.
+              #
+              # stream_subscriptions: {consumer_execution_id, subscription_id} ->
+              #     %{consumer_execution_external_id, producer_execution_id,
+              #       index, cursor, filter}
+              # stream_subscribers: {producer_execution_id, index} -> MapSet of
+              #     {consumer_execution_id, subscription_id}
+              stream_subscriptions: %{},
+              stream_subscribers: %{},
+
+              # Per-stream producer state for backpressure. Only present
+              # when the producer opted in by registering with a non-nil
+              # buffer. Keyed by {producer_execution_id, index}.
+              #
+              #   %{buffer, demand_granted, session_id, execution_external_id}
+              #
+              # * buffer                — configured backpressure budget
+              # * demand_granted        — cumulative credits sent so far
+              # * session_id            — where to route stream_demand
+              # * execution_external_id — external id for the command wire
+              #
+              # The current max_cursor across adapter subscribers is
+              # recomputed from stream_subscribers on demand rather than
+              # cached here, since it changes often and is cheap to
+              # derive.
+              stream_producers: %{}
   end
 
   def start_link(opts) do
@@ -346,10 +386,13 @@ defmodule Coflux.Orchestration.Server do
             end)
           )
         else
-          # Session no longer active - abandon these executions
+          # Session no longer active - abandon these executions. Server-initiated
+          # so we write both the results row (via process_result) and the
+          # completion row (via complete_execution) here — no worker is
+          # going to send notify_terminated for this execution.
           Enum.reduce(execution_ids, state, fn execution_id, state ->
             {:ok, state} = process_result(state, execution_id, :abandoned)
-            state
+            complete_execution(state, execution_id)
           end)
         end
       end)
@@ -1652,24 +1695,33 @@ defmodule Coflux.Orchestration.Server do
             update_in(state.sessions[session_id].starting, &MapSet.delete(&1, ext_id))
           end)
 
-        # Abandon executions that were executing but are no longer reported
+        # Abandon executions that were executing but are no longer reported.
+        # Keyed off `has_completion?` rather than `has_result?`: a value
+        # result with streams still draining is still running from the
+        # lifecycle's perspective, and we shouldn't synthesise a completion
+        # until the worker actually stops reporting it.
         state =
           session.executing
           |> MapSet.difference(reported_ext_ids)
           |> Enum.reduce(state, fn ext_id, state ->
             execution_id = Map.fetch!(state.execution_ids, ext_id)
 
-            case Results.has_result?(state.db, execution_id) do
+            case Results.has_completion?(state.db, execution_id) do
               {:ok, false} ->
+                # Server-detected abandonment. No worker will send
+                # notify_terminated for this execution.
                 {:ok, state} = process_result(state, execution_id, :abandoned)
-                state
+                complete_execution(state, execution_id)
 
               {:ok, true} ->
                 state
             end
           end)
 
-        # Check for executions reported but not in starting/executing - abort if already have result
+        # Executions the worker reported but the server has already
+        # finalised (completion recorded) — tell the worker to abort
+        # its local process. Mid-drain executions (result but no
+        # completion) are legitimate and left alone.
         state =
           reported_ext_ids
           |> MapSet.difference(session.starting)
@@ -1677,7 +1729,7 @@ defmodule Coflux.Orchestration.Server do
           |> Enum.reduce(state, fn ext_id, state ->
             case Map.fetch(state.execution_ids, ext_id) do
               {:ok, execution_id} ->
-                case Results.has_result?(state.db, execution_id) do
+                case Results.has_completion?(state.db, execution_id) do
                   {:ok, false} ->
                     state
 
@@ -1731,18 +1783,16 @@ defmodule Coflux.Orchestration.Server do
     state =
       external_execution_ids
       |> Enum.reduce(state, fn ext_id, state ->
-        # If execution has no result recorded, mark it as abandoned
+        # Finalize the execution — writes completion (plus creating any
+        # successor) if it hasn't already been done. For worker-reported
+        # error/timeout this runs the retry decision now. For executions
+        # with no results row yet, falls back to the :abandoned path.
         state =
           case Map.fetch(state.execution_ids, ext_id) do
             {:ok, execution_id} ->
-              case Results.has_result?(state.db, execution_id) do
-                {:ok, false} ->
-                  {:ok, state} = process_result(state, execution_id, :abandoned)
-                  state
-
-                {:ok, true} ->
-                  state
-              end
+              state
+              |> complete_execution(execution_id)
+              |> drop_execution_subscriptions(execution_id)
 
             :error ->
               state
@@ -1802,6 +1852,262 @@ defmodule Coflux.Orchestration.Server do
 
       :error ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call(
+        {:register_stream, execution_external_id, index, buffer, timeout_ms, session_external_id},
+        _from,
+        state
+      ) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        case Streams.register_stream(state.db, execution_id, index, buffer, timeout_ms) do
+          {:ok, created_at} ->
+            # Resolve the session's external id to the internal one —
+            # send_session (which delivers stream_demand) indexes by the
+            # internal id.
+            internal_session_id =
+              Map.get(state.session_ids, session_external_id)
+
+            state =
+              state
+              |> maybe_init_stream_producer(
+                execution_id,
+                execution_external_id,
+                index,
+                buffer,
+                internal_session_id
+              )
+              |> notify_stream_opened(execution_id, index, buffer, timeout_ms, created_at)
+              |> maybe_send_initial_demand(execution_id, index)
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, :already_registered} ->
+            {:reply, {:error, :already_registered}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call(
+        {:append_stream_item, execution_external_id, index, sequence, value},
+        _from,
+        state
+      ) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        case Streams.append_item(
+               state.db,
+               execution_id,
+               index,
+               sequence,
+               normalize_value(value)
+             ) do
+          {:ok, created_at} ->
+            # If we came out of a server restart with no in-memory
+            # producer state for this stream, rebuild it now from the
+            # persisted buffer so subsequent consumer advances can
+            # refresh demand. The appending session is the producer.
+            producer_session_id =
+              case find_session_for_execution(state, execution_external_id) do
+                {:ok, sid} -> sid
+                :error -> nil
+              end
+
+            state =
+              state
+              |> ensure_stream_producer(
+                execution_id,
+                execution_external_id,
+                index,
+                producer_session_id
+              )
+              |> push_stream_item(execution_id, index, sequence, value)
+              |> notify_stream_item_appended(
+                execution_id,
+                index,
+                sequence,
+                value,
+                created_at
+              )
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:close_stream, execution_external_id, index, close_spec}, _from, state) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        {spec, reason, error} =
+          case close_spec do
+            nil ->
+              {:complete, :complete, nil}
+
+            :timeout ->
+              {:timeout, :timeout, nil}
+
+            {type, message, frames} ->
+              {{:errored, type, message, frames}, :errored, {type, message, frames}}
+          end
+
+        case Streams.close_stream(state.db, execution_id, index, spec) do
+          {:ok, closed_at} ->
+            state =
+              state
+              |> push_stream_closed(execution_id, index, reason, error)
+              |> notify_stream_closed(execution_id, index, reason, error, closed_at)
+              |> drop_stream_producer({execution_id, index})
+              |> flush_notifications()
+
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call(
+        {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
+         producer_execution_external_id, index, from_sequence, stride},
+        _from,
+        state
+      ) do
+    # Producer may already have terminated — resolve from DB (active epoch)
+    # rather than the in-memory active-execution cache.
+    producer_result =
+      case resolve_internal_execution_id(state, producer_execution_external_id) do
+        {:ok, id} -> {:ok, id}
+        {:error, :not_found} -> {:error, :producer_not_found}
+      end
+
+    with {:ok, _session_id} <-
+           Map.fetch(state.session_ids, session_external_id)
+           |> ok_or(:session_not_found),
+         {:ok, consumer_execution_id} <-
+           Map.fetch(state.execution_ids, consumer_execution_external_id)
+           |> ok_or(:consumer_not_found),
+         {:ok, producer_execution_id} <- producer_result,
+         {:ok, true} <- Streams.exists?(state.db, producer_execution_id, index),
+         key = {consumer_execution_id, subscription_id},
+         false <- Map.has_key?(state.stream_subscriptions, key) do
+      subscription = %{
+        consumer_execution_external_id: consumer_execution_external_id,
+        producer_execution_id: producer_execution_id,
+        index: index,
+        cursor: from_sequence,
+        stride: stride
+      }
+
+      state =
+        state
+        |> Map.update!(:stream_subscriptions, &Map.put(&1, key, subscription))
+        |> Map.update!(:stream_subscribers, fn m ->
+          Map.update(
+            m,
+            {producer_execution_id, index},
+            MapSet.new([key]),
+            &MapSet.put(&1, key)
+          )
+        end)
+
+      # Post-restart recovery: producer state may be missing. The
+      # producer's session isn't necessarily the one the subscribe
+      # came from — look it up across sessions by external execution
+      # id.
+      producer_session_id =
+        case find_session_for_execution(state, producer_execution_external_id) do
+          {:ok, sid} -> sid
+          :error -> nil
+        end
+
+      state =
+        ensure_stream_producer(
+          state,
+          producer_execution_id,
+          producer_execution_external_id,
+          index,
+          producer_session_id
+        )
+
+      # First subscriber (or a later one whose cursor exceeds the prior
+      # max) may unblock the producer — recompute demand before pushing
+      # backlog so any delivered items keep the credit maths honest.
+      state =
+        refresh_stream_demand(state, {producer_execution_id, index})
+
+      # Push any items already in the log that match the filter, then (if
+      # the stream has already closed) the terminal close record.
+      state = push_backlog(state, key)
+      state = maybe_push_closure_if_closed(state, key)
+
+      # Record the subscribe as a lineage edge (consumer -> producer stream).
+      # Done unconditionally on subscribe, independent of whether items end
+      # up being read. Uses execution_refs so the edge survives epoch
+      # rotation.
+      {:ok, stream_ref_id} =
+        Runs.create_execution_ref_for(state.db, producer_execution_id)
+
+      {:ok, inserted_id} =
+        Runs.record_stream_dependency(state.db, consumer_execution_id, stream_ref_id, index)
+
+      state =
+        if inserted_id do
+          {:ok, {run_external_id}} =
+            Runs.get_external_run_id_for_execution(state.db, consumer_execution_id)
+
+          {producer_ext_id, _module, _target} =
+            producer_metadata = resolve_execution_ref(state.db, stream_ref_id)
+
+          notify_listeners(
+            state,
+            {:run, run_external_id},
+            {:stream_dependency, consumer_execution_external_id, producer_ext_id, index,
+             producer_metadata}
+          )
+        else
+          state
+        end
+
+      state = flush_notifications(state)
+
+      {:reply, :ok, state}
+    else
+      {:ok, false} -> {:reply, {:error, :stream_not_found}, state}
+      true -> {:reply, {:error, :already_subscribed}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:unsubscribe_stream, session_external_id, consumer_execution_external_id,
+         subscription_id},
+        _from,
+        state
+      ) do
+    with {:ok, _session_id} <- Map.fetch(state.session_ids, session_external_id),
+         {:ok, consumer_execution_id} <-
+           Map.fetch(state.execution_ids, consumer_execution_external_id) do
+      {:reply, :ok, drop_subscription(state, {consumer_execution_id, subscription_id})}
+    else
+      :error ->
+        {:reply, :ok, state}
     end
   end
 
@@ -2500,6 +2806,23 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  def handle_call(
+        {:subscribe_stream_topic, execution_external_id, index, pid},
+        _from,
+        state
+      ) do
+    case build_stream_topic_initial(state, execution_external_id, index) do
+      {:ok, initial} ->
+        {:ok, ref, state} =
+          add_listener(state, {:stream, execution_external_id, index}, pid)
+
+        {:reply, {:ok, initial, ref}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:subscribe_targets, workspace_external_id, pid}, _from, state) do
     case resolve_workspace_external_id(state, workspace_external_id) do
       {:error, error} ->
@@ -2544,6 +2867,159 @@ defmodule Coflux.Orchestration.Server do
   def handle_call(:rotate_epoch, _from, state) do
     state = do_rotate_epoch(state)
     {:reply, :ok, state}
+  end
+
+  defp maybe_init_stream_producer(
+         state,
+         _execution_id,
+         _execution_external_id,
+         _index,
+         nil,
+         _session_id
+       ) do
+    # buffer=nil means the producer has opted out of backpressure — no
+    # tracking required on the server side. It'll emit freely and the
+    # adapter's driver never waits.
+    state
+  end
+
+  defp maybe_init_stream_producer(
+         state,
+         execution_id,
+         execution_external_id,
+         index,
+         buffer,
+         session_id
+       )
+       when is_integer(buffer) and buffer >= 0 do
+    put_in(state.stream_producers[{execution_id, index}], %{
+      buffer: buffer,
+      demand_granted: 0,
+      session_id: session_id,
+      execution_external_id: execution_external_id
+    })
+  end
+
+  defp maybe_send_initial_demand(state, execution_id, index) do
+    # At registration time there are no subscribers yet. Allow the
+    # producer to pre-warm up to `buffer` items; lockstep (buffer=0)
+    # stays paused until a consumer attaches.
+    refresh_stream_demand(state, {execution_id, index})
+  end
+
+  # Recompute the target demand for one stream and, if it's grown,
+  # send a delta grant to the producer's session.
+  #
+  # Formula:
+  #   target = max_cursor + buffer + (1 if has_subscribers else 0)
+  # The +1 on subscriber presence unblocks lockstep streams — a
+  # consumer's cursor at position N means "ready for item N", which is
+  # one item beyond what they've acked.
+  #
+  # demand_granted is monotonic; if target drops (e.g. the fastest
+  # consumer left) we don't claw back, future grants just wait until
+  # the remaining subscribers catch up past the old max.
+  defp refresh_stream_demand(state, {_execution_id, index} = key) do
+    case Map.fetch(state.stream_producers, key) do
+      :error ->
+        state
+
+      {:ok, %{session_id: nil}} ->
+        # Producer's session is gone — typically because the producer
+        # execution has long since terminated and we rebuilt its in-memory
+        # state for a late subscriber. There's nothing to grant demand to;
+        # the stream is durable in the DB and backlog reads don't consume
+        # credits.
+        state
+
+      {:ok, producer} ->
+        has_subscribers = has_stream_subscribers?(state, key)
+        max_cursor = current_max_cursor(state, key)
+        bump = if has_subscribers, do: 1, else: 0
+        target = max_cursor + producer.buffer + bump
+        delta = target - producer.demand_granted
+
+        if delta > 0 do
+          state
+          |> put_in([Access.key(:stream_producers), key, :demand_granted], target)
+          |> send_session(
+            producer.session_id,
+            {:stream_demand, producer.execution_external_id, index, delta}
+          )
+        else
+          state
+        end
+    end
+  end
+
+  defp has_stream_subscribers?(state, key) do
+    case Map.get(state.stream_subscribers, key) do
+      nil -> false
+      set -> MapSet.size(set) > 0
+    end
+  end
+
+  defp current_max_cursor(state, key) do
+    state.stream_subscribers
+    |> Map.get(key, MapSet.new())
+    |> Enum.reduce(0, fn sub_key, acc ->
+      case Map.get(state.stream_subscriptions, sub_key) do
+        nil -> acc
+        sub -> max(acc, sub.cursor)
+      end
+    end)
+  end
+
+  defp drop_stream_producer(state, key) do
+    Map.update!(state, :stream_producers, &Map.delete(&1, key))
+  end
+
+  # Lazily rebuild stream_producer state from the DB if it's missing.
+  # Used after server restart — in-memory producer state is gone but
+  # the ``streams`` table still has the buffer. We rebuild on first
+  # append or subscribe for a given stream, recovering flow control.
+  #
+  # ``session_id`` is the internal id of the producer's current session;
+  # supply ``nil`` if not known, in which case demand grants will be
+  # deferred until the session is resolvable.
+  defp ensure_stream_producer(
+         state,
+         execution_id,
+         execution_external_id,
+         index,
+         session_id
+       ) do
+    key = {execution_id, index}
+
+    cond do
+      Map.has_key?(state.stream_producers, key) ->
+        state
+
+      true ->
+        case Streams.get_buffer(state.db, execution_id, index) do
+          {:ok, nil} ->
+            # Stream opted out of backpressure; nothing to track.
+            state
+
+          {:ok, buffer} when is_integer(buffer) ->
+            # Reconstruct state. demand_granted starts at items already
+            # produced — we assume earlier-us granted enough for those,
+            # and rely on the producer having kept its local credit
+            # counter consistent.
+            {:ok, head} = Streams.get_stream_head(state.db, execution_id, index)
+            items_produced = if head < 0, do: 0, else: head + 1
+
+            put_in(state.stream_producers[key], %{
+              buffer: buffer,
+              demand_granted: items_produced,
+              session_id: session_id,
+              execution_external_id: execution_external_id
+            })
+
+          {:error, :not_found} ->
+            state
+        end
+    end
   end
 
   def handle_cast({:unsubscribe, ref}, state) do
@@ -2707,8 +3183,10 @@ defmodule Coflux.Orchestration.Server do
                     {:cached, ref_id, value}
                 end
 
-              {:ok, state} =
-                process_result(state, execution.execution_id, result)
+              # Cache hit during scheduling — server-only, no worker runs this
+              # execution. Write results + completion together.
+              {:ok, state} = process_result(state, execution.execution_id, result)
+              state = complete_execution(state, execution.execution_id)
 
               {state, assigned, unassigned}
             else
@@ -2766,7 +3244,11 @@ defmodule Coflux.Orchestration.Server do
                           session_id,
                           {:execute, execution_external_id, execution.module, execution.target,
                            enriched_arguments, execution.run_external_id, workspace_external_id,
-                           execution.timeout}
+                           execution.timeout,
+                           build_streams_config(
+                             execution.streams_buffer,
+                             execution.streams_timeout_ms
+                           )}
                         )
 
                       # Notify sessions topic of updated total
@@ -3447,7 +3929,7 @@ defmodule Coflux.Orchestration.Server do
   # execution that doesn't yet have a result.
   defp resolve_active_execution(db, execution_id) do
     case Results.get_result(db, execution_id) do
-      {:ok, {{:spawned, successor_id}, _created_at, _created_by}} ->
+      {:ok, {{:spawned, successor_id}, _created_at, _completion_created_at, _created_by}} ->
         resolve_active_execution(db, successor_id)
 
       _ ->
@@ -3457,11 +3939,23 @@ defmodule Coflux.Orchestration.Server do
 
   # Cancel a single execution: record :cancelled, abort if assigned, cancel descendants.
   defp do_cancel_execution(state, execution_id, workspace_id) do
+    # Write the completion row (kind = cancelled) and fire notifications.
+    # The result row is left untouched: if the worker already produced a
+    # value, it stays; otherwise nothing is recorded. UI shows "cancelled"
+    # via the completion kind, with any prior result visible in the
+    # sidebar.
     state =
       case record_and_notify_result(state, execution_id, :cancelled, nil) do
         {:ok, state} -> state
         {:error, :already_recorded} -> state
+        {:error, :already_completed} -> state
       end
+
+    # Close any open streams so iterating consumers stop waiting. Any
+    # subsequent `append_item` from the producer will fail with `:closed`,
+    # signalling the worker to stop. Recorded as :lifecycle — consumers
+    # derive the ExecutionCancelled error from the recorded result.
+    state = close_open_streams(state, execution_id)
 
     state =
       case Runs.get_execution_key(state.db, execution_id) do
@@ -3704,17 +4198,24 @@ defmodule Coflux.Orchestration.Server do
 
   defp remove_session(state, session_id) do
     {:ok, _} = Sessions.expire_session(state.db, session_id)
+    # Drop any stream subscriptions this session held — consumer has gone
+    # away, so there's no one to push to. Do this before popping the
+    # session from state.sessions since drop_session_subscriptions reads
+    # the session's live execution set.
+    state = drop_session_subscriptions(state, session_id)
     {session, state} = pop_in(state.sessions[session_id])
     state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
 
-    # starting/executing now contain external IDs - resolve to internal for process_result
+    # starting/executing now contain external IDs - resolve to internal for process_result.
+    # Session removal means no more notify_terminated for these executions, so we
+    # write both results + completion here.
     state =
       session.executing
       |> MapSet.union(session.starting)
       |> Enum.reduce(state, fn ext_id, state ->
         execution_id = Map.fetch!(state.execution_ids, ext_id)
         {:ok, state} = process_result(state, execution_id, :abandoned)
-        state
+        complete_execution(state, execution_id)
       end)
       |> Map.update!(:targets, fn all_targets ->
         Enum.reduce(
@@ -4078,6 +4579,7 @@ defmodule Coflux.Orchestration.Server do
       {:error, _, _, _, false} -> false
       {:error, _, _, _, _} -> true
       :abandoned -> true
+      :crashed -> true
       :timeout -> true
       _ -> false
     end
@@ -4610,6 +5112,7 @@ defmodule Coflux.Orchestration.Server do
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
     {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
+    {:ok, run_stream_dependencies} = Runs.get_run_stream_dependencies(db, run.id)
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
     {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
@@ -4694,17 +5197,33 @@ defmodule Coflux.Orchestration.Server do
       run_executions
       |> Enum.map(&elem(&1, 0))
       |> Enum.reduce(%{}, fn execution_id, results ->
-        {result, completed_at, result_created_by} =
+        {result, result_at, completed_at, result_created_by} =
           case Results.get_result(db, execution_id) do
-            {:ok, {result, completed_at, created_by}} ->
+            {:ok, {result, result_at, completion_at, created_by}} ->
               result = build_result(result, db)
-              {result, completed_at, created_by}
+              {result, result_at, completion_at, created_by}
 
             {:ok, nil} ->
-              {nil, nil, nil}
+              {nil, nil, nil, nil}
           end
 
-        Map.put(results, execution_id, {result, completed_at, result_created_by})
+        completion =
+          case Results.get_completion(db, execution_id) do
+            {:ok, {kind, successor_id, successor_ref_id, _, _}} ->
+              %{
+                kind: Atom.to_string(kind),
+                successor: build_completion_successor(db, successor_id, successor_ref_id)
+              }
+
+            {:ok, nil} ->
+              nil
+          end
+
+        Map.put(
+          results,
+          execution_id,
+          {result, result_at, completed_at, result_created_by, completion}
+        )
       end)
 
     steps =
@@ -4764,7 +5283,8 @@ defmodule Coflux.Orchestration.Server do
                {:ok, workspace_external_id} =
                  Workspaces.get_workspace_external_id(db, workspace_id)
 
-               {result, completed_at, result_created_by} = Map.fetch!(results, execution_id)
+               {result, result_at, completed_at, result_created_by, completion} =
+                 Map.fetch!(results, execution_id)
 
                execution_groups =
                  groups
@@ -4793,14 +5313,29 @@ defmodule Coflux.Orchestration.Server do
                    {ext_id, {:result, execution}}
                  end)
 
+               stream_deps =
+                 run_stream_dependencies
+                 |> Map.get(execution_id, [])
+                 |> Map.new(fn {stream_ref_id, stream_index} ->
+                   {producer_ext_id, _module, _target} =
+                     execution = resolve_execution_ref(db, stream_ref_id)
+
+                   {"#{producer_ext_id}:#{stream_index}", {:stream, stream_index, execution}}
+                 end)
+
                dependencies =
                  Map.merge(
                    result_deps,
                    Map.merge(
-                     Map.get(input_deps_by_execution, execution_id, %{}),
-                     Map.get(asset_deps_by_execution, execution_id, %{})
+                     stream_deps,
+                     Map.merge(
+                       Map.get(input_deps_by_execution, execution_id, %{}),
+                       Map.get(asset_deps_by_execution, execution_id, %{})
+                     )
                    )
                  )
+
+               streams = streams_with_resolved_reasons(db, execution_id)
 
                {attempt,
                 %{
@@ -4810,7 +5345,9 @@ defmodule Coflux.Orchestration.Server do
                   created_by: execution_created_by,
                   execute_after: execute_after,
                   assigned_at: assigned_at,
+                  result_at: result_at,
                   completed_at: completed_at,
+                  completion: completion,
                   groups: execution_groups,
                   assets: assets,
                   dependencies: dependencies,
@@ -4818,7 +5355,8 @@ defmodule Coflux.Orchestration.Server do
                   result: result,
                   result_created_by: result_created_by,
                   children: Map.get(run_children, execution_id, []),
-                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{})
+                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
+                  streams: streams
                 }}
              end)
          }}
@@ -5240,6 +5778,18 @@ defmodule Coflux.Orchestration.Server do
     "#{run_external_id}:#{step_number}:#{attempt}"
   end
 
+  # Build the map passed to workers in the :execute message, describing
+  # the execution's default stream config. Returns nil when neither
+  # option is set — keeps the wire message compact for the common case.
+  defp build_streams_config(nil, nil), do: nil
+
+  defp build_streams_config(buffer, timeout_ms) do
+    map = %{}
+    map = if buffer != nil, do: Map.put(map, :buffer, buffer), else: map
+    map = if timeout_ms != nil, do: Map.put(map, :timeout_ms, timeout_ms), else: map
+    map
+  end
+
   defp input_external_id(run_external_id, input_number) do
     "#{run_external_id}/i#{input_number}"
   end
@@ -5403,6 +5953,7 @@ defmodule Coflux.Orchestration.Server do
       {:error, _, _, _, retry_id} -> is_nil(retry_id)
       {:value, _} -> true
       {:abandoned, retry_id} -> is_nil(retry_id)
+      {:crashed, retry_id} -> is_nil(retry_id)
       :cancelled -> true
       {:timeout, retry_id} -> is_nil(retry_id)
       {:suspended, _} -> false
@@ -5433,6 +5984,10 @@ defmodule Coflux.Orchestration.Server do
       {:abandoned, retry_id} ->
         retry = if retry_id, do: resolve_execution(db, retry_id)
         {:abandoned, retry}
+
+      {:crashed, retry_id} ->
+        retry = if retry_id, do: resolve_execution(db, retry_id)
+        {:crashed, retry}
 
       :cancelled ->
         :cancelled
@@ -5471,31 +6026,85 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Write the results row (with successor info baked in) and fire
+  # result-time notifications: wake waiters, update dependencies, send the
+  # Studio :result event carrying the result tuple and result_at timestamp.
+  # The completion row is written later via complete_execution (triggered by
+  # notify_terminated for worker-involved cases, or by the server-initiated
+  # paths directly when no worker is involved).
   defp record_and_notify_result(state, execution_id, result, _module, created_by \\ nil) do
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    result =
+      case result do
+        {:value, value} -> {:value, normalize_value(value)}
+        other -> other
+      end
+
+    case Results.record_result(state.db, execution_id, result, created_by) do
+      {:ok, timestamp} ->
+        state = fire_result_notifications(state, execution_id, result, timestamp, created_by)
+
+        # For result shapes that write the completion synchronously
+        # (cancelled / abandoned / timeout / deferred / cached / spawned /
+        # suspended / recurred), fire the completion-time notifications
+        # now — queue removal, run-topic `completion` update, waiter
+        # wake-ups. For value/error the completion is written later via
+        # complete_execution, which fires these itself.
+        state =
+          if writes_completion_immediately?(result) do
+            fire_completion_notification(state, execution_id, timestamp)
+          else
+            state
+          end
+
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp writes_completion_immediately?(:cancelled), do: true
+  defp writes_completion_immediately?({:abandoned, _}), do: true
+  defp writes_completion_immediately?({:crashed, _}), do: true
+  defp writes_completion_immediately?({:timeout, _}), do: true
+  defp writes_completion_immediately?({:suspended, _}), do: true
+  defp writes_completion_immediately?({:recurred, _}), do: true
+  defp writes_completion_immediately?({:deferred, _}), do: true
+  defp writes_completion_immediately?({:deferred, _, _}), do: true
+  defp writes_completion_immediately?({:cached, _}), do: true
+  defp writes_completion_immediately?({:cached, _, _}), do: true
+  defp writes_completion_immediately?({:spawned, _}), do: true
+  defp writes_completion_immediately?({:spawned, _, _}), do: true
+  defp writes_completion_immediately?(_), do: false
+
+  defp fire_result_notifications(state, execution_id, result, result_at, created_by) do
     {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
     {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
     execution_external_id = execution_external_id(r, s, a)
 
-    result =
-      case result do
-        {:value, value} ->
-          {:value, normalize_value(value)}
+    state =
+      state
+      |> notify_waiting(execution_id)
+      |> update_dependencies_on_result(execution_id)
+      |> unregister_pending_dependencies(execution_id)
 
-        other ->
-          other
-      end
+    # Cancellation after a value result was already recorded: the value
+    # stays authoritative for consumer resolution (a consumer that saw
+    # the value before the cancel must keep seeing it). The run-topic
+    # `:result` notification was already fired at value-record time, so
+    # re-firing it with `:cancelled` would clobber the value in the UI
+    # and in any dependent executions' nested result state. The
+    # `:completion` notification carries the cancelled status via its
+    # kind field, which is what the UI reads for the badge.
+    skip_topic_notifications =
+      result == :cancelled and has_value_result?(state.db, execution_id)
 
-    case Results.record_result(state.db, execution_id, result, created_by) do
-      {:ok, created_at} ->
-        state =
-          state
-          |> notify_waiting(execution_id)
-          |> update_dependencies_on_result(execution_id)
-          |> unregister_pending_dependencies(execution_id)
-
+    state =
+      if skip_topic_notifications do
+        state
+      else
         final = is_result_final?(result)
-        result = build_result(result, state.db)
+        built_result = build_result(result, state.db)
 
         principal =
           case Principals.get_principal(state.db, created_by) do
@@ -5503,95 +6112,437 @@ defmodule Coflux.Orchestration.Server do
             {:ok, nil} -> nil
           end
 
-        ws_ext_id = workspace_external_id(state, workspace_id)
+        successors
+        |> Enum.reduce(state, fn {run_external_id, successor_id}, state ->
+          cond do
+            successor_id == execution_id ->
+              notify_listeners(
+                state,
+                {:run, run_external_id},
+                {:result, execution_external_id, built_result, result_at, principal}
+              )
 
-        # get_result_successors now returns {run_external_id, successor_id}
-        state =
-          successors
-          |> Enum.reduce(state, fn {run_external_id, successor_id}, state ->
-            cond do
-              successor_id == execution_id ->
-                notify_listeners(
-                  state,
-                  {:run, run_external_id},
-                  {:result, execution_external_id, result, created_at, principal}
-                )
+            final ->
+              {:ok, {r2, s2, a2}} = Runs.get_execution_key(state.db, successor_id)
+              successor_external_id = execution_external_id(r2, s2, a2)
 
-              final ->
-                {:ok, {r, s, a}} = Runs.get_execution_key(state.db, successor_id)
-                successor_external_id = execution_external_id(r, s, a)
+              notify_listeners(
+                state,
+                {:run, run_external_id},
+                # TODO: better name?
+                {:result_result, successor_external_id, built_result, result_at, principal}
+              )
 
-                notify_listeners(
-                  state,
-                  {:run, run_external_id},
-                  # TODO: better name?
-                  {:result_result, successor_external_id, result, created_at, principal}
-                )
-
-              true ->
-                state
-            end
-          end)
-          |> then(fn state ->
-            case untrack_run_execution(state, r, execution_id) do
-              {{root_module, root_target}, state} ->
-                notify_listeners(
-                  state,
-                  {:modules, ws_ext_id},
-                  {:completed, {root_module, root_target}, r, execution_external_id}
-                )
-
-              {nil, state} ->
-                state
-            end
-          end)
-          |> notify_listeners(
-            {:queue, ws_ext_id},
-            {:completed, execution_external_id}
-          )
-
-        # Check if any input dependencies became inactive. Route the
-        # :inputs topic notification to the INPUT's workspace (matching
-        # :input_dependency_active in the resolve_input handler), not the
-        # completing execution's workspace — these differ when an execution
-        # in a child workspace resolved an input created in a parent.
-        state =
-          case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
-            {:ok, deps} ->
-              Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
-                if Inputs.has_active_dependency?(state.db, input_id) do
-                  state
-                else
-                  {:ok, run_ext_id, input_number} =
-                    Inputs.get_input_run_and_number(state.db, input_id)
-
-                  input_ext_id = input_external_id(run_ext_id, input_number)
-                  input_ws_ext_id = workspace_external_id(state, input_ws_id)
-
-                  state
-                  |> notify_listeners(
-                    {:inputs, input_ws_ext_id},
-                    {:input_dependency_inactive, input_ext_id}
-                  )
-                  |> notify_listeners(
-                    {:input, input_ext_id},
-                    {:active, false}
-                  )
-                end
-              end)
-
-            _ ->
+            true ->
               state
           end
+        end)
+      end
 
-        # TODO: only if there's an execution waiting for this result?
-        send(self(), :tick)
+    # TODO: only if there's an execution waiting for this result?
+    send(self(), :tick)
 
-        {:ok, state}
+    state
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  defp has_value_result?(db, execution_id) do
+    case Results.get_result_payload(db, execution_id) do
+      {:ok, {:value, _}} -> true
+      _ -> false
     end
+  end
+
+  # Notify input-topic subscribers when any input this execution depended on
+  # has now become inactive. `has_active_dependency?` keys off the completion
+  # row, so this must run at completion time rather than result time —
+  # calling it any earlier would always see "still active".
+  defp notify_input_deactivations(state, execution_id) do
+    case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
+      {:ok, deps} ->
+        Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
+          if Inputs.has_active_dependency?(state.db, input_id) do
+            state
+          else
+            {:ok, run_ext_id, input_number} =
+              Inputs.get_input_run_and_number(state.db, input_id)
+
+            input_ext_id = input_external_id(run_ext_id, input_number)
+            # Route :inputs topic notification to the INPUT's workspace
+            # (matching :input_dependency_active in the resolve_input
+            # handler) — these differ when an execution in a child
+            # workspace resolved an input created in a parent.
+            input_ws_ext_id = workspace_external_id(state, input_ws_id)
+
+            state
+            |> notify_listeners(
+              {:inputs, input_ws_ext_id},
+              {:input_dependency_inactive, input_ext_id}
+            )
+            |> notify_listeners(
+              {:input, input_ext_id},
+              {:active, false}
+            )
+          end
+        end)
+
+      _ ->
+        state
+    end
+  end
+
+  # Write the completion row and fire completion-time notifications. Called
+  # from notify_terminated (or the abandonment/crash paths). Decides any
+  # retry/successor from the persisted result row at this point rather than
+  # carrying a decision forward from result-record time — so the decision
+  # survives server restarts and epoch rotation.
+  defp complete_execution(state, execution_id) do
+    case Results.has_completion?(state.db, execution_id) do
+      {:ok, true} ->
+        state
+
+      {:ok, false} ->
+        case Results.get_result_payload(state.db, execution_id) do
+          {:ok, {:value, _}} ->
+            finalize_success_completion(state, execution_id)
+
+          {:ok, {:error, type, message, frames, retryable}} ->
+            finalize_error_completion(
+              state,
+              execution_id,
+              {type, message, frames, retryable}
+            )
+
+          {:ok, nil} ->
+            handle_crashed(state, execution_id)
+        end
+    end
+  end
+
+  # Value result + drain: dispatch on stream closure outcomes.
+  #   * any owned stream closed `:errored` → `:stream_errored` (retried)
+  #   * else any owned stream closed `:timeout` → `:partial` (not retried,
+  #     not cacheable)
+  #   * else `:succeeded`
+  # `close_open_streams` runs first so any still-open streams get a
+  # `:lifecycle` row (which doesn't influence the dispatch — only the
+  # explicit `:errored`/`:timeout` reasons do).
+  defp finalize_success_completion(state, execution_id) do
+    state = close_open_streams(state, execution_id)
+
+    {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
+
+    cond do
+      not is_nil(summary.errored) ->
+        finalize_stream_errored_completion(state, execution_id, summary.errored)
+
+      summary.timed_out ->
+        finalize_stream_timeout_completion(state, execution_id)
+
+      true ->
+        case Results.record_completion(state.db, execution_id, :succeeded) do
+          {:ok, completion_at} ->
+            fire_completion_notification(state, execution_id, completion_at)
+
+          {:error, :already_completed} ->
+            state
+        end
+    end
+  end
+
+  # A stream owned by this execution closed with an error, but the function
+  # body returned a value. Promote to `:stream_errored`: drives the retry
+  # policy and excludes the execution from cache lookups. The value result
+  # stays untouched in `results` — the execution's "result" remains the
+  # value (the stream reference). The stream's error info is surfaced via
+  # the streams panel; the completion kind alone tells the UI to render
+  # this as a failure-with-value (mirrors `do_cancel_execution`).
+  defp finalize_stream_errored_completion(state, execution_id, error_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    {:ok, {type, message, frames}} = Errors.get_by_id(state.db, error_id)
+
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(
+        state,
+        execution_id,
+        step,
+        workspace_id,
+        {:error, type, message, frames, nil}
+      )
+
+    case Results.record_completion(state.db, execution_id, :stream_errored,
+           successor_id: retry_id
+         ) do
+      {:ok, completion_at} ->
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  # A stream owned by this execution closed via idle timeout. The execution
+  # itself succeeded; promote to `:stream_timeout` to exclude it from cache
+  # lookups (consumer-shaped cache contents would be wrong) without
+  # surfacing as a failure or triggering a retry.
+  defp finalize_stream_timeout_completion(state, execution_id) do
+    case Results.record_completion(state.db, execution_id, :stream_timeout) do
+      {:ok, completion_at} ->
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  # Error result: decide retry now (so the successor decision lands on
+  # the persisted completion row, not in transient in-memory state) and
+  # re-fire the :result notification with the retry link filled in.
+  defp finalize_error_completion(state, execution_id, {type, message, frames, retryable}) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(
+        state,
+        execution_id,
+        step,
+        workspace_id,
+        {:error, type, message, frames, retryable}
+      )
+
+    state = close_open_streams(state, execution_id)
+
+    case Results.record_completion(state.db, execution_id, :errored, successor_id: retry_id) do
+      {:ok, completion_at} ->
+        # Re-fire :result on the run topic so the error entry in the UI
+        # picks up the newly-created retry successor. We only need to do
+        # this when retry_id changed from nil (there was no successor at
+        # initial :result time) to something.
+        state =
+          if retry_id do
+            fire_result_notifications(
+              state,
+              execution_id,
+              {:error, type, message, frames, retry_id, retryable},
+              nil,
+              nil
+            )
+          else
+            state
+          end
+
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  # No results row exists for this execution but notify_terminated has
+  # arrived — the worker terminated without reporting. Decide retry, write
+  # completion (no results row), fire notifications.
+  defp handle_crashed(state, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+    # Decide retry as if this were an abandoned-like failure. result_retryable?
+    # treats :crashed as retryable so the step's retry policy applies.
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
+
+    # Streams that had been appended to before the worker died need to be
+    # closed so consumers don't wait forever. Recorded as :lifecycle —
+    # consumers derive the specific error from the execution's outcome.
+    state = close_open_streams(state, execution_id)
+
+    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
+      {:ok, completion_at} ->
+        # Result-time notifications weren't fired (no results row was ever
+        # written), so fire them now alongside the completion notification.
+        state =
+          fire_result_notifications(state, execution_id, {:crashed, retry_id}, nil, nil)
+
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  # Closes every stream owned by `execution_id` that doesn't yet have a
+  # closure row, and pushes a `stream_closed` notification to every active
+  # subscriber. Streams already closed by the producer (clean or errored)
+  # are left untouched.
+  #
+  # The closure is recorded on disk with reason :lifecycle (no error on
+  # the closure row). On the wire, we resolve that to a specific reason
+  # (:cancelled / :abandoned / :crashed / :timeout / :errored) by looking
+  # at the execution's completion — consumers then decide how to handle
+  # each case.
+  defp close_open_streams(state, execution_id) do
+    {:ok, indexes} = Streams.get_open_streams_for_execution(state.db, execution_id)
+    {push_reason, push_error} = derive_lifecycle_info(state.db, execution_id)
+
+    Enum.reduce(indexes, state, fn index, state ->
+      case Streams.close_stream(state.db, execution_id, index, :lifecycle) do
+        {:ok, closed_at} ->
+          state
+          |> push_stream_closed(execution_id, index, push_reason, push_error)
+          |> notify_stream_closed(
+            execution_id,
+            index,
+            push_reason,
+            push_error,
+            closed_at
+          )
+          |> drop_stream_producer({execution_id, index})
+
+        {:error, :already_closed} ->
+          state
+      end
+    end)
+  end
+
+  # Returns the streams list for `execution_id` for the run topic's
+  # initial state. Shape:
+  #   `{index, buffer, opened_at, closed_at | nil, reason | nil, error | nil}`
+  #
+  # DB closures are recorded with reason :complete / :errored / :lifecycle.
+  # For :lifecycle we resolve the actual cause (from the execution's
+  # completion kind) and surface that directly as the reason —
+  # :cancelled / :abandoned / :crashed / :timeout / :errored — so Studio
+  # doesn't have to deal with a generic "lifecycle" bucket. `error` is
+  # non-nil only when the reason is :errored.
+  defp streams_with_resolved_reasons(db, execution_id) do
+    {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
+
+    Enum.map(rows, fn
+      {index, buffer, timeout_ms, opened_at, nil, nil, nil} ->
+        {index, buffer, timeout_ms, opened_at, nil, nil, nil}
+
+      {index, buffer, timeout_ms, opened_at, closed_at, :lifecycle, _} ->
+        {resolved_reason, resolved_error} = derive_lifecycle_info(db, execution_id)
+        {index, buffer, timeout_ms, opened_at, closed_at, resolved_reason, resolved_error}
+
+      {index, buffer, timeout_ms, opened_at, closed_at, reason, error} ->
+        {index, buffer, timeout_ms, opened_at, closed_at, reason, error}
+    end)
+  end
+
+  # Derive a semantic reason + optional error for a lifecycle stream
+  # closure, from the execution's completion kind. Used when pushing
+  # closures to live consumers and when late subscribers attach to
+  # already-closed streams.
+  #
+  # Returns `{reason, error}` where:
+  #   * `reason` is `:cancelled | :abandoned | :crashed | :timeout |
+  #     :errored | nil` — the shape of the ending, not a fabricated
+  #     exception string. Clients (Python adapter, Studio) decide how
+  #     to represent each reason in their own idioms.
+  #   * `error` is non-nil only when `reason == :errored` — then it's
+  #     the producer's actual `{type, message, frames}`, propagated
+  #     so consumers see the same exception the producer raised.
+  #
+  # Keys off the completion kind directly (rather than the logical-result
+  # tuple) so cancelled-with-value — where `get_result` returns
+  # `{:value, _}` but the completion kind is `:cancelled` — still
+  # propagates the cancellation signal to stream consumers.
+  defp derive_lifecycle_info(db, execution_id) do
+    case Results.get_completion(db, execution_id) do
+      {:ok, {:cancelled, _, _, _, _}} ->
+        {:cancelled, nil}
+
+      {:ok, {:abandoned, _, _, _, _}} ->
+        {:abandoned, nil}
+
+      {:ok, {:crashed, _, _, _, _}} ->
+        {:crashed, nil}
+
+      {:ok, {:timeout, _, _, _, _}} ->
+        {:timeout, nil}
+
+      {:ok, {:errored, _, _, _, _}} ->
+        # Error payload lives on the results row — pull it so consumers
+        # see the producer's actual exception.
+        case Results.get_result_payload(db, execution_id) do
+          {:ok, {:error, type, message, frames, _}} -> {:errored, {type, message, frames}}
+          _ -> {:errored, nil}
+        end
+
+      _ ->
+        {nil, nil}
+    end
+  end
+
+  defp fire_completion_notification(state, execution_id, completion_at) do
+    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
+    execution_external_id = execution_external_id(r, s, a)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    ws_ext_id = workspace_external_id(state, workspace_id)
+
+    # Error results become resolvable only once the completion lands (the
+    # retry decision is on the completion). Any waiters parked at result
+    # time because the result was still pending need to be re-evaluated now.
+    state = notify_waiting(state, execution_id)
+
+    {kind, successor} =
+      case Results.get_completion(state.db, execution_id) do
+        {:ok, {kind_atom, successor_id, successor_ref_id, _, _}} ->
+          {kind_atom, build_completion_successor(state.db, successor_id, successor_ref_id)}
+
+        {:ok, nil} ->
+          {nil, nil}
+      end
+
+    state =
+      state
+      |> notify_listeners(
+        {:run, r},
+        {:completion, execution_external_id, kind, successor, completion_at}
+      )
+      # Queue / workflow-list bookkeeping is completion-driven: the
+      # execution is considered "done" for the queue and the module-level
+      # running-workflow tracker only once the completion is recorded.
+      # An execution with a value result but no completion (streams still
+      # draining) continues to show up as running.
+      |> then(fn state ->
+        case untrack_run_execution(state, r, execution_id) do
+          {{root_module, root_target}, state} ->
+            notify_listeners(
+              state,
+              {:modules, ws_ext_id},
+              {:completed, {root_module, root_target}, r, execution_external_id}
+            )
+
+          {nil, state} ->
+            state
+        end
+      end)
+      |> notify_listeners(
+        {:queue, ws_ext_id},
+        {:completed, execution_external_id}
+      )
+      |> notify_input_deactivations(execution_id)
+
+    state
+  end
+
+  # Shape the successor on a completion for the run topic. Same-epoch
+  # integer ids get resolved to their external form; cross-epoch refs go
+  # out as their resolved run/step/attempt triple.
+  defp build_completion_successor(_db, nil, nil), do: nil
+
+  defp build_completion_successor(db, successor_id, nil) when is_integer(successor_id) do
+    case Runs.get_execution_key(db, successor_id) do
+      {:ok, {r, s, a}} -> %{type: "execution", id: execution_external_id(r, s, a)}
+      _ -> nil
+    end
+  end
+
+  defp build_completion_successor(db, nil, successor_ref_id) when is_integer(successor_ref_id) do
+    {ext_id, _module, _target} = resolve_execution_ref(db, successor_ref_id)
+    %{type: "execution", id: ext_id}
   end
 
   defp process_result(state, execution_id, result, created_by \\ nil) do
@@ -5603,114 +6554,21 @@ defmodule Coflux.Orchestration.Server do
         {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
 
-        execution_ext_id =
-          case Runs.get_execution_key(state.db, execution_id) do
-            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-            {:error, :not_found} -> nil
-          end
-
+        # Retry decisions for error results are deferred to
+        # complete_execution — they need to survive server restart, and
+        # the error payload is already persisted on the results row so
+        # the decision can be reconstructed from there. Every other shape
+        # (value with recurrent → :recurred, suspended, abandoned, crashed,
+        # timeout) still needs its successor decided here so the
+        # compat-shim-written completion carries the correct link.
         {retry_id, recurred?, state} =
-          cond do
-            match?({:suspended, _, _}, result) ->
-              {:suspended, execute_after, dependency_keys} = result
-
-              # TODO: limit the number of times a step can suspend? (or rate?)
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id,
-                  execute_after: execute_after,
-                  dependency_keys: dependency_keys
-                )
-
-              state =
-                if execution_ext_id do
-                  abort_execution(state, execution_ext_id)
-                else
-                  state
-                end
-
-              {retry_id, false, state}
-
-            result_retryable?(result) && step.retry_limit == -1 ->
-              # Unlimited retries - random delay between min and max
-              delay_ms =
-                step.retry_backoff_min +
-                  :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
-
-              execute_after = System.os_time(:millisecond) + delay_ms
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-              {retry_id, false, state}
-
-            result_retryable?(result) && step.retry_limit > 0 ->
-              # Limited retries - check consecutive failures
-              {:ok, result_types} =
-                Runs.get_step_result_types(state.db, step.id, step.retry_limit + 1)
-
-              consecutive_failures =
-                result_types
-                |> Enum.take_while(&(&1 in [0, 2, 8]))
-                |> Enum.count()
-
-              if consecutive_failures < step.retry_limit do
-                # TODO: add jitter (within min/max delay)
-                delay_ms =
-                  step.retry_backoff_min +
-                    consecutive_failures / max(step.retry_limit - 1, 1) *
-                      (step.retry_backoff_max - step.retry_backoff_min)
-
-                execute_after = System.os_time(:millisecond) + delay_ms
-
-                {:ok, retry_id, _, state} =
-                  rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-                {retry_id, false, state}
-              else
-                {nil, false, state}
-              end
-
-            step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
-              # Null return from recurrent step: schedule next iteration via :recurred
-              execute_after =
-                if step.delay > 0 do
-                  System.os_time(:millisecond) + step.delay
-                end
-
-              {:ok, retry_id, _, state} =
-                rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-              {retry_id, true, state}
-
-            step.recurrent == 1 and match?({:value, _}, result) ->
-              # Non-null return from recurrent step: stop recurrence
-              {nil, false, state}
-
-            true ->
-              {nil, false, state}
+          if match?({:error, _, _, _, _}, result) do
+            {nil, false, state}
+          else
+            decide_and_create_successor(state, execution_id, step, workspace_id, result)
           end
 
-        result =
-          case result do
-            {:error, type, message, frames, retryable} ->
-              {:error, type, message, frames, retry_id, retryable}
-
-            :abandoned ->
-              {:abandoned, retry_id}
-
-            :timeout ->
-              {:timeout, retry_id}
-
-            {:suspended, _, _} ->
-              {:suspended, retry_id}
-
-            {:value, _} when recurred? ->
-              {:recurred, retry_id}
-
-            other ->
-              other
-          end
+        result = transform_result_with_successor(result, retry_id, recurred?)
 
         state =
           case record_and_notify_result(
@@ -5736,18 +6594,146 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp decide_and_create_successor(state, execution_id, step, workspace_id, result) do
+    execution_ext_id =
+      case Runs.get_execution_key(state.db, execution_id) do
+        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+        {:error, :not_found} -> nil
+      end
+
+    cond do
+      match?({:suspended, _, _}, result) ->
+        {:suspended, execute_after, dependency_keys} = result
+
+        # TODO: limit the number of times a step can suspend? (or rate?)
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id,
+            execute_after: execute_after,
+            dependency_keys: dependency_keys
+          )
+
+        state =
+          if execution_ext_id do
+            abort_execution(state, execution_ext_id)
+          else
+            state
+          end
+
+        {retry_id, false, state}
+
+      result_retryable?(result) && step.retry_limit == -1 ->
+        # Unlimited retries - random delay between min and max
+        delay_ms =
+          step.retry_backoff_min +
+            :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
+
+        execute_after = System.os_time(:millisecond) + delay_ms
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+        {retry_id, false, state}
+
+      result_retryable?(result) && step.retry_limit > 0 ->
+        # Limited retries - check consecutive failures. Exclude the current
+        # execution so this works whether or not its completion has been
+        # written yet. Failure kinds are errored/abandoned/crashed/timeout —
+        # the same set the retry predicate uses.
+        {:ok, rows} =
+          Runs.get_step_completion_kinds(state.db, step.id, step.retry_limit + 2)
+
+        failure_kinds = Results.failure_kinds()
+
+        consecutive_failures =
+          rows
+          |> Enum.reject(fn {id, _kind} -> id == execution_id end)
+          |> Enum.take_while(fn {_id, kind} -> kind in failure_kinds end)
+          |> Enum.count()
+
+        if consecutive_failures < step.retry_limit do
+          # TODO: add jitter (within min/max delay)
+          delay_ms =
+            step.retry_backoff_min +
+              consecutive_failures / max(step.retry_limit - 1, 1) *
+                (step.retry_backoff_max - step.retry_backoff_min)
+
+          execute_after = System.os_time(:millisecond) + delay_ms
+
+          {:ok, retry_id, _, state} =
+            rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+          {retry_id, false, state}
+        else
+          {nil, false, state}
+        end
+
+      step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
+        # Null return from recurrent step: schedule next iteration via :recurred
+        execute_after =
+          if step.delay > 0 do
+            System.os_time(:millisecond) + step.delay
+          end
+
+        {:ok, retry_id, _, state} =
+          rerun_step(state, step, workspace_id, execute_after: execute_after)
+
+        {retry_id, true, state}
+
+      step.recurrent == 1 and match?({:value, _}, result) ->
+        # Non-null return from recurrent step: stop recurrence
+        {nil, false, state}
+
+      true ->
+        {nil, false, state}
+    end
+  end
+
+  defp transform_result_with_successor(result, retry_id, recurred?) do
+    case result do
+      {:error, type, message, frames, retryable} ->
+        {:error, type, message, frames, retry_id, retryable}
+
+      :abandoned ->
+        {:abandoned, retry_id}
+
+      :crashed ->
+        {:crashed, retry_id}
+
+      :timeout ->
+        {:timeout, retry_id}
+
+      {:suspended, _, _} ->
+        {:suspended, retry_id}
+
+      {:value, _} when recurred? ->
+        {:recurred, retry_id}
+
+      other ->
+        other
+    end
+  end
+
   defp resolve_result(db, execution_id) do
     # TODO: check execution exists?
     case Results.get_result(db, execution_id) do
       {:ok, nil} ->
         {:pending, execution_id}
 
-      {:ok, {result, _created_at, _created_by}} ->
+      {:ok, {result, _created_at, completion_at, _created_by}} ->
         case result do
+          # Error payload but no completion yet — retry decision hasn't been
+          # made. Treat as pending so the caller waits for the completion.
+          {:error, _, _, _, nil, _retryable} when is_nil(completion_at) ->
+            {:pending, execution_id}
+
           {:error, _, _, _, execution_id, _retryable} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           {:abandoned, execution_id} when not is_nil(execution_id) ->
+            resolve_result(db, execution_id)
+
+          {:crashed, execution_id} when not is_nil(execution_id) ->
             resolve_result(db, execution_id)
 
           {:timeout, execution_id} when not is_nil(execution_id) ->
@@ -6833,7 +7819,541 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # --- Producer flow control ---
+  #
+  # Not yet wired. Implicit backpressure today: a slow consumer's WS push
+  # blocks the GenServer, which blocks append_item, which blocks the
+  # producer. That's usually enough. When a real use case surfaces for
+  # explicit pause/resume (e.g. an infinite producer with no subscribers
+  # filling disk), the hooks go here:
+  #   * On first subscriber for a stream: send_session(producer_session,
+  #     {:stream_resume, producer_exec_ext, index}).
+  #   * On last subscriber dropping: {:stream_pause, ...}.
+  # Dispatcher on the adapter side already routes notifications by method;
+  # the StreamDriver gets a per-stream Event to gate its next() calls.
+
+  # --- Stream topic notifications (for Studio subscribers) ---
+  # These flow through `notify_listeners` → the run topic and the
+  # per-stream `{:stream, execution_ext_id, index}` inspection topic,
+  # distinct from the session-directed `push_stream_*` helpers which
+  # target subscribed consumer sessions' WebSockets.
+
+  # Bounded tail of items held by the stream inspection topic. Long
+  # streams don't need to materialise every item — the UI loads older
+  # items on demand.
+  @stream_topic_tail_size 200
+
+  defp notify_stream_opened(state, execution_id, index, buffer, timeout_ms, created_at) do
+    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+
+    notify_listeners(
+      state,
+      {:run, r},
+      {:stream_opened, execution_ext_id, index, buffer, timeout_ms, created_at}
+    )
+  end
+
+  defp notify_stream_item_appended(
+         state,
+         execution_id,
+         index,
+         sequence,
+         value,
+         created_at
+       ) do
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+    topic = {:stream, execution_ext_id, index}
+
+    # Skip the build_value (which hits the DB to resolve refs) when the
+    # inspection topic has no active subscribers.
+    if Map.has_key?(state.topics, topic) do
+      resolved = build_value(normalize_value(value), state.db)
+
+      notify_listeners(
+        state,
+        topic,
+        {:item_appended, sequence, resolved, created_at}
+      )
+    else
+      state
+    end
+  end
+
+  # Fire the stream-closed notification on run + stream topics. `reason`
+  # is a semantic atom from the full set (:complete / :errored /
+  # :cancelled / :abandoned / :crashed / :timeout) — Studio renders each
+  # directly in UI-appropriate language, rather than displaying a
+  # fabricated exception type. `error` is non-nil only for :errored.
+  defp notify_stream_closed(state, execution_id, index, reason, error, closed_at) do
+    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
+    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+
+    encoded_error = encode_stream_error_summary(error)
+
+    reason_str = if reason, do: Atom.to_string(reason)
+
+    state =
+      notify_listeners(
+        state,
+        {:run, r},
+        {:stream_closed, execution_ext_id, index, reason_str, encoded_error, closed_at}
+      )
+
+    notify_listeners(
+      state,
+      {:stream, execution_ext_id, index},
+      {:closed, reason_str, encoded_error, closed_at}
+    )
+  end
+
+  # Build the initial state for a newly-opened stream inspection topic.
+  # Returns {:ok, state} with producer metadata, opened/closed timestamps,
+  # closure info (with lifecycle errors already derived), bounded tail of
+  # items, and the total item count.
+  defp build_stream_topic_initial(state, execution_ext_id, index) do
+    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_ext_id),
+         {:ok, true} <- Streams.exists?(state.db, execution_id, index),
+         {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, index),
+         {:ok, buffer} <- Streams.get_buffer(state.db, execution_id, index),
+         {:ok, timeout_ms} <- Streams.get_timeout_ms(state.db, execution_id, index),
+         {:ok, {items, total_count}} <-
+           Streams.get_stream_tail(state.db, execution_id, index, @stream_topic_tail_size) do
+      # Keep the tuple shape here — the topic module runs TopicUtils.build_value
+      # on each item's value to produce the JSON-encodable form, matching
+      # how live :item_appended notifications are handled.
+      resolved_items =
+        Enum.map(items, fn {sequence, value, created_at} ->
+          {sequence, build_value(value, state.db), created_at}
+        end)
+
+      closure = build_stream_topic_closure(state, execution_id, index)
+
+      {:ok,
+       %{
+         producer: build_stream_producer(state.db, execution_ext_id, execution_id),
+         buffer: buffer,
+         timeoutMs: timeout_ms,
+         openedAt: opened_at,
+         closure: closure,
+         items: resolved_items,
+         totalCount: total_count,
+         tailSize: @stream_topic_tail_size
+       }}
+    else
+      {:ok, false} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_stream_topic_closure(state, execution_id, index) do
+    case Streams.get_stream_closure(state.db, execution_id, index) do
+      {:ok, nil} ->
+        nil
+
+      {:ok, {reason, stored_error, closed_at}} ->
+        # DB stores `:lifecycle` for closures driven by the producer
+        # execution ending; on read we resolve that to the specific
+        # cause (:cancelled / :abandoned / :crashed / :timeout /
+        # :errored) so clients don't need to know about the internal
+        # bucket. `error` only accompanies a genuine :errored close.
+        {effective_reason, effective_error} =
+          case reason do
+            :lifecycle -> derive_lifecycle_info(state.db, execution_id)
+            _ -> {reason, stored_error}
+          end
+
+        %{
+          reason: if(effective_reason, do: Atom.to_string(effective_reason)),
+          error: encode_stream_error_summary(effective_error),
+          closedAt: closed_at
+        }
+    end
+  end
+
+  defp encode_stream_error_summary(nil), do: nil
+
+  defp encode_stream_error_summary({type, message, frames}) do
+    %{
+      type: type,
+      message: message,
+      frames:
+        Enum.map(frames, fn {file, line, name, code} ->
+          %{file: file, line: line, name: name, code: code}
+        end)
+    }
+  end
+
+  defp build_stream_producer(db, execution_ext_id, execution_id) do
+    # The external execution_id already encodes run + step + attempt, so
+    # the producer reference only carries identifier + module/target —
+    # matching ExecutionReference on the wire.
+    {:ok, step} = Runs.get_step_for_execution(db, execution_id)
+    Coflux.TopicUtils.build_execution({execution_ext_id, step.module, step.target})
+  end
+
+  defp execution_external_id_for(db, execution_id) do
+    case Runs.get_execution_key(db, execution_id) do
+      {:ok, {r, s, a}} -> {:ok, execution_external_id(r, s, a)}
+      err -> err
+    end
+  end
+
+  # --- Stream subscription helpers ---
+
+  defp ok_or({:ok, val}, _reason), do: {:ok, val}
+  defp ok_or(:error, reason), do: {:error, reason}
+
+  # Does a `sequence` pass a subscription's stride? A stride is
+  # ``%{"start" => int, "stop" => int | nil, "step" => int}`` — the
+  # client composes any chain of slice/partition/stride calls into one
+  # before sending. `nil` means the trivial identity stride (everything).
+  defp stride_matches?(nil, _sequence), do: true
+
+  defp stride_matches?(%{"start" => start, "stop" => stop, "step" => step}, sequence) do
+    sequence >= start and
+      (stop == nil or sequence < stop) and
+      rem(sequence - start, step) == 0
+  end
+
+  # Is `cursor` past the stride's stop? Lets us close the subscription
+  # early once nothing more can match (i.e. the upper bound is finite
+  # and we've reached it).
+  defp stride_exhausted?(nil, _cursor), do: false
+
+  defp stride_exhausted?(%{"stop" => stop}, cursor) when is_integer(stop),
+    do: cursor >= stop
+
+  defp stride_exhausted?(_stride, _cursor), do: false
+
+  # Per-fetch page size when draining backlog for a newly subscribed
+  # consumer. Keeps any single DB read bounded and lets us push each page
+  # to the session before loading the next.
+  @backlog_page_size 1024
+
+  # Send backlog items (those already in the DB) for a newly subscribed
+  # consumer. Pages the DB reads + session pushes so a very long stream
+  # doesn't materialise the entire tail in memory at once.
+  defp push_backlog(state, key) do
+    push_backlog_page(state, key)
+  end
+
+  defp push_backlog_page(state, key) do
+    sub = Map.fetch!(state.stream_subscriptions, key)
+
+    {:ok, items} =
+      Streams.get_stream_items(
+        state.db,
+        sub.producer_execution_id,
+        sub.index,
+        sub.cursor,
+        @backlog_page_size
+      )
+
+    if items == [] do
+      state
+    else
+      state = push_backlog_items(state, key, sub, items)
+
+      # If the subscription was dropped (filter exhausted) or didn't
+      # advance (nothing in this page matched), stop. Otherwise keep
+      # paging until the tail empties.
+      case Map.fetch(state.stream_subscriptions, key) do
+        :error ->
+          state
+
+        {:ok, next_sub} ->
+          cond do
+            next_sub.cursor == sub.cursor -> state
+            length(items) < @backlog_page_size -> state
+            true -> push_backlog_page(state, key)
+          end
+      end
+    end
+  end
+
+  defp push_backlog_items(state, key, sub, items) do
+    {_consumer_execution_id, subscription_id} = key
+
+    filtered =
+      items
+      |> Enum.filter(fn {sequence, _value, _at} -> stride_matches?(sub.stride, sequence) end)
+      |> Enum.take_while(fn {sequence, _, _} ->
+        not stride_exhausted?(sub.stride, sequence)
+      end)
+
+    # Advance cursor past the page even if no items matched this filter —
+    # otherwise we'd re-fetch the same sequences forever.
+    advance_to =
+      if filtered == [] do
+        elem(List.last(items), 0) + 1
+      else
+        elem(List.last(filtered), 0) + 1
+      end
+
+    state =
+      if filtered == [] do
+        state
+      else
+        resolved_items =
+          Enum.map(filtered, fn {sequence, value, _at} ->
+            [sequence, build_value(value, state.db)]
+          end)
+
+        send_to_consumer(
+          state,
+          sub,
+          {:stream_items, sub.consumer_execution_external_id, subscription_id, resolved_items}
+        )
+      end
+
+    state =
+      update_in(
+        state.stream_subscriptions[key],
+        &Map.put(&1, :cursor, advance_to)
+      )
+
+    state =
+      if stride_exhausted?(sub.stride, advance_to) do
+        # If the stride has reached its stop, close the subscription
+        # synchronously — matches push_stream_item's behaviour. Without
+        # this, a consumer that subscribed after appends with a bounded
+        # stride would wait forever for a close that never comes.
+        # Stride-exhaustion is a "complete" outcome from the consumer's
+        # perspective: they've received everything that was addressed
+        # to them.
+        state
+        |> send_to_consumer(
+          sub,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete", nil}
+        )
+        |> drop_subscription(key)
+      else
+        state
+      end
+
+    # The backlog push moved this consumer's cursor forward — may
+    # unblock the producer if their buffer has room now.
+    refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
+  end
+
+  # Resolve the consumer's current session and send, skipping if the
+  # execution is no longer live on any session (reconnect window, etc.).
+  defp send_to_consumer(state, sub, payload) do
+    case find_session_for_execution(state, sub.consumer_execution_external_id) do
+      {:ok, session_id} -> send_session(state, session_id, payload)
+      :error -> state
+    end
+  end
+
+  # Push a freshly-appended item to every subscriber of this stream.
+  defp push_stream_item(state, producer_execution_id, index, sequence, value) do
+    stream_key = {producer_execution_id, index}
+
+    subscribers = Map.get(state.stream_subscribers, stream_key, MapSet.new())
+
+    state =
+      Enum.reduce(subscribers, state, fn key, state ->
+        {_consumer_execution_id, subscription_id} = key
+        sub = Map.fetch!(state.stream_subscriptions, key)
+
+        cond do
+          sequence < sub.cursor ->
+            # Consumer already has this sequence via backlog; skip.
+            state
+
+          not stride_matches?(sub.stride, sequence) ->
+            state
+
+          true ->
+            # Value came off the wire in parse form (ext-id refs, no metadata).
+            # Normalise + resolve to match the form push_backlog sends; the WS
+            # handler composes to wire JSON.
+            resolved = build_value(normalize_value(value), state.db)
+            item = [sequence, resolved]
+
+            state =
+              send_to_consumer(
+                state,
+                sub,
+                {:stream_items, sub.consumer_execution_external_id, subscription_id, [item]}
+              )
+
+            state =
+              update_in(
+                state.stream_subscriptions[key],
+                &Map.put(&1, :cursor, sequence + 1)
+              )
+
+            # If the stride has reached its stop, close the subscription
+            # early — no more items will match. Treated as a "complete"
+            # close for the consumer (they got everything that was
+            # addressed to them).
+            if stride_exhausted?(sub.stride, sequence + 1) do
+              state
+              |> send_to_consumer(
+                sub,
+                {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete",
+                 nil}
+              )
+              |> drop_subscription(key)
+            else
+              state
+            end
+        end
+      end)
+
+    # Subscriber cursors may have advanced — recompute demand once per
+    # stream (cheaper than once per subscriber, same result).
+    refresh_stream_demand(state, stream_key)
+  end
+
+  # On close, tell every subscriber. `reason` is a semantic atom
+  # (`:complete | :errored | :cancelled | :abandoned | :crashed |
+  # :timeout`) — the client chooses how to represent each in its own
+  # idiom. `error` is non-nil only when `reason == :errored`, carrying
+  # the producer's actual `{type, message, frames}`.
+  defp push_stream_closed(state, producer_execution_id, index, reason, error) do
+    subscribers =
+      Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
+
+    reason_str = if reason, do: Atom.to_string(reason)
+    encoded_error = encode_stream_error(error)
+
+    Enum.reduce(subscribers, state, fn key, state ->
+      {_consumer_execution_id, subscription_id} = key
+      sub = Map.fetch!(state.stream_subscriptions, key)
+
+      state
+      |> send_to_consumer(
+        sub,
+        {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason_str,
+         encoded_error}
+      )
+      |> drop_subscription(key)
+    end)
+  end
+
+  # Wire encoding for the producer's actual error on an `:errored` close.
+  # Frames are included so consumers can reconstruct tracebacks for
+  # debuggability. Lifecycle reasons (:cancelled/:abandoned/...) don't
+  # go through this — they're conveyed as the reason atom alone.
+  defp encode_stream_error(nil), do: nil
+
+  defp encode_stream_error({type, message, frames}) do
+    %{
+      "type" => type,
+      "message" => message,
+      "frames" =>
+        Enum.map(frames, fn {file, line, name, code} ->
+          [file, line, name, code]
+        end)
+    }
+  end
+
+  # If a subscription attaches to an already-closed stream, emit closure now.
+  # If push_backlog already closed the subscription (e.g., a bounded filter
+  # was exhausted by the backlog itself), this is a no-op.
+  defp maybe_push_closure_if_closed(state, key) do
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
+
+      {:ok, sub} ->
+        do_maybe_push_closure(state, sub, key)
+    end
+  end
+
+  defp do_maybe_push_closure(state, sub, key) do
+    {_consumer_execution_id, subscription_id} = key
+
+    case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.index) do
+      {:ok, nil} ->
+        state
+
+      {:ok, {reason, stored_error, _closed_at}} ->
+        # Resolve :lifecycle to the specific cause for the wire — same
+        # treatment as live closures so late subscribers don't get a
+        # less-informative signal than those attached at close time.
+        {effective_reason, effective_error} =
+          case reason do
+            :lifecycle -> derive_lifecycle_info(state.db, sub.producer_execution_id)
+            _ -> {reason, stored_error}
+          end
+
+        reason_str = if effective_reason, do: Atom.to_string(effective_reason)
+
+        state
+        |> send_to_consumer(
+          sub,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason_str,
+           encode_stream_error(effective_error)}
+        )
+        |> drop_subscription(key)
+    end
+  end
+
+  defp drop_subscription(state, key) do
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
+
+      {:ok, sub} ->
+        stream_key = {sub.producer_execution_id, sub.index}
+
+        state
+        |> Map.update!(:stream_subscriptions, &Map.delete(&1, key))
+        |> Map.update!(:stream_subscribers, fn m ->
+          case Map.get(m, stream_key) do
+            nil ->
+              m
+
+            subs ->
+              remaining = MapSet.delete(subs, key)
+
+              if MapSet.size(remaining) == 0 do
+                Map.delete(m, stream_key)
+              else
+                Map.put(m, stream_key, remaining)
+              end
+          end
+        end)
+    end
+  end
+
+  # Drop every subscription held by the disconnected session's executions.
+  # Called just before the session is removed, so we can read its live
+  # execution set directly.
+  defp drop_session_subscriptions(state, session_id) do
+    session = Map.fetch!(state.sessions, session_id)
+
+    session.starting
+    |> MapSet.union(session.executing)
+    |> Enum.reduce(state, fn ext_id, state ->
+      case Map.fetch(state.execution_ids, ext_id) do
+        {:ok, execution_id} -> drop_execution_subscriptions(state, execution_id)
+        :error -> state
+      end
+    end)
+  end
+
+  # Drop every subscription owned by a terminated consumer execution so the
+  # server stops pushing items and the subscription map doesn't leak. Called
+  # from notify_terminated — by that point the consumer's generator iterator
+  # (and thus the subscription) is definitely gone.
+  defp drop_execution_subscriptions(state, consumer_execution_id) do
+    keys =
+      state.stream_subscriptions
+      |> Map.keys()
+      |> Enum.filter(fn {cons_id, _sub_id} -> cons_id == consumer_execution_id end)
+
+    Enum.reduce(keys, state, &drop_subscription(&2, &1))
+  end
+
   # Clean up an execution's state and send an abort message to the worker.
+  # If the execution has already terminated (completion recorded), there's
+  # nothing to abort — skip silently. Only warn when an actively-running
+  # execution unexpectedly has no session.
   defp abort_execution(state, execution_ext_id) do
     state = cleanup_execution(state, execution_ext_id)
 
@@ -6842,7 +8362,23 @@ defmodule Coflux.Orchestration.Server do
         send_session(state, session_id, {:abort, execution_ext_id})
 
       :error ->
-        Logger.warning("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
+        already_completed? =
+          case Map.fetch(state.execution_ids, execution_ext_id) do
+            {:ok, execution_id} ->
+              case Results.has_completion?(state.db, execution_id) do
+                {:ok, done?} -> done?
+              end
+
+            :error ->
+              # No internal id mapped — execution is long gone (e.g.,
+              # cache rotation cleared the cache). Treat as terminated.
+              true
+          end
+
+        unless already_completed? do
+          Logger.warning("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
+        end
+
         state
     end
   end
