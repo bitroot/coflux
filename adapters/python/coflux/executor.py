@@ -50,6 +50,10 @@ def _resolve_execute_streams(target_obj: Any, streams_from_wire: dict[str, Any] 
     Returns a ``Streams`` instance or ``None`` (no stream config).
     """
     if streams_from_wire is not None:
+        # The wire config always carries the "buffer" key when set: an
+        # explicit null means unbounded (opted out of backpressure) —
+        # dict.get returns that stored None, NOT the fallback, so the
+        # 0 default only applies if the key is genuinely absent.
         buffer = streams_from_wire.get("buffer", 0)
         timeout_ms = streams_from_wire.get("timeout_ms")
         timeout = timeout_ms / 1000 if timeout_ms is not None else None

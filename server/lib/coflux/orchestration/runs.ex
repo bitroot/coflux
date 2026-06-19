@@ -424,7 +424,9 @@ defmodule Coflux.Orchestration.Runs do
             if defer,
               do: build_key(defer.params, arguments, "#{module}:#{target}")
 
-          streams_buffer = if streams, do: streams[:buffer]
+          # streams_buffer column: NULL = unset (no streams config),
+          # -1 = unbounded (nil buffer in a set config), N >= 0 = bounded.
+          streams_buffer = if streams, do: streams[:buffer] || -1
           streams_timeout_ms = if streams, do: streams[:timeout_ms]
 
           # TODO: validate parent belongs to run?

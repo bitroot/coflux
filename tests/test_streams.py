@@ -1346,3 +1346,84 @@ def test_stream_timeout_execution_not_used_as_memo_hit(worker):
         prod2.conn.complete(prod2.execution_id, value="v2")
 
         wf.conn.complete(wf.execution_id)
+
+
+def test_producer_error_lifecycle_close_delivers_error_to_live_subscriber(worker):
+    """Producer errors WITHOUT explicitly closing its stream while a
+    consumer is already subscribed: the server's completion-time lifecycle
+    close must carry reason "errored" plus the producer's actual error —
+    not a clean close, which would make live consumers silently accept a
+    truncated stream as complete.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "ok")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+
+        # Producer errors with the stream still open — the server's
+        # lifecycle close (at completion time) is the only closer.
+        prod_ex.conn.fail(prod_ex.execution_id, "ValueError", "boom")
+
+        items, closed = cons_ex.conn.drain_stream(subscription_id=1)
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+        assert [item[1]["value"] for item in items] == ["ok"]
+        assert closed.get("reason") == "errored"
+        err = closed.get("error")
+        assert err is not None
+        assert err["type"] == "ValueError"
+        assert err["message"] == "boom"
+
+
+def test_backpressure_partition_consumer_advances_demand_past_unmatched(worker):
+    """buffer=0 producer whose only consumer wants partition(2, 1):
+    appending sequence 0 (skipped by the stride) must still advance the
+    subscriber cursor — and therefore demand — so the producer gets a
+    credit for sequence 1 instead of deadlocking against the consumer.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+            stride=partition_stride(n=2, i=1),
+        )
+        first = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert first["n"] == 1
+
+        # Sequence 0 doesn't match the consumer's stride; the cursor must
+        # advance past it anyway, granting the producer another credit.
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "skip")
+        second = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert second["n"] == 1
+
+        # Sequence 1 matches and is delivered.
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "take")
+        params = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [item[1]["value"] for item in params["items"]] == ["take"]
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(prod_resp["runId"])

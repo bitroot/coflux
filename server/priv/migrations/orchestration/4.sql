@@ -117,7 +117,9 @@ ALTER TABLE results_new RENAME TO results;
 -- falls back to the decorator-level default.
 --
 -- streams_buffer: backpressure budget in number of items (0 = strict
--- lockstep, N = allow N items ahead, NULL = unbounded).
+-- lockstep, N = allow N items ahead, -1 = explicitly unbounded —
+-- mirroring retry_limit's -1-for-unlimited convention, since NULL
+-- already means "unset").
 -- streams_timeout_ms: idle-timeout budget in milliseconds; NULL means
 -- no timeout.
 ALTER TABLE workflows ADD COLUMN streams_buffer INTEGER;

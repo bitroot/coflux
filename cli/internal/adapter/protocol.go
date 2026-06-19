@@ -30,10 +30,12 @@ type TargetDefinition struct {
 }
 
 // StreamsConfig is the wire form of cf.Streams: default buffer + idle
-// timeout for streams produced by the target. Either field may be
-// absent; the adapter falls back to the decorator default.
+// timeout for streams produced by the target. The buffer key is always
+// emitted when a config is present — nil marshals as an explicit null,
+// meaning "unbounded" (opted out of backpressure), which is distinct
+// from the config being absent (fall back to the decorator default).
 type StreamsConfig struct {
-	Buffer    *int `json:"buffer,omitempty"`
+	Buffer    *int `json:"buffer"`
 	TimeoutMs *int `json:"timeout_ms,omitempty"`
 }
 

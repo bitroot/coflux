@@ -133,7 +133,8 @@ defmodule Coflux.Orchestration.Epoch do
                     id, number, run_id, parent_id, module, target, type, priority,
                     wait_for, cache_config_id, cache_key, defer_key, memo_key,
                     retry_limit, retry_backoff_min, retry_backoff_max, recurrent, delay,
-                    requires_tag_set_id, created_at
+                    timeout, requires_tag_set_id, streams_buffer, streams_timeout_ms,
+                    created_at
                   FROM steps
                   WHERE run_id = ?1
                   ORDER BY number
@@ -146,8 +147,9 @@ defmodule Coflux.Orchestration.Epoch do
                                                    module, target, type, priority, wait_for,
                                                    cache_config_id, cache_key, defer_key,
                                                    memo_key, retry_limit, retry_backoff_min,
-                                                   retry_backoff_max, recurrent, delay,
-                                                   requires_tag_set_id, step_created_at},
+                                                   retry_backoff_max, recurrent, delay, timeout,
+                                                   requires_tag_set_id, streams_buffer,
+                                                   streams_timeout_ms, step_created_at},
                                                   {step_acc, exec_acc} ->
                   # steps.parent_id is same-run internal — strict remap
                   new_parent_id =
@@ -172,8 +174,11 @@ defmodule Coflux.Orchestration.Epoch do
                       retry_backoff_max: retry_backoff_max,
                       recurrent: recurrent,
                       delay: delay,
+                      timeout: timeout,
                       requires_tag_set_id:
                         ensure_tag_set(source_db, target_db, requires_tag_set_id),
+                      streams_buffer: streams_buffer,
+                      streams_timeout_ms: streams_timeout_ms,
                       created_at: step_created_at
                     })
 
@@ -349,15 +354,17 @@ defmodule Coflux.Orchestration.Epoch do
                 {:ok, streams} =
                   query(
                     source_db,
-                    "SELECT `index`, created_at FROM streams WHERE execution_id = ?1",
+                    "SELECT `index`, buffer, timeout_ms, created_at FROM streams WHERE execution_id = ?1",
                     {old_exec_id}
                   )
 
-                Enum.each(streams, fn {index, stream_created_at} ->
+                Enum.each(streams, fn {index, buffer, timeout_ms, stream_created_at} ->
                   {:ok, _} =
                     insert_one(target_db, :streams, %{
                       execution_id: new_exec_id,
                       index: index,
+                      buffer: buffer,
+                      timeout_ms: timeout_ms,
                       created_at: stream_created_at
                     })
 
@@ -1869,6 +1876,8 @@ defmodule Coflux.Orchestration.Epoch do
   #   * 6 suspended, 7 recurred — successor_id (same-run handoff).
   #   * 8 deferred, 9 cached, 10 spawned — successor_id in-flight, or
   #     successor_ref_id once resolved (value inlined on results).
+  #   * 11 stream_errored — may have successor_id (retry).
+  #   * 12 stream_timeout — no successor.
   defp copy_completion_successor(
          _source_db,
          _target_db,
@@ -1891,9 +1900,10 @@ defmodule Coflux.Orchestration.Epoch do
          execution_ids,
          visited
        )
-       when kind in [0, 1, 2, 3, 4, 6, 7] do
+       when kind in [0, 1, 2, 3, 4, 6, 7, 11, 12] do
     # Succeeded / errored / abandoned / crashed / timeout / suspended /
-    # recurred — retry or same-run successor, if any.
+    # recurred / stream_errored / stream_timeout — retry or same-run
+    # successor, if any.
     new_successor_id =
       if successor_id, do: Map.fetch!(execution_ids, successor_id)
 

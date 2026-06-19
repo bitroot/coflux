@@ -70,6 +70,12 @@ class Streams:
     waiting for consumer demand), the stream is force-closed with
     reason ``"timeout"``. Enforced at the worker level. ``None``
     disables the timeout.
+
+    Note: with the defaults (``buffer=0``, ``timeout=None``), a producer
+    whose stream never gains a consumer waits for demand indefinitely,
+    holding its worker slot until it's cancelled — e.g. when the intended
+    consumer fails before iterating the stream. Set ``timeout`` to bound
+    how long the producer may sit idle waiting for a consumer.
     """
 
     _: dataclasses.KW_ONLY
@@ -377,16 +383,16 @@ def serialize_retries(retries: Retries) -> dict:
     return result
 
 
-def serialize_streams(streams: Streams) -> dict | None:
+def serialize_streams(streams: Streams) -> dict:
     """Serialise a Streams dataclass to the wire format used in the
-    manifest and in submit_execution requests. Returns ``None`` if
-    neither option is set (so the key is omitted from the wire)."""
-    result: dict[str, t.Any] = {}
-    if streams.buffer is not None:
-        result["buffer"] = streams.buffer
+    manifest and in submit_execution requests. The ``buffer`` key is
+    always emitted — ``None`` (explicitly unbounded, opted out of
+    backpressure) must survive the round-trip; omitting the key would
+    be re-read on the executing side as the default (strict lockstep)."""
+    result: dict[str, t.Any] = {"buffer": streams.buffer}
     if streams.timeout is not None:
         result["timeout_ms"] = _to_ms(streams.timeout)
-    return result if result else None
+    return result
 
 
 class Target(t.Generic[P, T]):

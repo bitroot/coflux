@@ -372,9 +372,9 @@ defmodule Coflux.Handlers.Worker do
             # If the stream doesn't exist yet (or producer vanished), push an
             # immediate close so the consumer doesn't wait forever. Carry
             # the reason atom verbatim — consumers decide how to surface
-            # "not_found" / "already_subscribed" in their own idiom.
+            # "not_found" in their own idiom.
             {:error, reason}
-            when reason in [:stream_not_found, :producer_not_found, :already_subscribed] ->
+            when reason in [:stream_not_found, :producer_not_found] ->
               {[
                  command_message("stream_closed", [
                    consumer_execution_id,
@@ -383,6 +383,13 @@ defmodule Coflux.Handlers.Worker do
                    nil
                  ])
                ], state}
+
+            # Duplicate subscribe: the server already holds this
+            # subscription and keeps delivering — a benign no-op. The CLI
+            # re-sends subscriptions on reconnect (it can't tell whether
+            # the server restarted), so this must NOT close the stream.
+            {:error, :already_subscribed} ->
+              {[], state}
 
             {:error, :consumer_not_found} ->
               {[{:close, 4000, "execution_invalid"}], nil}

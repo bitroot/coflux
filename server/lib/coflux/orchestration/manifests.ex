@@ -46,10 +46,14 @@ defmodule Coflux.Orchestration.Manifests do
                             {:ok, nil}
                           end
 
+                        # streams_buffer column: NULL = unset (no streams
+                        # config), -1 = unbounded (nil buffer in a set
+                        # config), N >= 0 = bounded. Mirrors retry_limit's
+                        # -1-for-unlimited convention.
                         {streams_buffer, streams_timeout_ms} =
                           case workflow[:streams] do
                             nil -> {nil, nil}
-                            streams -> {streams[:buffer], streams[:timeout_ms]}
+                            streams -> {streams[:buffer] || -1, streams[:timeout_ms]}
                           end
 
                         {
@@ -379,7 +383,12 @@ defmodule Coflux.Orchestration.Manifests do
 
     streams =
       if streams_buffer != nil or streams_timeout_ms != nil do
-        %{buffer: streams_buffer, timeout_ms: streams_timeout_ms}
+        # -1 in the column means an explicitly-unbounded buffer (nil in
+        # the in-memory config); NULL means the config was never set.
+        %{
+          buffer: if(streams_buffer == -1, do: nil, else: streams_buffer),
+          timeout_ms: streams_timeout_ms
+        }
       end
 
     {:ok,

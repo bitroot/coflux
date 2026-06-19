@@ -5779,15 +5779,16 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Build the map passed to workers in the :execute message, describing
-  # the execution's default stream config. Returns nil when neither
-  # option is set — keeps the wire message compact for the common case.
+  # the execution's default stream config. Returns nil when no config was
+  # set (NULL columns) — keeps the wire message compact for the common
+  # case. When a config exists, the buffer key is ALWAYS present (nil =
+  # unbounded, from the -1 column sentinel) so the adapter can distinguish
+  # an explicit opt-out of backpressure from an unset buffer.
   defp build_streams_config(nil, nil), do: nil
 
   defp build_streams_config(buffer, timeout_ms) do
-    map = %{}
-    map = if buffer != nil, do: Map.put(map, :buffer, buffer), else: map
-    map = if timeout_ms != nil, do: Map.put(map, :timeout_ms, timeout_ms), else: map
-    map
+    map = %{buffer: if(buffer == -1, do: nil, else: buffer)}
+    if timeout_ms != nil, do: Map.put(map, :timeout_ms, timeout_ms), else: map
   end
 
   defp input_external_id(run_external_id, input_number) do
@@ -6049,9 +6050,17 @@ defmodule Coflux.Orchestration.Server do
         # now — queue removal, run-topic `completion` update, waiter
         # wake-ups. For value/error the completion is written later via
         # complete_execution, which fires these itself.
+        #
+        # Completion implies streams closed: any streams this execution
+        # left open are closed here (after the completion row is written,
+        # so derive_lifecycle_info resolves the real reason for live
+        # subscribers) — otherwise abandoned/timed-out producers leave
+        # consumers blocked forever waiting for a close that never comes.
         state =
           if writes_completion_immediately?(result) do
-            fire_completion_notification(state, execution_id, timestamp)
+            state
+            |> close_open_streams(execution_id)
+            |> fire_completion_notification(execution_id, timestamp)
           else
             state
           end
@@ -6311,10 +6320,15 @@ defmodule Coflux.Orchestration.Server do
         {:error, type, message, frames, retryable}
       )
 
-    state = close_open_streams(state, execution_id)
-
     case Results.record_completion(state.db, execution_id, :errored, successor_id: retry_id) do
       {:ok, completion_at} ->
+        # Close streams only after the completion row exists, so
+        # derive_lifecycle_info resolves the real reason (:errored, with
+        # the producer's error) for live subscribers — closing first
+        # would push a nil reason, which consumers coerce to a clean
+        # "complete" and silently accept the truncated stream.
+        state = close_open_streams(state, execution_id)
+
         # Re-fire :result on the run topic so the error entry in the UI
         # picks up the newly-created retry successor. We only need to do
         # this when retry_id changed from nil (there was no successor at
@@ -6351,13 +6365,15 @@ defmodule Coflux.Orchestration.Server do
     {retry_id, _recurred?, state} =
       decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
 
-    # Streams that had been appended to before the worker died need to be
-    # closed so consumers don't wait forever. Recorded as :lifecycle —
-    # consumers derive the specific error from the execution's outcome.
-    state = close_open_streams(state, execution_id)
-
     case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
       {:ok, completion_at} ->
+        # Streams that had been appended to before the worker died need to
+        # be closed so consumers don't wait forever. Closed after the
+        # completion row is written so derive_lifecycle_info resolves the
+        # real reason (:crashed) for live subscribers, rather than a nil
+        # reason that consumers would coerce to a clean "complete".
+        state = close_open_streams(state, execution_id)
+
         # Result-time notifications weren't fired (no results row was ever
         # written), so fire them now alongside the completion notification.
         state =
@@ -6380,12 +6396,17 @@ defmodule Coflux.Orchestration.Server do
   # (:cancelled / :abandoned / :crashed / :timeout / :errored) by looking
   # at the execution's completion — consumers then decide how to handle
   # each case.
-  defp close_open_streams(state, execution_id) do
+  defp close_open_streams(state, execution_id, spec \\ :lifecycle) do
     {:ok, indexes} = Streams.get_open_streams_for_execution(state.db, execution_id)
-    {push_reason, push_error} = derive_lifecycle_info(state.db, execution_id)
+
+    {push_reason, push_error} =
+      case spec do
+        :lifecycle -> derive_lifecycle_info(state.db, execution_id)
+        :timeout -> {:timeout, nil}
+      end
 
     Enum.reduce(indexes, state, fn index, state ->
-      case Streams.close_stream(state.db, execution_id, index, :lifecycle) do
+      case Streams.close_stream(state.db, execution_id, index, spec) do
         {:ok, closed_at} ->
           state
           |> push_stream_closed(execution_id, index, push_reason, push_error)
@@ -6546,11 +6567,32 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp process_result(state, execution_id, result, created_by \\ nil) do
-    case Results.has_result?(state.db, execution_id) do
-      {:ok, true} ->
+    {:ok, has_result?} = Results.has_result?(state.db, execution_id)
+    {:ok, has_completion?} = Results.has_completion?(state.db, execution_id)
+
+    cond do
+      # Already completed (e.g. cancelled, then the session died before the
+      # worker acknowledged): nothing to record — proceeding would create a
+      # spurious retry and then trip the completions UNIQUE constraint.
+      has_completion? ->
         {:ok, state}
 
-      {:ok, false} ->
+      has_result? ->
+        # Mid-drain (value result recorded, completion pending): a
+        # wall-clock timeout here means the drain was cut short. Close the
+        # remaining open streams as :timeout so complete_execution promotes
+        # the completion to :stream_timeout — otherwise the kill would land
+        # as a clean :succeeded with silently truncated streams.
+        state =
+          if result == :timeout do
+            close_open_streams(state, execution_id, :timeout)
+          else
+            state
+          end
+
+        {:ok, state}
+
+      true ->
         {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
 
@@ -6580,6 +6622,7 @@ defmodule Coflux.Orchestration.Server do
                ) do
             {:ok, state} -> state
             {:error, :already_recorded} -> state
+            {:error, :already_completed} -> state
           end
 
         # Cancel descendant executions for timeouts and cancellations
@@ -8163,7 +8206,28 @@ defmodule Coflux.Orchestration.Server do
             state
 
           not stride_matches?(sub.stride, sequence) ->
-            state
+            # Advance the cursor past non-matching sequences too (matching
+            # push_backlog_items' behaviour): demand grants are derived
+            # from subscriber cursors, so leaving the cursor behind would
+            # permanently stall a bounded-buffer producer against a
+            # partition/slice consumer whose stride skips this sequence.
+            state =
+              update_in(
+                state.stream_subscriptions[key],
+                &Map.put(&1, :cursor, sequence + 1)
+              )
+
+            if stride_exhausted?(sub.stride, sequence + 1) do
+              state
+              |> send_to_consumer(
+                sub,
+                {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete",
+                 nil}
+              )
+              |> drop_subscription(key)
+            else
+              state
+            end
 
           true ->
             # Value came off the wire in parse form (ext-id refs, no metadata).

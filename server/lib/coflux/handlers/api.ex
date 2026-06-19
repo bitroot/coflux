@@ -1746,9 +1746,10 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # Parse a ``streams`` config object from an HTTP request body. Both
-  # ``buffer`` and ``timeoutMs`` are optional; returns nil when the
-  # caller omits streams entirely.
+  # Parse a ``streams`` config object from an HTTP request body. Returns
+  # nil when the caller omits streams entirely. A present-but-null
+  # ``buffer`` key means an explicitly unbounded buffer (distinct from
+  # omitting the key), so presence is checked rather than the value.
   defp parse_streams_config(value) do
     cond do
       is_nil(value) ->
@@ -1758,7 +1759,7 @@ defmodule Coflux.Handlers.Api do
         with {:ok, buffer} <- parse_integer(Map.get(value, "buffer"), optional: true),
              {:ok, timeout_ms} <-
                parse_integer(Map.get(value, "timeoutMs"), optional: true) do
-          if buffer == nil and timeout_ms == nil do
+          if not Map.has_key?(value, "buffer") and timeout_ms == nil do
             {:ok, nil}
           else
             {:ok, %{buffer: buffer, timeout_ms: timeout_ms}}
@@ -1826,7 +1827,9 @@ defmodule Coflux.Handlers.Api do
         with {:ok, buffer} <- parse_integer(Map.get(value, "buffer"), optional: true),
              {:ok, timeout_ms} <-
                parse_integer(Map.get(value, "timeout_ms"), optional: true) do
-          if buffer == nil and timeout_ms == nil do
+          # A present-but-null buffer key means explicitly unbounded —
+          # only treat the config as unset when the key is absent too.
+          if not Map.has_key?(value, "buffer") and timeout_ms == nil do
             {:ok, nil}
           else
             {:ok, %{buffer: buffer, timeout_ms: timeout_ms}}

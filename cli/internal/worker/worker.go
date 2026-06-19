@@ -57,6 +57,32 @@ type Worker struct {
 
 	mu         sync.RWMutex
 	executions map[string]*executionState
+
+	// Active stream subscriptions, tracked so they can be re-established
+	// after a reconnect: the server holds subscriptions in memory only,
+	// so a server restart silently drops them — without a re-subscribe,
+	// consumers blocked mid-iteration would wait forever.
+	streamSubsMu sync.Mutex
+	streamSubs   map[streamSubKey]*streamSubscription
+}
+
+// streamSubKey identifies a consumer-side stream subscription. The
+// subscription ID is allocated by the consumer's adapter and is unique
+// within the consumer execution.
+type streamSubKey struct {
+	executionID    string // consumer execution
+	subscriptionID int
+}
+
+// streamSubscription remembers the subscribe params plus the next
+// sequence the consumer expects (advanced as stream_items are forwarded),
+// so a re-subscribe resumes exactly where delivery stopped — no gaps, no
+// duplicates.
+type streamSubscription struct {
+	producerExecutionID string
+	index               int
+	nextSequence        int
+	stride              map[string]any
 }
 
 type executionState struct {
@@ -86,6 +112,7 @@ func New(cfg *config.Config, adp adapter.Adapter, session string, logger *slog.L
 		logger:     logger,
 		connCh:     make(chan struct{}),
 		executions: make(map[string]*executionState),
+		streamSubs: make(map[streamSubKey]*streamSubscription),
 	}
 }
 
@@ -692,6 +719,7 @@ func (w *Worker) handleStreamItems(params []any) error {
 	}
 
 	converted := make([]any, len(rawItems))
+	maxSequence := -1
 	for i, raw := range rawItems {
 		itemArr, ok := raw.([]any)
 		if !ok || len(itemArr) != 2 {
@@ -702,6 +730,21 @@ func (w *Worker) handleStreamItems(params []any) error {
 			return fmt.Errorf("stream_items: item %d value: %w", i, err)
 		}
 		converted[i] = []any{itemArr[0], value}
+		if seq, ok := itemArr[0].(float64); ok && int(seq) > maxSequence {
+			maxSequence = int(seq)
+		}
+	}
+
+	// Advance the tracked cursor so a post-reconnect re-subscribe resumes
+	// after the last item the consumer was sent.
+	if maxSequence >= 0 {
+		w.streamSubsMu.Lock()
+		if sub, ok := w.streamSubs[streamSubKey{executionID, int(subscriptionID)}]; ok {
+			if maxSequence+1 > sub.nextSequence {
+				sub.nextSequence = maxSequence + 1
+			}
+		}
+		w.streamSubsMu.Unlock()
 	}
 
 	return w.pool.PushToExecutor(executionID, "stream_items", map[string]any{
@@ -732,6 +775,11 @@ func (w *Worker) handleStreamClosed(params []any) error {
 	}
 	reason, _ := params[2].(string)
 	errField := params[3]
+
+	// The subscription is finished — stop tracking it for re-subscribes.
+	w.streamSubsMu.Lock()
+	delete(w.streamSubs, streamSubKey{executionID, int(subscriptionID)})
+	w.streamSubsMu.Unlock()
 
 	forwarded := map[string]any{
 		"execution_id":    executionID,
@@ -896,20 +944,19 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 	}
 
 	// Streams config (buffer + idle timeout_ms defaults for streams
-	// produced by this execution). Encoded as a map with keys that the
-	// Elixir handler reads positionally; nil omits the option entirely.
+	// produced by this execution). The buffer key is always present when
+	// a config is set — null means explicitly unbounded, which must
+	// survive the round-trip (omitting the key would be re-read as the
+	// default, strict lockstep).
 	var streams any
 	if params.Streams != nil {
-		s := map[string]any{}
-		if params.Streams.Buffer != nil {
-			s["buffer"] = *params.Streams.Buffer
+		s := map[string]any{
+			"buffer": params.Streams.Buffer,
 		}
 		if params.Streams.TimeoutMs != nil {
 			s["timeout_ms"] = *params.Streams.TimeoutMs
 		}
-		if len(s) > 0 {
-			streams = s
-		}
+		streams = s
 	}
 
 	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams
@@ -1313,6 +1360,19 @@ func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscr
 	if err != nil {
 		return err
 	}
+
+	// Track before notifying so the subscription is re-established on
+	// reconnect (see resubscribeStreams) even if the connection drops
+	// immediately after this send.
+	w.streamSubsMu.Lock()
+	w.streamSubs[streamSubKey{executionID, subscriptionID}] = &streamSubscription{
+		producerExecutionID: producerExecutionID,
+		index:               index,
+		nextSequence:        fromSequence,
+		stride:              stride,
+	}
+	w.streamSubsMu.Unlock()
+
 	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride]
 	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride)
 }
@@ -1322,6 +1382,11 @@ func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subs
 	if err != nil {
 		return err
 	}
+
+	w.streamSubsMu.Lock()
+	delete(w.streamSubs, streamSubKey{executionID, subscriptionID})
+	w.streamSubsMu.Unlock()
+
 	// Server params: [consumer_execution_id, subscription_id]. The consumer
 	// id scopes the subscription key server-side, so two adapters in the
 	// same session can reuse subscription_id without colliding.
@@ -1863,7 +1928,8 @@ func (w *Worker) flushPending() {
 }
 
 // handleSession is called when a session message is received (including on reconnect).
-// It prunes stale executions and flushes any buffered results.
+// It prunes stale executions, flushes any buffered results, and re-establishes
+// stream subscriptions.
 func (w *Worker) handleSession(executionIDs []string) {
 	// Build set of server-known execution IDs
 	known := make(map[string]struct{}, len(executionIDs))
@@ -1881,6 +1947,51 @@ func (w *Worker) handleSession(executionIDs []string) {
 
 	// Flush any buffered results and terminations
 	w.flushPending()
+
+	w.resubscribeStreams(known)
+}
+
+// resubscribeStreams re-sends stream_subscribe for every tracked
+// subscription whose consumer execution the server still recognises.
+// The server holds subscriptions in memory only, so a server restart
+// drops them — items keep being appended (they're persisted) but nothing
+// would be pushed to the consumer, leaving it blocked forever. Re-sent
+// from the next undelivered sequence, so delivery resumes without gaps
+// or duplicates. If the server didn't restart, the duplicate subscribe
+// is rejected by its already-subscribed guard — a no-op.
+func (w *Worker) resubscribeStreams(known map[string]struct{}) {
+	conn := w.getConn()
+	if conn == nil {
+		return
+	}
+
+	type resub struct {
+		key streamSubKey
+		sub streamSubscription
+	}
+
+	w.streamSubsMu.Lock()
+	resubs := make([]resub, 0, len(w.streamSubs))
+	for key, sub := range w.streamSubs {
+		if _, ok := known[key.executionID]; ok {
+			resubs = append(resubs, resub{key, *sub})
+		} else {
+			// Consumer execution is gone server-side — drop the orphan.
+			delete(w.streamSubs, key)
+		}
+	}
+	w.streamSubsMu.Unlock()
+
+	for _, r := range resubs {
+		err := conn.Notify("stream_subscribe", r.key.subscriptionID, r.key.executionID,
+			r.sub.producerExecutionID, r.sub.index, r.sub.nextSequence, r.sub.stride)
+		if err != nil {
+			// Connection dropped again — the next reconnect retries.
+			w.logger.Debug("stream re-subscribe failed", "execution_id", r.key.executionID,
+				"subscription_id", r.key.subscriptionID, "error", err)
+			return
+		}
+	}
 }
 
 func getString(v any) string {
@@ -1989,19 +2100,18 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		timeout := int(t.Timeout)
 
 		// Build streams (nil if not set) — keys snake_case to match the
-		// Python adapter's wire format for register_manifests.
+		// Python adapter's wire format for register_manifests. The buffer
+		// key is always present when a config is set (null = explicitly
+		// unbounded, distinct from the config being absent).
 		var streams any
 		if t.Streams != nil {
-			m := map[string]any{}
-			if t.Streams.Buffer != nil {
-				m["buffer"] = *t.Streams.Buffer
+			m := map[string]any{
+				"buffer": t.Streams.Buffer,
 			}
 			if t.Streams.TimeoutMs != nil {
 				m["timeout_ms"] = *t.Streams.TimeoutMs
 			}
-			if len(m) > 0 {
-				streams = m
-			}
+			streams = m
 		}
 
 		def := map[string]any{

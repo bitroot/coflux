@@ -147,9 +147,7 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["instruction"] = definition.instruction
 
     if definition.streams is not None:
-        streams_dict = serialize_streams(definition.streams)
-        if streams_dict is not None:
-            result["streams"] = streams_dict
+        result["streams"] = serialize_streams(definition.streams)
 
     return result
 
