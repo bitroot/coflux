@@ -24,7 +24,15 @@ from .errors import (
     StreamSuperseded,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
-from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, Stream
+from .models import (
+    Asset,
+    AssetEntry,
+    AssetMetadata,
+    Execution,
+    Input,
+    Stream,
+    StreamIterator,
+)
 from .prompt import Prompt
 from .state import get_context
 from .streams import stream
@@ -60,6 +68,7 @@ __all__ = [
     "AssetEntry",
     "AssetMetadata",
     "Stream",
+    "StreamIterator",
     # Producer-side stream helper
     "stream",
     # Context functions

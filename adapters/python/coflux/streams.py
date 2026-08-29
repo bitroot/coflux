@@ -26,6 +26,7 @@ import inspect
 import queue
 import threading
 import traceback
+import weakref
 from typing import Any, Iterator
 
 from . import protocol
@@ -533,6 +534,59 @@ class _StreamIterator(Iterator[Any]):
     def __iter__(self) -> "_StreamIterator":
         return self
 
+    def close(self) -> None:
+        """Release the subscription. Idempotent.
+
+        Mirrors ``generator.close()``: a consumer that stops iterating
+        early — ``break``, an exception in the loop body, or just dropping
+        the last reference — has to tell the server. Otherwise the
+        subscription lives on until the whole consumer execution
+        terminates (``drop_execution_subscriptions``, server-side), which
+        is far later.
+
+        That's not merely a leak. An abandoned subscription's
+        acknowledged position stops advancing, and the producer's
+        ``buffer`` is measured against the *slowest* subscriber, so
+        walking away from a bounded stream pins its producer until the
+        idle timeout fires — or forever, if no timeout was configured.
+
+        Pending acks are deliberately not flushed first: unsubscribing
+        removes this subscriber from the watermark entirely, which
+        releases the producer at least as much as any ack would.
+        """
+        if self._done:
+            return
+        self._done = True
+        self._in_hand = None
+        self._unreported = 0
+        _stream_registry().drop(self._subscription_id)
+        # Skip the unsubscribe roundtrip when the dispatcher is gone —
+        # stdout may still be writable but there's no one to receive it,
+        # and a closed pipe would raise from send_*.
+        if get_dispatcher().is_closed():
+            return
+        try:
+            protocol.send_stream_unsubscribe(self._execution_id, self._subscription_id)
+        except Exception:
+            pass
+
+    def __enter__(self) -> "_StreamIterator":
+        return self
+
+    def __exit__(self, *_exc_info: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # The registry holds iterators weakly, so this is the hook that
+        # makes an abandoned `for` loop behave like an abandoned
+        # generator. Best-effort: interpreter shutdown may already have
+        # torn down the globals `close` reaches for, and `__del__` must
+        # never raise.
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _retire_in_hand(self) -> None:
         """Count the previously-yielded item as processed.
 
@@ -591,18 +645,10 @@ class _StreamIterator(Iterator[Any]):
             item = self._queue.get()
 
         if isinstance(item, _Closed):
-            self._done = True
-            _stream_registry().drop(self._subscription_id)
-            # Skip the unsubscribe roundtrip when the dispatcher is gone —
-            # stdout may still be writable but there's no one to receive it,
-            # and a closed pipe would raise from send_*.
-            if not get_dispatcher().is_closed():
-                try:
-                    protocol.send_stream_unsubscribe(
-                        self._execution_id, self._subscription_id
-                    )
-                except Exception:
-                    pass
+            # Same release path as an early exit — the server has already
+            # dropped its side, but the unsubscribe is harmless and keeps
+            # the two paths from drifting apart.
+            self.close()
             raise_for_close(item.reason, item.error)
             raise StopIteration
 
@@ -615,9 +661,25 @@ class StreamRegistry:
     """Per-process registry of open consumer subscriptions."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Reentrant because finalization can re-enter: the cyclic collector
+        # may finalize an abandoned iterator at an arbitrary allocation
+        # point, including one inside a method that already holds this
+        # lock, and `__del__` -> `close` -> `drop` wants it again. A plain
+        # Lock would deadlock that thread against itself.
+        self._lock = threading.RLock()
         self._next_id = 0
-        self._iterators: dict[int, _StreamIterator] = {}
+        # Weak values, so that dropping the last user-held reference to an
+        # iterator finalizes it and `_StreamIterator.__del__` can release
+        # the subscription — the same way an abandoned generator gets
+        # closed. A strong map here would keep every iterator alive for the
+        # life of the execution and defeat that entirely.
+        #
+        # Nothing is lost by holding them weakly: an iterator with no
+        # remaining reference is by definition one no consumer can read
+        # from again.
+        self._iterators: weakref.WeakValueDictionary[int, _StreamIterator] = (
+            weakref.WeakValueDictionary()
+        )
         self._installed = False
 
     def _ensure_installed(self) -> None:
@@ -712,7 +774,7 @@ def parse_stream_id(id: str) -> tuple[str, int]:
 def open_subscription(
     stream_id: str,
     stride: tuple[int, int | None, int],
-) -> Iterator[Any]:
+) -> "_StreamIterator":
     """Begin iterating a stream. Called by ``Stream.__iter__``.
 
     Allocates a subscription id, sends the subscribe message, and returns

@@ -11,6 +11,8 @@ from .state import get_context
 
 T = t.TypeVar("T")
 D = t.TypeVar("D")
+# Covariant counterpart of T, for protocols that only ever produce values.
+T_co = t.TypeVar("T_co", covariant=True)
 
 
 # --- Assets ---
@@ -238,6 +240,30 @@ def _compose_stride(outer: Stride, inner: Stride) -> Stride:
     return (new_start, new_stop, new_step)
 
 
+class StreamIterator(t.Iterator[T_co], t.Protocol):
+    """What ``iter(stream)`` returns.
+
+    Declared structurally here rather than as the concrete class because
+    ``streams`` imports from this module, so naming the implementation
+    would cycle.
+
+    Beyond ``Iterator``, it can be released early — mirroring
+    ``generator.close()``. That matters for streams: an open subscription
+    holds the producer's backpressure watermark down, so a consumer that
+    stops reading a bounded stream without releasing it stalls the
+    producer. Dropping the last reference releases it automatically; the
+    explicit forms are for when the reference outlives the reading.
+    """
+
+    def close(self) -> None:
+        """Release the subscription. Idempotent; iteration then stops."""
+        ...
+
+    def __enter__(self) -> "StreamIterator[T_co]": ...
+
+    def __exit__(self, *exc_info: t.Any) -> None: ...
+
+
 class Stream(t.Iterable[T]):
     """A handle to a stream produced by another execution.
 
@@ -297,7 +323,7 @@ class Stream(t.Iterable[T]):
             raise ValueError(f"invalid partition args: n={n}, i={i}")
         return self.stride(i, None, n)
 
-    def __iter__(self) -> t.Iterator[T]:
+    def __iter__(self) -> StreamIterator[T]:
         # Local import: ``streams`` imports ``serialization`` at top, and
         # ``serialization`` imports ``Stream`` from here — a top-level
         # ``from .streams import ...`` would cycle.

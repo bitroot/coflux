@@ -781,12 +781,11 @@ def test_workflow_produces_stream_while_awaiting_consumer(worker):
     """Regression: a workflow that produces a stream *and* synchronously
     awaits a consumer of that stream must not deadlock.
 
-    Reproduces the ``inline_producer`` pattern from
-    ``examples/python/examples/streams.py``: the workflow registers an
-    inline stream, submits a consumer task with the stream as its
-    argument, then calls ``select`` (blocking) to wait for the
-    consumer's result. The producer driver keeps emitting items on the
-    same session while the select is in flight.
+    The inline-producer pattern: the workflow registers an inline
+    stream, submits a consumer task with the stream as its argument,
+    then calls ``select`` (blocking) to wait for the consumer's result.
+    The producer driver keeps emitting items on the same session while
+    the select is in flight.
 
     Before the fix, the CLI's per-executor message loop handled
     ``select`` synchronously: while waiting on the server's response,
