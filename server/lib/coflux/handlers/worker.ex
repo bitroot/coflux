@@ -18,6 +18,11 @@ defmodule Coflux.Handlers.Worker do
 
   @protocol_version "v1"
 
+  # Fallback delivery window for a stream subscription when the adapter
+  # doesn't declare one. Adapters send their own `prefetch` on subscribe;
+  # this only covers older clients.
+  @default_stream_prefetch 16
+
   def init(req, opts) do
     qs = :cowboy_req.parse_qs(req)
     expected_version = get_query_param(qs, "version")
@@ -352,8 +357,38 @@ defmodule Coflux.Handlers.Worker do
           producer_execution_id,
           index,
           from_sequence,
-          stride
+          stride | rest
         ] = message["params"]
+
+        # `prefetch` bounds how many items may be in flight to this
+        # consumer. `progress` is only sent when the CLI is re-establishing
+        # a subscription after a reconnect, carrying the adapter's
+        # cumulative counters so credit accounting resumes rather than
+        # restarting.
+        #
+        # Anything non-positive is treated as absent: a client that omits
+        # the field gets 0 from the CLI's non-pointer `Prefetch int`, and
+        # a subscription with zero credit is never delivered anything —
+        # not even its close, since that waits on the cursor passing the
+        # head. Default instead of starving it.
+        prefetch =
+          case Enum.at(rest, 0) do
+            p when is_integer(p) and p > 0 -> p
+            _ -> @default_stream_prefetch
+          end
+
+        # Validated here rather than trusted downstream: the orchestration
+        # GenServer is per-project, so malformed worker JSON reaching a
+        # failing match there would take down every run in the project.
+        progress =
+          case Enum.at(rest, 1) do
+            %{"delivered" => d, "acked_count" => a, "acked_seq" => s} = p
+            when is_integer(d) and is_integer(a) and is_integer(s) ->
+              p
+
+            _ ->
+              nil
+          end
 
         if is_recognised_execution?(consumer_execution_id, state) do
           case Orchestration.subscribe_stream(
@@ -364,7 +399,9 @@ defmodule Coflux.Handlers.Worker do
                  producer_execution_id,
                  index,
                  from_sequence,
-                 stride
+                 stride,
+                 prefetch,
+                 progress
                ) do
             :ok ->
               {[], state}
@@ -398,18 +435,55 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      "stream_ack" ->
+        # Guarded like every other stream message: an ack frees the
+        # consumer's delivery credit and advances the watermark the
+        # producer's `buffer` is measured against, so accepting one for an
+        # execution this session doesn't own would let any authenticated
+        # worker release another session's producer and defeat
+        # backpressure.
+        case message["params"] do
+          [consumer_execution_id, subscription_id, count, sequence]
+          when is_integer(count) and is_integer(sequence) ->
+            if is_recognised_execution?(consumer_execution_id, state) do
+              :ok =
+                Orchestration.ack_stream(
+                  state.project_id,
+                  consumer_execution_id,
+                  subscription_id,
+                  count,
+                  sequence
+                )
+
+              {[], state}
+            else
+              {[{:close, 4000, "execution_invalid"}], nil}
+            end
+
+          _ ->
+            {[{:close, 4000, "protocol_error"}], nil}
+        end
+
       "stream_unsubscribe" ->
-        [consumer_execution_id, subscription_id] = message["params"]
+        case message["params"] do
+          [consumer_execution_id, subscription_id] ->
+            if is_recognised_execution?(consumer_execution_id, state) do
+              :ok =
+                Orchestration.unsubscribe_stream(
+                  state.project_id,
+                  state.session_id,
+                  consumer_execution_id,
+                  subscription_id
+                )
 
-        :ok =
-          Orchestration.unsubscribe_stream(
-            state.project_id,
-            state.session_id,
-            consumer_execution_id,
-            subscription_id
-          )
+              {[], state}
+            else
+              {[{:close, 4000, "execution_invalid"}], nil}
+            end
 
-        {[], state}
+          _ ->
+            {[{:close, 4000, "protocol_error"}], nil}
+        end
 
       "put_error" ->
         [execution_id, error] = message["params"]
@@ -677,10 +751,14 @@ defmodule Coflux.Handlers.Worker do
         state
       ) do
     # `reason` is a string ("complete" / "errored" / "cancelled" /
-    # "abandoned" / "crashed" / "timeout"); `error` is non-nil only for
-    # "errored" — the producer's actual `{type, message, frames}`. Other
-    # reasons travel as the string alone; the consumer adapter decides
-    # how to represent them.
+    # "abandoned" / "crashed" / "timeout" / "suspended" / "recurred");
+    # `error` is non-nil only for "errored" — the producer's actual
+    # `{type, message, frames}`. Other reasons travel as the string
+    # alone; the consumer adapter decides how to represent them.
+    #
+    # "suspended" / "recurred" mean the producer was superseded rather
+    # than failing: the successor owns a new stream, so this one is
+    # terminal even though nothing went wrong.
     {[
        command_message("stream_closed", [
          execution_external_id,

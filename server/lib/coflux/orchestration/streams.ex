@@ -36,7 +36,7 @@ defmodule Coflux.Orchestration.Streams do
   # Registers a new stream owned by `execution_id` at `index` (monotonic
   # per-execution, worker-assigned). ``buffer`` is the persisted flow-
   # control budget — ``nil`` means no backpressure, integer N means the
-  # producer may be up to N items ahead of the fastest consumer.
+  # producer may be up to N items ahead of the slowest consumer.
   # ``timeout_ms`` is the idle-timeout budget (milliseconds) — ``nil``
   # disables the timeout. The server only stores it (for display in
   # Studio); enforcement happens at the worker (CLI). Returns

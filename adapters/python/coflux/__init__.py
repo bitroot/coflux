@@ -21,6 +21,7 @@ from .errors import (
     ExecutionTerminated,
     ExecutionTimeout,
     InputDismissed,
+    StreamSuperseded,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input, Stream
@@ -44,6 +45,7 @@ __all__ = [
     "ExecutionTimeout",
     "ExecutionAbandoned",
     "ExecutionCrashed",
+    "StreamSuperseded",
     "InputDismissed",
     "Input",
     "Metric",

@@ -57,6 +57,13 @@ class ExecutorConnection:
         # we may read a push while waiting for a response and vice-versa. Park
         # mismatched messages here so the next `recv` / helper picks them up.
         self._buffer = []
+        # subscription_id -> consumer execution id, so drain_stream can
+        # acknowledge without the caller having to repeat it.
+        self._sub_execution_ids: dict[int, str] = {}
+        # subscription_id -> (items received, highest sequence). Stream
+        # acks are cumulative per subscription, so this has to span every
+        # helper that consumes items, not just one call.
+        self._sub_received: dict[int, tuple[int, int]] = {}
 
     def send(self, msg: dict):
         self._conn.sendall(protocol.encode_message(msg))
@@ -296,12 +303,19 @@ class ExecutorConnection:
         index,
         from_sequence=0,
         stride=None,
+        prefetch=protocol.DEFAULT_PREFETCH,
     ):
         """Subscribe to a stream. ``stride`` is an optional
         ``{"start", "stop", "step"}`` dict restricting which positions
         are delivered — built via ``protocol.stride`` /
         ``slice_stride`` / ``partition_stride``. ``None`` means no
-        filtering (identity stride)."""
+        filtering (identity stride).
+
+        ``prefetch`` is the delivery window — the server pushes at most
+        this many items beyond what's been acknowledged. The default is
+        large enough to be invisible; lower it to exercise credit-gated
+        delivery."""
+        self._sub_execution_ids[subscription_id] = execution_id
         self.send(
             protocol.stream_subscribe(
                 execution_id,
@@ -310,8 +324,15 @@ class ExecutorConnection:
                 index,
                 from_sequence=from_sequence,
                 stride=stride,
+                prefetch=prefetch,
             )
         )
+
+    def stream_ack(self, execution_id, subscription_id, count, sequence):
+        """Report cumulative consumer progress — frees delivery credit
+        and advances the watermark the producer's buffer is measured
+        against."""
+        self.send(protocol.stream_ack(execution_id, subscription_id, count, sequence))
 
     def stream_unsubscribe(self, execution_id, subscription_id):
         self.send(protocol.stream_unsubscribe(execution_id, subscription_id))
@@ -334,6 +355,10 @@ class ExecutorConnection:
                         subscription_id is None
                         or params.get("subscription_id") == subscription_id
                     ):
+                        if method == "stream_items":
+                            self._record_items(
+                                params["subscription_id"], params.get("items", [])
+                            )
                         # Put held messages back (preserve order) before returning.
                         self._buffer[:0] = held
                         return params
@@ -343,12 +368,18 @@ class ExecutorConnection:
             self._buffer[:0] = held
             raise
 
-    def drain_stream(self, subscription_id, timeout=10):
+    def drain_stream(self, subscription_id, timeout=10, ack=True):
         """Collect every pushed item + final closure for ``subscription_id``.
 
         Returns ``(items, closed_params)`` where ``items`` is a list of
         ``[position, value_dict]`` pairs in arrival order. Messages for other
         subscriptions are re-buffered so later calls can fetch them.
+
+        Acknowledges each batch as it arrives (like a real consumer
+        iterating), so delivery keeps flowing when the subscription has a
+        small prefetch and the producer keeps running under a bounded
+        buffer. Pass ``ack=False`` to drain without acknowledging — useful
+        for asserting that the window actually stops delivery.
         """
         items = []
         deadline = time.time() + timeout
@@ -364,10 +395,35 @@ class ExecutorConnection:
                 self._buffer.append(msg)
                 continue
             if method == "stream_items":
-                items.extend(params.get("items", []))
+                batch = params.get("items", [])
+                items.extend(batch)
+                count, sequence = self._record_items(subscription_id, batch)
+                if ack and batch:
+                    self.stream_ack(
+                        self._sub_execution_ids[subscription_id],
+                        subscription_id,
+                        count,
+                        sequence,
+                    )
                 continue
             # stream_closed — terminal
             return items, params
+
+    def _record_items(self, subscription_id, batch):
+        """Fold a delivered batch into this subscription's cumulative
+        totals, returning ``(count, highest_sequence)``.
+
+        Stream acks are cumulative for the life of the subscription, so
+        every helper that consumes items has to contribute — a count
+        local to one ``drain_stream`` call would go backwards and the
+        server would (correctly) ignore it, stalling delivery.
+        """
+        count, sequence = self._sub_received.get(subscription_id, (0, -1))
+        if batch:
+            count += len(batch)
+            sequence = max(sequence, batch[-1][0])
+            self._sub_received[subscription_id] = (count, sequence)
+        return count, sequence
 
     def complete(self, execution_id, value=None):
         """Send execution_result and signal the mock adapter we're done.

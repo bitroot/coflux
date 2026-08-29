@@ -61,9 +61,16 @@ class Streams:
 
     ``buffer`` is the producer-side backpressure budget. ``0`` (the
     default) means strict lockstep: the producer emits an item, waits
-    for a consumer to ack, then emits the next. ``N`` allows the
-    producer to run up to ``N`` items ahead of the fastest consumer.
-    ``None`` disables backpressure entirely.
+    for a consumer to finish processing it, then emits the next. ``N``
+    allows the producer to run up to ``N`` items ahead of the *slowest*
+    consumer. ``None`` disables backpressure entirely.
+
+    The budget is measured against what consumers have acknowledged,
+    not against what's been sent to them, so it bounds how far ahead of
+    actual consumption the producer runs. It's separate from how much a
+    consumer buffers in memory — the item log is durable, so the server
+    holds items back rather than pushing a whole backlog at a slow
+    consumer.
 
     ``timeout`` is the idle-timeout budget — if the producer hasn't
     appended a new item within this window (including when blocked

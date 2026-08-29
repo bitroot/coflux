@@ -73,9 +73,9 @@ def stream(
         buffer: Backpressure budget. ``0`` (the default if neither
             ``cf.stream(buffer=...)`` nor the task-level default sets
             it) means strict lockstep — the producer emits an item,
-            waits for a consumer to acknowledge it, then emits the
-            next. ``N`` allows the producer to stay up to ``N`` items
-            ahead of the fastest consumer. ``None`` disables
+            waits for a consumer to finish processing it, then emits
+            the next. ``N`` allows the producer to stay up to ``N``
+            items ahead of the *slowest* consumer. ``None`` disables
             backpressure entirely.
         timeout: Idle-timeout budget. If the producer doesn't append a
             new item within this window (including when blocked on
@@ -152,7 +152,7 @@ class StreamDriver:
         means unbounded (no flow control); ``0`` means strict lockstep
         (producer waits for a consumer to ack each item before emitting
         the next); ``N>0`` allows the producer to stay up to N items
-        ahead of the fastest consumer.
+        ahead of the slowest consumer.
 
         ``timeout_ms`` is the idle-timeout budget (milliseconds). The
         worker (CLI) closes the stream with reason "timeout" if no item
@@ -477,14 +477,42 @@ class _Closed:
         self.error = error
 
 
+# Delivery window for a consumer subscription: the server won't push
+# more than this many items beyond what we've acknowledged. This is what
+# bounds the iterator's queue, and it's deliberately independent of the
+# producer's ``buffer`` — the item log is durable, so the server can hold
+# items back without anything being lost. A producer allowed to run far
+# ahead doesn't oblige its consumers to buffer that far ahead in memory.
+_PREFETCH = 16
+
+# Report progress once this many items have been retired, rather than one
+# message per item. Progress is also flushed whenever we're about to
+# block, so batching can't stall a producer that's waiting on us.
+_ACK_BATCH = max(1, _PREFETCH // 2)
+
+
 class _StreamIterator(Iterator[Any]):
-    """Drains items for one active subscription via a bounded-free queue."""
+    """Drains items for one active subscription.
+
+    Delivery is credit-gated: the server sends at most ``_PREFETCH``
+    items beyond what we've acknowledged, so the queue is bounded even
+    if the consumer is much slower than the producer.
+    """
 
     def __init__(self, subscription_id: int, execution_id: str) -> None:
         self._subscription_id = subscription_id
         self._execution_id = execution_id
         self._queue: queue.Queue[Any] = queue.Queue()
         self._done = False
+        # Cumulative progress, as reported to the server.
+        self._acked_count = 0
+        self._acked_sequence = -1
+        # Sequence of the item handed to the caller by the previous
+        # ``__next__`` and not yet retired. It only counts as processed
+        # once the caller comes back for another one.
+        self._in_hand: int | None = None
+        # Retired items not yet reported.
+        self._unreported = 0
 
     def on_items(self, items: list[list[Any]]) -> None:
         """Called by the registry when the server pushes items for this
@@ -495,8 +523,8 @@ class _StreamIterator(Iterator[Any]):
         ``__next__`` on the consumer's thread so heavy decode work doesn't
         stall stdin reads.
         """
-        for _sequence, value in items:
-            self._queue.put(value)
+        for sequence, value in items:
+            self._queue.put((sequence, value))
 
     def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         """Called by the registry when the stream closes."""
@@ -505,10 +533,63 @@ class _StreamIterator(Iterator[Any]):
     def __iter__(self) -> "_StreamIterator":
         return self
 
+    def _retire_in_hand(self) -> None:
+        """Count the previously-yielded item as processed.
+
+        Done on re-entry to ``__next__`` rather than when the item was
+        handed over, so the acknowledgement reflects the loop body having
+        actually run. That's what makes ``buffer=0`` genuine lockstep
+        instead of merely bounding what's been put on the wire.
+        """
+        if self._in_hand is None:
+            return
+        self._acked_count += 1
+        self._acked_sequence = max(self._acked_sequence, self._in_hand)
+        self._in_hand = None
+        self._unreported += 1
+        if self._unreported >= _ACK_BATCH:
+            self._flush_ack()
+
+    def _flush_ack(self) -> None:
+        if self._unreported == 0:
+            return
+        # Skip the roundtrip when the dispatcher is gone — stdout may still
+        # be writable but there's no one to receive it. Terminal, so clear
+        # the counter: no later flush could succeed either.
+        if get_dispatcher().is_closed():
+            self._unreported = 0
+            return
+        try:
+            protocol.send_stream_ack(
+                self._execution_id,
+                self._subscription_id,
+                self._acked_count,
+                self._acked_sequence,
+            )
+        except Exception:
+            # Leave `_unreported` set so the next flush retries. The
+            # counters are cumulative, so a re-send subsumes this one.
+            # Clearing it before the send would strand a lockstep producer
+            # waiting on exactly the acknowledgement we just dropped,
+            # with nothing left to trigger another flush.
+            return
+        self._unreported = 0
+
     def __next__(self) -> Any:
         if self._done:
             raise StopIteration
-        item = self._queue.get()
+
+        self._retire_in_hand()
+
+        try:
+            item = self._queue.get_nowait()
+        except queue.Empty:
+            # About to block. Report progress first — with a small buffer
+            # the producer may be waiting on precisely the acknowledgement
+            # we're batching, so holding it back would deadlock.
+            self._flush_ack()
+            item = self._queue.get()
+
         if isinstance(item, _Closed):
             self._done = True
             _stream_registry().drop(self._subscription_id)
@@ -524,7 +605,10 @@ class _StreamIterator(Iterator[Any]):
                     pass
             raise_for_close(item.reason, item.error)
             raise StopIteration
-        return deserialize_value(item)
+
+        sequence, value = item
+        self._in_hand = sequence
+        return deserialize_value(value)
 
 
 class StreamRegistry:
@@ -653,6 +737,7 @@ def open_subscription(
         producer_execution_id,
         index,
         0,
+        _PREFETCH,
         stride=wire_stride,
     )
     return iterator

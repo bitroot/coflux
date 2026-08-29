@@ -278,6 +278,12 @@ def stream_close(execution_id, index, error=None):
 # --- Stream messages (consumer side: adapter → server) ---
 
 
+# Delivery window used by tests that don't care about backpressure.
+# Large enough that the server never withholds items, so tests written
+# before credit-gating behave as they did.
+DEFAULT_PREFETCH = 1000
+
+
 def stream_subscribe(
     execution_id,
     subscription_id,
@@ -285,17 +291,42 @@ def stream_subscribe(
     index,
     from_sequence=0,
     stride=None,
+    prefetch=DEFAULT_PREFETCH,
 ):
+    """Subscribe to a stream.
+
+    ``prefetch`` bounds how many items the server will push beyond what
+    has been acknowledged via ``stream_ack``.
+
+    (The reconnect-resume path, where the CLI restates the credit
+    accounting, isn't reachable from here — the CLI builds that itself
+    from its own tracking when it re-establishes a subscription.)
+    """
     params = {
         "execution_id": execution_id,
         "subscription_id": subscription_id,
         "producer_execution_id": producer_execution_id,
         "index": index,
         "from_sequence": from_sequence,
+        "prefetch": prefetch,
     }
     if stride is not None:
         params["stride"] = stride
     return {"method": "stream_subscribe", "params": params}
+
+
+def stream_ack(execution_id, subscription_id, count, sequence):
+    """Report cumulative consumer progress: how many items have been
+    processed, and the highest sequence among them."""
+    return {
+        "method": "stream_ack",
+        "params": {
+            "execution_id": execution_id,
+            "subscription_id": subscription_id,
+            "count": count,
+            "sequence": sequence,
+        },
+    }
 
 
 def stream_unsubscribe(execution_id, subscription_id):

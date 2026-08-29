@@ -77,6 +77,24 @@ class ExecutionCrashed(ExecutionTerminated):
         super().__init__(message)
 
 
+class StreamSuperseded(ExecutionTerminated):
+    """Raised when a stream ended because its producer was superseded.
+
+    The producer suspended, or finished an iteration of a recurrent
+    target. Neither is a failure — but a stream is owned by exactly one
+    execution, so the successor registers a *new* stream rather than
+    continuing this one, and a handle to this stream will never yield
+    anything further.
+
+    To follow the successor's stream, obtain a fresh handle from the
+    successor (e.g. re-resolve the producer's result) rather than
+    re-iterating this one.
+    """
+
+    def __init__(self, message: str = "stream producer was superseded"):
+        super().__init__(message)
+
+
 class InputDismissed(Exception):
     """Raised when an input request was dismissed."""
 
@@ -195,6 +213,8 @@ def raise_for_close(reason: str, error: dict | None) -> None:
         raise ExecutionCrashed()
     if reason == "timeout":
         raise ExecutionTimeout()
+    if reason in ("suspended", "recurred"):
+        raise StreamSuperseded()
 
     # Anything else (e.g. "not_found", "already_subscribed", or an
     # unknown future reason) is a subscription problem rather than a

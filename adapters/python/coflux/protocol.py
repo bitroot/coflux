@@ -556,6 +556,7 @@ def send_stream_subscribe(
     producer_execution_id: str,
     index: int,
     from_sequence: int,
+    prefetch: int,
     stride: dict[str, Any] | None = None,
 ) -> None:
     """Open a consumer subscription to a stream owned by another execution.
@@ -566,6 +567,10 @@ def send_stream_subscribe(
     restricting which sequence positions are delivered; any chain of
     slice/partition/stride calls on the handle composes into a single
     stride before reaching here.
+
+    ``prefetch`` is the delivery window: the server won't push more than
+    this many items beyond what we've acknowledged via
+    ``send_stream_ack``. It's what bounds the iterator's queue.
     """
     params: dict[str, Any] = {
         "execution_id": execution_id,
@@ -573,10 +578,39 @@ def send_stream_subscribe(
         "producer_execution_id": producer_execution_id,
         "index": index,
         "from_sequence": from_sequence,
+        "prefetch": prefetch,
     }
     if stride is not None:
         params["stride"] = stride
     get_protocol().send_message("stream_subscribe", params)
+
+
+def send_stream_ack(
+    execution_id: str,
+    subscription_id: int,
+    count: int,
+    sequence: int,
+) -> None:
+    """Report consumer progress on a subscription.
+
+    ``count`` is how many items the consumer has finished processing and
+    ``sequence`` the highest sequence among them. Both are cumulative
+    rather than incremental, so a retransmit after a reconnect is
+    idempotent and a dropped ack is corrected by the next one.
+
+    This frees delivery credit and advances the watermark the producer's
+    ``buffer`` is measured against — with ``buffer=0`` the producer stays
+    blocked until the ack for the previous item arrives.
+    """
+    get_protocol().send_message(
+        "stream_ack",
+        {
+            "execution_id": execution_id,
+            "subscription_id": subscription_id,
+            "count": count,
+            "sequence": sequence,
+        },
+    )
 
 
 def send_stream_unsubscribe(execution_id: str, subscription_id: int) -> None:

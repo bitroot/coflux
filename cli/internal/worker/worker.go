@@ -78,11 +78,23 @@ type streamSubKey struct {
 // sequence the consumer expects (advanced as stream_items are forwarded),
 // so a re-subscribe resumes exactly where delivery stopped — no gaps, no
 // duplicates.
+//
+// The credit counters are tracked for the same reason. The adapter's
+// counters are cumulative and don't reset when the connection drops, so
+// a re-subscribe has to tell the server where the accounting stands.
+// Letting the server restart from zero would over-grant the window by
+// however many items were in flight; deriving the acked counts from
+// `delivered` would under-grant it, and could deadlock a consumer that
+// has already drained its queue and so has nothing left to ack.
 type streamSubscription struct {
 	producerExecutionID string
 	index               int
 	nextSequence        int
 	stride              map[string]any
+	prefetch            int
+	delivered           int
+	ackCount            int
+	ackSequence         int
 }
 
 type executionState struct {
@@ -736,13 +748,15 @@ func (w *Worker) handleStreamItems(params []any) error {
 	}
 
 	// Advance the tracked cursor so a post-reconnect re-subscribe resumes
-	// after the last item the consumer was sent.
+	// after the last item the consumer was sent, and count the delivery so
+	// the re-subscribe can restate the credit accounting.
 	if maxSequence >= 0 {
 		w.streamSubsMu.Lock()
 		if sub, ok := w.streamSubs[streamSubKey{executionID, int(subscriptionID)}]; ok {
 			if maxSequence+1 > sub.nextSequence {
 				sub.nextSequence = maxSequence + 1
 			}
+			sub.delivered += len(converted)
 		}
 		w.streamSubsMu.Unlock()
 	}
@@ -1355,7 +1369,7 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, index int,
 	return conn.Notify("stream_close", executionID, index, errTuple, *reason)
 }
 
-func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error {
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any, prefetch int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
@@ -1370,11 +1384,39 @@ func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscr
 		index:               index,
 		nextSequence:        fromSequence,
 		stride:              stride,
+		prefetch:            prefetch,
+		ackSequence:         fromSequence - 1,
 	}
 	w.streamSubsMu.Unlock()
 
-	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride]
-	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride)
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride, prefetch]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride, prefetch)
+}
+
+// StreamAck forwards a consumer's cumulative progress to the server,
+// which frees delivery credit and advances the watermark the producer's
+// buffer is measured against.
+func (w *Worker) StreamAck(ctx context.Context, executionID string, subscriptionID int, count int, sequence int) error {
+	// Record before notifying (as StreamSubscribe does), so an ack issued
+	// while disconnected still updates what resubscribeStreams reports.
+	// Dropping it here would be unrecoverable: the counters are
+	// cumulative, so the adapter never re-sends them, and a consumer that
+	// has already drained its queue has nothing left to ack. The server
+	// would then resume with stale credit and deliver nothing.
+	w.streamSubsMu.Lock()
+	if sub, ok := w.streamSubs[streamSubKey{executionID, subscriptionID}]; ok {
+		sub.ackCount = count
+		sub.ackSequence = sequence
+	}
+	w.streamSubsMu.Unlock()
+
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+
+	// Params: [consumer_execution_id, subscription_id, count, sequence]
+	return conn.Notify("stream_ack", executionID, subscriptionID, count, sequence)
 }
 
 func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {
@@ -1983,8 +2025,17 @@ func (w *Worker) resubscribeStreams(known map[string]struct{}) {
 	w.streamSubsMu.Unlock()
 
 	for _, r := range resubs {
+		// Restate the credit accounting: the adapter's counters are
+		// cumulative and survive the reconnect, so the server has to pick
+		// them up rather than starting a fresh window.
+		progress := map[string]any{
+			"delivered":   r.sub.delivered,
+			"acked_count": r.sub.ackCount,
+			"acked_seq":   r.sub.ackSequence,
+		}
 		err := conn.Notify("stream_subscribe", r.key.subscriptionID, r.key.executionID,
-			r.sub.producerExecutionID, r.sub.index, r.sub.nextSequence, r.sub.stride)
+			r.sub.producerExecutionID, r.sub.index, r.sub.nextSequence, r.sub.stride,
+			r.sub.prefetch, progress)
 		if err != nil {
 			// Connection dropped again — the next reconnect retries.
 			w.logger.Debug("stream re-subscribe failed", "execution_id", r.key.executionID,

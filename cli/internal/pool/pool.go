@@ -66,7 +66,11 @@ type ExecutionHandler interface {
 	// by another execution. `stride` is an optional
 	// {"start", "stop", "step"} map restricting which positions are
 	// delivered; nil means no filtering.
-	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any) error
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any, prefetch int) error
+	// StreamAck reports consumer progress. `count` and `sequence` are
+	// cumulative — how many items have been processed, and the highest
+	// sequence among them. Frees delivery credit server-side.
+	StreamAck(ctx context.Context, executionID string, subscriptionID int, count int, sequence int) error
 	// StreamUnsubscribe drops a consumer subscription.
 	StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error
 }
@@ -352,6 +356,9 @@ loop:
 		case "stream_subscribe":
 			p.handleStreamSubscribe(execCtx, executionID, params, logger)
 
+		case "stream_ack":
+			p.handleStreamAck(execCtx, executionID, params, logger)
+
 		case "stream_unsubscribe":
 			p.handleStreamUnsubscribe(execCtx, executionID, params, logger)
 
@@ -597,8 +604,21 @@ func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, pa
 		req.Index,
 		req.FromSequence,
 		req.Stride,
+		req.Prefetch,
 	); err != nil {
 		logger.Error("failed to subscribe to stream", "error", err)
+	}
+}
+
+func (p *Pool) handleStreamAck(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.StreamAckParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse stream_ack message", "error", err)
+		return
+	}
+
+	if err := p.handler.StreamAck(ctx, req.ExecutionID, req.SubscriptionID, req.Count, req.Sequence); err != nil {
+		logger.Error("failed to ack stream", "error", err)
 	}
 }
 

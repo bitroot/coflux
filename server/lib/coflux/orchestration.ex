@@ -213,12 +213,25 @@ defmodule Coflux.Orchestration do
         producer_execution_id,
         index,
         from_sequence,
-        filter
+        filter,
+        prefetch,
+        progress
       ) do
     call_server(
       project_id,
       {:subscribe_stream, session_id, subscription_id, consumer_execution_id,
-       producer_execution_id, index, from_sequence, filter}
+       producer_execution_id, index, from_sequence, filter, prefetch, progress}
+    )
+  end
+
+  # Consumer progress report. `count` / `sequence` are cumulative: how
+  # many items the consumer has finished with, and the highest sequence
+  # among them. Frees delivery credit and advances the watermark the
+  # producer's buffer is measured against.
+  def ack_stream(project_id, consumer_execution_id, subscription_id, count, sequence) do
+    call_server(
+      project_id,
+      {:ack_stream, consumer_execution_id, subscription_id, count, sequence}
     )
   end
 

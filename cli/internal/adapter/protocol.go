@@ -316,6 +316,8 @@ type StreamCloseError struct {
 // positions `start, start+step, start+2·step, …` up to (but not
 // including) `stop`. Any chain of slice/partition/stride calls on the
 // consumer side composes into a single stride before the wire.
+// `Prefetch` is the adapter's delivery window: the server won't send
+// more than this many items beyond what the adapter has acknowledged.
 type StreamSubscribeParams struct {
 	ExecutionID         string         `json:"execution_id"` // consumer
 	SubscriptionID      int            `json:"subscription_id"`
@@ -323,6 +325,19 @@ type StreamSubscribeParams struct {
 	Index               int            `json:"index"`
 	FromSequence        int            `json:"from_sequence"`
 	Stride              map[string]any `json:"stride,omitempty"`
+	Prefetch            int            `json:"prefetch"`
+}
+
+// StreamAckParams for stream_ack notification. `Count` and `Sequence`
+// are cumulative: how many items the consumer has finished processing,
+// and the highest sequence among them. Cumulative rather than
+// incremental so a retransmit after a reconnect is idempotent and a
+// dropped ack is corrected by the next one.
+type StreamAckParams struct {
+	ExecutionID    string `json:"execution_id"` // consumer
+	SubscriptionID int    `json:"subscription_id"`
+	Count          int    `json:"count"`
+	Sequence       int    `json:"sequence"`
 }
 
 // StreamUnsubscribeParams for stream_unsubscribe notification.

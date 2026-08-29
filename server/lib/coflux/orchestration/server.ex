@@ -131,9 +131,17 @@ defmodule Coflux.Orchestration.Server do
               # adapters (each starting subscription counters from 0) can't
               # collide.
               #
+              # Delivery is credit-gated: the consumer declares a `prefetch`
+              # window on subscribe and reports progress with `stream_ack`.
+              # We only push while `delivered - acked_count < prefetch`, which
+              # is what bounds the consumer's in-memory queue. Undelivered
+              # items aren't lost — they're durable, and the next ack pumps
+              # them from the DB.
+              #
               # stream_subscriptions: {consumer_execution_id, subscription_id} ->
               #     %{consumer_execution_external_id, producer_execution_id,
-              #       index, cursor, filter}
+              #       index, cursor, stride, prefetch, delivered, acked_count,
+              #       acked_seq, pending_close}
               # stream_subscribers: {producer_execution_id, index} -> MapSet of
               #     {consumer_execution_id, subscription_id}
               stream_subscriptions: %{},
@@ -150,10 +158,10 @@ defmodule Coflux.Orchestration.Server do
               # * session_id            — where to route stream_demand
               # * execution_external_id — external id for the command wire
               #
-              # The current max_cursor across adapter subscribers is
-              # recomputed from stream_subscribers on demand rather than
-              # cached here, since it changes often and is cheap to
-              # derive.
+              # The watermark the budget is measured against is the
+              # *slowest* subscriber's acknowledged position, recomputed
+              # from stream_subscribers on demand rather than cached here,
+              # since it changes often and is cheap to derive.
               stream_producers: %{}
   end
 
@@ -1985,7 +1993,7 @@ defmodule Coflux.Orchestration.Server do
 
   def handle_call(
         {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
-         producer_execution_external_id, index, from_sequence, stride},
+         producer_execution_external_id, index, from_sequence, stride, prefetch, progress},
         _from,
         state
       ) do
@@ -2007,12 +2015,40 @@ defmodule Coflux.Orchestration.Server do
          {:ok, true} <- Streams.exists?(state.db, producer_execution_id, index),
          key = {consumer_execution_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
+      # `progress` is nil for a fresh subscribe and carries the CLI's
+      # cumulative counters when it's re-establishing a subscription after
+      # a reconnect. The adapter's counters don't reset across a reconnect,
+      # so we resume the accounting where the previous connection left off.
+      # Starting from zero instead would over-grant the window by however
+      # many items were in flight when the connection dropped; deriving
+      # `acked_count` from `delivered` would under-grant it, and could
+      # deadlock a consumer that has already drained its queue and so has
+      # nothing left to ack.
+      # The handler validates the shape, but this is worker-supplied JSON
+      # reaching a GenServer whose crash would take down every in-flight
+      # run in the project — so fall back rather than raise if anything
+      # unexpected gets this far.
+      {delivered, acked_count, acked_seq} =
+        case progress do
+          %{"delivered" => d, "acked_count" => a, "acked_seq" => s}
+          when is_integer(d) and is_integer(a) and is_integer(s) ->
+            {d, a, s}
+
+          _ ->
+            {0, 0, from_sequence - 1}
+        end
+
       subscription = %{
         consumer_execution_external_id: consumer_execution_external_id,
         producer_execution_id: producer_execution_id,
         index: index,
         cursor: from_sequence,
-        stride: stride
+        stride: stride,
+        prefetch: prefetch,
+        delivered: delivered,
+        acked_count: acked_count,
+        acked_seq: acked_seq,
+        pending_close: nil
       }
 
       state =
@@ -2052,10 +2088,12 @@ defmodule Coflux.Orchestration.Server do
       state =
         refresh_stream_demand(state, {producer_execution_id, index})
 
-      # Push any items already in the log that match the filter, then (if
-      # the stream has already closed) the terminal close record.
-      state = push_backlog(state, key)
-      state = maybe_push_closure_if_closed(state, key)
+      # If the stream has already closed, record that as pending first so
+      # the pump can emit it — but only once the backlog it's allowed to
+      # send has actually been delivered. Pushing the closure eagerly
+      # would land it ahead of a credit-limited backlog.
+      state = mark_closed_if_closed(state, key)
+      state = pump_subscription(state, key)
 
       # Record the subscribe as a lineage edge (consumer -> producer stream).
       # Done unconditionally on subscribe, independent of whether items end
@@ -2092,6 +2130,45 @@ defmodule Coflux.Orchestration.Server do
       {:ok, false} -> {:reply, {:error, :stream_not_found}, state}
       true -> {:reply, {:error, :already_subscribed}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Consumer reports progress. `count` and `sequence` are cumulative and
+  # monotonic — `count` is how many items the consumer has finished
+  # processing, `sequence` the highest sequence among them. Cumulative
+  # (rather than incremental) so a retransmit after a reconnect is
+  # idempotent, and so a dropped ack is corrected by the next one.
+  #
+  # Acking does two things: frees credit (allowing the pump to deliver
+  # more), and advances the watermark the producer's buffer is measured
+  # against.
+  def handle_call(
+        {:ack_stream, consumer_execution_external_id, subscription_id, count, sequence},
+        _from,
+        state
+      ) do
+    with {:ok, consumer_execution_id} <-
+           Map.fetch(state.execution_ids, consumer_execution_external_id),
+         key = {consumer_execution_id, subscription_id},
+         {:ok, sub} <- Map.fetch(state.stream_subscriptions, key) do
+      # Clamp rather than trust: an out-of-order or stale ack must never
+      # move a watermark backwards, and `count` can't exceed what we
+      # actually sent.
+      acked_count = sub.acked_count |> max(count) |> min(sub.delivered)
+      acked_seq = max(sub.acked_seq, sequence)
+
+      state =
+        update_in(
+          state.stream_subscriptions[key],
+          &%{&1 | acked_count: acked_count, acked_seq: acked_seq}
+        )
+
+      state = pump_subscription(state, key)
+      state = refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
+
+      {:reply, :ok, flush_notifications(state)}
+    else
+      :error -> {:reply, :ok, state}
     end
   end
 
@@ -2911,15 +2988,29 @@ defmodule Coflux.Orchestration.Server do
   # send a delta grant to the producer's session.
   #
   # Formula:
-  #   target = max_cursor + buffer + (1 if has_subscribers else 0)
-  # The +1 on subscriber presence unblocks lockstep streams — a
-  # consumer's cursor at position N means "ready for item N", which is
-  # one item beyond what they've acked.
+  #   target = watermark + buffer + (1 if has_subscribers else 0)
   #
-  # demand_granted is monotonic; if target drops (e.g. the fastest
-  # consumer left) we don't claw back, future grants just wait until
-  # the remaining subscribers catch up past the old max.
-  defp refresh_stream_demand(state, {_execution_id, index} = key) do
+  # `watermark` is the *slowest* subscriber's acknowledged position, so
+  # `buffer` means what it claims: how far ahead of actual consumption
+  # the producer may run. Measuring against the fastest subscriber (or
+  # against delivery rather than acknowledgement) would let the producer
+  # run arbitrarily far ahead of a slow consumer, which is the thing the
+  # budget exists to prevent.
+  #
+  # The +1 on subscriber presence is what makes buffer=0 lockstep rather
+  # than deadlock: the consumer needs one item in hand before it can ack
+  # anything.
+  #
+  # With no subscribers the watermark is 0, so a producer may pre-warm up
+  # to `buffer` items before anyone attaches.
+  #
+  # demand_granted is monotonic; if the target drops (e.g. a slower
+  # consumer joined, pulling the minimum down) we don't claw back —
+  # future grants just wait until consumption passes the old high-water
+  # mark. The target *rising* does have to be noticed, though, which is
+  # why drop_subscription refreshes: losing the slowest subscriber
+  # raises the minimum, and nothing else would recompute it.
+  defp refresh_stream_demand(state, key) do
     case Map.fetch(state.stream_producers, key) do
       :error ->
         state
@@ -2933,22 +3024,34 @@ defmodule Coflux.Orchestration.Server do
         state
 
       {:ok, producer} ->
-        has_subscribers = has_stream_subscribers?(state, key)
-        max_cursor = current_max_cursor(state, key)
-        bump = if has_subscribers, do: 1, else: 0
-        target = max_cursor + producer.buffer + bump
-        delta = target - producer.demand_granted
-
-        if delta > 0 do
+        # The producer's stream_producers entry can outlive its session
+        # (e.g. a subscription is dropped during that session's teardown).
+        # send_session would raise on the missing session, so treat that
+        # like session_id: nil above.
+        if not Map.has_key?(state.sessions, producer.session_id) do
           state
-          |> put_in([Access.key(:stream_producers), key, :demand_granted], target)
-          |> send_session(
-            producer.session_id,
-            {:stream_demand, producer.execution_external_id, index, delta}
-          )
         else
-          state
+          refresh_stream_demand_for(state, key, producer)
         end
+    end
+  end
+
+  defp refresh_stream_demand_for(state, {_execution_id, index} = key, producer) do
+    has_subscribers = has_stream_subscribers?(state, key)
+    watermark = slowest_ack_watermark(state, key)
+    bump = if has_subscribers, do: 1, else: 0
+    target = watermark + producer.buffer + bump
+    delta = target - producer.demand_granted
+
+    if delta > 0 do
+      state
+      |> put_in([Access.key(:stream_producers), key, :demand_granted], target)
+      |> send_session(
+        producer.session_id,
+        {:stream_demand, producer.execution_external_id, index, delta}
+      )
+    else
+      state
     end
   end
 
@@ -2959,16 +3062,38 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp current_max_cursor(state, key) do
-    state.stream_subscribers
-    |> Map.get(key, MapSet.new())
-    |> Enum.reduce(0, fn sub_key, acc ->
-      case Map.get(state.stream_subscriptions, sub_key) do
-        nil -> acc
-        sub -> max(acc, sub.cursor)
-      end
-    end)
+  defp slowest_ack_watermark(state, key) do
+    watermarks =
+      state.stream_subscribers
+      |> Map.get(key, MapSet.new())
+      |> Enum.flat_map(fn sub_key ->
+        case Map.get(state.stream_subscriptions, sub_key) do
+          nil -> []
+          sub -> [ack_watermark(sub)]
+        end
+      end)
+
+    case watermarks do
+      [] -> 0
+      watermarks -> Enum.min(watermarks)
+    end
   end
+
+  # How far this subscriber has got, in sequence space.
+  #
+  # With nothing outstanding, the consumer has processed (or been
+  # stride-skipped past) everything below `cursor` — that's the honest
+  # position, and it's what keeps a stride subscriber from stalling the
+  # producer over sequences it will never be sent.
+  #
+  # Otherwise the oldest unacked item sits at or above `acked_seq + 1`.
+  # Using that is conservative: it can understate progress when delivery
+  # is sparse, which errs towards producing less rather than more.
+  defp ack_watermark(%{delivered: delivered, acked_count: acked_count, cursor: cursor})
+       when delivered == acked_count,
+       do: cursor
+
+  defp ack_watermark(%{acked_seq: acked_seq}), do: acked_seq + 1
 
   defp drop_stream_producer(state, key) do
     Map.update!(state, :stream_producers, &Map.delete(&1, key))
@@ -6051,15 +6176,15 @@ defmodule Coflux.Orchestration.Server do
         # wake-ups. For value/error the completion is written later via
         # complete_execution, which fires these itself.
         #
-        # Completion implies streams closed: any streams this execution
-        # left open are closed here (after the completion row is written,
-        # so derive_lifecycle_info resolves the real reason for live
-        # subscribers) — otherwise abandoned/timed-out producers leave
+        # Terminal completions imply streams closed: any streams this
+        # execution left open are closed here (after the completion row is
+        # written, so derive_lifecycle_info resolves the real reason for
+        # live subscribers) — otherwise abandoned/timed-out producers leave
         # consumers blocked forever waiting for a close that never comes.
         state =
           if writes_completion_immediately?(result) do
             state
-            |> close_open_streams(execution_id)
+            |> maybe_close_open_streams(result, execution_id)
             |> fire_completion_notification(execution_id, timestamp)
           else
             state
@@ -6071,6 +6196,40 @@ defmodule Coflux.Orchestration.Server do
         {:error, reason}
     end
   end
+
+  # Which of the immediately-completing shapes should close the
+  # execution's open streams. Deliberately the same set that
+  # derive_lifecycle_info can name — closing a stream whose reason we
+  # can't derive would push a nil reason, which consumers coerce to a
+  # clean "complete" and silently accept as a truncated stream.
+  #
+  # :deferred / :cached / :spawned never reach here with open streams
+  # (the execution was superseded before its body ran, so it appended
+  # nothing).
+  #
+  # :suspended / :recurred *are* included. A stream is owned by exactly
+  # one execution (see the `streams` table invariants), so a successor
+  # does not continue its predecessor's stream — it registers its own
+  # under a new execution id, and consumer references are concrete to
+  # the original. That makes the predecessor's stream terminal at the
+  # moment it suspends or recurs. Leaving it open would strand every
+  # attached consumer: no further item can ever be appended to it, and
+  # no later event would close it.
+  defp maybe_close_open_streams(state, result, execution_id) do
+    if closes_streams_on_completion?(result) do
+      close_open_streams(state, execution_id)
+    else
+      state
+    end
+  end
+
+  defp closes_streams_on_completion?(:cancelled), do: true
+  defp closes_streams_on_completion?({:abandoned, _}), do: true
+  defp closes_streams_on_completion?({:crashed, _}), do: true
+  defp closes_streams_on_completion?({:timeout, _}), do: true
+  defp closes_streams_on_completion?({:suspended, _}), do: true
+  defp closes_streams_on_completion?({:recurred, _}), do: true
+  defp closes_streams_on_completion?(_), do: false
 
   defp writes_completion_immediately?(:cancelled), do: true
   defp writes_completion_immediately?({:abandoned, _}), do: true
@@ -6349,7 +6508,11 @@ defmodule Coflux.Orchestration.Server do
         fire_completion_notification(state, execution_id, completion_at)
 
       {:error, :already_completed} ->
-        state
+        # A completion row already exists, so derive_lifecycle_info still
+        # resolves a real reason. Close streams here too — otherwise this
+        # branch strands every consumer of a stream the producer left
+        # open, waiting for a close that nothing else emits.
+        close_open_streams(state, execution_id)
     end
   end
 
@@ -6382,7 +6545,10 @@ defmodule Coflux.Orchestration.Server do
         fire_completion_notification(state, execution_id, completion_at)
 
       {:error, :already_completed} ->
-        state
+        # As in finalize_error_completion: a completion row exists, so the
+        # reason is derivable and any streams the dead worker left open
+        # still need closing or their consumers wait forever.
+        close_open_streams(state, execution_id)
     end
   end
 
@@ -6482,6 +6648,18 @@ defmodule Coflux.Orchestration.Server do
 
       {:ok, {:timeout, _, _, _, _}} ->
         {:timeout, nil}
+
+      # The producer didn't fail — it suspended, or finished a recurrent
+      # iteration. Either way *this* stream is finished: the successor
+      # registers its own under a new execution id and consumer
+      # references are concrete to the original, so nothing more can
+      # arrive here. Reported distinctly rather than as :abandoned so a
+      # truncated-by-recurrence stream doesn't read as a worker failure.
+      {:ok, {:suspended, _, _, _, _}} ->
+        {:suspended, nil}
+
+      {:ok, {:recurred, _, _, _, _}} ->
+        {:recurred, nil}
 
       {:ok, {:errored, _, _, _, _}} ->
         # Error payload lives on the results row — pull it so consumers
@@ -8074,74 +8252,109 @@ defmodule Coflux.Orchestration.Server do
   # to the session before loading the next.
   @backlog_page_size 1024
 
-  # Send backlog items (those already in the DB) for a newly subscribed
-  # consumer. Pages the DB reads + session pushes so a very long stream
-  # doesn't materialise the entire tail in memory at once.
-  defp push_backlog(state, key) do
-    push_backlog_page(state, key)
+  # How many more items may be sent to this subscriber before it has to
+  # acknowledge some. This is what bounds the consumer's in-memory queue;
+  # anything we hold back stays durable in the DB and goes out on the
+  # next pump.
+  defp available_credit(%{prefetch: prefetch, delivered: delivered, acked_count: acked_count}) do
+    prefetch - (delivered - acked_count)
   end
 
+  # Deliver as much as credit allows, then settle any pending closure.
+  # Driven on subscribe, on ack (credit freed up), and after an append
+  # that couldn't be sent inline.
+  defp pump_subscription(state, key) do
+    state
+    |> push_backlog_page(key)
+    |> maybe_finish_subscription(key)
+  end
+
+  # Send items from the DB for a subscriber that's behind — either newly
+  # subscribed, or previously held back for want of credit. Pages the DB
+  # reads + session pushes so a very long stream doesn't materialise the
+  # entire tail in memory at once.
   defp push_backlog_page(state, key) do
-    sub = Map.fetch!(state.stream_subscriptions, key)
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
 
-    {:ok, items} =
-      Streams.get_stream_items(
-        state.db,
-        sub.producer_execution_id,
-        sub.index,
-        sub.cursor,
-        @backlog_page_size
-      )
-
-    if items == [] do
-      state
-    else
-      state = push_backlog_items(state, key, sub, items)
-
-      # If the subscription was dropped (filter exhausted) or didn't
-      # advance (nothing in this page matched), stop. Otherwise keep
-      # paging until the tail empties.
-      case Map.fetch(state.stream_subscriptions, key) do
-        :error ->
+      {:ok, sub} ->
+        if available_credit(sub) <= 0 do
           state
+        else
+          {:ok, items} =
+            Streams.get_stream_items(
+              state.db,
+              sub.producer_execution_id,
+              sub.index,
+              sub.cursor,
+              @backlog_page_size
+            )
 
-        {:ok, next_sub} ->
-          cond do
-            next_sub.cursor == sub.cursor -> state
-            length(items) < @backlog_page_size -> state
-            true -> push_backlog_page(state, key)
+          if items == [] do
+            state
+          else
+            state = push_backlog_items(state, key, sub, items)
+
+            # Stop if the subscription was dropped (stride exhausted), if
+            # nothing in this page moved us forward, if we've run out of
+            # credit, or if the page was short (tail reached). Otherwise
+            # keep paging.
+            case Map.fetch(state.stream_subscriptions, key) do
+              :error ->
+                state
+
+              {:ok, next_sub} ->
+                cond do
+                  next_sub.cursor == sub.cursor -> state
+                  available_credit(next_sub) <= 0 -> state
+                  length(items) < @backlog_page_size -> state
+                  true -> push_backlog_page(state, key)
+                end
+            end
           end
-      end
+        end
     end
   end
 
   defp push_backlog_items(state, key, sub, items) do
     {_consumer_execution_id, subscription_id} = key
+    credit = available_credit(sub)
 
-    filtered =
-      items
-      |> Enum.filter(fn {sequence, _value, _at} -> stride_matches?(sub.stride, sequence) end)
-      |> Enum.take_while(fn {sequence, _, _} ->
-        not stride_exhausted?(sub.stride, sequence)
+    # Walk the page in order, taking matching items until credit runs out.
+    # `advance_to` tracks how far the cursor may honestly move: past
+    # everything we've decided about, and no further. An item we had no
+    # credit for must be left for the next pump to re-read, so the cursor
+    # has to stop short of it — advancing past the whole page (as an
+    # unbounded push could) would silently drop it.
+    {selected, count, advance_to, exhausted} =
+      Enum.reduce_while(items, {[], 0, sub.cursor, false}, fn {sequence, value, _at},
+                                                              {acc, count, _advance, _exhausted} ->
+        cond do
+          stride_exhausted?(sub.stride, sequence) ->
+            {:halt, {acc, count, sequence, true}}
+
+          not stride_matches?(sub.stride, sequence) ->
+            # Skipped sequences cost no credit — advance past them freely,
+            # otherwise we'd re-fetch them forever.
+            {:cont, {acc, count, sequence + 1, false}}
+
+          count < credit ->
+            {:cont, {[{sequence, value} | acc], count + 1, sequence + 1, false}}
+
+          true ->
+            {:halt, {acc, count, sequence, false}}
+        end
       end)
 
-    # Advance cursor past the page even if no items matched this filter —
-    # otherwise we'd re-fetch the same sequences forever.
-    advance_to =
-      if filtered == [] do
-        elem(List.last(items), 0) + 1
-      else
-        elem(List.last(filtered), 0) + 1
-      end
-
     state =
-      if filtered == [] do
+      if selected == [] do
         state
       else
         resolved_items =
-          Enum.map(filtered, fn {sequence, value, _at} ->
-            [sequence, build_value(value, state.db)]
-          end)
+          selected
+          |> Enum.reverse()
+          |> Enum.map(fn {sequence, value} -> [sequence, build_value(value, state.db)] end)
 
         send_to_consumer(
           state,
@@ -8153,30 +8366,23 @@ defmodule Coflux.Orchestration.Server do
     state =
       update_in(
         state.stream_subscriptions[key],
-        &Map.put(&1, :cursor, advance_to)
+        fn s -> %{s | cursor: advance_to, delivered: s.delivered + count} end
       )
 
     state =
-      if stride_exhausted?(sub.stride, advance_to) do
-        # If the stride has reached its stop, close the subscription
-        # synchronously — matches push_stream_item's behaviour. Without
-        # this, a consumer that subscribed after appends with a bounded
-        # stride would wait forever for a close that never comes.
-        # Stride-exhaustion is a "complete" outcome from the consumer's
-        # perspective: they've received everything that was addressed
-        # to them.
-        state
-        |> send_to_consumer(
-          sub,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete", nil}
-        )
-        |> drop_subscription(key)
+      if exhausted or stride_exhausted?(sub.stride, advance_to) do
+        # The stride has reached its stop — nothing more can match, so
+        # close now rather than leaving the consumer waiting for a close
+        # that would only arrive when the producer finishes. This is a
+        # "complete" outcome from their perspective: they've received
+        # everything that was addressed to them.
+        finish_subscription(state, key, "complete", nil)
       else
         state
       end
 
-    # The backlog push moved this consumer's cursor forward — may
-    # unblock the producer if their buffer has room now.
+    # The push moved this consumer's cursor forward, which may have moved
+    # the slowest-subscriber watermark and unblocked the producer.
     refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
   end
 
@@ -8190,6 +8396,17 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Push a freshly-appended item to every subscriber of this stream.
+  #
+  # This is a fast path: it exists so the just-appended value can be sent
+  # straight from memory instead of being re-read from SQLite by the
+  # pump. That means it necessarily restates the delivery rules
+  # (stride skip, credit check, cursor advance, stride-exhaustion close)
+  # that push_backlog_items implements over a page of items.
+  #
+  # push_backlog_items is the authority on those rules. Any change to
+  # stride or credit semantics must be made there *and* mirrored here.
+  # Anything this path declines to send is left untouched and durable,
+  # so the pump re-reads it in order — declining is always safe.
   defp push_stream_item(state, producer_execution_id, index, sequence, value) do
     stream_key = {producer_execution_id, index}
 
@@ -8201,16 +8418,20 @@ defmodule Coflux.Orchestration.Server do
         sub = Map.fetch!(state.stream_subscriptions, key)
 
         cond do
-          sequence < sub.cursor ->
-            # Consumer already has this sequence via backlog; skip.
+          sequence != sub.cursor ->
+            # Not the sequence this subscriber is waiting for — either it
+            # already has this one via the backlog, or it's behind and this
+            # item is ahead of its cursor. Either way the item is durable,
+            # so leave it for the pump to read in order.
             state
 
           not stride_matches?(sub.stride, sequence) ->
             # Advance the cursor past non-matching sequences too (matching
             # push_backlog_items' behaviour): demand grants are derived
-            # from subscriber cursors, so leaving the cursor behind would
+            # from subscriber positions, so leaving the cursor behind would
             # permanently stall a bounded-buffer producer against a
             # partition/slice consumer whose stride skips this sequence.
+            # Skipping costs no credit — nothing is delivered.
             state =
               update_in(
                 state.stream_subscriptions[key],
@@ -8218,20 +8439,20 @@ defmodule Coflux.Orchestration.Server do
               )
 
             if stride_exhausted?(sub.stride, sequence + 1) do
-              state
-              |> send_to_consumer(
-                sub,
-                {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete",
-                 nil}
-              )
-              |> drop_subscription(key)
+              finish_subscription(state, key, "complete", nil)
             else
               state
             end
 
+          available_credit(sub) <= 0 ->
+            # Consumer's window is full. Hold the item back *without*
+            # advancing the cursor — it's already durable, and the next ack
+            # will pump it from the DB in order.
+            state
+
           true ->
             # Value came off the wire in parse form (ext-id refs, no metadata).
-            # Normalise + resolve to match the form push_backlog sends; the WS
+            # Normalise + resolve to match the form the pump sends; the WS
             # handler composes to wire JSON.
             resolved = build_value(normalize_value(value), state.db)
             item = [sequence, resolved]
@@ -8246,7 +8467,7 @@ defmodule Coflux.Orchestration.Server do
             state =
               update_in(
                 state.stream_subscriptions[key],
-                &Map.put(&1, :cursor, sequence + 1)
+                fn s -> %{s | cursor: sequence + 1, delivered: s.delivered + 1} end
               )
 
             # If the stride has reached its stop, close the subscription
@@ -8254,13 +8475,7 @@ defmodule Coflux.Orchestration.Server do
             # close for the consumer (they got everything that was
             # addressed to them).
             if stride_exhausted?(sub.stride, sequence + 1) do
-              state
-              |> send_to_consumer(
-                sub,
-                {:stream_closed, sub.consumer_execution_external_id, subscription_id, "complete",
-                 nil}
-              )
-              |> drop_subscription(key)
+              finish_subscription(state, key, "complete", nil)
             else
               state
             end
@@ -8277,6 +8492,12 @@ defmodule Coflux.Orchestration.Server do
   # :timeout`) — the client chooses how to represent each in its own
   # idiom. `error` is non-nil only when `reason == :errored`, carrying
   # the producer's actual `{type, message, frames}`.
+  #
+  # The closure is recorded as *pending* rather than sent immediately:
+  # with credit-gated delivery a subscriber may still be behind the
+  # stream head, and emitting the close now would land it ahead of the
+  # items the consumer hasn't been given room for yet. Each subscription
+  # emits its close once it has drained.
   defp push_stream_closed(state, producer_execution_id, index, reason, error) do
     subscribers =
       Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
@@ -8284,18 +8505,64 @@ defmodule Coflux.Orchestration.Server do
     reason_str = if reason, do: Atom.to_string(reason)
     encoded_error = encode_stream_error(error)
 
-    Enum.reduce(subscribers, state, fn key, state ->
-      {_consumer_execution_id, subscription_id} = key
-      sub = Map.fetch!(state.stream_subscriptions, key)
+    # The stream is closed in the DB by the time we get here, so the head
+    # is final. Read it once and record it on each pending close rather
+    # than re-querying per subscriber per ack for the rest of the drain.
+    {:ok, head} = Streams.get_stream_head(state.db, producer_execution_id, index)
 
+    Enum.reduce(subscribers, state, fn key, state ->
       state
-      |> send_to_consumer(
-        sub,
-        {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason_str,
-         encoded_error}
-      )
-      |> drop_subscription(key)
+      |> mark_pending_close(key, reason_str, encoded_error, head)
+      |> maybe_finish_subscription(key)
     end)
+  end
+
+  # `head` is the stream's final sequence — safe to cache on the pending
+  # close because a stream only gets one closure and no item may be
+  # appended after it.
+  defp mark_pending_close(state, key, reason, error, head) do
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error -> state
+      {:ok, _} -> put_in(state.stream_subscriptions[key].pending_close, {reason, error, head})
+    end
+  end
+
+  # Emit a recorded closure, but only once the consumer has been sent
+  # everything it is going to get. Until then the close waits — the
+  # subscription stays alive so later acks can pump the remainder.
+  defp maybe_finish_subscription(state, key) do
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
+
+      {:ok, %{pending_close: nil}} ->
+        state
+
+      {:ok, %{pending_close: {reason, error, head}} = sub} ->
+        if sub.cursor > head do
+          finish_subscription(state, key, reason, error)
+        else
+          state
+        end
+    end
+  end
+
+  # Send the terminal close for a subscription and drop it.
+  defp finish_subscription(state, key, reason, error) do
+    case Map.fetch(state.stream_subscriptions, key) do
+      :error ->
+        state
+
+      {:ok, sub} ->
+        {_consumer_execution_id, subscription_id} = key
+
+        state
+        |> send_to_consumer(
+          sub,
+          {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason, error}
+        )
+        |> drop_subscription(key)
+    end
   end
 
   # Wire encoding for the producer's actual error on an `:errored` close.
@@ -8315,22 +8582,21 @@ defmodule Coflux.Orchestration.Server do
     }
   end
 
-  # If a subscription attaches to an already-closed stream, emit closure now.
-  # If push_backlog already closed the subscription (e.g., a bounded filter
-  # was exhausted by the backlog itself), this is a no-op.
-  defp maybe_push_closure_if_closed(state, key) do
+  # If a subscription attaches to an already-closed stream, record the
+  # closure as pending. The pump emits it once the backlog has been
+  # delivered — which, for a consumer whose prefetch is smaller than the
+  # backlog, takes several rounds of acks.
+  defp mark_closed_if_closed(state, key) do
     case Map.fetch(state.stream_subscriptions, key) do
       :error ->
         state
 
       {:ok, sub} ->
-        do_maybe_push_closure(state, sub, key)
+        do_mark_closed(state, sub, key)
     end
   end
 
-  defp do_maybe_push_closure(state, sub, key) do
-    {_consumer_execution_id, subscription_id} = key
-
+  defp do_mark_closed(state, sub, key) do
     case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.index) do
       {:ok, nil} ->
         state
@@ -8347,13 +8613,16 @@ defmodule Coflux.Orchestration.Server do
 
         reason_str = if effective_reason, do: Atom.to_string(effective_reason)
 
-        state
-        |> send_to_consumer(
-          sub,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason_str,
-           encode_stream_error(effective_error)}
+        # Already closed, so the head is final — see mark_pending_close.
+        {:ok, head} = Streams.get_stream_head(state.db, sub.producer_execution_id, sub.index)
+
+        mark_pending_close(
+          state,
+          key,
+          reason_str,
+          encode_stream_error(effective_error),
+          head
         )
-        |> drop_subscription(key)
     end
   end
 
@@ -8382,6 +8651,14 @@ defmodule Coflux.Orchestration.Server do
               end
           end
         end)
+        # Demand is measured against the *slowest* subscriber, so losing
+        # one can only raise the target — and if the departing subscriber
+        # was the slowest, this is the last chance to notice. The
+        # remaining subscribers may already have acked everything they'll
+        # ever ack, and a blocked producer appends nothing, so neither of
+        # the other refresh sites (ack_stream, push_stream_item) would
+        # fire again and the producer would wait forever.
+        |> refresh_stream_demand(stream_key)
     end
   end
 

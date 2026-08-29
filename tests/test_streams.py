@@ -729,7 +729,9 @@ def test_backpressure_prewarms_up_to_buffer(worker):
 
 def test_backpressure_subscribe_unblocks_producer(worker):
     """buffer=0 + consumer subscribes → server grants 1 credit. Producer
-    emits. Consumer reads → cursor advances → server grants 1 more.
+    emits. Delivery alone doesn't release the producer — only the
+    consumer's ack does, which is what makes buffer=0 lockstep against
+    consumption rather than against what's been put on the wire.
     """
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
@@ -758,8 +760,14 @@ def test_backpressure_subscribe_unblocks_producer(worker):
         # decrement credits; we just emulate that here by appending).
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "hi")
 
-        # Consumer receives item → cursor advances → server grants again.
+        # Consumer receives the item, but hasn't finished with it yet —
+        # the producer stays blocked.
         cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.3)
+
+        # Acking it releases the next credit.
+        cons_ex.conn.stream_ack(cons_ex.execution_id, 1, count=1, sequence=0)
         second = prod_ex.conn.recv_push("stream_demand", timeout=2)
         assert second["n"] == 1
 
@@ -898,6 +906,325 @@ def test_backpressure_unbounded_sends_no_demand(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         cons_ex.conn.complete(cons_ex.execution_id)
         ctx.result(prod_resp["runId"])
+
+
+def test_prefetch_bounds_delivery_independently_of_buffer(worker):
+    """A consumer's prefetch window bounds what's pushed to it, even when
+    the producer has opted out of backpressure entirely.
+
+    This is the point of keeping the two loops separate: the producer may
+    run as far ahead as it likes (items are durable), without obliging
+    consumers to buffer that far ahead in memory. Undelivered items aren't
+    dropped — each ack pumps the next slice out of the log.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        # buffer omitted → unbounded producer, so any limit on delivery
+        # comes from the consumer's window rather than from the producer.
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        for i in range(5):
+            prod_ex.conn.stream_append(prod_ex.execution_id, 0, i, f"v{i}")
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+            prefetch=2,
+        )
+
+        # Window is 2, so only the first two items arrive — and no close,
+        # even though the stream is already closed in the log.
+        received = []
+        params = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        received.extend(params["items"])
+        assert [i[0] for i in received] == [0, 1]
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=0.3)
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=0.3)
+
+        # Acking frees the window; the rest arrives a slice at a time.
+        cons_ex.conn.stream_ack(cons_ex.execution_id, 1, count=2, sequence=1)
+        rest, closed = cons_ex.conn.drain_stream(subscription_id=1)
+        received.extend(rest)
+
+        assert [i[0] for i in received] == [0, 1, 2, 3, 4]
+        assert [i[1]["value"] for i in received] == ["v0", "v1", "v2", "v3", "v4"]
+        assert closed["reason"] == "complete"
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(cons_resp["runId"])
+
+
+def test_closure_waits_for_credit_limited_consumer_to_drain(worker):
+    """A close must never overtake items the consumer hasn't had room for.
+
+    The producer finishes while the consumer is still behind its window,
+    so the closure is held until the backlog has actually been delivered.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        for i in range(3):
+            prod_ex.conn.stream_append(prod_ex.execution_id, 0, i, f"v{i}")
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+            prefetch=1,
+        )
+
+        # One item in flight; the producer then closes and terminates
+        # while the consumer is still two items behind.
+        first = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [i[0] for i in first["items"]] == [0]
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        ctx.result(prod_resp["runId"])
+
+        # The close must not have jumped the queue.
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=0.5)
+
+        cons_ex.conn.stream_ack(cons_ex.execution_id, 1, count=1, sequence=0)
+        rest, closed = cons_ex.conn.drain_stream(subscription_id=1)
+
+        assert [i[0] for i in first["items"] + rest] == [0, 1, 2]
+        assert closed["reason"] == "complete"
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+        ctx.result(cons_resp["runId"])
+
+
+def test_backpressure_tracks_slowest_consumer(worker):
+    """With two consumers on a buffer=0 stream, the producer is released
+    by the slowest one — a single consumer acking isn't enough.
+
+    Measuring against the fastest subscriber instead would let the
+    producer run arbitrarily far ahead of the slow one, which is the
+    thing the budget exists to prevent.
+    """
+    targets = [
+        workflow("test", "producer"),
+        workflow("test", "consumer"),
+        workflow("test", "consumer2"),
+    ]
+
+    with worker(targets, concurrency=3) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        ctx.submit("test", "consumer")
+        cons_a = ctx.executor.next_execute()
+        cons_a.conn.stream_subscribe(
+            cons_a.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+        ctx.submit("test", "consumer2")
+        cons_b = ctx.executor.next_execute()
+        cons_b.conn.stream_subscribe(
+            cons_b.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+
+        # Drain the grants issued as each consumer attached, then emit.
+        prod_ex.conn.recv_push("stream_demand", timeout=2)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "hi")
+        cons_a.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        cons_b.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # Only the fast consumer acks — the producer stays blocked.
+        cons_a.conn.stream_ack(cons_a.execution_id, 1, count=1, sequence=0)
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.5)
+
+        # The slow one catching up is what releases it.
+        cons_b.conn.stream_ack(cons_b.execution_id, 1, count=1, sequence=0)
+        grant = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert grant["n"] >= 1
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_a.conn.complete(cons_a.execution_id)
+        cons_b.conn.complete(cons_b.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_slowest_consumer_leaving_releases_producer(worker):
+    """When the consumer holding the watermark down goes away, the
+    producer must be released by its departure.
+
+    Nothing else would do it: the remaining consumers have already acked
+    everything they're going to, and a blocked producer appends nothing,
+    so neither an ack nor an append will arrive to trigger a recompute.
+    Demand is measured against the slowest subscriber, so losing one can
+    only raise the target — dropping a subscription has to recompute it.
+    """
+    targets = [
+        workflow("test", "producer"),
+        workflow("test", "consumer"),
+        workflow("test", "consumer2"),
+    ]
+
+    with worker(targets, concurrency=3) as ctx:
+        prod_resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        ctx.submit("test", "consumer")
+        cons_a = ctx.executor.next_execute()
+        cons_a.conn.stream_subscribe(
+            cons_a.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+        ctx.submit("test", "consumer2")
+        cons_b = ctx.executor.next_execute()
+        cons_b.conn.stream_subscribe(
+            cons_b.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+
+        prod_ex.conn.recv_push("stream_demand", timeout=2)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "hi")
+        cons_a.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        cons_b.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # A acks and is now fully caught up; B never does, so B holds the
+        # watermark down and the producer is blocked.
+        cons_a.conn.stream_ack(cons_a.execution_id, 1, count=1, sequence=0)
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_demand", timeout=0.5)
+
+        # B leaves without ever acking. A has nothing left to ack, so this
+        # is the last opportunity to notice the watermark has moved.
+        cons_b.conn.stream_unsubscribe(cons_b.execution_id, 1)
+        grant = prod_ex.conn.recv_push("stream_demand", timeout=2)
+        assert grant["n"] >= 1
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id)
+        cons_a.conn.complete(cons_a.execution_id)
+        cons_b.conn.complete(cons_b.execution_id)
+        ctx.result(prod_resp["runId"])
+
+
+def test_suspended_producer_closes_stream_as_superseded(worker):
+    """A producer that suspends leaves its stream terminal.
+
+    A stream is owned by exactly one execution, so the resumed execution
+    registers its own under a new id rather than continuing this one.
+    The attached consumer must therefore be told the stream is over —
+    and told *why*, since "suspended" is not a failure and shouldn't
+    read like one.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=prod_ex.execution_id,
+            index=0,
+        )
+        items = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [i[0] for i in items["items"]] == [0]
+
+        prod_ex.conn.suspend(prod_ex.execution_id)
+
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "suspended"
+        assert closed.get("error") is None
+
+        # The resumed execution is a distinct execution owning a distinct
+        # stream — which is exactly why the old one had to be closed.
+        prod2 = ctx.executor.next_execute()
+        assert prod2.execution_id != prod_ex.execution_id
+        prod2.conn.stream_register(prod2.execution_id, 0)
+        prod2.conn.complete(prod2.execution_id, value="done")
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+
+def test_recurrent_producer_closes_stream_each_iteration(worker):
+    """Each iteration of a recurrent producer owns its own stream.
+
+    Returning None recurs, which supersedes the execution — so that
+    iteration's stream closes rather than carrying over into the next.
+    """
+    targets = [
+        workflow("test", "main"),
+        task("test", "ticker"),
+        workflow("test", "consumer"),
+    ]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "main")
+        main_ex = ctx.executor.next_execute()
+        main_ex.conn.submit_task(main_ex.execution_id, "test", "ticker", [], recurrent=True)
+
+        tick1 = ctx.executor.next_execute()
+        tick1.conn.stream_register(tick1.execution_id, 0)
+        tick1.conn.stream_append(tick1.execution_id, 0, 0, "tick-0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id,
+            subscription_id=1,
+            producer_execution_id=tick1.execution_id,
+            index=0,
+        )
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # Returning None triggers the next iteration, superseding this one.
+        tick1.conn.complete(tick1.execution_id, value=None)
+
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "recurred"
+
+        # The next iteration is a separate execution with a separate
+        # stream; the old handle does not follow it.
+        tick2 = ctx.executor.next_execute()
+        assert tick2.execution_id != tick1.execution_id
+        tick2.conn.stream_register(tick2.execution_id, 0)
+        tick2.conn.stream_append(tick2.execution_id, 0, 0, "tick-1")
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=0.5)
+
+        cons_ex.conn.complete(cons_ex.execution_id)
 
 
 # --- Idle timeout -------------------------------------------------------
