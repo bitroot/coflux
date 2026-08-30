@@ -423,6 +423,56 @@ defmodule Coflux.Orchestration.Results do
     end
   end
 
+  # Rolls an execution's completion up into the outcome reported for the run
+  # it heads. Called with a run's initial execution, so this is "how did the
+  # run turn out", independent of whether anything is still executing.
+  #
+  #   * `nil`        — nothing settled yet (no completion, or handed off to a
+  #                    successor that hasn't completed / isn't in this epoch)
+  #   * `:completed` — returned a value (a stream erroring or timing out
+  #                    doesn't change the value the run produced)
+  #   * `:errored`   — raised
+  #   * `:cancelled` — cancelled by a user
+  #   * `:aborted`   — abandoned, crashed, or timed out
+  #
+  # Handoffs (suspend / defer / cache / spawn) resolve to the successor's
+  # outcome: the run's result is whatever the execution it deferred to
+  # produced. The depth cap is a guard against a cycle in that chain.
+  @outcome_depth_limit 10
+
+  def run_outcome(db, execution_id, depth \\ 0)
+
+  def run_outcome(_db, nil, _depth), do: nil
+
+  def run_outcome(_db, _execution_id, depth) when depth >= @outcome_depth_limit, do: nil
+
+  def run_outcome(db, execution_id, depth) do
+    case get_completion(db, execution_id) do
+      {:ok, nil} ->
+        nil
+
+      {:ok, {kind, successor_id, _successor_ref_id, _, _}} ->
+        case kind do
+          kind when kind in [:succeeded, :recurred, :stream_errored, :stream_timeout] ->
+            :completed
+
+          :errored ->
+            :errored
+
+          :cancelled ->
+            :cancelled
+
+          kind when kind in [:abandoned, :crashed, :timeout] ->
+            :aborted
+
+          kind when kind in [:suspended, :deferred, :cached, :spawned] ->
+            # `successor_ref_id` (rather than `successor_id`) means the
+            # successor is in an older epoch, which we don't follow into
+            run_outcome(db, successor_id, depth + 1)
+        end
+    end
+  end
+
   # True when the execution is in a state that could resolve to a useful
   # value — either still running (pending/draining) or cleanly completed.
   # Used for cache candidacy and memoisation: once a negative signal

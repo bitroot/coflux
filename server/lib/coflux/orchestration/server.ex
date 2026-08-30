@@ -410,7 +410,7 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       Enum.reduce(active_run_workflows, state, fn {run_ext_id, module, target, _step_number,
-                                                   _attempt, execution_id},
+                                                   _attempt, execution_id, _assigned},
                                                   state ->
         track_run_execution(state, run_ext_id, execution_id, module, target)
       end)
@@ -1497,6 +1497,10 @@ defmodule Coflux.Orchestration.Server do
                 {:modules, ws_ext_id},
                 {:scheduled, {root_module, root_target}, run.external_id, execution_external_id,
                  execute_at}
+              )
+              |> notify_listeners(
+                {:workflow, root_module, root_target, ws_ext_id},
+                {:scheduled, run.external_id, execution_external_id}
               )
               |> notify_listeners(
                 {:queue, ws_ext_id},
@@ -2699,7 +2703,7 @@ defmodule Coflux.Orchestration.Server do
         # Build active_runs: {root_module, root_target} -> %{run_ext_id -> MapSet of execution_ext_ids}
         active_runs =
           Enum.reduce(active_executions, %{}, fn {run_ext_id, root_module, root_target,
-                                                  step_number, attempt, _execution_id},
+                                                  step_number, attempt, _execution_id, _assigned},
                                                  active_runs ->
             ext_id = execution_external_id(run_ext_id, step_number, attempt)
             key = {root_module, root_target}
@@ -2861,10 +2865,13 @@ defmodule Coflux.Orchestration.Server do
       if is_nil(workflow) and runs == [] do
         {:reply, {:error, :not_found}, state}
       else
+        active_runs =
+          get_active_workflow_runs(state, module, target_name, workspace_id)
+
         {:ok, ref, state} =
           add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
 
-        {:reply, {:ok, workflow, instruction, runs, ref}, state}
+        {:reply, {:ok, workflow, instruction, runs, active_runs, ref}, state}
       end
     else
       {:error, error} ->
@@ -3527,6 +3534,16 @@ defmodule Coflux.Orchestration.Server do
           {:modules, ws_ext_id},
           {:assigned, workflow_executions}
         )
+        |> then(fn state ->
+          Enum.reduce(workflow_executions, state, fn {{root_module, root_target}, executions},
+                                                     state ->
+            notify_listeners(
+              state,
+              {:workflow, root_module, root_target, ws_ext_id},
+              {:assigned, executions}
+            )
+          end)
+        end)
         |> notify_listeners(
           {:queue, ws_ext_id},
           {:assigned, queue_executions}
@@ -4516,6 +4533,10 @@ defmodule Coflux.Orchestration.Server do
              execute_at}
           )
           |> notify_listeners(
+            {:workflow, module, target_name, ws_ext_id},
+            {:scheduled, external_run_id, execution_external_id}
+          )
+          |> notify_listeners(
             {:queue, ws_ext_id},
             {:scheduled, execution_external_id, module, target_name, external_run_id, step_number,
              attempt, execute_after, created_at,
@@ -4633,6 +4654,10 @@ defmodule Coflux.Orchestration.Server do
             {:modules, ws_ext_id},
             {:scheduled, {run_module, run_target}, run.external_id, execution_external_id,
              execute_at}
+          )
+          |> notify_listeners(
+            {:workflow, run_module, run_target, ws_ext_id},
+            {:scheduled, run.external_id, execution_external_id}
           )
           |> notify_listeners(
             {:queue, ws_ext_id},
@@ -5071,9 +5096,36 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # In-flight executions of this workflow's runs, as
+  # `%{run_external_id => %{execution_external_id => assigned?}}` - what the
+  # workflow topic needs to report whether each run is queued or running.
+  # Only the live epoch is considered: a run in an archived epoch can't have
+  # anything still executing.
+  defp get_active_workflow_runs(state, module, target_name, workspace_id) do
+    {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
+
+    active_executions
+    |> Enum.filter(fn {_run_ext_id, root_module, root_target, _, _, _, _} ->
+      root_module == module and root_target == target_name
+    end)
+    |> Enum.reduce(%{}, fn {run_ext_id, _, _, step_number, attempt, _execution_id, assigned},
+                           active_runs ->
+      execution_ext_id = execution_external_id(run_ext_id, step_number, attempt)
+
+      Map.update(
+        active_runs,
+        run_ext_id,
+        %{execution_ext_id => assigned == 1},
+        &Map.put(&1, execution_ext_id, assigned == 1)
+      )
+    end)
+  end
+
   defp get_target_runs_across_epochs(state, module, target_name, type, workspace_id, limit) do
-    {:ok, runs} =
+    {:ok, live_runs} =
       Runs.get_target_runs(state.db, module, target_name, type, workspace_id, limit)
+
+    runs = resolve_run_outcomes(state.db, live_runs)
 
     if length(runs) < limit do
       workspace_external_id = workspace_external_id(state, workspace_id)
@@ -5177,13 +5229,23 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Swaps each run's initial execution id for the outcome it resolved to.
+  # Done per-database, since the completion (and any successor it handed off
+  # to) lives in the same epoch as the run.
+  defp resolve_run_outcomes(db, runs) do
+    Enum.map(runs, fn {external_id, created_at, user_ext_id, token_ext_id, initial_execution_id} ->
+      {external_id, created_at, user_ext_id, token_ext_id,
+       Results.run_outcome(db, initial_execution_id)}
+    end)
+  end
+
   defp do_query_archive_target_runs(db, module, target_name, type, workspace_external_id, limit) do
     case Workspaces.get_workspace_id(db, workspace_external_id) do
       {:ok, workspace_id} when not is_nil(workspace_id) ->
         {:ok, runs} =
           Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
 
-        runs
+        resolve_run_outcomes(db, runs)
 
       {:ok, nil} ->
         []
@@ -6708,11 +6770,16 @@ defmodule Coflux.Orchestration.Server do
       |> then(fn state ->
         case untrack_run_execution(state, r, execution_id) do
           {{root_module, root_target}, state} ->
-            notify_listeners(
-              state,
+            state
+            |> notify_listeners(
               {:modules, ws_ext_id},
               {:completed, {root_module, root_target}, r, execution_external_id}
             )
+            |> notify_listeners(
+              {:workflow, root_module, root_target, ws_ext_id},
+              {:completed, r, execution_external_id}
+            )
+            |> notify_run_outcome(r, root_module, root_target, ws_ext_id, execution_id)
 
           {nil, state} ->
             state
@@ -6725,6 +6792,31 @@ defmodule Coflux.Orchestration.Server do
       |> notify_input_deactivations(execution_id)
 
     state
+  end
+
+  # Tell the workflow topic how the run turned out. The run's outcome comes
+  # from its initial execution, so it can move either when that execution
+  # completes, or when a later one does - a handed-off (deferred/cached/
+  # spawned) initial execution resolves to its successor's outcome. Rather
+  # than tracking which executions the initial one handed off to, this
+  # recomputes whenever the run has nothing left in flight, plus whenever the
+  # initial execution itself completes.
+  defp notify_run_outcome(state, run_external_id, module, target, ws_ext_id, execution_id) do
+    {:ok, initial?} = Runs.initial_execution?(state.db, execution_id)
+    idle? = !Map.has_key?(state.run_workflows, run_external_id)
+
+    if initial? or idle? do
+      {:ok, initial_execution_id} = Runs.get_initial_execution_id(state.db, run_external_id)
+      outcome = Results.run_outcome(state.db, initial_execution_id)
+
+      notify_listeners(
+        state,
+        {:workflow, module, target, ws_ext_id},
+        {:outcome, run_external_id, outcome}
+      )
+    else
+      state
+    end
   end
 
   # Shape the successor on a completion for the run topic. Same-epoch

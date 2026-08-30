@@ -787,7 +787,13 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT DISTINCT r.external_id, r.created_at,
              p.user_external_id AS created_by_user_external_id,
-             t.external_id AS created_by_token_external_id
+             t.external_id AS created_by_token_external_id,
+             (
+               SELECT e2.id FROM executions AS e2
+               WHERE e2.step_id = s.id
+               ORDER BY e2.attempt DESC
+               LIMIT 1
+             ) AS initial_execution_id
       FROM runs as r
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
@@ -888,16 +894,57 @@ defmodule Coflux.Orchestration.Runs do
     query(
       db,
       """
-      SELECT r.external_id, root_s.module, root_s.target, s.number, e.attempt, e.id
+      SELECT r.external_id, root_s.module, root_s.target, s.number, e.attempt, e.id,
+             a.execution_id IS NOT NULL AS assigned
       FROM executions AS e
       INNER JOIN steps AS s ON s.id = e.step_id
       INNER JOIN runs AS r ON r.id = s.run_id
       INNER JOIN steps AS root_s ON root_s.run_id = r.id AND root_s.parent_id IS NULL
       LEFT JOIN completions AS c ON c.execution_id = e.id
+      LEFT JOIN assignments AS a ON a.execution_id = e.id
       #{where}
       """,
       params
     )
+  end
+
+  # Whether the execution belongs to the run's initial step - i.e. it's the
+  # execution whose outcome is the run's outcome.
+  def initial_execution?(db, execution_id) do
+    case query_one(
+           db,
+           """
+           SELECT s.parent_id IS NULL
+           FROM executions AS e
+           INNER JOIN steps AS s ON s.id = e.step_id
+           WHERE e.id = ?1
+           """,
+           {execution_id}
+         ) do
+      {:ok, {1}} -> {:ok, true}
+      {:ok, _} -> {:ok, false}
+    end
+  end
+
+  # The latest attempt of the run's initial step, whose completion determines
+  # the run's outcome. Returns `{:ok, nil}` if the run has no executions.
+  def get_initial_execution_id(db, run_external_id) do
+    case query_one(
+           db,
+           """
+           SELECT e.id
+           FROM runs AS r
+           INNER JOIN steps AS s ON s.run_id = r.id AND s.parent_id IS NULL
+           INNER JOIN executions AS e ON e.step_id = s.id
+           WHERE r.external_id = ?1
+           ORDER BY e.attempt DESC
+           LIMIT 1
+           """,
+           {run_external_id}
+         ) do
+      {:ok, {execution_id}} -> {:ok, execution_id}
+      {:ok, nil} -> {:ok, nil}
+    end
   end
 
   def get_run_steps(db, run_id) do
