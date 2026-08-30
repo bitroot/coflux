@@ -27,6 +27,7 @@ import gc
 from types import SimpleNamespace
 
 import pytest
+
 from coflux import protocol, streams
 from coflux.models import Stream
 
