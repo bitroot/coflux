@@ -39,7 +39,8 @@ from .state import get_context
 from .streams import stream
 from .target import Cache, Defer, Retries, Streams
 
-__all__ = [
+# Grouped by category rather than sorted alphabetically.
+__all__ = [  # noqa: RUF022
     # Version
     "__version__",
     # Decorators

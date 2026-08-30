@@ -43,18 +43,22 @@ def test_execution_groups(worker):
         ex0 = ctx.executor.next_execute()
 
         # Register a group
-        ex0.conn.send(register_group_notification(ex0.execution_id, group_id=1, name="batch"))
+        ex0.conn.send(
+            register_group_notification(ex0.execution_id, group_id=1, name="batch")
+        )
 
         # Submit tasks in the group
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "item",
+            "test",
+            "item",
             json_args("a"),
             group_id=1,
         )
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "item",
+            "test",
+            "item",
             json_args("b"),
             group_id=1,
         )
@@ -129,7 +133,9 @@ def test_log_filter_by_execution(worker):
         ex0.conn.send(log_message(ex0.execution_id, "info", "parent message"))
 
         # Submit child task
-        ref1 = ex0.conn.submit_task(ex0.execution_id, "test", "log_child", json_args("a"))
+        ref1 = ex0.conn.submit_task(
+            ex0.execution_id, "test", "log_child", json_args("a")
+        )
 
         # Handle child task
         ex1 = ctx.executor.next_execute()

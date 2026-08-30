@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import io
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, TextIO
+from typing import TextIO
 
 from . import protocol
 

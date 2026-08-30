@@ -1,6 +1,6 @@
 """Tests for caching and memo."""
 
-import support.cli as cli
+from support import cli
 from support.manifest import task, workflow
 from support.protocol import json_args
 
@@ -21,7 +21,8 @@ def test_cache_hit(worker):
         # First submit - cache miss, task executes
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -34,7 +35,8 @@ def test_cache_hit(worker):
         # Second submit - same target + args, should be cached
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -62,7 +64,8 @@ def test_cache_miss_different_args(worker):
         # First submit with cache
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(1),
             cache={"params": True},
         )
@@ -73,7 +76,8 @@ def test_cache_miss_different_args(worker):
         # Second submit with different args - should execute (cache miss)
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(2),
             cache={"params": True},
         )
@@ -101,7 +105,8 @@ def test_memo_within_run(worker):
         # First submit with memo
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(10),
             memo=True,
         )
@@ -114,7 +119,8 @@ def test_memo_within_run(worker):
         # Second submit with same args and memo - should reuse
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(10),
             memo=True,
         )
@@ -141,7 +147,8 @@ def test_cache_from_base_workspace(worker):
         ex0 = ctx_base.executor.next_execute()
         ref = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -169,7 +176,8 @@ def test_cache_from_base_workspace(worker):
         ex0 = ctx_derived.executor.next_execute()
         ref = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -195,7 +203,8 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
         ex0 = ctx_a.executor.next_execute()
         ref = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -219,7 +228,8 @@ def test_cache_not_shared_across_unrelated_workspaces(worker):
         ex0 = ctx_b.executor.next_execute()
         ref = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "expensive",
+            "test",
+            "expensive",
             json_args(42),
             cache={"params": True},
         )
@@ -249,7 +259,8 @@ def test_run_level_memo_inherited_by_child_tasks(worker):
         # First submit - task has no memo of its own, inherits from run
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(10),
         )
 
@@ -261,7 +272,8 @@ def test_run_level_memo_inherited_by_child_tasks(worker):
         # Second submit with same args - should reuse (memo inherited from run)
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(10),
         )
 

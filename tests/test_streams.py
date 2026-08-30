@@ -17,11 +17,9 @@ Two common patterns:
 import time
 
 import pytest
-
 from support.manifest import task, workflow
 from support.protocol import (
     execution_handle,
-    execution_result,
     json_args,
     partition_stride,
     slice_stride,
@@ -67,7 +65,7 @@ def test_producer_writes_and_consumer_reads_backlog(worker):
         ctx.result(prod_resp["runId"])
 
         # Consumer in a separate workflow subscribes to the producer's stream.
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -120,7 +118,7 @@ def test_backlog_replay_after_producer_terminated_with_buffer(worker):
         # this execution removed — before the consumer subscribes.
         ctx.result(prod_resp["runId"])
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -145,12 +143,12 @@ def test_consumer_sees_live_push(worker):
 
     with worker(targets, concurrency=2) as ctx:
         # Producer registers but doesn't append yet.
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
 
         # Consumer subscribes now — stream is open with no items yet.
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -187,7 +185,7 @@ def test_slice_filter_restricts_items(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         ctx.result(prod_resp["runId"])
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -217,7 +215,7 @@ def test_partition_filter_round_robin(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         ctx.result(prod_resp["runId"])
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -251,7 +249,7 @@ def test_producer_error_closes_with_error_info(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         ctx.result(prod_resp["runId"])
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -276,7 +274,7 @@ def test_subscribe_to_unknown_producer_closes_immediately(worker):
     targets = [workflow("test", "consumer")]
 
     with worker(targets) as ctx:
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -335,12 +333,12 @@ def test_cancellation_closes_streams_with_cancelled_reason(worker):
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=2) as ctx:
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "before")
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -378,7 +376,7 @@ def test_multiple_subscribers_get_independent_delivery(worker):
         # Each consumer picks its own subscription id locally; they only
         # need to be unique within each consumer execution. Use different
         # values here so we'd also catch any stale cross-consumer routing.
-        a_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         a_ex = ctx.executor.next_execute()
         a_ex.conn.stream_subscribe(
             a_ex.execution_id,
@@ -387,7 +385,7 @@ def test_multiple_subscribers_get_independent_delivery(worker):
             index=0,
         )
 
-        b_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         b_ex = ctx.executor.next_execute()
         b_ex.conn.stream_subscribe(
             b_ex.execution_id,
@@ -424,7 +422,7 @@ def test_subscription_ids_can_collide_across_consumers(worker):
         ctx.result(prod_resp["runId"])
 
         # Both consumers use subscription_id=1 — they must not collide.
-        a_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         a_ex = ctx.executor.next_execute()
         a_ex.conn.stream_subscribe(
             a_ex.execution_id,
@@ -433,7 +431,7 @@ def test_subscription_ids_can_collide_across_consumers(worker):
             index=0,
         )
 
-        b_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         b_ex = ctx.executor.next_execute()
         b_ex.conn.stream_subscribe(
             b_ex.execution_id,
@@ -502,12 +500,12 @@ def test_slice_with_stop_closes_early(worker):
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=2) as ctx:
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
 
         # Subscriber gets first 2 items then close.
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -545,11 +543,11 @@ def test_unsubscribe_prevents_receiving_full_stream(worker):
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=2) as ctx:
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -598,11 +596,11 @@ def test_close_while_subscribed_delivers_closure(worker):
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=2) as ctx:
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -630,12 +628,12 @@ def test_lifecycle_close_on_completion_delivers_to_subscriber(worker):
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=2) as ctx:
-        prod_resp = ctx.submit("test", "producer")
+        ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, 1)
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -669,7 +667,7 @@ def test_stride_combines_slice_and_partition(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         ctx.result(prod_resp["runId"])
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -745,7 +743,7 @@ def test_backpressure_subscribe_unblocks_producer(worker):
             prod_ex.conn.recv_push("stream_demand", timeout=0.3)
 
         # Attach consumer. First grant arrives.
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -888,7 +886,7 @@ def test_backpressure_unbounded_sends_no_demand(worker):
         prod_ex = ctx.executor.next_execute()
         prod_ex.conn.stream_register(prod_ex.execution_id, 0)  # buffer omitted
 
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -1192,7 +1190,9 @@ def test_recurrent_producer_closes_stream_each_iteration(worker):
     with worker(targets, concurrency=3) as ctx:
         ctx.submit("test", "main")
         main_ex = ctx.executor.next_execute()
-        main_ex.conn.submit_task(main_ex.execution_id, "test", "ticker", [], recurrent=True)
+        main_ex.conn.submit_task(
+            main_ex.execution_id, "test", "ticker", [], recurrent=True
+        )
 
         tick1 = ctx.executor.next_execute()
         tick1.conn.stream_register(tick1.execution_id, 0)
@@ -1245,7 +1245,7 @@ def test_timeout_fires_when_producer_idle(worker):
         )
 
         # Consumer subscribes so it'll see the timeout close.
-        cons_resp = ctx.submit("test", "consumer")
+        ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id,
@@ -1372,7 +1372,9 @@ def test_clean_stream_keeps_completion_succeeded(worker):
         ctx.result(prod_resp["runId"])
 
         snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        execution = next(
+            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
+        )
         assert execution["completion"]["kind"] == "succeeded"
 
 
@@ -1398,7 +1400,9 @@ def test_stream_error_promotes_completion_to_stream_errored(worker):
         ctx.result(prod_resp["runId"])
 
         snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        execution = next(
+            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
+        )
         assert execution["completion"]["kind"] == "stream_errored"
 
 
@@ -1424,7 +1428,9 @@ def test_stream_timeout_promotes_completion_to_stream_timeout(worker):
         ctx.result(prod_resp["runId"])
 
         snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        execution = next(
+            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
+        )
         assert execution["completion"]["kind"] == "stream_timeout"
 
 
@@ -1457,7 +1463,9 @@ def test_stream_error_outranks_timeout(worker):
         ctx.result(prod_resp["runId"])
 
         snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values()))
+        execution = next(
+            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
+        )
         assert execution["completion"]["kind"] == "stream_errored"
 
 
@@ -1498,7 +1506,8 @@ def test_stream_errored_execution_not_used_as_cache_hit(worker):
 
         ref1 = wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             cache={"params": True},
         )
@@ -1523,7 +1532,8 @@ def test_stream_errored_execution_not_used_as_cache_hit(worker):
         # previous execution's completion is :stream_errored.
         wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             cache={"params": True},
         )
@@ -1550,15 +1560,14 @@ def test_stream_timeout_execution_not_used_as_cache_hit(worker):
 
         ref1 = wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             cache={"params": True},
         )
 
         prod = ctx.executor.next_execute()
-        prod.conn.stream_register(
-            prod.execution_id, 0, buffer=None, timeout_ms=100
-        )
+        prod.conn.stream_register(prod.execution_id, 0, buffer=None, timeout_ms=100)
         force = prod.conn.recv_push("stream_force_close", timeout=2)
         assert force["reason"] == "timeout"
         prod.conn.complete(prod.execution_id, value="v")
@@ -1570,7 +1579,8 @@ def test_stream_timeout_execution_not_used_as_cache_hit(worker):
         # :stream_timeout, not cacheable — expect a fresh execution.
         wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             cache={"params": True},
         )
@@ -1597,7 +1607,8 @@ def test_stream_errored_execution_not_used_as_memo_hit(worker):
 
         ref1 = wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             memo=True,
         )
@@ -1620,7 +1631,8 @@ def test_stream_errored_execution_not_used_as_memo_hit(worker):
         # a fresh execution rather than a memo hit on the broken stream.
         wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             memo=True,
         )
@@ -1646,15 +1658,14 @@ def test_stream_timeout_execution_not_used_as_memo_hit(worker):
 
         ref1 = wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             memo=True,
         )
 
         prod = ctx.executor.next_execute()
-        prod.conn.stream_register(
-            prod.execution_id, 0, buffer=None, timeout_ms=100
-        )
+        prod.conn.stream_register(prod.execution_id, 0, buffer=None, timeout_ms=100)
         force = prod.conn.recv_push("stream_force_close", timeout=2)
         assert force["reason"] == "timeout"
         prod.conn.complete(prod.execution_id, value="v")
@@ -1664,7 +1675,8 @@ def test_stream_timeout_execution_not_used_as_memo_hit(worker):
 
         wf.conn.submit_task(
             wf.execution_id,
-            "test", "produce",
+            "test",
+            "produce",
             json_args(1),
             memo=True,
         )

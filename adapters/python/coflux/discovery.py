@@ -33,7 +33,8 @@ def _expand_modules(module_names: list[str]) -> list[str]:
     for name in module_names:
         try:
             mod = importlib.import_module(name)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # Importing user modules can raise anything at all.
             # Let discover_targets import it again and record the failure
             if name not in seen:
                 seen.add(name)
@@ -94,7 +95,9 @@ def discover_targets(
     for module_name in expanded:
         try:
             module = importlib.import_module(module_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # Importing user modules can raise anything at all; report it
+            # as a module error rather than aborting the whole discovery.
             errors.append(
                 ModuleError(module=module_name, traceback=traceback.format_exc())
             )
@@ -190,7 +193,8 @@ def run_discovery(modules: list[str]) -> int:
     """
     try:
         targets, errors = discover_targets(modules)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
+        # Top-level CLI entry point: turn any failure into an exit code.
         print(f"Error during discovery: {e}", file=sys.stderr)
         return 1
 

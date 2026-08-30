@@ -52,9 +52,9 @@ def test_persist_and_get_asset(worker, tmp_path):
         assert len(entries) > 0
 
         # Each entry should have [blob_key, size, metadata]
-        for _, entry in entries.items():
+        for entry in entries.values():
             assert len(entry) == 3
-            blob_key, size, metadata = entry
+            blob_key, size, _metadata = entry
             assert isinstance(blob_key, str)
             assert size > 0
 
@@ -107,7 +107,7 @@ def test_asset_inspect_and_download(worker, tmp_path):
         assert len(entries) == 1
 
         # Get the blob key from the inspect output
-        entry_path = list(entries.keys())[0]
+        entry_path = next(iter(entries))
         blob_key = entries[entry_path]["blobKey"]
         assert entries[entry_path]["size"] > 0
 

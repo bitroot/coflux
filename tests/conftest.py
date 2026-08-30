@@ -5,7 +5,7 @@ import uuid
 from contextlib import contextmanager
 
 import pytest
-import support.cli as cli
+from support import cli
 from support.helpers import ADAPTER_SCRIPT, managed_worker, poll_result
 from support.server import ManagedServer
 
@@ -39,8 +39,12 @@ class WorkerContext:
     def result(self, run_id, timeout=10):
         """Poll for a run result."""
         return poll_result(
-            run_id, self.host, workspace=self.workspace,
-            timeout=timeout, interval=0.05, max_interval=0.5,
+            run_id,
+            self.host,
+            workspace=self.workspace,
+            timeout=timeout,
+            interval=0.05,
+            max_interval=0.5,
         )
 
     def inspect(self, run_id):
@@ -104,13 +108,13 @@ class WorkerContext:
         timeout=5,
     ):
         """Fetch logs, polling until min_entries are available."""
-        kwargs = dict(
-            step_attempt=step_attempt,
-            from_ts=from_ts,
-            host=self.host,
-            workspace=self.workspace,
-            json_output=json_output,
-        )
+        kwargs = {
+            "step_attempt": step_attempt,
+            "from_ts": from_ts,
+            "host": self.host,
+            "workspace": self.workspace,
+            "json_output": json_output,
+        }
         if not min_entries:
             return cli.logs_get(run_id, **kwargs)
         deadline = time.time() + timeout

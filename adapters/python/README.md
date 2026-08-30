@@ -22,10 +22,12 @@ poetry install
 ```python
 from coflux import task, workflow, log_info
 
+
 @task()
 def process_item(item_id: int) -> dict:
     log_info("Processing item {id}", id=item_id)
     return {"id": item_id, "status": "done"}
+
 
 @workflow()
 def batch_process(items: list[int]) -> list[dict]:

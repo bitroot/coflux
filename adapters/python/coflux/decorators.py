@@ -35,12 +35,12 @@ class _TargetDecorator(t.Protocol):
     """
 
     @t.overload
-    def __call__(self, fn: t.Callable[P, t.Iterator[T]]) -> Target[P, "Stream[T]"]: ...
+    def __call__(self, fn: t.Callable[P, t.Iterator[T]]) -> Target[P, Stream[T]]: ...
 
     @t.overload
     def __call__(
         self, fn: t.Callable[P, t.AsyncIterator[T]]
-    ) -> Target[P, "Stream[T]"]: ...
+    ) -> Target[P, Stream[T]]: ...
 
     @t.overload
     def __call__(

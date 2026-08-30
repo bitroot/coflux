@@ -15,7 +15,7 @@ To explicitly suspend an execution, call the `suspend` function, passing either 
 def my_workflow():
     # (Some code that is safe to be re-run)
     if not some_condition():
-        cf.suspend(60) # Restart the task in one minute
+        cf.suspend(60)  # Restart the task in one minute
     # (Do something)
 ```
 

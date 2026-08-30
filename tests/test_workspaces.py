@@ -3,8 +3,7 @@
 import subprocess
 
 import pytest
-
-import support.cli as cli
+from support import cli
 from support.manifest import task, workflow
 from support.protocol import execution_result
 
@@ -42,11 +41,13 @@ def test_duplicate_workspace_name(worker):
     """Creating a workspace with a duplicate name fails."""
     targets = [workflow("test", "main")]
 
-    with worker(targets) as ctx:
+    with (
+        worker(targets) as ctx,
         # The "default" workspace is already created by the fixture.
         # Trying to create another with the same name should fail.
-        with pytest.raises(subprocess.CalledProcessError):
-            cli.workspaces_create("default", host=ctx.host, workspace=ctx.workspace)
+        pytest.raises(subprocess.CalledProcessError),
+    ):
+        cli.workspaces_create("default", host=ctx.host, workspace=ctx.workspace)
 
 
 def test_archive_module(worker):

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import contextvars
 import datetime as dt
-import fnmatch as fnmatch
+import fnmatch
 import hashlib
 import json
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from . import protocol
 from .dispatcher import get_dispatcher
@@ -394,9 +395,8 @@ class ExecutorContext:
             for path_str, entry in entries.items():
                 if isinstance(entry, (str, Path)):
                     path = Path(entry).resolve()
-                    if path.is_file():
-                        if matcher is None or matcher(path_str, match):
-                            paths_to_upload.append((path_str, path))
+                    if path.is_file() and (matcher is None or matcher(path_str, match)):
+                        paths_to_upload.append((path_str, path))
                 elif isinstance(entry, Asset):
                     for asset_entry in entry.entries:
                         full_path = f"{path_str}/{asset_entry.path}"
@@ -414,9 +414,9 @@ class ExecutorContext:
                             entry.metadata,
                         )
                 else:
-                    raise ValueError(f"Unhandled entry type ({type(entry)})")
+                    raise TypeError(f"Unhandled entry type ({type(entry)})")
         else:
-            raise ValueError(f"Unhandled entries type ({type(entries)})")
+            raise TypeError(f"Unhandled entries type ({type(entries)})")
 
         if not paths_to_upload and not resolved_entries:
             raise ValueError("No files found to create asset")
@@ -584,10 +584,15 @@ class ExecutorContext:
         if isinstance(delay, dt.datetime):
             execute_after = int(delay.timestamp() * 1000)
         elif isinstance(delay, dt.timedelta):
-            execute_after = int((dt.datetime.now() + delay).timestamp() * 1000)
+            execute_after = int(
+                (dt.datetime.now(dt.timezone.utc) + delay).timestamp() * 1000
+            )
         elif isinstance(delay, (int, float)) and delay > 0:
             execute_after = int(
-                (dt.datetime.now() + dt.timedelta(seconds=delay)).timestamp() * 1000
+                (
+                    dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+                ).timestamp()
+                * 1000
             )
         request_id = protocol.request_suspend(self.execution_id, execute_after)
         self._wait_response(request_id)
@@ -597,7 +602,7 @@ class ExecutorContext:
 
     def _parse_response(self, msg: dict) -> Any:
         """Extract the result from a response message, raising on error."""
-        if "error" in msg and msg["error"]:
+        if msg.get("error"):
             error = msg["error"]
             raise RuntimeError(f"{error['code']}: {error['message']}")
         return msg.get("result", {})

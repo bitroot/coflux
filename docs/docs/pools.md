@@ -171,8 +171,7 @@ On the task side, specify `requires` in the decorator:
 
 ```python
 @cf.task(requires={"gpu": "A100"})
-def train_model(data):
-    ...
+def train_model(data): ...
 ```
 
 The `requires` parameter accepts a dictionary where keys are feature names and values can be a specific value (`"A100"`), a list of acceptable values (`["A100", "H100"]`), or `True` to require the feature with any value.

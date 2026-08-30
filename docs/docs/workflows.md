@@ -9,9 +9,10 @@ A function decorated with `@cf.workflow()` is the entry point for a run. A funct
 ```python
 import coflux as cf
 
+
 @cf.task()
-def fetch_data(url: str):
-    ...
+def fetch_data(url: str): ...
+
 
 @cf.workflow()
 def process(url: str):
@@ -67,6 +68,7 @@ For example, given an `other.workflows` module with a task:
 ```python
 # other/workflows.py
 
+
 @cf.task()
 def random_int(max: int) -> int:
     return random.randint(1, max)
@@ -77,9 +79,10 @@ Another module can reference this task with a stub:
 ```python
 # example/workflows.py
 
+
 @cf.stub("other.workflows")
-def random_int(max: int) -> int:
-    ...
+def random_int(max: int) -> int: ...
+
 
 @cf.workflow()
 def roll_die():

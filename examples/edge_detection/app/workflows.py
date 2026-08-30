@@ -1,11 +1,10 @@
 from pathlib import Path
 
+import coflux as cf
 import cv2
 import numpy as np
 import requests
 import skimage as sk
-
-import coflux as cf
 
 
 @cf.task(memo=True)

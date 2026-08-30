@@ -26,7 +26,8 @@ blocking APIs used by the rest of the adapter.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .protocol import Protocol
 
@@ -103,7 +104,9 @@ class Dispatcher:
         if already_closed:
             try:
                 callback()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort: a faulty callback must not propagate into
+                # whoever happened to be registering it.
                 pass
 
     def is_closed(self) -> bool:
@@ -158,7 +161,9 @@ class Dispatcher:
                 for cb in callbacks:
                     try:
                         cb()
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110
+                        # One faulty callback mustn't stop the others from
+                        # being notified of EOF.
                         pass
                 return
 
@@ -179,7 +184,7 @@ class Dispatcher:
                 if handler is not None:
                     try:
                         handler(msg.get("params", {}))
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S110
                         # Don't let a handler fault kill the dispatcher.
                         # Adapter-side logging hooks into protocol anyway,
                         # but we swallow here rather than taking the loop down.

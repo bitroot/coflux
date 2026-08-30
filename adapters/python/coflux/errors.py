@@ -173,7 +173,9 @@ def create_execution_error(error_type: str, error_message: str) -> ExecutionErro
             error_type=error_type,
             error_message=error_message,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # The cached class is a user-defined exception; its constructor can
+        # reject our arguments in any way. Fall back to the generic error.
         return ExecutionError(
             error_message,
             error_type=error_type,

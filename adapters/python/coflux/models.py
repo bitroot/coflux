@@ -206,7 +206,7 @@ class Execution(_Handle[T]):
 # --- Streams ---
 
 
-Stride = t.Tuple[int, t.Optional[int], int]
+Stride = tuple[int, int | None, int]
 """A stride over the stream's sequence numbers: ``(start, stop, step)``.
 
 Matches positions ``start, start+step, start+2·step, …`` up to but not
@@ -259,9 +259,9 @@ class StreamIterator(t.Iterator[T_co], t.Protocol):
         """Release the subscription. Idempotent; iteration then stops."""
         ...
 
-    def __enter__(self) -> "StreamIterator[T_co]": ...
+    def __enter__(self) -> StreamIterator[T_co]: ...
 
-    def __exit__(self, *exc_info: t.Any) -> None: ...
+    def __exit__(self, *exc_info: object) -> None: ...
 
 
 class AsyncStreamIterator(t.AsyncIterator[T_co], t.Protocol):
@@ -276,9 +276,9 @@ class AsyncStreamIterator(t.AsyncIterator[T_co], t.Protocol):
         """Release the subscription. Idempotent; iteration then stops."""
         ...
 
-    async def __aenter__(self) -> "AsyncStreamIterator[T_co]": ...
+    async def __aenter__(self) -> AsyncStreamIterator[T_co]: ...
 
-    async def __aexit__(self, *exc_info: t.Any) -> None: ...
+    async def __aexit__(self, *exc_info: object) -> None: ...
 
 
 class Stream(t.Iterable[T], t.AsyncIterable[T]):
@@ -320,7 +320,7 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
         start: int = 0,
         stop: int | None = None,
         step: int = 1,
-    ) -> "Stream[T]":
+    ) -> Stream[T]:
         """Return a view of this stream restricted to the positions
         ``start, start+step, …`` up to (but not including) ``stop``.
         Composes with any existing stride on this view.
@@ -331,14 +331,14 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
             )
         return Stream(self._id, _compose_stride(self._stride, (start, stop, step)))
 
-    def slice(self, start: int, stop: int | None = None) -> "Stream[T]":
+    def slice(self, start: int, stop: int | None = None) -> Stream[T]:
         """Return a view restricted to sequences ``[start, stop)`` —
         shorthand for ``stride(start, stop, 1)``. Equivalent to
         ``itertools.islice`` on the source stream's items.
         """
         return self.stride(start, stop, 1)
 
-    def partition(self, n: int, i: int) -> "Stream[T]":
+    def partition(self, n: int, i: int) -> Stream[T]:
         """Return a view where only sequences ``s`` with ``s % n == i``
         are delivered — round-robin partitioning for parallel consumers.
         Shorthand for ``stride(i, None, n)``.

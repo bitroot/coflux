@@ -5,9 +5,10 @@ It's common to need to start multiple tasks in a loop - for example:
 ```python
 import coflux as cf
 
+
 @cf.task()
-def my_task(i: int):
-    ...
+def my_task(i: int): ...
+
 
 @cf.workflow()
 def my_workflow(n: int):
@@ -22,7 +23,7 @@ A group can be created using a context manager:
 ```python
 @cf.workflow()
 def my_workflow(n: int):
-    with cf.group("My tasks"): # ←
+    with cf.group("My tasks"):  # ←
         for i in range(n):
             my_task(i)
 ```
@@ -41,7 +42,7 @@ Note that steps can be run in parallel by 'submitting' them:
 def my_workflow(n: int):
     with cf.group("My tasks"):
         for i in range(n):
-            my_task.submit(i) # ←
+            my_task.submit(i)  # ←
 ```
 
 See the [concurrency](/concurrency) page for more details.

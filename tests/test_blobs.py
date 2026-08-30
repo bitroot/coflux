@@ -95,7 +95,7 @@ def test_no_files_created_outside_blobs_dir(isolated_server):
     and assert that only the expected ``blobs/<aa>/<bb>/<rest>`` layout
     (or nothing at all) appears.
     """
-    srv, host, pid = isolated_server
+    srv, host, _pid = isolated_server
     project_id = host.split(".", 1)[0]
 
     # Hit every invalid-key vector across all three verbs.
@@ -113,6 +113,6 @@ def test_no_files_created_outside_blobs_dir(isolated_server):
     blobs_dir = os.path.join(data_dir, "blobs")
     if os.path.exists(blobs_dir):
         for entry in os.listdir(blobs_dir):
-            assert len(entry) == 2 and all(
-                c in "0123456789abcdef" for c in entry
-            ), f"unexpected blob shard: {entry!r}"
+            assert len(entry) == 2 and all(c in "0123456789abcdef" for c in entry), (
+                f"unexpected blob shard: {entry!r}"
+            )

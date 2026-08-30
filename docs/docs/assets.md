@@ -12,6 +12,7 @@ Each execution is started in a temporary directory. By default, `cf.asset()` wil
 import coflux as cf
 from pathlib import Path
 
+
 @cf.task()
 def my_task() -> cf.Asset:
     Path.cwd().joinpath("foo.txt").write_text("hello")

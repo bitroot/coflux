@@ -13,8 +13,9 @@ import json
 import pickle
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .models import Asset, AssetMetadata, Execution, Input, Stream
 
@@ -172,7 +173,9 @@ def _encode_value(
                     ]
                 )
                 return {"type": "ref", "index": len(references) - 1}
-            except Exception:
+            except Exception:  # noqa: BLE001
+                # Pickling arbitrary user values can fail in any way; fall
+                # back to a printable representation.
                 return repr(v)
 
     data = _encode(value)

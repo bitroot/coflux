@@ -30,13 +30,16 @@ A **workflow** is the entry point for a run. It can call **tasks**, which are th
 ```python
 import coflux as cf
 
+
 @cf.task(retries=cf.Retries(3, when=ConnectionError))
 def fetch_data(url: str) -> dict:
     return requests.get(url).json()
 
+
 @cf.task(cache=True)
 def transform(data: dict) -> list:
     return sorted(data["items"], key=lambda x: x["score"], reverse=True)
+
 
 @cf.workflow()
 def my_pipeline(url: str):
@@ -56,9 +59,11 @@ Reuse results across runs, with TTLs, parameter filtering, and cross-workspace c
 @cf.task(cache=True)
 def get_user(user_id): ...
 
+
 # cache for 10 minutes
 @cf.task(cache=600)
 def fetch_prices(): ...
+
 
 # cache by specific params only
 @cf.task(cache=cf.Cache(params=["product_id"]))
@@ -71,8 +76,7 @@ Retry on specific exceptions with configurable backoff:
 
 ```python
 @cf.task(retries=cf.Retries(5, backoff=(1, 60), when=TransientError))
-def call_api():
-    ...
+def call_api(): ...
 ```
 
 ### Parallel execution
@@ -82,9 +86,9 @@ Submit tasks concurrently and collect results:
 ```python
 @cf.workflow()
 def process_order(user_id, product_id):
-    user = load_user.submit(user_id)              # starts immediately
-    product = load_product.submit(product_id)     # starts immediately
-    create_order(user.result(), product.result()) # waits for results before calling
+    user = load_user.submit(user_id)  # starts immediately
+    product = load_product.submit(product_id)  # starts immediately
+    create_order(user.result(), product.result())  # waits for results before calling
 ```
 
 ### Assets
@@ -96,6 +100,7 @@ Share files and directories between tasks, with glob filtering and composition:
 def generate_report() -> cf.Asset:
     Path("report.csv").write_text(build_csv())
     return cf.asset(match="*.csv")
+
 
 @cf.workflow()
 def my_workflow():
@@ -112,6 +117,7 @@ Memoise task calls within a single run (unlike caching, which works across runs)
 def send_email(recipient):
     mailer.send(recipient.email, ...)
 
+
 @cf.workflow()
 def notify(campaign_id):
     for r in get_recipients(campaign_id):
@@ -124,6 +130,7 @@ Record numeric values from tasks and visualise them in Studio:
 
 ```python
 loss = cf.Metric("loss", group="training")
+
 
 @cf.task()
 def train(epochs):
@@ -191,9 +198,11 @@ Or [run it with Docker](https://docs.coflux.com/getting_started/server).
 
 import coflux as cf
 
+
 @cf.task()
 def greet(name: str) -> str:
     return f"Hello, {name}!"
+
 
 @cf.workflow()
 def hello(name: str):

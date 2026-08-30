@@ -8,8 +8,7 @@ Enable memoizing of a task with the `memo` option:
 
 ```python
 @task(memo=True)
-def fetch_user(user_id):
-    ...
+def fetch_user(user_id): ...
 ```
 
 ## Workflow-level memo
@@ -18,8 +17,7 @@ Setting `memo=True` on a `@workflow` applies it as a default for all tasks in th
 
 ```python
 @workflow(memo=True)
-def analyse():
-    ...
+def analyse(): ...
 ```
 
 Individual tasks can still override this — for example, a task with `memo=False` will not be memoized even if the workflow has `memo=True`.
@@ -46,13 +44,14 @@ Memoizing can also be used as an optimization for workflows. For example, if a r
 
 ```python
 @task(memo=True)
-def fetch_user(user_id):
-    ...
+def fetch_user(user_id): ...
+
 
 @task()
 def send_email(user_id):
     user = fetch_user(user_id)
     ...
+
 
 @task()
 def send_notification(user_id):
@@ -68,8 +67,7 @@ As with caching, by default the memoization considers all arguments. This can be
 
 ```python
 @task(memo=["machine_id"])
-def apply_configuration(machine_id, config):
-    ...
+def apply_configuration(machine_id, config): ...
 ```
 
 In this case, the function to apply configuration to a machine is only run once for the specified machine, regardless of whether the configuration itself changes. This can allow you to make changes to a workflow and re-run it with (some) confidence that a new configuration won't be applied.

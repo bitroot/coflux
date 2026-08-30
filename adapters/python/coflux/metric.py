@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterator, TypeVar
+from collections.abc import Iterator
+from typing import Any, TypeVar
 
 from . import protocol
 from .state import get_context

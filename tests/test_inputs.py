@@ -1,15 +1,13 @@
 """Tests for input submission, resolution, and lifecycle."""
 
 import json
+import subprocess
 import threading
 import time
 
-import support.cli as cli
-import support.protocol as protocol
+from support import cli, protocol
 from support.helpers import api_post, managed_worker, poll_result
 from support.manifest import task, workflow
-from support.protocol import execution_result, json_args
-
 
 # ---------------------------------------------------------------------------
 # Basic lifecycle
@@ -114,12 +112,8 @@ def test_input_memoization_same_key(worker):
         resp = ctx.submit("test", "memo")
         ex = ctx.executor.next_execute()
 
-        input_id_1 = ex.conn.submit_input(
-            ex.execution_id, "Enter value", key="my-key"
-        )
-        input_id_2 = ex.conn.submit_input(
-            ex.execution_id, "Enter value", key="my-key"
-        )
+        input_id_1 = ex.conn.submit_input(ex.execution_id, "Enter value", key="my-key")
+        input_id_2 = ex.conn.submit_input(ex.execution_id, "Enter value", key="my-key")
 
         assert input_id_1 == input_id_2
 
@@ -284,7 +278,8 @@ def test_input_wait_then_respond(worker):
                 result_holder[0] = ex.conn.resolve_input(
                     input_id, ex.execution_id, timeout_ms=5000
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
+                # Hand any failure back to the main thread to assert on.
                 error_holder[0] = e
 
         t = threading.Thread(target=do_resolve)
@@ -339,7 +334,7 @@ def test_input_schema_validation_reject(worker):
     schema = json.dumps({"type": "integer"})
 
     with worker(targets) as ctx:
-        resp = ctx.submit("test", "schema_bad")
+        ctx.submit("test", "schema_bad")
         ex = ctx.executor.next_execute()
 
         input_id = ex.conn.submit_input(
@@ -350,7 +345,7 @@ def test_input_schema_validation_reject(worker):
         try:
             cli.inputs_respond(input_id, "not a number", host=ctx.host)
             rejected = False
-        except Exception:
+        except subprocess.CalledProcessError:
             rejected = True
 
         assert rejected, "Server should reject value that doesn't match schema"
@@ -382,7 +377,7 @@ def test_input_already_responded(worker):
         try:
             cli.inputs_respond(input_id, "second", host=ctx.host)
             second_failed = False
-        except Exception:
+        except subprocess.CalledProcessError:
             second_failed = True
 
         assert second_failed, "Second response should be rejected"
@@ -536,7 +531,7 @@ def test_input_with_initial_requires_schema(worker):
     targets = [workflow("test", "bad_initial")]
 
     with worker(targets) as ctx:
-        resp = ctx.submit("test", "bad_initial")
+        ctx.submit("test", "bad_initial")
         ex = ctx.executor.next_execute()
 
         result = ex.conn.submit_input(

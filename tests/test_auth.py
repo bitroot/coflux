@@ -87,7 +87,7 @@ def _api_request(server_port, project_id, path, *, token=None, body=None):
         raw = e.read()
         try:
             resp_body = json.loads(raw) if raw else None
-        except Exception:
+        except ValueError:
             resp_body = None
         return e.code, resp_body
 
@@ -104,12 +104,12 @@ def _make_host(project_id, port):
 def _mint(keypair, auth_server, project_id, **kwargs):
     """Convenience: mint a JWT for the given project against the test server."""
     private_key, _jwk = keypair
-    defaults = dict(
-        kid=KID,
-        issuer=auth_server._extra_env["COFLUX_STUDIO_URL"],
-        team_id=TEAM_ID,
-        host=_make_host(project_id, auth_server.port),
-    )
+    defaults = {
+        "kid": KID,
+        "issuer": auth_server._extra_env["COFLUX_STUDIO_URL"],
+        "team_id": TEAM_ID,
+        "host": _make_host(project_id, auth_server.port),
+    }
     defaults.update(kwargs)
     return mint_jwt(private_key, **defaults)
 
@@ -178,7 +178,7 @@ class TestJWTRejection:
             project_id,
             not_before=int(time.time()) + 3600,
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_wrong_issuer(self, keypair, auth_server):
@@ -190,14 +190,14 @@ class TestJWTRejection:
             project_id,
             issuer="https://evil.example.com",
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_wrong_team(self, keypair, auth_server):
         """A JWT with a team ID not in COFLUX_STUDIO_TEAMS is rejected."""
         project_id = f"auth-{uuid.uuid4().hex[:8]}"
         token = _mint(keypair, auth_server, project_id, team_id="unknown-team")
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_wrong_host(self, keypair, auth_server):
@@ -211,7 +211,7 @@ class TestJWTRejection:
             team_id=TEAM_ID,
             host="wrong-project.localhost:9999",
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_wrong_signature(self, keypair, auth_server):
@@ -225,14 +225,14 @@ class TestJWTRejection:
             team_id=TEAM_ID,
             host=_make_host(project_id, auth_server.port),
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_unknown_kid(self, keypair, auth_server):
         """A JWT with an unknown ``kid`` header is rejected."""
         project_id = f"auth-{uuid.uuid4().hex[:8]}"
         token = _mint(keypair, auth_server, project_id, kid="nonexistent-key")
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
     def test_missing_audience(self, keypair, auth_server):
@@ -249,7 +249,7 @@ class TestJWTRejection:
         token = pyjwt.encode(
             claims, private_key, algorithm="EdDSA", headers={"kid": KID}
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 401
 
 
@@ -269,7 +269,7 @@ class TestSuperToken:
     def test_invalid_super_token_rejected(self, auth_server):
         """A token that isn't the super token and isn't a JWT is rejected."""
         project_id = f"auth-{uuid.uuid4().hex[:8]}"
-        status, body = _discover(
+        status, _body = _discover(
             auth_server.port, project_id, token="not-the-right-token"
         )
         assert status == 401
@@ -280,7 +280,7 @@ class TestSuperToken:
 
         # JWT should be forbidden
         jwt_token = _mint(keypair, auth_server, project_id)
-        status, body = _api_request(
+        status, _body = _api_request(
             auth_server.port,
             project_id,
             "rotate_epoch",
@@ -338,7 +338,7 @@ class TestKeyRotation:
             team_id=TEAM_ID,
             host=_make_host(project_id, auth_server.port),
         )
-        status, body = _discover(auth_server.port, project_id, token=token)
+        status, _body = _discover(auth_server.port, project_id, token=token)
         assert status == 200
 
         # Restore original keys for other tests

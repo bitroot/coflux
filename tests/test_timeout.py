@@ -1,7 +1,5 @@
 """Tests for execution timeout enforcement."""
 
-import pytest
-
 from support.manifest import task, workflow
 
 
@@ -25,7 +23,8 @@ def test_timeout_with_retry(worker):
     """Timed-out execution is retried when retries are configured."""
     targets = [
         workflow(
-            "test", "flaky",
+            "test",
+            "flaky",
             timeout=1500,
             retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0},
         ),

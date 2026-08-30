@@ -18,8 +18,7 @@ By default, recurring tasks restart immediately. Use `delay` to wait between exe
 
 ```python
 @cf.workflow(recurrent=True, delay=60)
-def poll_every_minute():
-    ...
+def poll_every_minute(): ...
 ```
 
 The delay is in seconds (or pass a `timedelta`).
@@ -30,6 +29,5 @@ Recurring tasks can be combined with [retries](./retries.md). If a task fails, r
 
 ```python
 @cf.workflow(recurrent=True, delay=60, retries=3)
-def resilient_polling():
-    ...
+def resilient_polling(): ...
 ```

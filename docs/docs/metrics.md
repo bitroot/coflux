@@ -12,6 +12,7 @@ import coflux as cf
 loss = cf.Metric("loss", group="training")
 accuracy = cf.Metric("accuracy", group="training")
 
+
 @cf.task()
 def train(epochs):
     for epoch in range(epochs):
@@ -30,7 +31,9 @@ Metrics within the same _group_ are displayed together on a shared chart. You ca
 group = cf.MetricGroup("training", units="epoch")
 
 loss = cf.Metric("loss", group=group, scale=cf.MetricScale(units=""))
-accuracy = cf.Metric("accuracy", group=group, scale=cf.MetricScale(units="%", lower=0, upper=100))
+accuracy = cf.Metric(
+    "accuracy", group=group, scale=cf.MetricScale(units="%", lower=0, upper=100)
+)
 ```
 
 `MetricGroup` configures the x-axis (shared across metrics in the group):
@@ -75,7 +78,7 @@ for item in cf.progress(items, key="items_processed", group="processing"):
 Metrics are throttled client-side to avoid flooding the server in tight loops. By default, each metric reports up to 10 values per second. This can be adjusted per metric:
 
 ```python
-metric = cf.Metric("fast_metric", throttle=100)   # 100 values/sec
+metric = cf.Metric("fast_metric", throttle=100)  # 100 values/sec
 metric = cf.Metric("exact_metric", throttle=None)  # No throttling
 ```
 

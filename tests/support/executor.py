@@ -39,6 +39,7 @@ def _unwrap_select_result(result):
         return {"status": status}
     return result
 
+
 Execution = namedtuple(
     "Execution",
     ["conn", "execution_id", "module", "target", "arguments", "streams"],
@@ -287,7 +288,9 @@ class ExecutorConnection:
 
     def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""
-        self.send(protocol.stream_append(execution_id, index, sequence, value, format=format))
+        self.send(
+            protocol.stream_append(execution_id, index, sequence, value, format=format)
+        )
 
     def stream_close(self, execution_id, index, error=None):
         """Close a stream (optionally with an error {type, message, traceback})."""
@@ -439,7 +442,9 @@ class ExecutorConnection:
     def fail(self, execution_id, error_type, message, traceback="", retryable=None):
         """Send execution_error."""
         self.send(
-            protocol.execution_error(execution_id, error_type, message, traceback, retryable=retryable)
+            protocol.execution_error(
+                execution_id, error_type, message, traceback, retryable=retryable
+            )
         )
         self._close_sending_side()
 
@@ -495,7 +500,7 @@ class Executor:
             self._server_sock.settimeout(0.5)
             try:
                 conn, _ = self._server_sock.accept()
-            except (socket.timeout, OSError):
+            except (TimeoutError, OSError):
                 continue
             ec = ExecutorConnection(conn)
             ec.send_ready()

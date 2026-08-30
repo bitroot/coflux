@@ -30,16 +30,16 @@ import queue
 import threading
 import traceback
 import weakref
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any, final
 
 from . import protocol
 from .dispatcher import get_dispatcher
 from .errors import raise_for_close
+from .models import Stream
 from .serialization import deserialize_value, serialize_value
 from .state import get_context
-from .models import Stream
 from .target import Streams, _validate_buffer, _validate_timeout
-
 
 # --- Producer side ---
 
@@ -271,13 +271,15 @@ class StreamDriver:
                     async def _close(g=gen) -> None:
                         try:
                             await g.aclose()
-                        except Exception:
+                        except Exception:  # noqa: BLE001, S110
+                            # Best-effort close of a user generator.
                             pass
 
                     asyncio.run_coroutine_threadsafe(_close(), loop)
             else:
                 entry["generator"].close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # Best-effort close of a user generator.
             pass
 
     def _acquire_demand(self, index: int) -> bool:
@@ -404,11 +406,13 @@ class StreamDriver:
         finally:
             try:
                 loop.run_until_complete(generator.aclose())
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort teardown; the close was already reported.
                 pass
             try:
                 loop.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort teardown; the close was already reported.
                 pass
 
     def _record_loop(self, generator: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -455,13 +459,15 @@ class StreamDriver:
                         async def _close(g=gen) -> None:
                             try:
                                 await g.aclose()
-                            except Exception:
+                            except Exception:  # noqa: BLE001, S110
+                                # Best-effort close of a user generator.
                                 pass
 
                         asyncio.run_coroutine_threadsafe(_close(), loop)
                 else:
                     entry["generator"].close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort close of a user generator.
                 pass
 
 
@@ -474,7 +480,7 @@ class StreamDriver:
 # ``"not_found"``). ``error`` is only populated when ``reason ==
 # "errored"`` — it's the producer's actual ``{type, message, frames}``.
 class _Closed:
-    __slots__ = ("reason", "error")
+    __slots__ = ("error", "reason")
 
     def __init__(self, reason: str, error: dict[str, Any] | None) -> None:
         self.reason = reason
@@ -567,7 +573,8 @@ class _Subscription:
             return
         try:
             protocol.send_stream_unsubscribe(self._execution_id, self._subscription_id)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # The pipe may be tearing down underneath us; nothing to do.
             pass
 
     def __del__(self) -> None:
@@ -578,7 +585,8 @@ class _Subscription:
         # never raise.
         try:
             self.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # `__del__` must never raise.
             pass
 
     def _retire_in_hand(self) -> None:
@@ -614,7 +622,7 @@ class _Subscription:
                 self._acked_count,
                 self._acked_sequence,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Leave `_unreported` set so the next flush retries. The
             # counters are cumulative, so a re-send subsumes this one.
             # Clearing it before the send would strand a lockstep producer
@@ -624,6 +632,7 @@ class _Subscription:
         self._unreported = 0
 
 
+@final
 class _StreamIterator(_Subscription, Iterator[Any]):
     """Drains items for one active subscription, synchronously.
 
@@ -643,13 +652,13 @@ class _StreamIterator(_Subscription, Iterator[Any]):
     def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         self._queue.put(_Closed(reason, error))
 
-    def __iter__(self) -> "_StreamIterator":
+    def __iter__(self) -> _StreamIterator:
         return self
 
-    def __enter__(self) -> "_StreamIterator":
+    def __enter__(self) -> _StreamIterator:
         return self
 
-    def __exit__(self, *_exc_info: Any) -> None:
+    def __exit__(self, *_exc_info: object) -> None:
         self.close()
 
     def __next__(self) -> Any:
@@ -680,6 +689,7 @@ class _StreamIterator(_Subscription, Iterator[Any]):
         return deserialize_value(value)
 
 
+@final
 class _AsyncStreamIterator(_Subscription):
     """Drains items for one active subscription, asynchronously.
 
@@ -727,7 +737,7 @@ class _AsyncStreamIterator(_Subscription):
     def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         self._put(_Closed(reason, error))
 
-    def __aiter__(self) -> "_AsyncStreamIterator":
+    def __aiter__(self) -> _AsyncStreamIterator:
         return self
 
     async def aclose(self) -> None:
@@ -738,10 +748,10 @@ class _AsyncStreamIterator(_Subscription):
         """
         self.close()
 
-    async def __aenter__(self) -> "_AsyncStreamIterator":
+    async def __aenter__(self) -> _AsyncStreamIterator:
         return self
 
-    async def __aexit__(self, *_exc_info: Any) -> None:
+    async def __aexit__(self, *_exc_info: object) -> None:
         self.close()
 
     async def __anext__(self) -> Any:
@@ -928,7 +938,7 @@ def _open_subscription(
 def open_subscription(
     stream_id: str,
     stride: tuple[int, int | None, int],
-) -> "_StreamIterator":
+) -> _StreamIterator:
     """Begin iterating a stream. Called by ``Stream.__iter__``.
 
     Returns an iterator that yields as items arrive, blocking the calling
@@ -940,7 +950,7 @@ def open_subscription(
 def open_async_subscription(
     stream_id: str,
     stride: tuple[int, int | None, int],
-) -> "_AsyncStreamIterator":
+) -> _AsyncStreamIterator:
     """Begin iterating a stream. Called by ``Stream.__aiter__``.
 
     Returns an async iterator that yields as items arrive, suspending the

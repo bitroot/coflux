@@ -384,5 +384,3 @@ def submit_input_request(
     if initial is not None:
         params["initial"] = initial
     return {"id": request_id, "method": "submit_input", "params": params}
-
-

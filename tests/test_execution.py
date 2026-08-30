@@ -29,7 +29,9 @@ def test_workflow_with_arguments(worker):
         return execution_result(execution_id, value="hello hello hello")
 
     with worker(targets, handler) as ctx:
-        assert ctx.run("test", "greet", '"hello"', "3") == {"value": "hello hello hello"}
+        assert ctx.run("test", "greet", '"hello"', "3") == {
+            "value": "hello hello hello"
+        }
 
 
 def test_workflow_error(worker):
@@ -269,7 +271,9 @@ def test_sequential_tasks(worker):
         assert ex0.conn.resolve(ex0.execution_id, ref1)["value"] == 7
 
         # Submit multiply(7, 2) and resolve (fresh connection)
-        ref2 = ex0.conn.submit_task(ex0.execution_id, "test", "multiply", json_args(7, 2))
+        ref2 = ex0.conn.submit_task(
+            ex0.execution_id, "test", "multiply", json_args(7, 2)
+        )
 
         ex_t2 = ctx.executor.next_execute()
         assert ex_t2.target == "multiply"

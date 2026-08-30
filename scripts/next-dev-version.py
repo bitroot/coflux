@@ -30,7 +30,9 @@ def compute_next_version(version: str, branch: str) -> str:
     elif branch.startswith("release/"):
         return f"{major}.{minor}.{patch + 1}-dev"
     else:
-        raise ValueError(f"Unsupported branch: {branch} (expected 'main' or 'release/*')")
+        raise ValueError(
+            f"Unsupported branch: {branch} (expected 'main' or 'release/*')"
+        )
 
 
 def to_pep440(version: str) -> str:

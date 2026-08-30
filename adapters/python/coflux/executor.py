@@ -14,10 +14,10 @@ from typing import Any, get_type_hints
 from . import protocol
 from .context import ExecutorContext
 from .dispatcher import start_dispatcher
-from .state import set_context
-from .output import capture_output
 from .models import Input
+from .output import capture_output
 from .serialization import deserialize_value, serialize_value
+from .state import set_context
 from .streams import stream as _register_stream
 from .target import Streams
 
@@ -74,7 +74,9 @@ def _apply_type_hints(fn: Any, args: list[Any]) -> list[Any]:
     """
     try:
         hints = get_type_hints(fn)
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unresolvable annotations (forward refs, missing imports) just mean
+        # we can't reconstruct the parameterised Input.
         return args
     params = list(inspect.signature(fn).parameters.keys())
     for i, (arg, name) in enumerate(zip(args, params)):
@@ -186,7 +188,9 @@ def execute_target(
         # serialised by Protocol._write_lock.
         ctx.wait_streams()
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
+        # Any failure in user code is reported back to the server as an
+        # execution error rather than crashing the adapter.
         # Evaluate retry 'when' callback if present
         # None = no callback configured, True/False = callback result
         # If the callback raises, report that exception instead (makes bugs visible)
@@ -196,7 +200,9 @@ def execute_target(
             if retries and retries.when is not None:
                 try:
                     retryable = bool(retries.when(e))
-                except Exception as callback_exc:
+                except Exception as callback_exc:  # noqa: BLE001
+                    # Surface a faulty `when` callback instead of the
+                    # original error, so the bug is visible.
                     e = callback_exc
 
         # Stop any in-flight stream producers and wait for their driver
@@ -207,7 +213,9 @@ def execute_target(
             try:
                 ctx.close_streams()
                 ctx.wait_streams()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort teardown — the execution error below is what
+                # actually gets reported.
                 pass
 
         error_type = f"{type(e).__module__}.{type(e).__qualname__}"

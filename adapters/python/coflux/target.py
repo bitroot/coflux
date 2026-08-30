@@ -148,7 +148,7 @@ def _get_param_indexes(
     parameter_names = [p.name for p in parameters]
     for name in names:
         if name not in parameter_names:
-            raise Exception(f"Unrecognised parameter in wait ({name})")
+            raise ValueError(f"Unrecognised parameter in wait ({name})")
         indexes.append(parameter_names.index(name))
     return indexes
 
@@ -322,7 +322,7 @@ def _build_definition(
     parameters = inspect.signature(fn).parameters.values()
     for p in parameters:
         if p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            raise Exception(f"Unsupported parameter type ({p.kind})")
+            raise TypeError(f"Unsupported parameter type ({p.kind})")
     parameters_ = [_build_parameter(p) for p in parameters]
     return TargetDefinition(
         type,

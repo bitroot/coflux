@@ -128,6 +128,7 @@ class ManagedServer:
                 ["docker", "rm", "-f", self._container],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                check=False,
             )
             self._container = None
         elif self._proc:

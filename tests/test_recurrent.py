@@ -1,7 +1,6 @@
 """Tests for recurrent execution behavior."""
 
 import pytest
-
 from support.manifest import task, workflow
 
 

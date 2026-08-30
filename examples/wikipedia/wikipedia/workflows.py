@@ -1,6 +1,5 @@
 import collections
 import datetime as dt
-import typing as t
 
 import coflux as cf
 import nltk
@@ -54,7 +53,7 @@ def tokenise(text_: cf.Execution[str]):
 
 
 @cf.task(wait=True)
-def count_tokens(tokens_: cf.Execution[t.List[str]]):
+def count_tokens(tokens_: cf.Execution[list[str]]):
     return collections.Counter(tokens_.result()).most_common(100)
 
 
