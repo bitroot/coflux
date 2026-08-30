@@ -23,13 +23,24 @@ class _TargetDecorator(t.Protocol):
     function's return type — which is visible at application time, but not
     at the factory call.
 
-    Overload resolution order matters: generator functions match first (so
-    ``-> Iterator[T]`` gives a ``Target[P, Stream[T]]``), then async
-    coroutines (unwrapped), then the general case.
+    Overload resolution order matters: generator functions match first,
+    sync and async alike (so ``-> Iterator[T]`` and ``-> AsyncIterator[T]``
+    both give a ``Target[P, Stream[T]]``), then async coroutines
+    (unwrapped), then the general case.
+
+    Only the *iterator* forms collapse, not ``Iterable``: a task returning
+    ``list[str]`` is an ``Iterable[str]`` too, and typing that as a stream
+    would be wrong. Declaring a generator task's return as ``Iterable[T]``
+    therefore leaves it uncollapsed — use ``Iterator[T]``.
     """
 
     @t.overload
     def __call__(self, fn: t.Callable[P, t.Iterator[T]]) -> Target[P, "Stream[T]"]: ...
+
+    @t.overload
+    def __call__(
+        self, fn: t.Callable[P, t.AsyncIterator[T]]
+    ) -> Target[P, "Stream[T]"]: ...
 
     @t.overload
     def __call__(

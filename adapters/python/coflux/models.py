@@ -264,13 +264,37 @@ class StreamIterator(t.Iterator[T_co], t.Protocol):
     def __exit__(self, *exc_info: t.Any) -> None: ...
 
 
-class Stream(t.Iterable[T]):
+class AsyncStreamIterator(t.AsyncIterator[T_co], t.Protocol):
+    """What ``aiter(stream)`` returns.
+
+    The async counterpart of ``StreamIterator``: same subscription, same
+    release obligation, but the caller suspends between items instead of
+    blocking its thread.
+    """
+
+    async def aclose(self) -> None:
+        """Release the subscription. Idempotent; iteration then stops."""
+        ...
+
+    async def __aenter__(self) -> "AsyncStreamIterator[T_co]": ...
+
+    async def __aexit__(self, *exc_info: t.Any) -> None: ...
+
+
+class Stream(t.Iterable[T], t.AsyncIterable[T]):
     """A handle to a stream produced by another execution.
 
     Iterating a ``Stream`` opens a subscription with the server; items arrive
     pushed over the WebSocket and yield from the iterator. Each ``__iter__``
     starts a fresh subscription from sequence 0, so a stream can be iterated
     multiple times and each iteration sees the whole sequence.
+
+    ``async for`` works too, and does the same thing — the difference is
+    only in how the consumer waits. Prefer it in ``async def`` bodies:
+    the sync iterator blocks its thread between items, which in an async
+    task means blocking the event loop, and in an async generator
+    producer means nothing else in that generator can make progress
+    while it waits.
 
     ``partition``, ``slice``, and ``stride`` return new ``Stream`` views
     with the stride adjusted. Chained calls compose into a single stride
@@ -330,3 +354,8 @@ class Stream(t.Iterable[T]):
         from .streams import open_subscription
 
         return open_subscription(self._id, self._stride)
+
+    def __aiter__(self) -> AsyncStreamIterator[T]:
+        from .streams import open_async_subscription
+
+        return open_async_subscription(self._id, self._stride)

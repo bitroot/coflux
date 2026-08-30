@@ -10,7 +10,10 @@ The consumer side owns a module-level ``StreamRegistry``: open consumer
 subscriptions are keyed by subscription id. The registry's dispatcher
 handlers (``stream_items``/``stream_closed``) route incoming pushes from
 the server to the right iterator's queue, which yields as the user
-iterates. On dispatcher EOF every active iterator is woken with a
+iterates. Readers come in two flavours — a blocking one for ``for`` and
+a loop-native one for ``async for`` — sharing their acknowledgement and
+release bookkeeping via ``_Subscription``; only the queue they deliver
+through differs. On dispatcher EOF every active iterator is woken with a
 synthetic abandoned-close so user code doesn't hang forever.
 
 Both sides are thread-safe: the ``Dispatcher`` owns stdin (so subtask
@@ -492,18 +495,20 @@ _PREFETCH = 16
 _ACK_BATCH = max(1, _PREFETCH // 2)
 
 
-class _StreamIterator(Iterator[Any]):
-    """Drains items for one active subscription.
+class _Subscription:
+    """Bookkeeping shared by the sync and async subscription readers.
 
-    Delivery is credit-gated: the server sends at most ``_PREFETCH``
-    items beyond what we've acknowledged, so the queue is bounded even
-    if the consumer is much slower than the producer.
+    Everything here is independent of how items reach the caller: the
+    acknowledgement accounting that drives the producer's backpressure,
+    and the release path that hands the subscription back to the server.
+    Only delivery differs between the two readers — a ``queue.Queue`` fed
+    from the dispatcher thread for the sync one, an ``asyncio.Queue``
+    filled via the consumer's event loop for the async one.
     """
 
     def __init__(self, subscription_id: int, execution_id: str) -> None:
         self._subscription_id = subscription_id
         self._execution_id = execution_id
-        self._queue: queue.Queue[Any] = queue.Queue()
         self._done = False
         # Cumulative progress, as reported to the server.
         self._acked_count = 0
@@ -520,19 +525,14 @@ class _StreamIterator(Iterator[Any]):
         subscription. ``items`` is a list of ``[sequence, value_wire]``.
 
         Runs on the dispatcher reader thread — keep it cheap. The raw wire
-        value goes onto the queue unmodified; deserialization happens in
-        ``__next__`` on the consumer's thread so heavy decode work doesn't
-        stall stdin reads.
+        value is enqueued unmodified; deserialization happens on the
+        consumer's side so heavy decode work doesn't stall stdin reads.
         """
-        for sequence, value in items:
-            self._queue.put((sequence, value))
+        raise NotImplementedError
 
     def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         """Called by the registry when the stream closes."""
-        self._queue.put(_Closed(reason, error))
-
-    def __iter__(self) -> "_StreamIterator":
-        return self
+        raise NotImplementedError
 
     def close(self) -> None:
         """Release the subscription. Idempotent.
@@ -569,12 +569,6 @@ class _StreamIterator(Iterator[Any]):
             protocol.send_stream_unsubscribe(self._execution_id, self._subscription_id)
         except Exception:
             pass
-
-    def __enter__(self) -> "_StreamIterator":
-        return self
-
-    def __exit__(self, *_exc_info: Any) -> None:
-        self.close()
 
     def __del__(self) -> None:
         # The registry holds iterators weakly, so this is the hook that
@@ -629,6 +623,35 @@ class _StreamIterator(Iterator[Any]):
             return
         self._unreported = 0
 
+
+class _StreamIterator(_Subscription, Iterator[Any]):
+    """Drains items for one active subscription, synchronously.
+
+    Delivery is credit-gated: the server sends at most ``_PREFETCH``
+    items beyond what we've acknowledged, so the queue is bounded even
+    if the consumer is much slower than the producer.
+    """
+
+    def __init__(self, subscription_id: int, execution_id: str) -> None:
+        super().__init__(subscription_id, execution_id)
+        self._queue: queue.Queue[Any] = queue.Queue()
+
+    def on_items(self, items: list[list[Any]]) -> None:
+        for sequence, value in items:
+            self._queue.put((sequence, value))
+
+    def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
+        self._queue.put(_Closed(reason, error))
+
+    def __iter__(self) -> "_StreamIterator":
+        return self
+
+    def __enter__(self) -> "_StreamIterator":
+        return self
+
+    def __exit__(self, *_exc_info: Any) -> None:
+        self.close()
+
     def __next__(self) -> Any:
         if self._done:
             raise StopIteration
@@ -657,6 +680,93 @@ class _StreamIterator(Iterator[Any]):
         return deserialize_value(value)
 
 
+class _AsyncStreamIterator(_Subscription):
+    """Drains items for one active subscription, asynchronously.
+
+    Same accounting as ``_StreamIterator`` — the difference is where the
+    caller waits. Items arrive on the dispatcher's reader thread and are
+    handed to the consumer's event loop with ``call_soon_threadsafe``,
+    so ``__anext__`` awaits an ``asyncio.Queue`` instead of blocking a
+    thread. That keeps the loop free to run other tasks between items,
+    and makes cancellation clean: a cancelled ``__anext__`` leaves the
+    item sitting in the queue for the next reader rather than consuming
+    and dropping it.
+
+    The loop is captured when the iterator is created, which is inside
+    the ``async for`` that opened the subscription.
+    """
+
+    def __init__(self, subscription_id: int, execution_id: str) -> None:
+        super().__init__(subscription_id, execution_id)
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            raise RuntimeError(
+                "iterating a stream with `async for` needs a running event loop"
+                " — use a plain `for` outside async code"
+            ) from None
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    def _put(self, item: Any) -> None:
+        """Hand an item to the consumer's loop.
+
+        Called on the dispatcher thread. The loop may already be closed —
+        an execution that finished while items were in flight, or the
+        dispatcher-EOF wake-up arriving after the consumer's loop shut
+        down — in which case there's no one left to deliver to.
+        """
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+        except RuntimeError:
+            pass
+
+    def on_items(self, items: list[list[Any]]) -> None:
+        for sequence, value in items:
+            self._put((sequence, value))
+
+    def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
+        self._put(_Closed(reason, error))
+
+    def __aiter__(self) -> "_AsyncStreamIterator":
+        return self
+
+    async def aclose(self) -> None:
+        """Release the subscription. Idempotent.
+
+        A coroutine to mirror ``agen.aclose()``, though the work itself is
+        synchronous — releasing is a single protocol write.
+        """
+        self.close()
+
+    async def __aenter__(self) -> "_AsyncStreamIterator":
+        return self
+
+    async def __aexit__(self, *_exc_info: Any) -> None:
+        self.close()
+
+    async def __anext__(self) -> Any:
+        if self._done:
+            raise StopAsyncIteration
+
+        self._retire_in_hand()
+
+        if self._queue.empty():
+            # About to suspend. Report progress first, for the same reason
+            # the sync path does: a lockstep producer may be waiting on
+            # precisely the acknowledgement we're batching.
+            self._flush_ack()
+        item = await self._queue.get()
+
+        if isinstance(item, _Closed):
+            self.close()
+            raise_for_close(item.reason, item.error)
+            raise StopAsyncIteration
+
+        sequence, value = item
+        self._in_hand = sequence
+        return deserialize_value(value)
+
+
 class StreamRegistry:
     """Per-process registry of open consumer subscriptions."""
 
@@ -677,7 +787,7 @@ class StreamRegistry:
         # Nothing is lost by holding them weakly: an iterator with no
         # remaining reference is by definition one no consumer can read
         # from again.
-        self._iterators: weakref.WeakValueDictionary[int, _StreamIterator] = (
+        self._iterators: weakref.WeakValueDictionary[int, _Subscription] = (
             weakref.WeakValueDictionary()
         )
         self._installed = False
@@ -710,13 +820,22 @@ class StreamRegistry:
         for it in iterators:
             it.on_closed("abandoned", None)
 
-    def allocate(self, execution_id: str) -> tuple[int, _StreamIterator]:
-        """Claim a subscription id and iterator."""
+    def allocate(
+        self,
+        execution_id: str,
+        factory: type[_Subscription] = _StreamIterator,
+    ) -> tuple[int, Any]:
+        """Claim a subscription id and reader.
+
+        ``factory`` selects the sync or async reader; both are registered
+        here identically, so the dispatcher routes to either without
+        caring which kind it is.
+        """
         self._ensure_installed()
         with self._lock:
             subscription_id = self._next_id
             self._next_id += 1
-            it = _StreamIterator(subscription_id, execution_id)
+            it = factory(subscription_id, execution_id)
             self._iterators[subscription_id] = it
         return subscription_id, it
 
@@ -771,20 +890,21 @@ def parse_stream_id(id: str) -> tuple[str, int]:
     return exec_id, int(index)
 
 
-def open_subscription(
+def _open_subscription(
     stream_id: str,
     stride: tuple[int, int | None, int],
-) -> "_StreamIterator":
-    """Begin iterating a stream. Called by ``Stream.__iter__``.
+    factory: type[_Subscription],
+) -> Any:
+    """Allocate a subscription and tell the server about it.
 
-    Allocates a subscription id, sends the subscribe message, and returns
-    an iterator that yields as items arrive. ``stride`` is a
-    ``(start, stop, step)`` tuple — any chain of slice/partition/stride
-    calls on the handle collapses to a single stride before this point.
+    ``stride`` is a ``(start, stop, step)`` tuple — any chain of
+    slice/partition/stride calls on the handle collapses to a single
+    stride before this point. The wire message is the same whichever
+    reader the caller asked for; only local delivery differs.
     """
     ctx = get_context()
     execution_id = ctx.execution_id
-    subscription_id, iterator = _stream_registry().allocate(execution_id)
+    subscription_id, iterator = _stream_registry().allocate(execution_id, factory)
 
     # Split the opaque id for the wire message, which still takes
     # producer_execution_id + index positionally.
@@ -803,3 +923,29 @@ def open_subscription(
         stride=wire_stride,
     )
     return iterator
+
+
+def open_subscription(
+    stream_id: str,
+    stride: tuple[int, int | None, int],
+) -> "_StreamIterator":
+    """Begin iterating a stream. Called by ``Stream.__iter__``.
+
+    Returns an iterator that yields as items arrive, blocking the calling
+    thread between them.
+    """
+    return _open_subscription(stream_id, stride, _StreamIterator)
+
+
+def open_async_subscription(
+    stream_id: str,
+    stride: tuple[int, int | None, int],
+) -> "_AsyncStreamIterator":
+    """Begin iterating a stream. Called by ``Stream.__aiter__``.
+
+    Returns an async iterator that yields as items arrive, suspending the
+    calling task rather than blocking its thread. Must be called with a
+    running event loop — the loop it binds to is the one that will be
+    woken when items land.
+    """
+    return _open_subscription(stream_id, stride, _AsyncStreamIterator)

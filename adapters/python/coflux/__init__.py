@@ -28,6 +28,7 @@ from .models import (
     Asset,
     AssetEntry,
     AssetMetadata,
+    AsyncStreamIterator,
     Execution,
     Input,
     Stream,
@@ -69,6 +70,7 @@ __all__ = [
     "AssetMetadata",
     "Stream",
     "StreamIterator",
+    "AsyncStreamIterator",
     # Producer-side stream helper
     "stream",
     # Context functions
