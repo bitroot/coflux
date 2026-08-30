@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,6 +63,21 @@ func (a *CommandAdapter) Command() []string {
 	return a.command
 }
 
+// DiscoveryError reports modules that the adapter couldn't load.
+//
+// Discovery still writes a manifest of everything it *could* load, so a
+// non-nil manifest is returned alongside this error. Callers that can work
+// with a partial result (the dev worker's reload path) may proceed after
+// logging the details; everyone else should treat it as fatal, since the
+// missing targets have no worker to claim them.
+type DiscoveryError struct {
+	Details string
+}
+
+func (e *DiscoveryError) Error() string {
+	return e.Details
+}
+
 // Discover runs discovery on the specified modules
 func (a *CommandAdapter) Discover(ctx context.Context, modules []string) (*DiscoveryManifest, error) {
 	// Build command: base... discover modules...
@@ -70,20 +86,34 @@ func (a *CommandAdapter) Discover(ctx context.Context, modules []string) (*Disco
 	args = append(args, modules...)
 	cmd := exec.CommandContext(ctx, a.command[0], args...)
 
-	output, err := cmd.Output()
+	// Capture both streams: unlike cmd.Output(), which only surfaces stderr
+	// via ExitError, this keeps the adapter's diagnostics (import
+	// tracebacks) available whatever the exit code.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	details := strings.TrimSpace(stderr.String())
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			if strings.Contains(stderr, "No module named coflux") {
+		if _, ok := err.(*exec.ExitError); ok {
+			if strings.Contains(details, "No module named coflux") {
 				return nil, fmt.Errorf("discovery failed: the 'coflux' package does not appear to be installed in this environment")
 			}
-			return nil, fmt.Errorf("discovery failed: %s", stderr)
+			// Per-module import failures exit non-zero but still emit a
+			// manifest covering the modules that did load. Hand back both
+			// and let the caller decide what a partial result is worth.
+			var manifest DiscoveryManifest
+			if json.Unmarshal(stdout.Bytes(), &manifest) == nil {
+				return &manifest, &DiscoveryError{Details: details}
+			}
+			return nil, fmt.Errorf("discovery failed: %s", details)
 		}
 		return nil, fmt.Errorf("failed to run discovery: %w", err)
 	}
 
 	var manifest DiscoveryManifest
-	if err := json.Unmarshal(output, &manifest); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		return nil, fmt.Errorf("failed to parse discovery output: %w", err)
 	}
 

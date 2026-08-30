@@ -252,6 +252,11 @@ func runWorkerWithWatch(
 
 	logger.Info("watching for file changes", "directory", ".")
 
+	// The first run is strict about modules that fail to import; reloads
+	// after it are not, so that saving a file mid-edit logs the error
+	// instead of exiting the worker.
+	firstRun := true
+
 	for {
 		// Re-resolve token before each run (project tokens may have expired)
 		token, err := resolveToken()
@@ -268,6 +273,8 @@ func runWorkerWithWatch(
 
 		// Start worker in goroutine
 		w := worker.New(cfg, cmdAdapter, session, logger)
+		w.AllowPartialDiscovery = !firstRun
+		firstRun = false
 		go func() {
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,

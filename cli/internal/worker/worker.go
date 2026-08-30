@@ -41,6 +41,14 @@ type Worker struct {
 	session string
 	logger  *slog.Logger
 
+	// AllowPartialDiscovery keeps the worker running when some of its
+	// modules fail to import, serving the targets from the ones that did.
+	// Set on reloads under --watch/--dev, where a half-saved file would
+	// otherwise exit the worker and leave you restarting it by hand. On
+	// first start it stays false: a worker that can't load what it was
+	// asked for should say so rather than come up quietly incomplete.
+	AllowPartialDiscovery bool
+
 	client      *api.Client
 	workspaceID string // resolved external workspace ID
 	sessionID   string
@@ -229,7 +237,15 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.logger.Debug("discovering targets", "modules", modules)
 	manifest, err := w.adapter.Discover(ctx, modules)
 	if err != nil {
-		return fmt.Errorf("discovery failed: %w", err)
+		var discoveryErr *adapter.DiscoveryError
+		if !errors.As(err, &discoveryErr) || !w.AllowPartialDiscovery || manifest == nil {
+			return fmt.Errorf("discovery failed: %w", err)
+		}
+		// Serve what loaded, but make the gap impossible to miss: targets
+		// from the failed modules won't be offered, so runs using them sit
+		// unassigned until the next reload fixes the import.
+		w.logger.Error("some modules failed to import; continuing without them")
+		fmt.Fprintln(os.Stderr, discoveryErr.Details)
 	}
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
