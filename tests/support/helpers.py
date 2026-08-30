@@ -16,7 +16,9 @@ from .server import SUPER_TOKEN
 ADAPTER_SCRIPT = os.path.join(os.path.dirname(__file__), "adapter.py")
 
 
-def poll_result(run_id, host, workspace="default", timeout=15, interval=0.1, max_interval=1.0):
+def poll_result(
+    run_id, host, workspace="default", timeout=15, interval=0.1, max_interval=1.0
+):
     """Poll for a run result until it completes or times out."""
     deadline = time.time() + timeout
     last_error = None
@@ -28,8 +30,7 @@ def poll_result(run_id, host, workspace="default", timeout=15, interval=0.1, max
             time.sleep(interval)
             interval = min(interval * 2, max_interval)
     raise TimeoutError(
-        f"run {run_id} did not complete within {timeout}s"
-        f" (last error: {last_error})"
+        f"run {run_id} did not complete within {timeout}s (last error: {last_error})"
     )
 
 

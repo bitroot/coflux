@@ -46,7 +46,8 @@ defmodule Coflux.Application do
       Topics.Asset,
       Topics.Queue,
       Topics.Inputs,
-      Topics.Input
+      Topics.Input,
+      Topics.Stream
     ]
   end
 end

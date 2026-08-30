@@ -26,16 +26,20 @@ defmodule Coflux.Topics.Workflow do
            @max_runs,
            self()
          ) do
-      {:ok, workflow, instruction, runs, ref} ->
+      {:ok, workflow, instruction, runs, active_runs, ref} ->
         value =
           %{
             parameters: if(workflow, do: build_parameters(workflow.parameters)),
             instruction: instruction,
             configuration: build_configuration(workflow),
-            runs: build_runs(runs)
+            runs: build_runs(runs, active_runs)
           }
 
-        {:ok, Topic.new(value, %{ref: ref})}
+        # `active_runs` is %{run_id => %{execution_id => assigned?}} for
+        # everything still in flight, kept in step with the scheduled /
+        # assigned / completed notifications so that each run's activity can
+        # be recomputed as they arrive
+        {:ok, Topic.new(value, %{ref: ref, active_runs: active_runs})}
 
       {:error, :not_found} ->
         {:error, :not_found}
@@ -62,7 +66,13 @@ defmodule Coflux.Topics.Workflow do
       Topic.set(
         topic,
         [:runs, external_run_id],
-        %{id: external_run_id, createdAt: created_at, createdBy: build_principal(created_by)}
+        %{
+          id: external_run_id,
+          createdAt: created_at,
+          createdBy: build_principal(created_by),
+          outcome: nil,
+          active: build_active(topic.state.active_runs[external_run_id])
+        }
       )
 
     runs = topic.value.runs
@@ -74,6 +84,69 @@ defmodule Coflux.Topics.Workflow do
       topic
     end
   end
+
+  defp process_notification({:scheduled, external_run_id, execution_id}, topic) do
+    update_active(topic, external_run_id, &Map.put(&1, execution_id, false))
+  end
+
+  defp process_notification({:assigned, executions}, topic) do
+    Enum.reduce(executions, topic, fn {external_run_id, execution_id}, topic ->
+      update_active(topic, external_run_id, &Map.put(&1, execution_id, true))
+    end)
+  end
+
+  defp process_notification({:completed, external_run_id, execution_id}, topic) do
+    update_active(topic, external_run_id, &Map.delete(&1, execution_id))
+  end
+
+  defp process_notification({:outcome, external_run_id, outcome}, topic) do
+    if Map.has_key?(topic.value.runs, external_run_id) do
+      Topic.set(topic, [:runs, external_run_id, :outcome], build_outcome(outcome))
+    else
+      topic
+    end
+  end
+
+  defp update_active(topic, external_run_id, fun) do
+    topic =
+      update_in(
+        topic,
+        [Access.key(:state), :active_runs, Access.key(external_run_id, %{})],
+        fun
+      )
+
+    topic =
+      if topic.state.active_runs[external_run_id] == %{} do
+        update_in(topic, [Access.key(:state), :active_runs], &Map.delete(&1, external_run_id))
+      else
+        topic
+      end
+
+    # Runs that have been evicted from the list (or that belong to another
+    # workspace) still get notifications, but have nothing to update
+    if Map.has_key?(topic.value.runs, external_run_id) do
+      Topic.set(
+        topic,
+        [:runs, external_run_id, :active],
+        build_active(topic.state.active_runs[external_run_id])
+      )
+    else
+      topic
+    end
+  end
+
+  # A run is "running" once any of its in-flight executions has been assigned
+  # to a worker, and "queued" while they're all still waiting for one
+  defp build_active(nil), do: nil
+
+  defp build_active(executions) when map_size(executions) == 0, do: nil
+
+  defp build_active(executions) do
+    if Enum.any?(executions, fn {_, assigned} -> assigned end), do: "running", else: "queued"
+  end
+
+  defp build_outcome(nil), do: nil
+  defp build_outcome(outcome), do: Atom.to_string(outcome)
 
   defp build_parameters(parameters) do
     Enum.map(parameters, fn {name, default, annotation} ->
@@ -119,14 +192,24 @@ defmodule Coflux.Topics.Workflow do
         recurrent: workflow.recurrent,
         timeout: workflow.timeout,
         requires: workflow.requires,
-        memo: workflow.memo
+        memo: workflow.memo,
+        streams: build_streams_configuration(workflow[:streams])
       }
     end
   end
 
-  defp build_runs(runs) do
+  defp build_streams_configuration(nil), do: nil
+
+  defp build_streams_configuration(streams) do
+    %{
+      buffer: streams[:buffer],
+      timeoutMs: streams[:timeout_ms]
+    }
+  end
+
+  defp build_runs(runs, active_runs) do
     Map.new(runs, fn
-      {external_run_id, created_at, created_by_user_ext_id, created_by_token_ext_id} ->
+      {external_run_id, created_at, created_by_user_ext_id, created_by_token_ext_id, outcome} ->
         created_by =
           case {created_by_user_ext_id, created_by_token_ext_id} do
             {nil, nil} -> nil
@@ -134,7 +217,16 @@ defmodule Coflux.Topics.Workflow do
             {nil, token_ext_id} -> %{type: "token", externalId: token_ext_id}
           end
 
-        {external_run_id, %{id: external_run_id, createdAt: created_at, createdBy: created_by}}
+        active = build_active(Map.get(active_runs, external_run_id))
+
+        {external_run_id,
+         %{
+           id: external_run_id,
+           createdAt: created_at,
+           createdBy: created_by,
+           outcome: build_outcome(outcome),
+           active: active
+         }}
     end)
   end
 end

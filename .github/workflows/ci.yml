@@ -67,6 +67,10 @@ jobs:
           uvx ruff format --check .
           uvx ruff check .
 
+      - name: Run adapter tests
+        working-directory: adapters/python
+        run: uv run --with pytest pytest tests/
+
       - name: Check version consistency
         shell: python3 {0}
         run: |

@@ -81,7 +81,9 @@ def lint_changelog(path: Path) -> list[str]:
         # "No changes." marker
         if line == "No changes.":
             if no_changes or current_category:
-                errors.append(f"{path}:{i}: 'No changes.' must be the only content in a version section")
+                errors.append(
+                    f"{path}:{i}: 'No changes.' must be the only content in a version section"
+                )
             no_changes = True
             continue
 

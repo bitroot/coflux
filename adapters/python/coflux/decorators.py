@@ -5,20 +5,42 @@ from __future__ import annotations
 import datetime as dt
 import typing as t
 
-from .target import Cache, Defer, Retries, Target
+from .target import _STREAMS_UNSET, Cache, Defer, Retries, Streams, Target
+
+if t.TYPE_CHECKING:
+    from .models import Stream
 
 P = t.ParamSpec("P")
 T = t.TypeVar("T")
 
 
 class _TargetDecorator(t.Protocol):
-    """Decorator protocol that unwraps ``Coroutine`` for async functions.
+    """Decorator protocol that unwraps ``Coroutine`` and collapses generator
+    return types to ``Stream``.
 
-    Overloading on ``__call__`` (rather than on the factory function)
-    lets the type checker pick the right overload based on the decorated
-    function's return type — which is visible at application time, but
-    not at the factory call.
+    Overloading on ``__call__`` (rather than on the factory function) lets
+    the type checker pick the right overload based on the decorated
+    function's return type — which is visible at application time, but not
+    at the factory call.
+
+    Overload resolution order matters: generator functions match first,
+    sync and async alike (so ``-> Iterator[T]`` and ``-> AsyncIterator[T]``
+    both give a ``Target[P, Stream[T]]``), then async coroutines
+    (unwrapped), then the general case.
+
+    Only the *iterator* forms collapse, not ``Iterable``: a task returning
+    ``list[str]`` is an ``Iterable[str]`` too, and typing that as a stream
+    would be wrong. Declaring a generator task's return as ``Iterable[T]``
+    therefore leaves it uncollapsed — use ``Iterator[T]``.
     """
+
+    @t.overload
+    def __call__(self, fn: t.Callable[P, t.Iterator[T]]) -> Target[P, Stream[T]]: ...
+
+    @t.overload
+    def __call__(
+        self, fn: t.Callable[P, t.AsyncIterator[T]]
+    ) -> Target[P, Stream[T]]: ...
 
     @t.overload
     def __call__(
@@ -41,12 +63,21 @@ def task(
     memo: bool | t.Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
+    streams: Streams | None = _STREAMS_UNSET,  # type: ignore[assignment]
 ) -> _TargetDecorator:
     """Decorator for defining a task.
 
     For ``async def`` functions, the coroutine is run to completion by
     the executor; the task's return type is the coroutine's resolved
     value (not the coroutine itself).
+
+    ``streams`` only applies to tasks that produce streams — either
+    generator-bodied tasks (``def`` + ``yield`` / ``async def`` +
+    ``yield``) or tasks that call ``cf.stream(...)`` internally. It
+    configures the default ``buffer`` and ``timeout`` for those
+    streams; per-call overrides on ``cf.stream(...)`` win. Passing
+    ``streams=`` on a non-generator task raises ``TypeError`` at
+    decoration time.
     """
 
     def decorator(fn):
@@ -63,6 +94,7 @@ def task(
             memo=memo,
             requires=requires,
             timeout=timeout,
+            streams=streams,
         )
 
     return decorator  # type: ignore[return-value]
@@ -80,12 +112,15 @@ def workflow(
     memo: bool = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
+    streams: Streams | None = _STREAMS_UNSET,  # type: ignore[assignment]
 ) -> _TargetDecorator:
     """Decorator for defining a workflow.
 
     For ``async def`` functions, the coroutine is run to completion by
     the executor; the workflow's return type is the coroutine's resolved
     value (not the coroutine itself).
+
+    See ``@cf.task`` for ``streams=`` semantics.
     """
 
     def decorator(fn):
@@ -102,6 +137,7 @@ def workflow(
             memo=memo,
             requires=requires,
             timeout=timeout,
+            streams=streams,
         )
 
     return decorator  # type: ignore[return-value]

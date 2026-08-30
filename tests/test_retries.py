@@ -9,7 +9,9 @@ def test_retry_on_error(worker):
     """First attempt fails, retry succeeds. Run result is the success value."""
     targets = [
         workflow(
-            "test", "flaky", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
+            "test",
+            "flaky",
+            retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0},
         )
     ]
 
@@ -34,7 +36,9 @@ def test_retry_limit_exhausted(worker):
     """All retry attempts fail. After the limit, run result is the final error."""
     targets = [
         workflow(
-            "test", "doomed", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
+            "test",
+            "doomed",
+            retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0},
         )
     ]
 
@@ -72,7 +76,8 @@ def test_retry_with_delay(worker):
 
         ref = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "flaky_task",
+            "test",
+            "flaky_task",
             [],
             retries={"limit": 1, "backoff_min_ms": 500, "backoff_max_ms": 500},
         )
@@ -98,7 +103,9 @@ def test_retry_not_retryable(worker):
     """When retryable=False, no retry is attempted despite retry limit."""
     targets = [
         workflow(
-            "test", "non_retryable", retries={"limit": 3, "backoff_min_ms": 0, "backoff_max_ms": 0}
+            "test",
+            "non_retryable",
+            retries={"limit": 3, "backoff_min_ms": 0, "backoff_max_ms": 0},
         )
     ]
 
@@ -118,7 +125,9 @@ def test_retry_retryable_true_still_retries(worker):
     """When retryable=True (default), retries work normally."""
     targets = [
         workflow(
-            "test", "retryable", retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0}
+            "test",
+            "retryable",
+            retries={"limit": 1, "backoff_min_ms": 0, "backoff_max_ms": 0},
         )
     ]
 

@@ -3,7 +3,6 @@
 import time
 
 import pytest
-
 from support.manifest import task, workflow
 from support.protocol import json_args
 
@@ -81,7 +80,9 @@ def test_wait_for(worker):
                 "references": [["execution", ref_a]],
             }
         ]
-        ref_b = ex0.conn.submit_task(ex0.execution_id, "test", "consumer", consumer_args, wait_for=[0])
+        ref_b = ex0.conn.submit_task(
+            ex0.execution_id, "test", "consumer", consumer_args, wait_for=[0]
+        )
 
         # Producer should be dispatched
         ex1 = ctx.executor.next_execute()
@@ -191,14 +192,16 @@ def test_defer_deduplicates(worker):
         # and defers one to the other.
         ref1 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(42),
             defer_config={"params": True},
             delay=1000,
         )
         ref2 = ex0.conn.submit_task(
             ex0.execution_id,
-            "test", "compute",
+            "test",
+            "compute",
             json_args(42),
             defer_config={"params": True},
             delay=1000,
@@ -340,54 +343,57 @@ def test_requires_matching(worker):
         task("test", "compute", requires={"gpu": ["cuda-12"]}),
     ]
 
-    # Worker A: no provides, concurrency=2
-    with worker(targets, concurrency=2) as ctx_a:
+    with (
+        # Worker A: no provides, concurrency=2
+        worker(targets, concurrency=2) as ctx_a,
         # Worker B: provides gpu=cuda-12, concurrency=1
-        with worker(
+        worker(
             targets,
             concurrency=1,
             provides={"gpu": ["cuda-12"]},
-        ) as ctx_b:
-            resp = ctx_a.submit("test", "main")
-            run_id = resp["runId"]
+        ) as ctx_b,
+    ):
+        resp = ctx_a.submit("test", "main")
+        run_id = resp["runId"]
 
-            # The workflow has no requires, so it could land on either worker.
-            # Try worker A first (more likely with 2 slots), fall back to B.
-            try:
-                ex = ctx_a.executor.next_execute(timeout=5)
-                assert ex.target == "main"
-                wf_on_a = True
-            except TimeoutError:
-                ex = ctx_b.executor.next_execute(timeout=5)
-                assert ex.target == "main"
-                wf_on_a = False
+        # The workflow has no requires, so it could land on either worker.
+        # Try worker A first (more likely with 2 slots), fall back to B.
+        try:
+            ex = ctx_a.executor.next_execute(timeout=5)
+            assert ex.target == "main"
+            wf_on_a = True
+        except TimeoutError:
+            ex = ctx_b.executor.next_execute(timeout=5)
+            assert ex.target == "main"
+            wf_on_a = False
 
-            # Submit child task with requires
-            ref = ex.conn.submit_task(
-                ex.execution_id,
-                "test", "compute",
-                [],
-                requires={"gpu": ["cuda-12"]},
-            )
+        # Submit child task with requires
+        ref = ex.conn.submit_task(
+            ex.execution_id,
+            "test",
+            "compute",
+            [],
+            requires={"gpu": ["cuda-12"]},
+        )
 
-            # Worker B (tagged) should receive the task
-            if not wf_on_a:
-                # Workflow landed on B's only slot; task must wait.
-                # Complete the workflow first so B's slot frees up.
-                ex.conn.complete(ex.execution_id, value="done")
-                ex_b = ctx_b.executor.next_execute(timeout=5)
-                assert ex_b.target == "compute"
-                ex_b.conn.complete(ex_b.execution_id, value="computed")
-            else:
-                # Workflow is on worker A -- B's slot is free
-                ex_b = ctx_b.executor.next_execute(timeout=5)
-                assert ex_b.target == "compute"
+        # Worker B (tagged) should receive the task
+        if not wf_on_a:
+            # Workflow landed on B's only slot; task must wait.
+            # Complete the workflow first so B's slot frees up.
+            ex.conn.complete(ex.execution_id, value="done")
+            ex_b = ctx_b.executor.next_execute(timeout=5)
+            assert ex_b.target == "compute"
+            ex_b.conn.complete(ex_b.execution_id, value="computed")
+        else:
+            # Workflow is on worker A -- B's slot is free
+            ex_b = ctx_b.executor.next_execute(timeout=5)
+            assert ex_b.target == "compute"
 
-                ex_b.conn.complete(ex_b.execution_id, value="computed")
-                assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
-                ex.conn.complete(ex.execution_id, value="done")
+            ex_b.conn.complete(ex_b.execution_id, value="computed")
+            assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
+            ex.conn.complete(ex.execution_id, value="done")
 
-            assert ctx_a.result(run_id)["value"]["data"] == "done"
+        assert ctx_a.result(run_id)["value"]["data"] == "done"
 
 
 def test_cancel_execution_externally(worker):
@@ -455,7 +461,7 @@ def test_cancel_across_multiple_spawns(worker):
         ex0 = ctx.executor.next_execute()
 
         # Top spawns middle workflow
-        ref_mid = ex0.conn.submit_workflow(ex0.execution_id, "test", "middle", [])
+        ex0.conn.submit_workflow(ex0.execution_id, "test", "middle", [])
 
         # Middle workflow starts
         ex1 = ctx.executor.next_execute()
@@ -610,40 +616,43 @@ def test_workflow_requires_inherited_by_child_task(worker):
         task("test", "compute"),
     ]
 
-    # Worker A: no provides, concurrency=2
-    with worker(targets, concurrency=2) as ctx_a:
+    with (
+        # Worker A: no provides, concurrency=2
+        worker(targets, concurrency=2) as ctx_a,
         # Worker B: provides gpu=cuda-12, concurrency=2
-        with worker(
+        worker(
             targets,
             concurrency=2,
             provides={"gpu": ["cuda-12"]},
-        ) as ctx_b:
-            resp = ctx_b.submit("test", "main")
-            run_id = resp["runId"]
+        ) as ctx_b,
+    ):
+        resp = ctx_b.submit("test", "main")
+        run_id = resp["runId"]
 
-            # Workflow has requires, so it must land on worker B
-            ex = ctx_b.executor.next_execute(timeout=5)
-            assert ex.target == "main"
+        # Workflow has requires, so it must land on worker B
+        ex = ctx_b.executor.next_execute(timeout=5)
+        assert ex.target == "main"
 
-            # Submit child task with no requires
-            ref = ex.conn.submit_task(
-                ex.execution_id,
-                "test", "compute",
-                [],
-            )
+        # Submit child task with no requires
+        ref = ex.conn.submit_task(
+            ex.execution_id,
+            "test",
+            "compute",
+            [],
+        )
 
-            # Child should also land on worker B (inherited requires)
-            ex_child = ctx_b.executor.next_execute(timeout=5)
-            assert ex_child.target == "compute"
+        # Child should also land on worker B (inherited requires)
+        ex_child = ctx_b.executor.next_execute(timeout=5)
+        assert ex_child.target == "compute"
 
-            # Verify worker A did NOT receive the task
-            with pytest.raises(TimeoutError):
-                ctx_a.executor.next_execute(timeout=1)
+        # Verify worker A did NOT receive the task
+        with pytest.raises(TimeoutError):
+            ctx_a.executor.next_execute(timeout=1)
 
-            ex_child.conn.complete(ex_child.execution_id, value="computed")
-            assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
-            ex.conn.complete(ex.execution_id, value="done")
-            assert ctx_a.result(run_id)["value"]["data"] == "done"
+        ex_child.conn.complete(ex_child.execution_id, value="computed")
+        assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
+        ex.conn.complete(ex.execution_id, value="done")
+        assert ctx_a.result(run_id)["value"]["data"] == "done"
 
 
 def test_task_requires_unset_overrides_workflow(worker):
@@ -658,38 +667,41 @@ def test_task_requires_unset_overrides_workflow(worker):
         task("test", "compute"),
     ]
 
-    # Worker A: no provides, concurrency=2
-    with worker(targets, concurrency=2) as ctx_a:
+    with (
+        # Worker A: no provides, concurrency=2
+        worker(targets, concurrency=2) as ctx_a,
         # Worker B: provides gpu=cuda-12, concurrency=2
-        with worker(
+        worker(
             targets,
             concurrency=2,
             provides={"gpu": ["cuda-12"]},
-        ) as ctx_b:
-            resp = ctx_b.submit("test", "main")
-            run_id = resp["runId"]
+        ) as ctx_b,
+    ):
+        resp = ctx_b.submit("test", "main")
+        run_id = resp["runId"]
 
-            # Workflow lands on worker B (has matching provides)
-            ex = ctx_b.executor.next_execute(timeout=5)
-            assert ex.target == "main"
+        # Workflow lands on worker B (has matching provides)
+        ex = ctx_b.executor.next_execute(timeout=5)
+        assert ex.target == "main"
 
-            # Submit child task that unsets the gpu requirement
-            ref = ex.conn.submit_task(
-                ex.execution_id,
-                "test", "compute",
-                [],
-                requires={"gpu": []},
-            )
+        # Submit child task that unsets the gpu requirement
+        ref = ex.conn.submit_task(
+            ex.execution_id,
+            "test",
+            "compute",
+            [],
+            requires={"gpu": []},
+        )
 
-            # Child should land on either worker (no effective requires).
-            # Try worker A first since it has more availability.
-            try:
-                ex_child = ctx_a.executor.next_execute(timeout=5)
-            except TimeoutError:
-                ex_child = ctx_b.executor.next_execute(timeout=5)
+        # Child should land on either worker (no effective requires).
+        # Try worker A first since it has more availability.
+        try:
+            ex_child = ctx_a.executor.next_execute(timeout=5)
+        except TimeoutError:
+            ex_child = ctx_b.executor.next_execute(timeout=5)
 
-            assert ex_child.target == "compute"
-            ex_child.conn.complete(ex_child.execution_id, value="computed")
-            assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
-            ex.conn.complete(ex.execution_id, value="done")
-            assert ctx_a.result(run_id)["value"]["data"] == "done"
+        assert ex_child.target == "compute"
+        ex_child.conn.complete(ex_child.execution_id, value="computed")
+        assert ex.conn.resolve(ex.execution_id, ref)["value"] == "computed"
+        ex.conn.complete(ex.execution_id, value="done")
+        assert ctx_a.result(run_id)["value"]["data"] == "done"

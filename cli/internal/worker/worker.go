@@ -41,6 +41,14 @@ type Worker struct {
 	session string
 	logger  *slog.Logger
 
+	// AllowPartialDiscovery keeps the worker running when some of its
+	// modules fail to import, serving the targets from the ones that did.
+	// Set on reloads under --watch/--dev, where a half-saved file would
+	// otherwise exit the worker and leave you restarting it by hand. On
+	// first start it stays false: a worker that can't load what it was
+	// asked for should say so rather than come up quietly incomplete.
+	AllowPartialDiscovery bool
+
 	client      *api.Client
 	workspaceID string // resolved external workspace ID
 	sessionID   string
@@ -57,6 +65,44 @@ type Worker struct {
 
 	mu         sync.RWMutex
 	executions map[string]*executionState
+
+	// Active stream subscriptions, tracked so they can be re-established
+	// after a reconnect: the server holds subscriptions in memory only,
+	// so a server restart silently drops them — without a re-subscribe,
+	// consumers blocked mid-iteration would wait forever.
+	streamSubsMu sync.Mutex
+	streamSubs   map[streamSubKey]*streamSubscription
+}
+
+// streamSubKey identifies a consumer-side stream subscription. The
+// subscription ID is allocated by the consumer's adapter and is unique
+// within the consumer execution.
+type streamSubKey struct {
+	executionID    string // consumer execution
+	subscriptionID int
+}
+
+// streamSubscription remembers the subscribe params plus the next
+// sequence the consumer expects (advanced as stream_items are forwarded),
+// so a re-subscribe resumes exactly where delivery stopped — no gaps, no
+// duplicates.
+//
+// The credit counters are tracked for the same reason. The adapter's
+// counters are cumulative and don't reset when the connection drops, so
+// a re-subscribe has to tell the server where the accounting stands.
+// Letting the server restart from zero would over-grant the window by
+// however many items were in flight; deriving the acked counts from
+// `delivered` would under-grant it, and could deadlock a consumer that
+// has already drained its queue and so has nothing left to ack.
+type streamSubscription struct {
+	producerExecutionID string
+	index               int
+	nextSequence        int
+	stride              map[string]any
+	prefetch            int
+	delivered           int
+	ackCount            int
+	ackSequence         int
 }
 
 type executionState struct {
@@ -86,6 +132,7 @@ func New(cfg *config.Config, adp adapter.Adapter, session string, logger *slog.L
 		logger:     logger,
 		connCh:     make(chan struct{}),
 		executions: make(map[string]*executionState),
+		streamSubs: make(map[streamSubKey]*streamSubscription),
 	}
 }
 
@@ -190,7 +237,15 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.logger.Debug("discovering targets", "modules", modules)
 	manifest, err := w.adapter.Discover(ctx, modules)
 	if err != nil {
-		return fmt.Errorf("discovery failed: %w", err)
+		var discoveryErr *adapter.DiscoveryError
+		if !errors.As(err, &discoveryErr) || !w.AllowPartialDiscovery || manifest == nil {
+			return fmt.Errorf("discovery failed: %w", err)
+		}
+		// Serve what loaded, but make the gap impossible to miss: targets
+		// from the failed modules won't be offered, so runs using them sit
+		// unassigned until the next reload fixes the import.
+		w.logger.Error("some modules failed to import; continuing without them")
+		fmt.Fprintln(os.Stderr, discoveryErr.Details)
 	}
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
@@ -360,6 +415,9 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	)
 	conn.RegisterHandler("execute", w.handleExecute)
 	conn.RegisterHandler("abort", w.handleAbort)
+	conn.RegisterHandler("stream_items", w.handleStreamItems)
+	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
+	conn.RegisterHandler("stream_demand", w.handleStreamDemand)
 	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
@@ -503,6 +561,25 @@ func (w *Worker) handleExecute(params []any) error {
 		}
 	}
 
+	// Optional streams config (8th param). A map with string keys
+	// "buffer" and/or "timeout_ms"; either may be absent. Passed to
+	// the adapter so ``cf.stream(...)`` / generator-bodied tasks
+	// inherit the caller's override (or the workflow manifest default).
+	var streams *adapter.StreamsConfig
+	if len(params) > 7 && params[7] != nil {
+		if m, ok := params[7].(map[string]any); ok {
+			streams = &adapter.StreamsConfig{}
+			if v, ok := m["buffer"].(float64); ok {
+				buf := int(v)
+				streams.Buffer = &buf
+			}
+			if v, ok := m["timeout_ms"].(float64); ok {
+				t := int(v)
+				streams.TimeoutMs = &t
+			}
+		}
+	}
+
 	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID, "timeout_ms", timeoutMs)
 
 	// Track execution
@@ -542,7 +619,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs, streams); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
@@ -553,45 +630,55 @@ func (w *Worker) handleExecute(params []any) error {
 func (w *Worker) convertArguments(args []any) ([]adapter.Argument, error) {
 	result := make([]adapter.Argument, len(args))
 	for i, arg := range args {
-		arr, ok := arg.([]any)
-		if !ok {
-			return nil, fmt.Errorf("argument %d: expected array", i)
-		}
-
-		value, err := api.ParseValue(arr)
+		value, err := w.convertValueFromServer(arg)
 		if err != nil {
 			return nil, fmt.Errorf("argument %d: %w", i, err)
 		}
-
-		// Convert to adapter argument
-		adapterRefs, err := w.refsToAdapter(value.References)
-		if err != nil {
-			return nil, fmt.Errorf("argument %d: %w", i, err)
-		}
-		switch value.Type {
-		case api.ValueTypeRaw:
-			result[i] = adapter.Argument{
-				Type:       "inline",
-				Format:     "json",
-				Value:      value.Content,
-				References: adapterRefs,
-			}
-		case api.ValueTypeBlob:
-			// Download blob to cache
-			path, err := w.blobs.Download(value.Key)
-			if err != nil {
-				return nil, fmt.Errorf("argument %d: failed to download blob: %w", i, err)
-			}
-			format := "json"
-			result[i] = adapter.Argument{
-				Type:       "file",
-				Format:     format,
-				Path:       path,
-				References: adapterRefs,
-			}
-		}
+		result[i] = *value
 	}
 	return result, nil
+}
+
+// convertValueFromServer turns a wire-form value array (["raw", data, refs]
+// or ["blob", key, size, refs]) into an adapter-side Value struct suitable
+// for forwarding to the Python adapter.
+func (w *Worker) convertValueFromServer(arg any) (*adapter.Value, error) {
+	arr, ok := arg.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected array")
+	}
+
+	value, err := api.ParseValue(arr)
+	if err != nil {
+		return nil, err
+	}
+
+	adapterRefs, err := w.refsToAdapter(value.References)
+	if err != nil {
+		return nil, err
+	}
+
+	switch value.Type {
+	case api.ValueTypeRaw:
+		return &adapter.Value{
+			Type:       "inline",
+			Format:     "json",
+			Value:      value.Content,
+			References: adapterRefs,
+		}, nil
+	case api.ValueTypeBlob:
+		path, err := w.blobs.Download(value.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download blob: %w", err)
+		}
+		return &adapter.Value{
+			Type:       "file",
+			Format:     "json",
+			Path:       path,
+			References: adapterRefs,
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown value type: %v", value.Type)
 }
 
 func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
@@ -635,6 +722,131 @@ func (w *Worker) handleAbort(params []any) error {
 
 	// Abort on pool
 	return w.pool.Abort(executionID)
+}
+
+// handleStreamItems forwards a server-pushed batch of stream items to the
+// adapter process owning the target execution. Params: [execution_id,
+// subscription_id, items]. Each item arrives as [sequence, value_array]
+// and is converted to [sequence, adapter.Value dict] so the Python side
+// can deserialize_value it directly.
+func (w *Worker) handleStreamItems(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_items: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_items: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_items: subscription_id is not a number (got %T)", params[1])
+	}
+	rawItems, ok := params[2].([]any)
+	if !ok {
+		return fmt.Errorf("stream_items: items is not an array (got %T)", params[2])
+	}
+
+	converted := make([]any, len(rawItems))
+	maxSequence := -1
+	for i, raw := range rawItems {
+		itemArr, ok := raw.([]any)
+		if !ok || len(itemArr) != 2 {
+			return fmt.Errorf("stream_items: item %d malformed", i)
+		}
+		value, err := w.convertValueFromServer(itemArr[1])
+		if err != nil {
+			return fmt.Errorf("stream_items: item %d value: %w", i, err)
+		}
+		converted[i] = []any{itemArr[0], value}
+		if seq, ok := itemArr[0].(float64); ok && int(seq) > maxSequence {
+			maxSequence = int(seq)
+		}
+	}
+
+	// Advance the tracked cursor so a post-reconnect re-subscribe resumes
+	// after the last item the consumer was sent, and count the delivery so
+	// the re-subscribe can restate the credit accounting.
+	if maxSequence >= 0 {
+		w.streamSubsMu.Lock()
+		if sub, ok := w.streamSubs[streamSubKey{executionID, int(subscriptionID)}]; ok {
+			if maxSequence+1 > sub.nextSequence {
+				sub.nextSequence = maxSequence + 1
+			}
+			sub.delivered += len(converted)
+		}
+		w.streamSubsMu.Unlock()
+	}
+
+	return w.pool.PushToExecutor(executionID, "stream_items", map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+		"items":           converted,
+	})
+}
+
+// handleStreamClosed forwards a server-pushed stream-closed notification.
+// Params: [execution_id, subscription_id, reason, error_or_null].
+//
+// `reason` is a string like "complete" / "errored" / "cancelled" /
+// "abandoned" / "crashed" / "timeout" / "not_found" — the adapter
+// decides how to represent each in its language idiom rather than the
+// server fabricating exception types.
+func (w *Worker) handleStreamClosed(params []any) error {
+	if len(params) < 4 {
+		return fmt.Errorf("stream_closed: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_closed: execution_id is not a string (got %T)", params[0])
+	}
+	subscriptionID, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_closed: subscription_id is not a number (got %T)", params[1])
+	}
+	reason, _ := params[2].(string)
+	errField := params[3]
+
+	// The subscription is finished — stop tracking it for re-subscribes.
+	w.streamSubsMu.Lock()
+	delete(w.streamSubs, streamSubKey{executionID, int(subscriptionID)})
+	w.streamSubsMu.Unlock()
+
+	forwarded := map[string]any{
+		"execution_id":    executionID,
+		"subscription_id": int(subscriptionID),
+		"reason":          reason,
+	}
+	if errField != nil {
+		forwarded["error"] = errField
+	}
+	return w.pool.PushToExecutor(executionID, "stream_closed", forwarded)
+}
+
+// handleStreamDemand forwards a server-pushed demand grant to the producer
+// adapter. Params: [execution_id, index, n]. The producer's StreamDriver
+// adds “n“ to its per-stream credit counter and wakes any waiting
+// worker thread.
+func (w *Worker) handleStreamDemand(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_demand: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_demand: execution_id is not a string (got %T)", params[0])
+	}
+	index, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: index is not a number (got %T)", params[1])
+	}
+	n, ok := params[2].(float64)
+	if !ok {
+		return fmt.Errorf("stream_demand: n is not a number (got %T)", params[2])
+	}
+	return w.pool.PushToExecutor(executionID, "stream_demand", map[string]any{
+		"execution_id": executionID,
+		"index":        int(index),
+		"n":            int(n),
+	})
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context) {
@@ -761,7 +973,23 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		timeout = params.Timeout
 	}
 
-	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout
+	// Streams config (buffer + idle timeout_ms defaults for streams
+	// produced by this execution). The buffer key is always present when
+	// a config is set — null means explicitly unbounded, which must
+	// survive the round-trip (omitting the key would be re-read as the
+	// default, strict lockstep).
+	var streams any
+	if params.Streams != nil {
+		s := map[string]any{
+			"buffer": params.Streams.Buffer,
+		}
+		if params.Streams.TimeoutMs != nil {
+			s["timeout_ms"] = *params.Streams.TimeoutMs
+		}
+		streams = s
+	}
+
+	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -782,6 +1010,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		params.Recurrent,   // recurrent
 		params.Requires,    // requires
 		timeout,            // timeout
+		streams,            // streams
 	)
 	if err != nil {
 		return nil, err
@@ -1099,6 +1328,127 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	}
 	// Python params: (parent_id, group_id, name)
 	return conn.Notify("register_group", executionID, groupID, name)
+}
+
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// The wire protocol takes buffer and timeout_ms positionally; nil
+	// encodes to JSON null. Server reads [execution_id, index, buffer,
+	// timeout_ms?]; omitting the trailing timeout_ms keeps compat with
+	// older server builds that don't read it.
+	var bufferArg any
+	if buffer != nil {
+		bufferArg = *buffer
+	}
+	if timeoutMs == nil {
+		return conn.Notify("stream_register", executionID, index, bufferArg)
+	}
+	return conn.Notify("stream_register", executionID, index, bufferArg, *timeoutMs)
+}
+
+func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	// Apply blob threshold + upload fragment references just like ReportResult.
+	serverValue, err := w.convertValueToServerFormat(value)
+	if err != nil {
+		return err
+	}
+	return conn.Notify("stream_append", executionID, index, sequence, serverValue)
+}
+
+func (w *Worker) StreamClose(ctx context.Context, executionID string, index int, streamErr *adapter.StreamCloseError, reason *string) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+	var errTuple any
+	if streamErr != nil {
+		// Match the shape used for put_error: [type, message, frames].
+		// Stream closures never carry a retryable flag — retry decisions
+		// live at the execution level, not per-stream.
+		frames := parseTraceback(streamErr.Traceback)
+		errTuple = []any{streamErr.Type, streamErr.Message, frames}
+	}
+	// Wire: [execution_id, index, error, reason?]. When reason is nil
+	// the server infers close kind from error presence (nil→complete,
+	// object→errored). A non-nil reason (today only "timeout") is
+	// passed through explicitly.
+	if reason == nil {
+		return conn.Notify("stream_close", executionID, index, errTuple)
+	}
+	return conn.Notify("stream_close", executionID, index, errTuple, *reason)
+}
+
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any, prefetch int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+
+	// Track before notifying so the subscription is re-established on
+	// reconnect (see resubscribeStreams) even if the connection drops
+	// immediately after this send.
+	w.streamSubsMu.Lock()
+	w.streamSubs[streamSubKey{executionID, subscriptionID}] = &streamSubscription{
+		producerExecutionID: producerExecutionID,
+		index:               index,
+		nextSequence:        fromSequence,
+		stride:              stride,
+		prefetch:            prefetch,
+		ackSequence:         fromSequence - 1,
+	}
+	w.streamSubsMu.Unlock()
+
+	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride, prefetch]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride, prefetch)
+}
+
+// StreamAck forwards a consumer's cumulative progress to the server,
+// which frees delivery credit and advances the watermark the producer's
+// buffer is measured against.
+func (w *Worker) StreamAck(ctx context.Context, executionID string, subscriptionID int, count int, sequence int) error {
+	// Record before notifying (as StreamSubscribe does), so an ack issued
+	// while disconnected still updates what resubscribeStreams reports.
+	// Dropping it here would be unrecoverable: the counters are
+	// cumulative, so the adapter never re-sends them, and a consumer that
+	// has already drained its queue has nothing left to ack. The server
+	// would then resume with stale credit and deliver nothing.
+	w.streamSubsMu.Lock()
+	if sub, ok := w.streamSubs[streamSubKey{executionID, subscriptionID}]; ok {
+		sub.ackCount = count
+		sub.ackSequence = sequence
+	}
+	w.streamSubsMu.Unlock()
+
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+
+	// Params: [consumer_execution_id, subscription_id, count, sequence]
+	return conn.Notify("stream_ack", executionID, subscriptionID, count, sequence)
+}
+
+func (w *Worker) StreamUnsubscribe(ctx context.Context, executionID string, subscriptionID int) error {
+	conn, err := w.requireConn()
+	if err != nil {
+		return err
+	}
+
+	w.streamSubsMu.Lock()
+	delete(w.streamSubs, streamSubKey{executionID, subscriptionID})
+	w.streamSubsMu.Unlock()
+
+	// Server params: [consumer_execution_id, subscription_id]. The consumer
+	// id scopes the subscription key server-side, so two adapters in the
+	// same session can reuse subscription_id without colliding.
+	return conn.Notify("stream_unsubscribe", executionID, subscriptionID)
 }
 
 func (w *Worker) Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error {
@@ -1558,6 +1908,15 @@ func (w *Worker) trySendResult(executionID string) {
 // Should only be called after the result has been queued to sendCh (either
 // via the write callback chain or from flushPending), so that FIFO ordering
 // ensures the result message precedes notify_terminated.
+//
+// The execution entry stays in w.executions (with pendingTerminated = true)
+// even after a successful send — "successful" here means the local write
+// didn't error, which doesn't guarantee delivery when the underlying TCP
+// connection is failing silently. The authoritative signal that the
+// server received the termination is the next session message: if the
+// execution isn't in the server's known set, handleSession drops it.
+// Until then, a reconnect triggers flushPending which re-sends both the
+// buffered result (via trySendResult) and this termination.
 func (w *Worker) trySendTerminated(executionID string) {
 	conn := w.getConn()
 	if conn == nil || !conn.IsConnected() {
@@ -1576,10 +1935,6 @@ func (w *Worker) trySendTerminated(executionID string) {
 		w.logger.Warn("failed to send terminated, will retry on reconnect", "execution_id", executionID, "error", err)
 		return
 	}
-
-	w.mu.Lock()
-	delete(w.executions, executionID)
-	w.mu.Unlock()
 }
 
 // NotifyTerminated is called by the pool after an execution's process has exited.
@@ -1631,7 +1986,8 @@ func (w *Worker) flushPending() {
 }
 
 // handleSession is called when a session message is received (including on reconnect).
-// It prunes stale executions and flushes any buffered results.
+// It prunes stale executions, flushes any buffered results, and re-establishes
+// stream subscriptions.
 func (w *Worker) handleSession(executionIDs []string) {
 	// Build set of server-known execution IDs
 	known := make(map[string]struct{}, len(executionIDs))
@@ -1639,8 +1995,6 @@ func (w *Worker) handleSession(executionIDs []string) {
 		known[id] = struct{}{}
 	}
 
-	// Prune executions not in the server's list (result was delivered, or
-	// server no longer cares about them).
 	w.mu.Lock()
 	for id := range w.executions {
 		if _, ok := known[id]; !ok {
@@ -1651,6 +2005,60 @@ func (w *Worker) handleSession(executionIDs []string) {
 
 	// Flush any buffered results and terminations
 	w.flushPending()
+
+	w.resubscribeStreams(known)
+}
+
+// resubscribeStreams re-sends stream_subscribe for every tracked
+// subscription whose consumer execution the server still recognises.
+// The server holds subscriptions in memory only, so a server restart
+// drops them — items keep being appended (they're persisted) but nothing
+// would be pushed to the consumer, leaving it blocked forever. Re-sent
+// from the next undelivered sequence, so delivery resumes without gaps
+// or duplicates. If the server didn't restart, the duplicate subscribe
+// is rejected by its already-subscribed guard — a no-op.
+func (w *Worker) resubscribeStreams(known map[string]struct{}) {
+	conn := w.getConn()
+	if conn == nil {
+		return
+	}
+
+	type resub struct {
+		key streamSubKey
+		sub streamSubscription
+	}
+
+	w.streamSubsMu.Lock()
+	resubs := make([]resub, 0, len(w.streamSubs))
+	for key, sub := range w.streamSubs {
+		if _, ok := known[key.executionID]; ok {
+			resubs = append(resubs, resub{key, *sub})
+		} else {
+			// Consumer execution is gone server-side — drop the orphan.
+			delete(w.streamSubs, key)
+		}
+	}
+	w.streamSubsMu.Unlock()
+
+	for _, r := range resubs {
+		// Restate the credit accounting: the adapter's counters are
+		// cumulative and survive the reconnect, so the server has to pick
+		// them up rather than starting a fresh window.
+		progress := map[string]any{
+			"delivered":   r.sub.delivered,
+			"acked_count": r.sub.ackCount,
+			"acked_seq":   r.sub.ackSequence,
+		}
+		err := conn.Notify("stream_subscribe", r.key.subscriptionID, r.key.executionID,
+			r.sub.producerExecutionID, r.sub.index, r.sub.nextSequence, r.sub.stride,
+			r.sub.prefetch, progress)
+		if err != nil {
+			// Connection dropped again — the next reconnect retries.
+			w.logger.Debug("stream re-subscribe failed", "execution_id", r.key.executionID,
+				"subscription_id", r.key.subscriptionID, "error", err)
+			return
+		}
+	}
 }
 
 func getString(v any) string {
@@ -1758,6 +2166,21 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		// Build timeout (0 = not set, same as delay)
 		timeout := int(t.Timeout)
 
+		// Build streams (nil if not set) — keys snake_case to match the
+		// Python adapter's wire format for register_manifests. The buffer
+		// key is always present when a config is set (null = explicitly
+		// unbounded, distinct from the config being absent).
+		var streams any
+		if t.Streams != nil {
+			m := map[string]any{
+				"buffer": t.Streams.Buffer,
+			}
+			if t.Streams.TimeoutMs != nil {
+				m["timeout_ms"] = *t.Streams.TimeoutMs
+			}
+			streams = m
+		}
+
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
 			"waitFor":     waitFor,
@@ -1770,6 +2193,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,
+			"streams":     streams,
 		}
 
 		manifests[t.Module][t.Name] = def

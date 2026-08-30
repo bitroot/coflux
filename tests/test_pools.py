@@ -8,16 +8,15 @@ import json
 import subprocess
 
 import pytest
-import support.cli as cli
+from support import cli
 from support.executor import Executor
 from support.helpers import ADAPTER_SCRIPT, poll_result
-from support.manifest import manifest, workflow, task
+from support.manifest import manifest, task, workflow
 from support.protocol import json_args
-
 
 # Launcher-managed workers are slower to start than direct workers.
 _LAUNCH_TIMEOUT = 30  # wait_connections: launcher startup + worker init
-_EXEC_TIMEOUT = 15    # next_execute: execution dispatch after worker is ready
+_EXEC_TIMEOUT = 15  # next_execute: execution dispatch after worker is ready
 _RESULT_TIMEOUT = 15  # poll_result: result propagation
 
 
@@ -50,7 +49,9 @@ def pool_env(server, project_id, tmp_path):
         executor.close()
 
 
-def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides=None, **kwargs):
+def _setup_pool(
+    pool_env, targets, modules=None, pool_name="test-pool", provides=None, **kwargs
+):
     """Write manifest and create a process-launcher pool.
 
     Creates the workspace (if needed) and configures a pool whose launcher
@@ -65,7 +66,14 @@ def _setup_pool(pool_env, targets, modules=None, pool_name="test-pool", provides
     with open(manifest_path, "w") as f:
         json.dump(manifest(targets), f)
 
-    adapter = ["python3", ADAPTER_SCRIPT, "--manifest", manifest_path, "--socket", socket_path]
+    adapter = [
+        "python3",
+        ADAPTER_SCRIPT,
+        "--manifest",
+        manifest_path,
+        "--socket",
+        socket_path,
+    ]
 
     cli.pools_create(
         pool_name,
@@ -275,7 +283,9 @@ class TestCommonLauncherFields:
         host = pool_env["host"]
         targets = [workflow("test", "my_workflow")]
         _setup_pool(
-            pool_env, targets, pool_name="env-pool",
+            pool_env,
+            targets,
+            pool_name="env-pool",
             env={"MY_VAR": "hello", "OTHER_VAR": "world"},
         )
 
@@ -338,7 +348,14 @@ class TestCommonLauncherFields:
             type="process",
             modules=["test"],
             process_dir=str(worker_dir),
-            adapter=["python3", wrapper_script, "--manifest", manifest_path, "--socket", socket_path],
+            adapter=[
+                "python3",
+                wrapper_script,
+                "--manifest",
+                manifest_path,
+                "--socket",
+                socket_path,
+            ],
             env={"TEST_POOL_VAR": "pool-env-works"},
             host=host,
         )

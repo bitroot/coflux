@@ -85,6 +85,8 @@ defmodule Coflux.Orchestration.Models do
       :retry_backoff_min,
       :retry_backoff_max,
       :timeout,
+      :streams_buffer,
+      :streams_timeout_ms,
       :workspace_id,
       :execute_after,
       :attempt,

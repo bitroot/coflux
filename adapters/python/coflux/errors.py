@@ -65,6 +65,36 @@ class ExecutionAbandoned(ExecutionTerminated):
         super().__init__(message)
 
 
+class ExecutionCrashed(ExecutionTerminated):
+    """Raised when a child execution's worker terminated without reporting.
+
+    The worker process ended (sent notify_terminated) but never reported
+    a result or error — typically indicates a process crash or shutdown
+    that didn't give the task code a chance to report.
+    """
+
+    def __init__(self, message: str = "worker terminated without reporting a result"):
+        super().__init__(message)
+
+
+class StreamSuperseded(ExecutionTerminated):
+    """Raised when a stream ended because its producer was superseded.
+
+    The producer suspended, or finished an iteration of a recurrent
+    target. Neither is a failure — but a stream is owned by exactly one
+    execution, so the successor registers a *new* stream rather than
+    continuing this one, and a handle to this stream will never yield
+    anything further.
+
+    To follow the successor's stream, obtain a fresh handle from the
+    successor (e.g. re-resolve the producer's result) rather than
+    re-iterating this one.
+    """
+
+    def __init__(self, message: str = "stream producer was superseded"):
+        super().__init__(message)
+
+
 class InputDismissed(Exception):
     """Raised when an input request was dismissed."""
 
@@ -143,9 +173,57 @@ def create_execution_error(error_type: str, error_message: str) -> ExecutionErro
             error_type=error_type,
             error_message=error_message,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # The cached class is a user-defined exception; its constructor can
+        # reject our arguments in any way. Fall back to the generic error.
         return ExecutionError(
             error_message,
             error_type=error_type,
             error_message=error_message,
         )
+
+
+# --- Stream close handling ---
+
+
+def raise_for_close(reason: str, error: dict | None) -> None:
+    """Raise the appropriate exception for a stream-closed event.
+
+    The server carries a semantic reason atom rather than a fabricated
+    exception type; we map it to the Python exception idiomatic for each
+    case. Only ``"errored"`` carries an error dict — the producer's
+    actual exception; other reasons raise a corresponding
+    ``ExecutionTerminated`` subclass with no further payload.
+    """
+    if reason == "complete":
+        return
+
+    if reason == "errored" and error is not None:
+        error_type = error.get("type", "")
+        error_message = error.get("message", "")
+        frames = error.get("frames") or []
+        exc = create_execution_error(error_type, error_message)
+        if frames:
+            exc.frames = frames
+        raise exc
+
+    if reason == "cancelled":
+        raise ExecutionCancelled()
+    if reason == "abandoned":
+        raise ExecutionAbandoned()
+    if reason == "crashed":
+        raise ExecutionCrashed()
+    if reason == "timeout":
+        raise ExecutionTimeout()
+    if reason in ("suspended", "recurred"):
+        raise StreamSuperseded()
+
+    # Anything else (e.g. "not_found", "already_subscribed", or an
+    # unknown future reason) is a subscription problem rather than a
+    # producer-terminal event — surface as a generic ExecutionError so
+    # the consumer is at least aware the stream ended abnormally.
+    raise ExecutionError(
+        reason,
+        error_type="Coflux.StreamClosed",
+        error_message=reason,
+    )

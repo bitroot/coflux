@@ -19,9 +19,11 @@ Here's a simple example:
 ```python title="hello.py"
 import coflux as cf
 
+
 @cf.task()
 def build_greeting(name: str):
     return f"Hello, {name}"
+
 
 @cf.workflow()
 def print_greeting(name: str):

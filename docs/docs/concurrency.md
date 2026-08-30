@@ -91,8 +91,8 @@ If we only wanted to wait for the product, we would instead do:
 ```python
 @cf.task(wait={"product_execution"})
 def create_order(user_execution, product_execution):
-    user = user_execution.result() # (this may still block waiting for the result)
-    product = product_execution.result() # (this result will be available)
+    user = user_execution.result()  # (this may still block waiting for the result)
+    product = product_execution.result()  # (this result will be available)
     # ...
 ```
 

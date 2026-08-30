@@ -9,13 +9,13 @@ Set the `timeout` parameter on a `@task` or `@workflow` decorator:
 ```python
 import coflux as cf
 
+
 @cf.task(timeout=30)
-def call_external_api():
-    ...
+def call_external_api(): ...
+
 
 @cf.workflow(timeout=300)
-def long_running_pipeline():
-    ...
+def long_running_pipeline(): ...
 ```
 
 The value is in seconds. You can also pass a `timedelta`:
@@ -23,9 +23,9 @@ The value is in seconds. You can also pass a `timedelta`:
 ```python
 from datetime import timedelta
 
+
 @cf.task(timeout=timedelta(minutes=5))
-def slow_task():
-    ...
+def slow_task(): ...
 ```
 
 A value of `0` (the default) means no timeout.
@@ -45,8 +45,7 @@ Timeouts compose with [retries](./retries.md) — a timed-out execution counts a
 
 ```python
 @cf.task(timeout=30, retries=3)
-def unreliable_api_call():
-    ...
+def unreliable_api_call(): ...
 ```
 
 ## Wait timeouts vs execution timeouts

@@ -7,6 +7,7 @@
 ```python
 import coflux as cf
 
+
 @cf.workflow()
 def search(query: str):
     a = source_a.submit(query)

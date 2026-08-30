@@ -13,9 +13,12 @@ import coflux as cf
 
 approve = cf.Prompt("Approve deployment of {service}?", title="Deployment")
 
+
 @cf.workflow()
 def deploy(service: str):
-    approve(service=service)  # blocks until approved; raises InputDismissed if dismissed
+    approve(
+        service=service
+    )  # blocks until approved; raises InputDismissed if dismissed
     do_deploy(service)
 ```
 
@@ -56,13 +59,16 @@ To collect structured data, pass a Pydantic model (or any class with `model_json
 from typing import Literal
 from pydantic import BaseModel, Field
 
+
 class Label(BaseModel):
     sentiment: Literal["positive", "neutral", "negative"]
     topic: Literal["product", "shipping", "support", "other"]
     confidence: int = Field(ge=1, le=5)
     notes: str | None = None
 
+
 label = cf.Prompt("Label this feedback:\n\n{text}", model=Label, title="Label")
+
 
 @cf.workflow()
 def annotate(sample_id: str, text: str):
@@ -150,7 +156,9 @@ deploy_prod = cf.Prompt(
 The fluent methods (`with_key`, `with_initial`, `with_actions`, `with_requires`) return a new `Prompt` with overrides applied, leaving the original unchanged. This makes it easy to define a prompt once and reuse it with per-submission tweaks:
 
 ```python
-label.with_initial(Label(sentiment="positive", topic="product", confidence=4)).submit(text=text)
+label.with_initial(Label(sentiment="positive", topic="product", confidence=4)).submit(
+    text=text
+)
 ```
 
 ## Lifecycle

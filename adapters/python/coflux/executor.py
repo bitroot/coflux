@@ -13,10 +13,13 @@ from typing import Any, get_type_hints
 
 from . import protocol
 from .context import ExecutorContext
-from .state import set_context
-from .output import capture_output
+from .dispatcher import start_dispatcher
 from .models import Input
+from .output import capture_output
 from .serialization import deserialize_value, serialize_value
+from .state import set_context
+from .streams import stream as _register_stream
+from .target import Streams
 
 _COFLUX_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,6 +38,33 @@ def _format_filtered_traceback(exc: Exception) -> str:
     return "".join(lines)
 
 
+def _resolve_execute_streams(target_obj: Any, streams_from_wire: dict[str, Any] | None):
+    """Decide the effective stream config for this execution.
+
+    Precedence:
+      1. ``streams_from_wire`` — the execute message's ``streams`` param.
+         Carries either the caller's ``with_streams(...)`` override or
+         the manifest default copied at submit time.
+      2. ``target_obj.definition.streams`` — the decorator-level default.
+
+    Returns a ``Streams`` instance or ``None`` (no stream config).
+    """
+    if streams_from_wire is not None:
+        # The wire config always carries the "buffer" key when set: an
+        # explicit null means unbounded (opted out of backpressure) —
+        # dict.get returns that stored None, NOT the fallback, so the
+        # 0 default only applies if the key is genuinely absent.
+        buffer = streams_from_wire.get("buffer", 0)
+        timeout_ms = streams_from_wire.get("timeout_ms")
+        timeout = timeout_ms / 1000 if timeout_ms is not None else None
+        return Streams(buffer=buffer, timeout=timeout)
+
+    if hasattr(target_obj, "definition"):
+        return target_obj.definition.streams
+
+    return None
+
+
 def _apply_type_hints(fn: Any, args: list[Any]) -> list[Any]:
     """Upgrade deserialized args using the function's type hints.
 
@@ -44,7 +74,9 @@ def _apply_type_hints(fn: Any, args: list[Any]) -> list[Any]:
     """
     try:
         hints = get_type_hints(fn)
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unresolvable annotations (forward refs, missing imports) just mean
+        # we can't reconstruct the parameterised Input.
         return args
     params = list(inspect.signature(fn).parameters.keys())
     for i, (arg, name) in enumerate(zip(args, params)):
@@ -68,9 +100,23 @@ def execute_target(
     target_name: str,
     arguments: list[dict[str, Any]],
     working_dir: str | None = None,
+    streams: dict[str, Any] | None = None,
 ) -> None:
-    """Execute a target with the given arguments."""
+    """Execute a target with the given arguments.
+
+    ``streams`` is the streams config passed in the execute message —
+    either the call-site override from ``with_streams(...)`` or the
+    workflow manifest default. When present it wins over the
+    decorator's static config; it's applied both to the auto-registered
+    stream for generator-bodied tasks and to ``cf.stream(...)`` calls
+    inside the body.
+    """
     original_dir = os.getcwd()
+    # Start the stdin dispatcher. From here on, all incoming messages flow
+    # through it — individual threads block on the dispatcher rather than
+    # racing on stdin directly.
+    start_dispatcher(protocol.get_protocol())
+    ctx: ExecutorContext | None = None
     try:
         if working_dir:
             os.chdir(working_dir)
@@ -92,11 +138,17 @@ def execute_target(
         deserialized_args = _apply_type_hints(fn, deserialized_args)
 
         # Set up execution context
-        set_context(
-            ExecutorContext(
-                execution_id, working_dir=Path(working_dir) if working_dir else None
-            )
+        ctx = ExecutorContext(
+            execution_id, working_dir=Path(working_dir) if working_dir else None
         )
+        # Resolve the effective stream config. The execute message's
+        # ``streams`` carries either the caller's ``with_streams(...)``
+        # override or the workflow manifest default; when absent we
+        # fall back to the decorator's static config.
+        effective_streams = _resolve_execute_streams(target_obj, streams)
+        if effective_streams is not None or hasattr(target_obj, "definition"):
+            ctx.set_default_streams(effective_streams)
+        set_context(ctx)
 
         with capture_output(execution_id):
             if inspect.iscoroutinefunction(fn):
@@ -107,11 +159,38 @@ def execute_target(
             else:
                 result = fn(*deserialized_args)
 
-        # Serialize and send result
+        # If the task body was itself a generator (``def`` + ``yield``
+        # or ``async def`` + ``yield``), the call above returned an
+        # unstarted generator object. Register it with the effective
+        # stream defaults so callers don't have to wrap explicitly.
+        # Streams created via cf.stream(...) are already registered;
+        # they appear here as Stream handles, not generators.
+        if (inspect.isgenerator(result) or inspect.isasyncgen(result)) and hasattr(
+            target_obj, "definition"
+        ):
+            kwargs: dict[str, Any] = {}
+            if effective_streams is not None:
+                kwargs["buffer"] = effective_streams.buffer
+                if effective_streams.timeout is not None:
+                    kwargs["timeout"] = effective_streams.timeout
+            result = _register_stream(result, **kwargs)
+
+        # Serialize result. Any streams returned (directly, or embedded
+        # in the result structure) were already registered via
+        # cf.stream() or the auto-wrap above; they're Stream handles
+        # here, not raw generators.
         result_value = serialize_value(result)
         protocol.send_execution_result(execution_id, result_value)
 
-    except Exception as e:
+        # Hold the process open until every stream has drained. Thread
+        # safety: stdin access goes through the dispatcher (so subtask
+        # calls from generator bodies don't race), and stdout writes are
+        # serialised by Protocol._write_lock.
+        ctx.wait_streams()
+
+    except Exception as e:  # noqa: BLE001
+        # Any failure in user code is reported back to the server as an
+        # execution error rather than crashing the adapter.
         # Evaluate retry 'when' callback if present
         # None = no callback configured, True/False = callback result
         # If the callback raises, report that exception instead (makes bugs visible)
@@ -121,8 +200,23 @@ def execute_target(
             if retries and retries.when is not None:
                 try:
                     retryable = bool(retries.when(e))
-                except Exception as callback_exc:
+                except Exception as callback_exc:  # noqa: BLE001
+                    # Surface a faulty `when` callback instead of the
+                    # original error, so the bug is visible.
                     e = callback_exc
+
+        # Stop any in-flight stream producers and wait for their driver
+        # threads to exit before reporting the execution error. The server's
+        # close_open_streams will then synthesise a Coflux.ExecutionErrored
+        # close for any streams still open when the error is recorded.
+        if ctx is not None:
+            try:
+                ctx.close_streams()
+                ctx.wait_streams()
+            except Exception:  # noqa: BLE001, S110
+                # Best-effort teardown — the execution error below is what
+                # actually gets reported.
+                pass
 
         error_type = f"{type(e).__module__}.{type(e).__qualname__}"
         tb = _format_filtered_traceback(e)
@@ -161,6 +255,7 @@ def run_executor() -> int:
             target_name=params["target"],
             arguments=params.get("arguments", []),
             working_dir=params.get("working_dir"),
+            streams=params.get("streams"),
         )
         return 0
 

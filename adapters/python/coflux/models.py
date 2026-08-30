@@ -1,4 +1,4 @@
-"""Models for the Coflux Python SDK."""
+"""Reference types returned to user code: assets, handles, and streams."""
 
 from __future__ import annotations
 
@@ -9,23 +9,13 @@ from pathlib import Path
 
 from .state import get_context
 
-
 T = t.TypeVar("T")
 D = t.TypeVar("D")
+# Covariant counterpart of T, for protocols that only ever produce values.
+T_co = t.TypeVar("T_co", covariant=True)
 
 
-class ModelSchema(t.Protocol):
-    """Protocol for schema classes that can validate JSON data.
-
-    Compatible with Pydantic BaseModel and any class providing
-    model_json_schema() and model_validate() classmethods.
-    """
-
-    @classmethod
-    def model_json_schema(cls) -> dict[str, t.Any]: ...
-
-    @classmethod
-    def model_validate(cls, obj: t.Any) -> t.Any: ...
+# --- Assets ---
 
 
 class AssetEntry(t.NamedTuple):
@@ -118,6 +108,9 @@ class Asset:
         return {e.path: e.restore(at=at) for e in entries}
 
 
+# --- Handles (resolve via cf.select) ---
+
+
 class _Handle(t.Generic[T]):
     """Base for handles that resolve via ``cf.select``.
 
@@ -208,3 +201,170 @@ class Execution(_Handle[T]):
     @property
     def target(self) -> str:
         return self._target
+
+
+# --- Streams ---
+
+
+Stride = tuple[int, int | None, int]
+"""A stride over the stream's sequence numbers: ``(start, stop, step)``.
+
+Matches positions ``start, start+step, start+2·step, …`` up to but not
+including ``stop`` (or unbounded when ``stop is None``). Composes with
+itself: any chain of ``slice``/``partition``/``stride`` calls reduces to
+a single stride, so the wire never sees more than one filter.
+"""
+
+
+def _compose_stride(outer: Stride, inner: Stride) -> Stride:
+    """Stride of a stride. Given that we already have stride ``outer``
+    selecting positions ``s₁ + k·step₁`` (``k < (e₁-s₁)/step₁``), apply
+    ``inner = (s₂, e₂, step₂)`` to those outputs: index ``k`` of the inner
+    result maps to index ``s₂ + k·step₂`` of the outer, which is original
+    position ``s₁ + (s₂ + k·step₂)·step₁``.
+
+    Combined: ``start = s₁ + s₂·step₁``, ``step = step₁·step₂``, ``stop``
+    is the tighter of the two constraints mapped back to original positions.
+    """
+    s1, e1, step1 = outer
+    s2, e2, step2 = inner
+    new_start = s1 + s2 * step1
+    new_step = step1 * step2
+    inner_stop_mapped = s1 + e2 * step1 if e2 is not None else None
+    if e1 is None:
+        new_stop = inner_stop_mapped
+    elif inner_stop_mapped is None:
+        new_stop = e1
+    else:
+        new_stop = min(e1, inner_stop_mapped)
+    return (new_start, new_stop, new_step)
+
+
+class StreamIterator(t.Iterator[T_co], t.Protocol):
+    """What ``iter(stream)`` returns.
+
+    Declared structurally here rather than as the concrete class because
+    ``streams`` imports from this module, so naming the implementation
+    would cycle.
+
+    Beyond ``Iterator``, it can be released early — mirroring
+    ``generator.close()``. That matters for streams: an open subscription
+    holds the producer's backpressure watermark down, so a consumer that
+    stops reading a bounded stream without releasing it stalls the
+    producer. Dropping the last reference releases it automatically; the
+    explicit forms are for when the reference outlives the reading.
+    """
+
+    def close(self) -> None:
+        """Release the subscription. Idempotent; iteration then stops."""
+        ...
+
+    def __enter__(self) -> StreamIterator[T_co]: ...
+
+    def __exit__(self, *exc_info: object) -> None: ...
+
+
+# Spelled out as a bare Protocol rather than inheriting
+# ``t.AsyncIterator`` — unlike its sync counterpart, ``AsyncIterator`` is
+# absent from CPython's ``typing._PROTO_ALLOWLIST`` before 3.12.8, so
+# inheriting it raises "Protocols can only inherit from other protocols"
+# at import time on 3.10, 3.11, and 3.12.0–3.12.7.
+class AsyncStreamIterator(t.Protocol[T_co]):
+    """What ``aiter(stream)`` returns.
+
+    The async counterpart of ``StreamIterator``: same subscription, same
+    release obligation, but the caller suspends between items instead of
+    blocking its thread.
+    """
+
+    async def aclose(self) -> None:
+        """Release the subscription. Idempotent; iteration then stops."""
+        ...
+
+    def __aiter__(self) -> AsyncStreamIterator[T_co]: ...
+
+    async def __anext__(self) -> T_co: ...
+
+    async def __aenter__(self) -> AsyncStreamIterator[T_co]: ...
+
+    async def __aexit__(self, *exc_info: object) -> None: ...
+
+
+class Stream(t.Iterable[T], t.AsyncIterable[T]):
+    """A handle to a stream produced by another execution.
+
+    Iterating a ``Stream`` opens a subscription with the server; items arrive
+    pushed over the WebSocket and yield from the iterator. Each ``__iter__``
+    starts a fresh subscription from sequence 0, so a stream can be iterated
+    multiple times and each iteration sees the whole sequence.
+
+    ``async for`` works too, and does the same thing — the difference is
+    only in how the consumer waits. Prefer it in ``async def`` bodies:
+    the sync iterator blocks its thread between items, which in an async
+    task means blocking the event loop, and in an async generator
+    producer means nothing else in that generator can make progress
+    while it waits.
+
+    ``partition``, ``slice``, and ``stride`` return new ``Stream`` views
+    with the stride adjusted. Chained calls compose into a single stride
+    on the wire — no server-side pipelining logic needed.
+    """
+
+    def __init__(
+        self,
+        id: str,
+        stride: Stride = (0, None, 1),
+    ):
+        # Opaque identifier of the form ``<producer_execution_id>_<index>``.
+        # Users may see this in the CLI/Studio but shouldn't need to parse it.
+        self._id = id
+        self._stride = stride
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    def stride(
+        self,
+        start: int = 0,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> Stream[T]:
+        """Return a view of this stream restricted to the positions
+        ``start, start+step, …`` up to (but not including) ``stop``.
+        Composes with any existing stride on this view.
+        """
+        if start < 0 or step < 1 or (stop is not None and stop < start):
+            raise ValueError(
+                f"invalid stride args: start={start}, stop={stop}, step={step}"
+            )
+        return Stream(self._id, _compose_stride(self._stride, (start, stop, step)))
+
+    def slice(self, start: int, stop: int | None = None) -> Stream[T]:
+        """Return a view restricted to sequences ``[start, stop)`` —
+        shorthand for ``stride(start, stop, 1)``. Equivalent to
+        ``itertools.islice`` on the source stream's items.
+        """
+        return self.stride(start, stop, 1)
+
+    def partition(self, n: int, i: int) -> Stream[T]:
+        """Return a view where only sequences ``s`` with ``s % n == i``
+        are delivered — round-robin partitioning for parallel consumers.
+        Shorthand for ``stride(i, None, n)``.
+        """
+        if n < 1 or i < 0 or i >= n:
+            raise ValueError(f"invalid partition args: n={n}, i={i}")
+        return self.stride(i, None, n)
+
+    def __iter__(self) -> StreamIterator[T]:
+        # Local import: ``streams`` imports ``serialization`` at top, and
+        # ``serialization`` imports ``Stream`` from here — a top-level
+        # ``from .streams import ...`` would cycle.
+        from .streams import open_subscription
+
+        return open_subscription(self._id, self._stride)
+
+    def __aiter__(self) -> AsyncStreamIterator[T]:
+        from .streams import open_async_subscription
+
+        return open_async_subscription(self._id, self._stride)

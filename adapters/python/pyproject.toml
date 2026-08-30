@@ -10,3 +10,9 @@ authors = [{name = "Coflux Labs"}]
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.10"
+
+# Without this, `coflux` sorts as first-party when ruff runs from this
+# directory (as CI does) but as third-party when it runs from the repo
+# root, and the two disagree about import order in tests/.
+[tool.ruff.lint.isort]
+known-first-party = ["coflux"]

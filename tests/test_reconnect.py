@@ -3,7 +3,7 @@
 import time
 import uuid
 
-import support.cli as cli
+from support import cli
 from support.helpers import managed_worker, poll_result
 from support.manifest import workflow
 from support.proxy import TCPProxy
@@ -82,7 +82,7 @@ def test_error_buffered_on_disconnect(server, tmp_path):
 
 def test_result_buffered_across_server_restart(isolated_server, tmp_path):
     """Result completed while server is down is delivered after server restart."""
-    server, host, project_id = isolated_server
+    server, host, _project_id = isolated_server
     targets = [workflow("test", "my_workflow")]
 
     with managed_worker(targets, host, tmp_path) as executor:

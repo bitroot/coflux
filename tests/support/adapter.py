@@ -23,15 +23,25 @@ def execute(args):
     stdin_fd = sys.stdin.buffer.fileno()
     stdout_fd = sys.stdout.buffer.fileno()
 
+    # Exit when EITHER direction ends:
+    #   * stdin closes — the CLI's old pattern (break loop, Wait, close stdin).
+    #   * the test's socket closes — the new pattern, simulating the real
+    #     adapter exiting after its task finishes. The CLI's post-fix receive
+    #     loop stays open until EOF on adapter stdout, so mock-side socket
+    #     close is how tests signal "this execution's work is done".
+    done = threading.Event()
+
     def stdin_to_socket():
-        while data := os.read(stdin_fd, 4096):
-            conn.sendall(data)
-        # Stdin closed (Go pool called Wait/Close). Shut down writes to
-        # tell the test socket we're done sending.
+        try:
+            while data := os.read(stdin_fd, 4096):
+                conn.sendall(data)
+        except OSError:
+            pass
         try:
             conn.shutdown(socket.SHUT_WR)
         except OSError:
             pass
+        done.set()
 
     def socket_to_stdout():
         try:
@@ -39,17 +49,18 @@ def execute(args):
                 os.write(stdout_fd, data)
         except OSError:
             pass
+        # Test closed the socket. Close stdout so CLI's readLoop gets EOF,
+        # breaks its receive loop, and runs Wait (which will close stdin).
+        try:
+            os.close(stdout_fd)
+        except OSError:
+            pass
+        done.set()
 
-    t1 = threading.Thread(target=stdin_to_socket)
-    t2 = threading.Thread(target=socket_to_stdout, daemon=True)
-    t1.start()
-    t2.start()
+    threading.Thread(target=stdin_to_socket, daemon=True).start()
+    threading.Thread(target=socket_to_stdout, daemon=True).start()
 
-    # Wait for stdin to close (Go pool called Wait/Close), then exit.
-    # t2 is a daemon thread — it will be cleaned up when the process exits.
-    # By this point, any data from the test socket has already been relayed
-    # to stdout (the Go pool reads the result before closing stdin).
-    t1.join()
+    done.wait()
 
 
 if __name__ == "__main__":

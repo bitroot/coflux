@@ -114,7 +114,7 @@ Each `with_*` method returns a new `Target` with the corresponding decorator-lev
 my_task.with_retries(3).with_timeout(30).submit(x)
 my_task.with_cache(False).submit(x)  # disable caching for this call
 
-cached = my_task.with_cache(60)      # stash a configured variant
+cached = my_task.with_cache(60)  # stash a configured variant
 cached.submit(a)
 cached.submit(b)
 ```

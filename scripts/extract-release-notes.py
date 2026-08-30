@@ -32,7 +32,9 @@ def extract_section(path: Path, version: str) -> str | None:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: extract-release-notes.py <version> [output-file]", file=sys.stderr)
+        print(
+            "Usage: extract-release-notes.py <version> [output-file]", file=sys.stderr
+        )
         sys.exit(2)
 
     version = sys.argv[1]

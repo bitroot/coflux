@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import pkgutil
 import sys
+import traceback
 from typing import Any
 
-from .target import Target, _to_ms, serialize_cache, serialize_defer, serialize_retries
+from .target import (
+    Target,
+    _to_ms,
+    serialize_cache,
+    serialize_defer,
+    serialize_retries,
+    serialize_streams,
+)
 
 
 def _expand_modules(module_names: list[str]) -> list[str]:
@@ -24,8 +33,9 @@ def _expand_modules(module_names: list[str]) -> list[str]:
     for name in module_names:
         try:
             mod = importlib.import_module(name)
-        except Exception:
-            # Let discover_targets handle the error with its own warning
+        except Exception:  # noqa: BLE001
+            # Importing user modules can raise anything at all.
+            # Let discover_targets import it again and record the failure
             if name not in seen:
                 seen.add(name)
                 result.append(name)
@@ -50,7 +60,17 @@ def _expand_modules(module_names: list[str]) -> list[str]:
     return result
 
 
-def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
+@dataclasses.dataclass
+class ModuleError:
+    """A module that couldn't be imported during discovery."""
+
+    module: str
+    traceback: str
+
+
+def discover_targets(
+    modules: list[str],
+) -> tuple[list[dict[str, Any]], list[ModuleError]]:
     """Discover all targets in the specified modules.
 
     If a module name refers to a package, all submodules are scanned
@@ -61,18 +81,25 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
                  (e.g., ["myapp.workflows", "myapp.tasks"] or just ["myapp"])
 
     Returns:
-        List of target definitions suitable for JSON serialization.
+        A ``(targets, errors)`` pair — target definitions suitable for JSON
+        serialization, plus one ``ModuleError`` per module that failed to
+        import. Targets from the modules that did import are still returned;
+        it's the caller's job to decide whether a partial result is usable
+        (see ``run_discovery``).
     """
     expanded = _expand_modules(modules)
     targets = []
+    errors: list[ModuleError] = []
     seen_targets: set[int] = set()
 
     for module_name in expanded:
         try:
             module = importlib.import_module(module_name)
-        except Exception as e:
-            print(
-                f"Warning: Failed to import module {module_name}: {e}", file=sys.stderr
+        except Exception:  # noqa: BLE001
+            # Importing user modules can raise anything at all; report it
+            # as a module error rather than aborting the whole discovery.
+            errors.append(
+                ModuleError(module=module_name, traceback=traceback.format_exc())
             )
             continue
 
@@ -87,7 +114,7 @@ def discover_targets(modules: list[str]) -> list[dict[str, Any]]:
                 target_def = _build_target_definition(attr, module_name)
                 targets.append(target_def)
 
-    return targets
+    return targets, errors
 
 
 def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
@@ -139,11 +166,24 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
     if definition.instruction:
         result["instruction"] = definition.instruction
 
+    if definition.streams is not None:
+        result["streams"] = serialize_streams(definition.streams)
+
     return result
 
 
 def run_discovery(modules: list[str]) -> int:
     """Run discovery and output manifest to stdout.
+
+    A module that fails to import is an error, not a warning: silently
+    dropping it leaves the worker serving a subset of what it was asked
+    for, and any run targeting the missing module waits forever for a
+    worker that will never claim it. Each failure is reported on stderr
+    with its full traceback and makes this exit non-zero.
+
+    The manifest is still written, so a caller that can use a partial
+    result — the dev worker's reload path, where exiting on a half-saved
+    file would mean restarting by hand — has it.
 
     Args:
         modules: List of module names to scan.
@@ -152,11 +192,24 @@ def run_discovery(modules: list[str]) -> int:
         Exit code (0 for success, 1 for error).
     """
     try:
-        targets = discover_targets(modules)
-        manifest = {"targets": targets}
-        # Output as compact JSON
-        print(json.dumps(manifest, separators=(",", ":")))
-        return 0
-    except Exception as e:
+        targets, errors = discover_targets(modules)
+    except Exception as e:  # noqa: BLE001
+        # Top-level CLI entry point: turn any failure into an exit code.
         print(f"Error during discovery: {e}", file=sys.stderr)
         return 1
+
+    manifest = {"targets": targets}
+    # Output as compact JSON
+    print(json.dumps(manifest, separators=(",", ":")))
+
+    if errors:
+        for error in errors:
+            print(
+                f"Failed to import module '{error.module}':\n{error.traceback}",
+                file=sys.stderr,
+            )
+        names = ", ".join(sorted(e.module for e in errors))
+        print(f"Discovery failed: could not import {names}", file=sys.stderr)
+        return 1
+
+    return 0

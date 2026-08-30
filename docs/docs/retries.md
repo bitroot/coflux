@@ -8,8 +8,7 @@ The simplest way to enable retries is to specify the maximum number of attempts 
 
 ```python
 @cf.task(retries=2)
-def submit_reports():
-    ...
+def submit_reports(): ...
 ```
 
 This task will be executed at most three times (the initial attempt plus up to two retries). Each subsequent attempt will happen immediately after the previous failure.
@@ -22,8 +21,7 @@ Failures can be caused by external environmental issues, so it's useful to be ab
 
 ```python
 @cf.task(retries=cf.Retries(limit=2, backoff=(300, 300)))
-def send_notification():
-    ...
+def send_notification(): ...
 ```
 
 In this case, the task will be retried up to twice, with a five minute delay (300 seconds) between each attempt.
@@ -34,8 +32,7 @@ A range of backoff delays can be specified:
 
 ```python
 @cf.task(retries=cf.Retries(limit=5, backoff=(300, 600)))
-def send_notification():
-    ...
+def send_notification(): ...
 ```
 
 In this case, the first retry will happen after 300 seconds, and the fifth (and final) retry will happen 600 seconds after the fourth, with an increasing gap between each retry. So (ignoring time taken for the execution and scheduling) attempts of this task would happen at `t+0`, `t+300`, `t+675`, `t+1125`, `t+1650`, `t+2250` (i.e., the final attempt happening over half an hour after the initial attempt).
@@ -46,16 +43,14 @@ For tasks that should keep retrying indefinitely until they succeed, use `retrie
 
 ```python
 @cf.task(retries=True)
-def critical_task():
-    ...
+def critical_task(): ...
 ```
 
 This will retry with a random delay between 1 and 60 seconds (the defaults). For custom backoff:
 
 ```python
 @cf.task(retries=cf.Retries(limit=None, backoff=(10, 300)))
-def critical_task():
-    ...
+def critical_task(): ...
 ```
 
 With unlimited retries, each retry uses a random delay between the min and max backoff seconds.
@@ -72,8 +67,7 @@ Specify a single exception type to only retry on that error:
 
 ```python
 @cf.task(retries=cf.Retries(limit=3, when=ConnectionError))
-def call_api():
-    ...
+def call_api(): ...
 ```
 
 ### Tuple of exception classes
@@ -82,8 +76,7 @@ Specify multiple exception types as a tuple:
 
 ```python
 @cf.task(retries=cf.Retries(limit=3, when=(ConnectionError, TimeoutError)))
-def call_api():
-    ...
+def call_api(): ...
 ```
 
 ### Callback function
@@ -98,8 +91,7 @@ For more complex logic, pass a function that receives the exception and returns 
         when=lambda e: getattr(e, "status_code", 0) >= 500,
     ),
 )
-def call_api():
-    ...
+def call_api(): ...
 ```
 
 This is useful for distinguishing between transient errors (e.g., 5xx server errors) that are worth retrying and permanent errors (e.g., 4xx client errors) that should fail immediately.

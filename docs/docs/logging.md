@@ -6,8 +6,11 @@ Log messages can be recorded from tasks using `log_debug`, `log_info`, `log_warn
 import coflux as cf
 
 cf.log_info(
-  "{count} bottles of {drink} on the wall",
-  count=99, drink='beer', sunny=True, temperature=12.3
+    "{count} bottles of {drink} on the wall",
+    count=99,
+    drink="beer",
+    sunny=True,
+    temperature=12.3,
 )
 ```
 

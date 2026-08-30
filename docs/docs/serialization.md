@@ -26,13 +26,16 @@ Pydantic models are automatically detected and serialized. Pydantic models can b
 ```python
 from pydantic import BaseModel
 
+
 class Order(BaseModel):
     item: str
     quantity: int
 
+
 @cf.task()
 def create_order(item: str, quantity: int) -> Order:
     return Order(item=item, quantity=quantity)
+
 
 @cf.task()
 def process_order(order: Order):

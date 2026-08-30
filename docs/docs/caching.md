@@ -26,9 +26,9 @@ Alternatively, instead of passing `True`, a _maximum age_ can be specified, eith
 ```python
 import datetime as dt
 
+
 @cf.task(cache=dt.timedelta(minutes=10))
-def fetch_latest_posts(user_id):
-    ...
+def fetch_latest_posts(user_id): ...
 ```
 
 This will re-use a (successful) request (for a user) as long as it's within the last ten minutes. Alternatively this could have been specified in seconds as `cache=600`.
@@ -40,9 +40,10 @@ Unlike a typical cache, results themselves don't expire. This gives more flexibi
 ```python
 import datetime as dt
 
+
 @cf.task(cache=True)
-def get_headlines(date):
-    ...
+def get_headlines(date): ...
+
 
 @cf.workflow()
 def my_workflow():
@@ -71,8 +72,7 @@ By default, all parameters are considered for a cache match, but if needed speci
 
 ```python
 @cf.task(cache=cf.Cache(params=["product_id"]))
-def fetch_product(product_id, url):
-    ...
+def fetch_product(product_id, url): ...
 ```
 
 In this case, only the `product_id` parameter will be used - a different `url` won't affect the cache lookup.
@@ -81,8 +81,7 @@ A maximum age can also be specified on the `Cache` object:
 
 ```python
 @cf.task(cache=cf.Cache(max_age=600, params=["product_id"]))
-def fetch_product(product_id, url):
-    ...
+def fetch_product(product_id, url): ...
 ```
 
 :::note
@@ -116,20 +115,18 @@ Each cache key is considered within a namespace. By default this namespace consi
 
 ```python
 @cf.task(cache=cf.Cache(namespace="example1.workflows:task_name"))
-def new_task_name():
-    ...
+def new_task_name(): ...
 ```
 
 Two task can share the same namespace. In this case, calling either task (with the same argument) will resolve to the same cached result (if present):
 
 ```python
 @cf.task(cache=cf.Cache(namespace="my_namespace"))
-def task_a(a):
-    ...
+def task_a(a): ...
+
 
 @cf.task(cache=cf.Cache(namespace="my_namespace"))
-def task_b(b):
-    ...
+def task_b(b): ...
 ```
 
 ## Cache versions

@@ -9,7 +9,7 @@ import base64
 import json
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import jwt as pyjwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -67,9 +67,7 @@ def mint_jwt(
         claims["nbf"] = not_before
     if extra_claims:
         claims.update(extra_claims)
-    return pyjwt.encode(
-        claims, private_key, algorithm="EdDSA", headers={"kid": kid}
-    )
+    return pyjwt.encode(claims, private_key, algorithm="EdDSA", headers={"kid": kid})
 
 
 class JWKSHandler(BaseHTTPRequestHandler):
@@ -112,9 +110,7 @@ class JWKSServer:
         self._thread = None
 
     def start(self):
-        self._thread = threading.Thread(
-            target=self._httpd.serve_forever, daemon=True
-        )
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 
     def set_keys(self, keys):

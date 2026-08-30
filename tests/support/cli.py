@@ -155,15 +155,24 @@ def inputs_inspect(input_id, host=None, workspace="default"):
 
 def inputs_respond(input_id, value, host=None, workspace="default"):
     _coflux(
-        "inputs", "respond", str(input_id), json.dumps(value),
-        host=host, workspace=workspace, output=None,
+        "inputs",
+        "respond",
+        str(input_id),
+        json.dumps(value),
+        host=host,
+        workspace=workspace,
+        output=None,
     )
 
 
 def inputs_dismiss(input_id, host=None, workspace="default"):
     _coflux(
-        "inputs", "dismiss", str(input_id),
-        host=host, workspace=workspace, output=None,
+        "inputs",
+        "dismiss",
+        str(input_id),
+        host=host,
+        workspace=workspace,
+        output=None,
     )
 
 
@@ -189,8 +198,14 @@ def logs_get(
 
 
 def _pools_set_args(
-    modules=None, provides=None, accepts=None, process_dir=None,
-    docker_image=None, adapter=None, concurrency=None, env=None,
+    modules=None,
+    provides=None,
+    accepts=None,
+    process_dir=None,
+    docker_image=None,
+    adapter=None,
+    concurrency=None,
+    env=None,
 ):
     """Build --set/--modules/--provides/--accepts args for pool create/update."""
     args = []
@@ -217,26 +232,61 @@ def _pools_set_args(
 
 
 def pools_create(
-    name, type, modules=None, provides=None, accepts=None, process_dir=None,
-    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
+    name,
+    type,
+    modules=None,
+    provides=None,
+    accepts=None,
+    process_dir=None,
+    docker_image=None,
+    adapter=None,
+    concurrency=None,
+    env=None,
+    host=None,
+    workspace="default",
 ):
     args = ["pools", "create", name, "--type", type]
-    args.extend(_pools_set_args(
-        modules=modules, provides=provides, accepts=accepts, process_dir=process_dir,
-        docker_image=docker_image, adapter=adapter, concurrency=concurrency, env=env,
-    ))
+    args.extend(
+        _pools_set_args(
+            modules=modules,
+            provides=provides,
+            accepts=accepts,
+            process_dir=process_dir,
+            docker_image=docker_image,
+            adapter=adapter,
+            concurrency=concurrency,
+            env=env,
+        )
+    )
     _coflux(*args, host=host, workspace=workspace, output=None)
 
 
 def pools_update(
-    name, modules=None, provides=None, accepts=None, process_dir=None,
-    docker_image=None, adapter=None, concurrency=None, env=None, host=None, workspace="default",
+    name,
+    modules=None,
+    provides=None,
+    accepts=None,
+    process_dir=None,
+    docker_image=None,
+    adapter=None,
+    concurrency=None,
+    env=None,
+    host=None,
+    workspace="default",
 ):
     args = ["pools", "update", name]
-    args.extend(_pools_set_args(
-        modules=modules, provides=provides, accepts=accepts, process_dir=process_dir,
-        docker_image=docker_image, adapter=adapter, concurrency=concurrency, env=env,
-    ))
+    args.extend(
+        _pools_set_args(
+            modules=modules,
+            provides=provides,
+            accepts=accepts,
+            process_dir=process_dir,
+            docker_image=docker_image,
+            adapter=adapter,
+            concurrency=concurrency,
+            env=env,
+        )
+    )
     _coflux(*args, host=host, workspace=workspace, output=None)
 
 
