@@ -264,7 +264,12 @@ class StreamIterator(t.Iterator[T_co], t.Protocol):
     def __exit__(self, *exc_info: object) -> None: ...
 
 
-class AsyncStreamIterator(t.AsyncIterator[T_co], t.Protocol):
+# Spelled out as a bare Protocol rather than inheriting
+# ``t.AsyncIterator`` — unlike its sync counterpart, ``AsyncIterator`` is
+# absent from CPython's ``typing._PROTO_ALLOWLIST`` before 3.12.8, so
+# inheriting it raises "Protocols can only inherit from other protocols"
+# at import time on 3.10, 3.11, and 3.12.0–3.12.7.
+class AsyncStreamIterator(t.Protocol[T_co]):
     """What ``aiter(stream)`` returns.
 
     The async counterpart of ``StreamIterator``: same subscription, same
@@ -275,6 +280,10 @@ class AsyncStreamIterator(t.AsyncIterator[T_co], t.Protocol):
     async def aclose(self) -> None:
         """Release the subscription. Idempotent; iteration then stops."""
         ...
+
+    def __aiter__(self) -> AsyncStreamIterator[T_co]: ...
+
+    async def __anext__(self) -> T_co: ...
 
     async def __aenter__(self) -> AsyncStreamIterator[T_co]: ...
 
