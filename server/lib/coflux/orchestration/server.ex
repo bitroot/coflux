@@ -11,6 +11,7 @@ defmodule Coflux.Orchestration.Server do
     Runs,
     Results,
     Streams,
+    Checkpoints,
     Assets,
     Inputs,
     Values,
@@ -1442,6 +1443,14 @@ defmodule Coflux.Orchestration.Server do
 
             recurrent = Keyword.get(opts, :recurrent, false)
 
+            {:ok, checkpoints} =
+              Checkpoints.get_effective(
+                state.db,
+                step_id,
+                get_workspace_chain(state, workspace_id),
+                attempt
+              )
+
             state
             |> notify_listeners(
               {:run, run.external_id},
@@ -1465,7 +1474,7 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               {:run, run.external_id},
               {:execution, step_number, attempt, execution_external_id, ws_ext_id, created_at,
-               execute_after, %{}, nil}
+               execute_after, %{}, nil, enrich_checkpoints(checkpoints, state.db)}
             )
           else
             state
@@ -1859,6 +1868,63 @@ defmodule Coflux.Orchestration.Server do
         case process_result(state, execution_id, result) do
           {:ok, state} ->
             state = flush_notifications(state)
+            {:reply, :ok, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:set_checkpoints, execution_external_id, set, reset}, _from, state) do
+    case Map.fetch(state.execution_ids, execution_external_id) do
+      {:ok, execution_id} ->
+        # Reject writes from an execution the server has already finalised. A
+        # worker that was declared abandoned while still alive flushes its
+        # buffer on reconnect; per-execution keying already makes those writes
+        # unreadable (they land on an older attempt), but there's no reason to
+        # mutate a terminated execution's history.
+        case Results.has_completion?(state.db, execution_id) do
+          {:ok, true} ->
+            {:reply, {:error, :completed}, state}
+
+          {:ok, false} ->
+            {:ok, {step_id, workspace_id, attempt}} =
+              Runs.get_execution_location(state.db, execution_id)
+
+            set = Map.new(set, fn {name, value} -> {name, normalize_value(value)} end)
+
+            {:ok, _updated_at} =
+              Checkpoints.apply_delta(
+                state.db,
+                execution_id,
+                step_id,
+                get_workspace_chain(state, workspace_id),
+                attempt,
+                set,
+                reset
+              )
+
+            # Push the whole resolved snapshot rather than the delta — it's
+            # what Studio renders, and carry-forward means the first write of
+            # an execution materialises names it never touched. Only the
+            # "after" side moves; what the execution started from is fixed.
+            {:ok, checkpoints} =
+              Checkpoints.get_effective_for_execution(state.db, execution_id)
+
+            checkpoints = enrich_checkpoints(checkpoints, state.db)
+
+            {:ok, {run_external_id, _step_number, _attempt}} =
+              Runs.get_execution_key(state.db, execution_id)
+
+            state =
+              state
+              |> notify_listeners(
+                {:run, run_external_id},
+                {:checkpoints, execution_external_id, checkpoints}
+              )
+              |> flush_notifications()
+
             {:reply, :ok, state}
         end
 
@@ -3349,6 +3415,22 @@ defmodule Coflux.Orchestration.Server do
                       # Enrich arguments with resolved references (asset/execution metadata)
                       enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
 
+                      # Checkpoints travel with the execute message in the same
+                      # wire form as arguments, and are handled the same way
+                      # end-to-end — including the worker downloading any
+                      # blob-backed value before the adapter starts. Bounded by
+                      # this execution's own attempt, so it sees what it started
+                      # with rather than anything a stale writer lands later.
+                      {:ok, checkpoints} =
+                        Checkpoints.get_effective(
+                          state.db,
+                          execution.step_id,
+                          get_workspace_chain(state, execution.workspace_id),
+                          execution.attempt
+                        )
+
+                      enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
+
                       workspace_external_id = state.workspaces[execution.workspace_id].external_id
 
                       execution_external_id =
@@ -3380,7 +3462,7 @@ defmodule Coflux.Orchestration.Server do
                            build_streams_config(
                              execution.streams_buffer,
                              execution.streams_timeout_ms
-                           )}
+                           ), enriched_checkpoints}
                         )
 
                       # Notify sessions topic of updated total
@@ -4303,6 +4385,20 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # The workspace inheritance chain ordered nearest-first (the workspace
+  # itself, then its bases). Checkpoint reads walk this and stop at the first
+  # workspace that has any state, so the nearest scope wins outright.
+  defp get_workspace_chain(state, workspace_id, ids \\ []) do
+    workspace = Map.fetch!(state.workspaces, workspace_id)
+    ids = [workspace_id | ids]
+
+    if workspace.base_id do
+      get_workspace_chain(state, workspace.base_id, ids)
+    else
+      Enum.reverse(ids)
+    end
+  end
+
   defp get_cache_workspace_ids(state, workspace_id, ids \\ []) do
     workspace = Map.fetch!(state.workspaces, workspace_id)
 
@@ -4642,13 +4738,21 @@ defmodule Coflux.Orchestration.Server do
 
         ws_ext_id = workspace_external_id(state, workspace_id)
 
+        {:ok, checkpoints} =
+          Checkpoints.get_effective(
+            state.db,
+            step.id,
+            get_workspace_chain(state, workspace_id),
+            attempt
+          )
+
         state =
           state
           |> put_in([Access.key(:execution_ids), execution_external_id], execution_id)
           |> notify_listeners(
             {:run, run.external_id},
             {:execution, step.number, attempt, execution_external_id, ws_ext_id, created_at,
-             execute_after, dependencies, principal}
+             execute_after, dependencies, principal, enrich_checkpoints(checkpoints, state.db)}
           )
           |> notify_listeners(
             {:modules, ws_ext_id},
@@ -5307,6 +5411,20 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
     {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
 
+    # Resolving a checkpoint needs the workspace chain of the execution
+    # reading it. Resolved from `db` rather than `state` because this also
+    # runs against archived epochs, which remap workspace ids.
+    workspace_chains =
+      run_executions
+      |> Enum.map(fn {_execution_id, _step_id, _attempt, workspace_id, _, _, _, _, _} ->
+        workspace_id
+      end)
+      |> Enum.uniq()
+      |> Map.new(fn workspace_id ->
+        {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
+        {workspace_id, chain}
+      end)
+
     submitted_inputs_by_execution =
       run_submitted_inputs
       |> Enum.group_by(
@@ -5524,6 +5642,15 @@ defmodule Coflux.Orchestration.Server do
 
                streams = streams_with_resolved_reasons(db, execution_id)
 
+               {:ok, {checkpoints_before, checkpoints_after}} =
+                 Checkpoints.get_execution_snapshots(
+                   db,
+                   execution_id,
+                   step.id,
+                   Map.fetch!(workspace_chains, workspace_id),
+                   attempt
+                 )
+
                {attempt,
                 %{
                   execution_id: exec_external_id,
@@ -5543,7 +5670,11 @@ defmodule Coflux.Orchestration.Server do
                   result_created_by: result_created_by,
                   children: Map.get(run_children, execution_id, []),
                   metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
-                  streams: streams
+                  streams: streams,
+                  checkpoints: %{
+                    before: enrich_checkpoints(checkpoints_before, db),
+                    after: enrich_checkpoints(checkpoints_after, db)
+                  }
                 }}
              end)
          }}
@@ -6124,6 +6255,13 @@ defmodule Coflux.Orchestration.Server do
 
   defp normalize_value({:blob, key, size, refs}),
     do: {:blob, key, size, normalize_references(refs)}
+
+  # Checkpoint values carry references (assets, executions, inputs) in the
+  # same form as arguments, so they need the same resolution before going out
+  # to a worker or a topic.
+  defp enrich_checkpoints(checkpoints, db) do
+    Map.new(checkpoints, fn {name, value} -> {name, build_value(value, db)} end)
+  end
 
   defp build_value(value, db) do
     case value do

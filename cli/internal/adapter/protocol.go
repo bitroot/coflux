@@ -80,6 +80,11 @@ type ExecuteRequestParams struct {
 	Arguments   []Argument     `json:"arguments"`
 	WorkingDir  string         `json:"working_dir,omitempty"`
 	Streams     *StreamsConfig `json:"streams,omitempty"`
+	// Checkpoints is the step's effective checkpoint state, resolved by the
+	// server and delivered eagerly so reads never need a round-trip. Values
+	// take the same form as arguments — a blob-backed one has already been
+	// downloaded by the worker and arrives as a local file path.
+	Checkpoints map[string]*Value `json:"checkpoints,omitempty"`
 }
 
 // Argument is the same structure as Value (used for arguments to distinguish context)
@@ -257,6 +262,25 @@ type SuspendParams struct {
 type CancelParams struct {
 	ExecutionID string         `json:"execution_id"`
 	Handles     []SelectHandle `json:"handles"`
+}
+
+// CheckpointUpdateParams for the checkpoint_update notification.
+// Set carries names assigned a new value; Reset carries names cleared back to
+// their declared default. A name appears in at most one of the two — the
+// adapter tracks the net effect, so a set followed by a reset arrives only as
+// a reset.
+type CheckpointUpdateParams struct {
+	ExecutionID string            `json:"execution_id"`
+	Set         map[string]*Value `json:"set,omitempty"`
+	Reset       []string          `json:"reset,omitempty"`
+}
+
+// FlushParams for the flush request. Flushes everything buffered on the
+// execution's behalf — checkpoints, metrics and logs — and only responds once
+// it has reached the server, giving the adapter an explicit durability
+// boundary.
+type FlushParams struct {
+	ExecutionID string `json:"execution_id"`
 }
 
 // RegisterGroupParams for register_group notification

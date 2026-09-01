@@ -471,6 +471,40 @@ def send_metric(
     get_protocol().send_message("metric", params)
 
 
+def send_checkpoint_update(
+    execution_id: str,
+    set_: dict[str, Any] | None = None,
+    reset: list[str] | None = None,
+) -> None:
+    """Send a checkpoint delta.
+
+    ``set_`` maps names to serialized values; ``reset`` lists names to clear
+    back to their declared default. Delivery is throttled by the worker, so
+    this returning does not mean the delta has reached the server — use
+    ``request_flush`` for that.
+
+    Args:
+        execution_id: The execution recording the delta.
+        set_: Names assigned a new value (serialized).
+        reset: Names to clear.
+    """
+    params: dict[str, Any] = {"execution_id": execution_id}
+    if set_:
+        params["set"] = set_
+    if reset:
+        params["reset"] = reset
+    get_protocol().send_message("checkpoint_update", params)
+
+
+def request_flush(execution_id: str) -> int:
+    """Request a flush of buffered state — checkpoints, metrics and logs.
+
+    The response is withheld until the buffered state has reached the server,
+    which is what makes this a durability boundary rather than a hint.
+    """
+    return get_protocol().send_request("flush", {"execution_id": execution_id})
+
+
 def send_stream_register(
     execution_id: str,
     index: int,

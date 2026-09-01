@@ -20,6 +20,7 @@ import (
 	"github.com/bitroot/coflux/cli/internal/adapter"
 	"github.com/bitroot/coflux/cli/internal/api"
 	"github.com/bitroot/coflux/cli/internal/blob"
+	"github.com/bitroot/coflux/cli/internal/checkpoint"
 	"github.com/bitroot/coflux/cli/internal/config"
 	logstore "github.com/bitroot/coflux/cli/internal/log"
 	"github.com/bitroot/coflux/cli/internal/metric"
@@ -58,6 +59,7 @@ type Worker struct {
 	metrics     metric.Store
 	tracker     *metric.Tracker
 	throttle    *metric.Throttle
+	checkpoints *checkpoint.Throttle
 
 	connMu sync.RWMutex
 	conn   *api.Connection
@@ -326,6 +328,12 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.tracker = metric.NewTracker(w.logger)
 	defer func() { _ = w.metrics.Close() }()
 
+	// Checkpoint writes go over the worker connection rather than the metrics
+	// HTTP path: they're semantic state, and the pool needs acknowledged
+	// flushes at suspend / result / termination rather than a best-effort
+	// background drain.
+	w.checkpoints = checkpoint.NewThrottle(checkpointSink{w}, checkpoint.DefaultInterval)
+
 	// Determine pool size (default to CPU count + 4)
 	poolSize := w.cfg.Worker.Concurrency
 	if poolSize <= 0 {
@@ -580,6 +588,24 @@ func (w *Worker) handleExecute(params []any) error {
 		}
 	}
 
+	// Optional checkpoints (9th param). The step's effective checkpoint
+	// state, resolved server-side and delivered eagerly so the adapter can
+	// answer reads without a round-trip. Values are in the same wire form as
+	// arguments.
+	var checkpoints map[string]*adapter.Value
+	if len(params) > 8 && params[8] != nil {
+		if m, ok := params[8].(map[string]any); ok && len(m) > 0 {
+			checkpoints = make(map[string]*adapter.Value, len(m))
+			for name, raw := range m {
+				value, err := w.convertValueFromServer(raw)
+				if err != nil {
+					return fmt.Errorf("checkpoint %q: %w", name, err)
+				}
+				checkpoints[name] = value
+			}
+		}
+	}
+
 	w.logger.Debug("executing", "execution_id", executionID, "module", moduleName, "target", targetName, "run_id", runID, "timeout_ms", timeoutMs)
 
 	// Track execution
@@ -619,7 +645,7 @@ func (w *Worker) handleExecute(params []any) error {
 	w.mu.Unlock()
 
 	// Execute on pool
-	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs, streams); err != nil {
+	if err := w.pool.Execute(context.Background(), executionID, moduleName, targetName, args, timeoutMs, streams, checkpoints); err != nil {
 		w.logger.Error("failed to execute", "error", err, "run_id", runID)
 		w.ReportError(context.Background(), executionID, "internal", err.Error(), "", nil)
 	}
@@ -1307,6 +1333,80 @@ func (w *Worker) Suspend(ctx context.Context, executionID string, executeAfter *
 	return conn.Notify("suspend", executionID, executeAfter)
 }
 
+// SetCheckpoints buffers a checkpoint delta. Delivery is throttled, so this
+// returns before the delta necessarily reaches the server — the pool calls
+// FlushCheckpoints at the points where that matters.
+func (w *Worker) SetCheckpoints(ctx context.Context, executionID string, set map[string]*adapter.Value, reset []string) error {
+	return w.checkpoints.Record(ctx, executionID, set, reset)
+}
+
+// FlushCheckpoints delivers anything buffered for the execution, returning
+// once the server has acknowledged it.
+func (w *Worker) FlushCheckpoints(ctx context.Context, executionID string) error {
+	return w.checkpoints.Flush(ctx, executionID)
+}
+
+// FlushBuffers delivers everything buffered on the execution's behalf —
+// checkpoints, metrics and logs — returning once the server has acknowledged
+// it. This is what `cf.flush()` reaches, so it has to cover every buffer the
+// adapter can fill, not just the one that motivated the call.
+//
+// All three are attempted regardless of failures: a caller flushing before a
+// side effect wants as much delivered as possible, and reporting only the
+// first failure would hide the rest.
+func (w *Worker) FlushBuffers(ctx context.Context, executionID string) error {
+	var errs []error
+
+	if err := w.checkpoints.Flush(ctx, executionID); err != nil {
+		errs = append(errs, fmt.Errorf("checkpoints: %w", err))
+	}
+
+	// Metrics and logs are batched per worker rather than per execution, so
+	// these deliver a superset — harmless, and cheaper than threading
+	// per-execution flushing through both stores.
+	if err := w.metrics.Flush(); err != nil {
+		errs = append(errs, fmt.Errorf("metrics: %w", err))
+	}
+
+	if err := w.logs.Flush(); err != nil {
+		errs = append(errs, fmt.Errorf("logs: %w", err))
+	}
+
+	return errors.Join(errs...)
+}
+
+// checkpointSink is the throttle's outbound half. Kept separate from
+// Worker.SetCheckpoints — which is the inbound half, feeding the throttle —
+// so the two directions don't share a method name.
+type checkpointSink struct{ w *Worker }
+
+func (s checkpointSink) SetCheckpoints(ctx context.Context, executionID string, set map[string]*adapter.Value, reset []string) error {
+	conn, err := s.w.requireConn()
+	if err != nil {
+		return err
+	}
+
+	// Values are composed here rather than in the adapter, so a value
+	// superseded within a throttle window is never uploaded to the blob store.
+	composed := make(map[string]any, len(set))
+	for name, value := range set {
+		serverValue, err := s.w.convertValueToServerFormat(value)
+		if err != nil {
+			return fmt.Errorf("failed to convert checkpoint %q: %w", name, err)
+		}
+		composed[name] = serverValue
+	}
+
+	if reset == nil {
+		reset = []string{}
+	}
+
+	// A request rather than a notification: the response is what makes a
+	// flush an actual barrier.
+	_, err = conn.Request(ctx, "checkpoint_update", executionID, composed, reset)
+	return err
+}
+
 func (w *Worker) DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string) error {
 	// Download blob to the target path
 	return w.blobs.DownloadTo(blobKey, targetPath)
@@ -1942,6 +2042,9 @@ func (w *Worker) NotifyTerminated(ctx context.Context, executionID string) error
 	// Clean up metric tracking for this execution
 	w.tracker.UnregisterExecution(executionID)
 	w.throttle.RemoveExecution(executionID)
+	// The pool flushes checkpoints before getting here, so anything still
+	// buffered couldn't be read anyway — the execution has terminated.
+	w.checkpoints.Remove(executionID)
 
 	w.mu.Lock()
 	state, ok := w.executions[executionID]

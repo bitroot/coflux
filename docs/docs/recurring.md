@@ -12,6 +12,8 @@ def poll_for_updates():
 
 The task recurs as long as it returns `None`. Returning any other value completes the cycle and stops recurrence. The run can also be stopped by cancelling it, or if an error occurs (without a successful retry).
 
+Each iteration is a fresh execution starting from the top, so anything that needs to carry forward between them — a cursor, say — belongs in a [checkpoint](./checkpoints.md).
+
 ## Delay
 
 By default, recurring tasks restart immediately. Use `delay` to wait between executions:

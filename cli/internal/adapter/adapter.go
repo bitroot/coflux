@@ -246,7 +246,7 @@ func (e *Executor) Send(msg any) error {
 }
 
 // SendExecute sends an execute command to the executor
-func (e *Executor) SendExecute(executionID, module, target string, arguments []Argument, workingDir string, streams *StreamsConfig) error {
+func (e *Executor) SendExecute(executionID, module, target string, arguments []Argument, workingDir string, streams *StreamsConfig, checkpoints map[string]*Value) error {
 	req := ExecuteRequest{
 		Method: "execute",
 		Params: ExecuteRequestParams{
@@ -256,6 +256,7 @@ func (e *Executor) SendExecute(executionID, module, target string, arguments []A
 			Arguments:   arguments,
 			WorkingDir:  workingDir,
 			Streams:     streams,
+			Checkpoints: checkpoints,
 		},
 	}
 	return e.Send(req)

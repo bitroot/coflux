@@ -181,6 +181,13 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:record_result, execution_id, result})
   end
 
+  # Applies a checkpoint delta recorded by an execution. `set` is a map of
+  # name => value; `reset` is a list of names to clear. Both are applied
+  # together, on top of the previous effective state.
+  def set_checkpoints(project_id, execution_id, set, reset) do
+    call_server(project_id, {:set_checkpoints, execution_id, set, reset})
+  end
+
   # Stream producer messages — worker registers a stream, appends items,
   # and closes the stream. `index` identifies the stream within its
   # producer execution; `sequence` identifies an item within the stream.

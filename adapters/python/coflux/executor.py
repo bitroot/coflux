@@ -101,6 +101,7 @@ def execute_target(
     arguments: list[dict[str, Any]],
     working_dir: str | None = None,
     streams: dict[str, Any] | None = None,
+    checkpoints: dict[str, Any] | None = None,
 ) -> None:
     """Execute a target with the given arguments.
 
@@ -110,6 +111,10 @@ def execute_target(
     decorator's static config; it's applied both to the auto-registered
     stream for generator-bodied tasks and to ``cf.stream(...)`` calls
     inside the body.
+
+    ``checkpoints`` is the step's effective checkpoint state, resolved by the
+    server. It's kept in protocol form until read, so a target that never
+    touches a checkpoint doesn't pay to deserialise it.
     """
     original_dir = os.getcwd()
     # Start the stdin dispatcher. From here on, all incoming messages flow
@@ -148,6 +153,7 @@ def execute_target(
         effective_streams = _resolve_execute_streams(target_obj, streams)
         if effective_streams is not None or hasattr(target_obj, "definition"):
             ctx.set_default_streams(effective_streams)
+        ctx.set_checkpoints(checkpoints)
         set_context(ctx)
 
         with capture_output(execution_id):
@@ -256,6 +262,7 @@ def run_executor() -> int:
             arguments=params.get("arguments", []),
             working_dir=params.get("working_dir"),
             streams=params.get("streams"),
+            checkpoints=params.get("checkpoints"),
         )
         return 0
 

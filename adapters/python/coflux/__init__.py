@@ -12,6 +12,7 @@ import typing as t
 from pathlib import Path
 
 from ._version import __version__
+from .checkpoint import Checkpoint, flush
 from .decorators import stub, task, workflow
 from .errors import (
     ExecutionAbandoned,
@@ -63,6 +64,7 @@ __all__ = [  # noqa: RUF022
     "MetricScale",
     "Prompt",
     "Cache",
+    "Checkpoint",
     "Defer",
     "Retries",
     "Streams",
@@ -86,6 +88,7 @@ __all__ = [  # noqa: RUF022
     "log_error",
     "progress",
     "asset",
+    "flush",
 ]
 
 

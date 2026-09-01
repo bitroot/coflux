@@ -1,6 +1,9 @@
 ## 0.12.0
 
-No changes.
+Enhancements:
+
+- Adds `cf.Checkpoint` for state that survives across executions of a step — retries, suspensions, recurrences and re-runs. Supports `get`, `set` and `reset`, with a declared default.
+- Adds `cf.flush` for synchronously flushing buffered state to the server.
 
 ## 0.11.0
 

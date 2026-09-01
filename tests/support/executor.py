@@ -42,8 +42,8 @@ def _unwrap_select_result(result):
 
 Execution = namedtuple(
     "Execution",
-    ["conn", "execution_id", "module", "target", "arguments", "streams"],
-    defaults=[None],
+    ["conn", "execution_id", "module", "target", "arguments", "streams", "checkpoints"],
+    defaults=[None, None],
 )
 
 
@@ -104,7 +104,10 @@ class ExecutorConnection:
             self.send(response)
 
     def recv_execute(self, **kwargs):
-        """Receive an execute message, return (execution_id, module, target, arguments, streams)."""
+        """Receive an execute message.
+
+        Returns (execution_id, module, target, arguments, streams, checkpoints).
+        """
         msg = self.recv(**kwargs)
         assert msg["method"] == "execute", f"expected execute, got {msg['method']}"
         p = msg["params"]
@@ -114,6 +117,7 @@ class ExecutorConnection:
             p["target"],
             p.get("arguments", []),
             p.get("streams"),
+            p.get("checkpoints") or {},
         )
 
     def _request(self, msg):
@@ -224,6 +228,18 @@ class ExecutorConnection:
         """Suspend the current execution."""
         msg = protocol.suspend_request(None, execution_id, execute_after)
         return self._request(msg)
+
+    def checkpoint_set(self, execution_id, **values):
+        """Set one or more checkpoints (plain JSON values)."""
+        self.send(protocol.checkpoint_update_notification(execution_id, set_=values))
+
+    def checkpoint_reset(self, execution_id, *names):
+        """Reset one or more checkpoints back to their declared default."""
+        self.send(protocol.checkpoint_update_notification(execution_id, reset=names))
+
+    def flush(self, execution_id):
+        """Flush buffered state, returning once the server has acknowledged it."""
+        return self._request(protocol.flush_request(None, execution_id))
 
     def persist_asset(self, execution_id, paths, metadata=None):
         """Persist files as an asset and return the result."""
@@ -538,9 +554,13 @@ class Executor:
                 if idx in self._consumed:
                     continue
                 try:
-                    eid, module, target, args, streams = conn.recv_execute(timeout=0.1)
+                    eid, module, target, args, streams, checkpoints = conn.recv_execute(
+                        timeout=0.1
+                    )
                     self._consumed.add(idx)
-                    return Execution(conn, eid, module, target, args, streams)
+                    return Execution(
+                        conn, eid, module, target, args, streams, checkpoints
+                    )
                 except TimeoutError:
                     continue
                 except (ConnectionError, OSError):

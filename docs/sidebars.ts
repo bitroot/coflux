@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "memoizing",
         "deferring",
         "suspense",
+        "checkpoints",
         "select",
       ],
     },

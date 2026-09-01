@@ -4,6 +4,8 @@ Suspense is a way of putting a task to sleep — the current execution will be s
 
 The suspense can be either _explicit_ or _implicit_. In either case, it's important that the code up to the point of suspense is safe to re-execute — i.e., any side-effects need to be idempotent. (An easy way to achieve this is to ensure that any tasks called by the execution are [memoized](/memoizing).)
 
+State that needs to survive the suspension, but isn't the result of a task, can be kept in a [checkpoint](/checkpoints).
+
 Suspense is useful as a way of freeing up resources used by a waiting execution.
 
 ## Explicit suspense

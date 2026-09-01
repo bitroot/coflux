@@ -118,6 +118,14 @@ class ExecutorContext:
         # executor from the target's ``@cf.task(streams=...)`` setting.
         # Used by ``cf.stream(...)`` to fill in unspecified options.
         self._default_streams: Streams | None = None
+        # Checkpoint state, split by whether it has been materialised yet.
+        # ``_checkpoint_wire`` holds what arrived with the execute message,
+        # still in protocol form — a checkpoint that's never read is never
+        # deserialised. ``_checkpoint_values`` holds materialised reads and
+        # anything written by this execution, and always wins. Both are
+        # guarded by ``self._lock``.
+        self._checkpoint_wire: dict[str, Any] = {}
+        self._checkpoint_values: dict[str, Any] = {}
 
     def set_default_streams(self, streams: Streams | None) -> None:
         """Record the decorator's stream config so ``cf.stream(...)`` can
@@ -575,6 +583,61 @@ class ExecutorContext:
             yield
         finally:
             _timeout.reset(token)
+
+    def set_checkpoints(self, checkpoints: dict[str, Any] | None) -> None:
+        """Seed the effective checkpoint state from the execute message."""
+        with self._lock:
+            self._checkpoint_wire = dict(checkpoints or {})
+            self._checkpoint_values = {}
+
+    def checkpoint_get(self, name: str) -> Any:
+        """Read a checkpoint value, raising ``KeyError`` if it isn't set.
+
+        Reads are served entirely from local state — the effective checkpoint
+        arrives with the execute message, and this execution's own writes are
+        applied to it — so this never round-trips to the server.
+        """
+        with self._lock:
+            if name in self._checkpoint_values:
+                return self._checkpoint_values[name]
+            if name not in self._checkpoint_wire:
+                raise KeyError(name)
+            wire = self._checkpoint_wire[name]
+
+        # Materialise outside the lock: a blob-backed value is read off disk
+        # here, and the lock is shared with the stream driver threads.
+        value = deserialize_value(wire)
+
+        with self._lock:
+            self._checkpoint_wire.pop(name, None)
+            # A write may have landed while this was materialising, and a
+            # write always wins over the inherited value.
+            if name not in self._checkpoint_values:
+                self._checkpoint_values[name] = value
+            return self._checkpoint_values[name]
+
+    def checkpoint_has(self, name: str) -> bool:
+        with self._lock:
+            return name in self._checkpoint_values or name in self._checkpoint_wire
+
+    def checkpoint_set(self, name: str, value: Any) -> None:
+        with self._lock:
+            self._checkpoint_values[name] = value
+            self._checkpoint_wire.pop(name, None)
+        protocol.send_checkpoint_update(
+            self.execution_id, set_={name: serialize_value(value)}
+        )
+
+    def checkpoint_reset(self, name: str) -> None:
+        with self._lock:
+            self._checkpoint_values.pop(name, None)
+            self._checkpoint_wire.pop(name, None)
+        protocol.send_checkpoint_update(self.execution_id, reset=[name])
+
+    def flush(self) -> None:
+        """Block until buffered state has reached the server."""
+        request_id = protocol.request_flush(self.execution_id)
+        self._wait_response(request_id)
 
     def suspend_execution(
         self, delay: float | dt.timedelta | dt.datetime | None = None

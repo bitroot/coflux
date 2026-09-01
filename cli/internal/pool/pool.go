@@ -39,6 +39,16 @@ type ExecutionHandler interface {
 	DefineMetric(ctx context.Context, executionID string, key string, definition map[string]any) error
 	// RecordMetric records a metric data point
 	RecordMetric(ctx context.Context, executionID string, key string, value float64, at *float64) error
+	// SetCheckpoints records a checkpoint delta. Writes are throttled, so this
+	// returns before the delta necessarily reaches the server.
+	SetCheckpoints(ctx context.Context, executionID string, set map[string]*adapter.Value, reset []string) error
+	// FlushCheckpoints delivers anything buffered for the execution and
+	// returns once the server has acknowledged it.
+	FlushCheckpoints(ctx context.Context, executionID string) error
+	// FlushBuffers delivers everything buffered on the execution's behalf —
+	// checkpoints, metrics and logs — and returns once the server has
+	// acknowledged it.
+	FlushBuffers(ctx context.Context, executionID string) error
 	// ReportResult reports execution completion
 	ReportResult(ctx context.Context, executionID string, result *adapter.Value) error
 	// ReportError reports execution failure
@@ -189,7 +199,7 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 // timeoutMs, if > 0, enforces a wall-clock timeout on the execution.
 // streams (if non-nil) is the default stream config — forwarded to the
 // adapter so generator-bodied tasks and cf.stream(...) calls pick it up.
-func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig) error {
+func (p *Pool) Execute(ctx context.Context, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig, checkpoints map[string]*adapter.Value) error {
 	p.mu.Lock()
 	if p.shutdown {
 		p.mu.Unlock()
@@ -220,12 +230,12 @@ func (p *Pool) Execute(ctx context.Context, executionID, module, target string, 
 	p.wg.Add(1)
 	p.mu.Unlock()
 
-	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs, streams)
+	go p.runExecution(ctx, exec, executionID, module, target, arguments, timeoutMs, streams, checkpoints)
 
 	return nil
 }
 
-func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig) {
+func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executionID, module, target string, arguments []adapter.Argument, timeoutMs int64, streams *adapter.StreamsConfig, checkpoints map[string]*adapter.Value) {
 	defer p.wg.Done()
 
 	// Create a temporary directory for this execution
@@ -241,7 +251,7 @@ func (p *Pool) runExecution(ctx context.Context, exec *adapter.Executor, executi
 	logger := p.logger.With("execution_id", executionID, "module", module, "target", target)
 
 	// Send execute command
-	if err := exec.SendExecute(executionID, module, target, arguments, workingDir, streams); err != nil {
+	if err := exec.SendExecute(executionID, module, target, arguments, workingDir, streams, checkpoints); err != nil {
 		logger.Error("failed to send execute command", "error", err)
 		p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 		os.RemoveAll(workingDir)
@@ -295,6 +305,11 @@ loop:
 				logger.Debug("executor exited after result", "error", err)
 			} else {
 				logger.Error("failed to receive message", "error", err)
+				// The adapter died without reporting anything — the case
+				// checkpoints exist for. Whatever it managed to write is what
+				// the retry should resume from, so land it before the error
+				// schedules that retry.
+				p.flushCheckpoints(ctx, executionID, "crash", logger)
 				p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 			}
 			break
@@ -331,7 +346,16 @@ loop:
 		case "metric":
 			p.handleMetric(execCtx, executionID, params, logger)
 
-		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input":
+		case "checkpoint_update":
+			// Handled inline rather than dispatched async like the requests
+			// below, even though the leading-edge write does hit the server:
+			// deltas are last-write-wins per name, so two goroutines racing
+			// to merge them could leave the older value as the stored one.
+			// The server call is a short-lived orchestration call, and the
+			// throttle means at most one per window per execution.
+			p.handleCheckpointUpdate(execCtx, executionID, params, logger)
+
+		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input", "flush":
 			// Dispatch async: these can block on the server (e.g. a
 			// `select` that waits for a child execution). Blocking the
 			// message loop here would stop us reading the adapter's
@@ -365,13 +389,16 @@ loop:
 		default:
 			err := fmt.Errorf("unknown message method: %s", method)
 			logger.Error("unknown message method", "method", method)
+			p.flushCheckpoints(ctx, executionID, "error", logger)
 			p.handler.ReportError(ctx, executionID, "internal", err.Error(), "", nil)
 			break loop
 		}
 	}
 
-	// Report timeout to the server if the execution timed out
+	// Report timeout to the server if the execution timed out. execCtx is
+	// already past its deadline, so the flush goes via ctx.
 	if timedOut {
+		p.flushCheckpoints(ctx, executionID, "timeout", logger)
 		if err := p.handler.ReportTimeout(ctx, executionID); err != nil {
 			logger.Error("failed to report timeout", "error", err)
 		}
@@ -386,6 +413,13 @@ loop:
 
 	// Clean up temp dir
 	os.RemoveAll(workingDir)
+
+	// Backstop for the paths that reach here without having reported anything
+	// — principally a server-side abort, where nothing above ran a flush. Every
+	// path that does report has already flushed, so this is normally a no-op
+	// against an empty buffer. Uses ctx rather than execCtx, which may already
+	// be cancelled by a timeout.
+	p.flushCheckpoints(ctx, executionID, "termination", logger)
 
 	// Remove from busy tracking and notify server that the process has
 	// exited. This frees the concurrency slot on the server side.
@@ -451,6 +485,11 @@ func (p *Pool) handleExecutionResult(ctx context.Context, executionID string, pa
 		return
 	}
 
+	// A recurrent step's successor is created off the back of this, so a
+	// trailing write that hasn't reached the server yet would be lost to the
+	// next iteration.
+	p.flushCheckpoints(ctx, executionID, "result", logger)
+
 	if err := p.handler.ReportResult(ctx, executionID, result.Result); err != nil {
 		logger.Error("failed to report result", "error", err)
 	}
@@ -471,8 +510,28 @@ func (p *Pool) handleExecutionError(ctx context.Context, executionID string, par
 		return
 	}
 
+	// A failing execution's checkpoint is exactly what its retry needs, and
+	// the retry is scheduled off this.
+	p.flushCheckpoints(ctx, executionID, "error", logger)
+
 	if err := p.handler.ReportError(ctx, executionID, result.Error.Type, result.Error.Message, result.Error.Traceback, result.Error.Retryable); err != nil {
 		logger.Error("failed to report error", "error", err)
+	}
+}
+
+// flushCheckpoints lands anything buffered for the execution, and must precede
+// every report that puts the execution into a terminal state.
+//
+// The report is what schedules the successor — retry, recurrence or
+// resumption — and the successor reads the checkpoint as it starts, so a
+// delta still sitting in the buffer at that point is one the successor may
+// miss. Where the report also records a completion (a timeout, say) it's worse
+// than a race: the server refuses checkpoint writes against a completed
+// execution, so a later flush is rejected outright and the delta is stranded
+// in a buffer nothing will drain.
+func (p *Pool) flushCheckpoints(ctx context.Context, executionID, before string, logger *slog.Logger) {
+	if err := p.handler.FlushCheckpoints(ctx, executionID); err != nil {
+		logger.Error("failed to flush checkpoints", "before", before, "error", err)
 	}
 }
 
@@ -523,6 +582,18 @@ func (p *Pool) handleMetric(ctx context.Context, executionID string, params json
 
 	if err := p.handler.RecordMetric(ctx, metricMsg.ExecutionID, metricMsg.Key, metricMsg.Value, metricMsg.At); err != nil {
 		logger.Error("failed to record metric", "error", err)
+	}
+}
+
+func (p *Pool) handleCheckpointUpdate(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
+	var req adapter.CheckpointUpdateParams
+	if err := json.Unmarshal(params, &req); err != nil {
+		logger.Error("failed to parse checkpoint_update message", "error", err)
+		return
+	}
+
+	if err := p.handler.SetCheckpoints(ctx, req.ExecutionID, req.Set, req.Reset); err != nil {
+		logger.Error("failed to record checkpoints", "error", err)
 	}
 }
 
@@ -726,12 +797,30 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = map[string]any{"blob_key": blobKey}
 		}
 
+	case "flush":
+		var req adapter.FlushParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		// Everything the adapter can have buffered, not just checkpoints —
+		// `cf.flush()` is documented as a boundary for all of it.
+		if err := p.handler.FlushBuffers(ctx, req.ExecutionID); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "flush_error", Message: err.Error()}
+		} else {
+			result = map[string]any{}
+		}
+
 	case "suspend":
 		var req adapter.SuspendParams
 		if err := json.Unmarshal(params, &req); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
+		// The successor may be scheduled the moment the server records the
+		// suspension, so anything still buffered has to land first — otherwise
+		// it resumes from a stale checkpoint.
+		p.flushCheckpoints(ctx, req.ExecutionID, "suspend", logger)
 		if err := p.handler.Suspend(ctx, req.ExecutionID, req.ExecuteAfter); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "suspend_error", Message: err.Error()}
 		} else {
