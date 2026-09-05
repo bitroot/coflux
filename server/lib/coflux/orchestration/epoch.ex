@@ -3,7 +3,7 @@ defmodule Coflux.Orchestration.Epoch do
   Copies data between epoch databases during rotation and copy-on-reference.
   """
 
-  alias Coflux.Orchestration.Runs
+  alias Coflux.Orchestration.{Checkpoints, Runs}
 
   import Coflux.Store
 
@@ -230,6 +230,8 @@ defmodule Coflux.Orchestration.Epoch do
 
                       Map.put(acc, old_exec_id, new_exec_id)
                     end)
+
+                  copy_step_checkpoints(source_db, target_db, old_step_id, exec_acc)
 
                   {Map.put(step_acc, old_step_id, new_step_id), exec_acc}
                 end)
@@ -472,6 +474,36 @@ defmodule Coflux.Orchestration.Epoch do
   end
 
   # Per-execution copy helpers
+
+  # Rotation is the compaction point for checkpoint history: only the
+  # effective snapshot is carried over — the latest checkpoint-bearing attempt
+  # per workspace — and everything older is discarded.
+  #
+  # Tombstones are copied along with values. Discarding the history they were
+  # masking isn't enough to make them redundant: a tombstone in a derived
+  # workspace also masks the *base* workspace's value, which survives rotation
+  # in its own right. Dropping it would empty that workspace's row-set, and an
+  # empty row-set falls back to the base — resurrecting the value the reset
+  # removed.
+  defp copy_step_checkpoints(source_db, target_db, old_step_id, execution_ids) do
+    {:ok, snapshot_execution_ids} =
+      Checkpoints.get_snapshot_execution_ids(source_db, old_step_id)
+
+    Enum.each(snapshot_execution_ids, fn old_exec_id ->
+      new_exec_id = Map.fetch!(execution_ids, old_exec_id)
+      {:ok, rows} = Checkpoints.get_rows_for_execution(source_db, old_exec_id)
+
+      Enum.each(rows, fn {name, value_id, updated_at} ->
+        {:ok, _} =
+          insert_one(target_db, :checkpoints, %{
+            execution_id: new_exec_id,
+            name: name,
+            value_id: value_id && ensure_value(source_db, target_db, value_id),
+            updated_at: updated_at
+          })
+      end)
+    end)
+  end
 
   defp copy_execution_groups(source_db, target_db, old_exec_id, new_exec_id) do
     {:ok, groups} =

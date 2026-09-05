@@ -17,6 +17,24 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
+  @doc """
+  The workspace inheritance chain, nearest-first (the workspace itself, then
+  its bases).
+
+  The orchestration server keeps the same thing in memory, but reads from an
+  archived epoch can't use that — rotation remaps workspace ids — so this
+  resolves it against whichever database the ids belong to.
+  """
+  def get_workspace_chain(db, workspace_id, ids \\ []) do
+    case get_workspace_by_id(db, workspace_id) do
+      {:ok, %{base_id: nil}} ->
+        {:ok, Enum.reverse([workspace_id | ids])}
+
+      {:ok, %{base_id: base_id}} ->
+        get_workspace_chain(db, base_id, [workspace_id | ids])
+    end
+  end
+
   def get_all_workspaces(db) do
     case query(
            db,

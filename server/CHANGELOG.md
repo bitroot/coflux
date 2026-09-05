@@ -1,6 +1,8 @@
 ## 0.12.0
 
-No changes.
+Enhancements:
+
+- Adds checkpoints — named values scoped to a step within a workspace, carried across retries, suspensions, recurrences and re-runs. Reads fall back through the workspace's bases; writes stay in the writing workspace. History is compacted to the effective state at epoch rotation.
 
 ## 0.11.0
 

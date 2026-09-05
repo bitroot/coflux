@@ -284,6 +284,46 @@ cf.Retries(
 | `backoff` | `tuple` | `(1, 60)` | Backoff range (min, max) in seconds |
 | `when` | type, tuple, callable, or `None` | `None` | Exception filter (`None` = retry on any error) |
 
+## Checkpoints
+
+State that survives across executions of a step — retries, suspensions, recurrences and re-runs. See [checkpoints](./checkpoints.md).
+
+### `Checkpoint`
+
+```python
+cf.Checkpoint(
+    name: str,
+    *,
+    default: T,
+)
+cf.Checkpoint[T | None](
+    name: str,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | required | Checkpoint name, unique within the step |
+| `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None` |
+
+`T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. Types only inform type checkers — nothing is enforced at runtime.
+
+#### `checkpoint.get() -> T`
+
+The current value, or the declared default if it isn't set. A checkpoint explicitly set to `None` reads back as `None`.
+
+#### `checkpoint.set(value) -> None`
+
+Sets the value, replacing anything already there.
+
+#### `checkpoint.reset() -> None`
+
+Clears the checkpoint, so `get()` returns the declared default again. Distinct from `set(None)`, which stores `None`.
+
+#### `checkpoint.is_set() -> bool`
+
+Whether the checkpoint has a value (including an explicit `None`).
+
 ## Metrics
 
 Record numeric values from executions, streamed in real-time and rendered as charts in Studio. See [metrics](./metrics.md).
@@ -365,6 +405,10 @@ Context manager that sets a timeout on `.result()` calls within its scope. If th
 ### `suspend(delay=None)`
 
 Explicitly suspends the current execution. It will be re-run after the specified delay. `delay` can be `float` (seconds), `timedelta`, or `datetime`.
+
+### `flush()`
+
+Blocks until buffered state (checkpoints, metrics, logs) has reached the server. Not needed before suspending, returning or raising — those flush automatically. See [checkpoints](./checkpoints.md).
 
 ### `select(handles, *, cancel_remaining=False)`
 

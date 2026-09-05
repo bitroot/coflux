@@ -196,6 +196,39 @@ defmodule Coflux.Handlers.Worker do
 
         {[], state}
 
+      # Shaped as a request rather than a notification so the worker gets a
+      # definite server ack. Writes are throttled worker-side, so the
+      # round-trip is cheap — and it makes "checkpoints flushed before the
+      # execution suspends or terminates" an awaited barrier rather than an
+      # assumption about message ordering.
+      "checkpoint_update" ->
+        [execution_id, set, reset] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          set = Map.new(set, fn {name, value} -> {name, parse_value(value)} end)
+
+          case Orchestration.set_checkpoints(
+                 state.project_id,
+                 execution_id,
+                 set,
+                 reset
+               ) do
+            :ok ->
+              {[success_message(message["id"], nil)], state}
+
+            # The execution has already been finalised — its writes can no
+            # longer be read by anything, so this is reported rather than
+            # retried.
+            {:error, :completed} ->
+              {[error_message(message["id"], "execution_completed")], state}
+
+            {:error, :not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
       "define_metric" ->
         [execution_id, key, definition] = message["params"]
 
@@ -702,10 +735,14 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
-         workspace_external_id, timeout, streams},
+         workspace_external_id, timeout, streams, checkpoints},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
+
+    # Checkpoints ride along in the same wire form as arguments, and follow
+    # the same path from here on.
+    checkpoints = Map.new(checkpoints, fn {name, value} -> {name, compose_value(value)} end)
 
     state = Map.update!(state, :execution_ids, &MapSet.put(&1, execution_external_id))
 
@@ -718,7 +755,8 @@ defmodule Coflux.Handlers.Worker do
          run_id,
          workspace_external_id,
          timeout,
-         compose_streams(streams)
+         compose_streams(streams),
+         checkpoints
        ])
      ], state}
   end

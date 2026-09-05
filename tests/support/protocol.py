@@ -224,6 +224,32 @@ def get_asset_request(request_id, execution_id, asset_id):
     }
 
 
+def checkpoint_update_notification(execution_id, set_=None, reset=None):
+    """Build a checkpoint delta notification.
+
+    ``set_`` maps names to plain JSON values (wrapped here); ``reset`` lists
+    names to clear.
+    """
+    params = {"execution_id": execution_id}
+    if set_:
+        params["set"] = {
+            name: {"type": "inline", "format": "json", "value": value}
+            for name, value in set_.items()
+        }
+    if reset:
+        params["reset"] = list(reset)
+    return {"method": "checkpoint_update", "params": params}
+
+
+def flush_request(request_id, execution_id):
+    """Build a flush request — responds once buffered state reaches the server."""
+    return {
+        "id": request_id,
+        "method": "flush",
+        "params": {"execution_id": execution_id},
+    }
+
+
 def register_group_notification(execution_id, group_id, name=None):
     params = {"execution_id": execution_id, "group_id": group_id}
     if name is not None:

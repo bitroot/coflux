@@ -148,6 +148,20 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
+  # The step, workspace and attempt an execution belongs to. Checkpoint reads
+  # and writes need all three: the step and workspace define the scope, and
+  # the attempt orders it against the step's other executions.
+  def get_execution_location(db, execution_id) do
+    case query_one(
+           db,
+           "SELECT step_id, workspace_id, attempt FROM executions WHERE id = ?1",
+           {execution_id}
+         ) do
+      {:ok, {step_id, workspace_id, attempt}} -> {:ok, {step_id, workspace_id, attempt}}
+      {:ok, nil} -> {:error, :not_found}
+    end
+  end
+
   def get_run_id_for_execution(db, execution_id) do
     case query_one(
            db,

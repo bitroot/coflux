@@ -75,7 +75,7 @@ defmodule Coflux.Topics.Run do
   defp process_notification(
          topic,
          {:execution, step_number, attempt, execution_external_id, workspace_external_id,
-          created_at, execute_after, dependencies, created_by}
+          created_at, execute_after, dependencies, created_by, checkpoints}
        ) do
     if workspace_external_id in topic.state.workspace_ids do
       Topic.set(
@@ -105,7 +105,10 @@ defmodule Coflux.Topics.Run do
           inputs: %{},
           result: nil,
           metrics: %{},
-          streams: %{}
+          streams: %{},
+          # Nothing has run yet, so what the execution will start from is also
+          # what it currently holds.
+          checkpoints: build_checkpoints(checkpoints, checkpoints)
         }
       )
     else
@@ -234,6 +237,15 @@ defmodule Coflux.Topics.Run do
         kind: Atom.to_string(kind),
         successor: successor
       })
+    end)
+  end
+
+  defp process_notification(topic, {:checkpoints, execution_external_id, checkpoints}) do
+    # Only the "after" side moves — what the execution started from was fixed
+    # when it was created. The whole snapshot is replaced rather than merged: a
+    # reset drops a name entirely, so merging would leave it behind.
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:checkpoints, :after], build_values(checkpoints))
     end)
   end
 
@@ -443,7 +455,12 @@ defmodule Coflux.Topics.Run do
                            upper: def_data.upper
                          }}
                       end),
-                    streams: build_streams(execution.streams)
+                    streams: build_streams(execution.streams),
+                    checkpoints:
+                      build_checkpoints(
+                        execution.checkpoints.before,
+                        execution.checkpoints.after
+                      )
                   }}
                end)
            }}
@@ -588,6 +605,17 @@ defmodule Coflux.Topics.Run do
       nil ->
         nil
     end
+  end
+
+  # Checkpoints are reported as a pair so an attempt can be read as a
+  # transition: `before` is what it was handed when it started, `after` what it
+  # ended up holding. They're equal for an attempt that didn't write.
+  defp build_checkpoints(before, after_) do
+    %{before: build_values(before), after: build_values(after_)}
+  end
+
+  defp build_values(values) do
+    Map.new(values, fn {name, value} -> {name, build_value(value)} end)
   end
 
   defp build_streams(streams) do
