@@ -292,15 +292,23 @@ class ExecutorConnection:
 
     # --- Stream producer helpers ---
 
-    def stream_register(self, execution_id, index, buffer=None, timeout_ms=None):
-        """Notify that a new stream exists. ``buffer`` enables
-        backpressure; ``timeout_ms`` enables idle-timeout enforcement
-        at the worker."""
-        self.send(
+    def stream_register(self, execution_id, position, buffer=None, timeout_ms=None):
+        """Register the execution's ``position``-th stream and return the
+        server's reply: ``{"id", "index", "head"}``. ``buffer`` enables
+        backpressure; ``timeout_ms`` enables idle-timeout enforcement at
+        the worker.
+
+        For a first attempt the index equals the position, so tests that
+        don't care about the reply can keep addressing the stream by the
+        position they registered."""
+        resp = self._request(
             protocol.stream_register(
-                execution_id, index, buffer=buffer, timeout_ms=timeout_ms
+                execution_id, position, buffer=buffer, timeout_ms=timeout_ms
             )
         )
+        if resp.get("error"):
+            raise RuntimeError(f"stream_register error: {resp['error']}")
+        return resp["result"]
 
     def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""
@@ -318,29 +326,36 @@ class ExecutorConnection:
         self,
         execution_id,
         subscription_id,
-        producer_execution_id,
-        index,
+        stream_id=None,
+        *,
+        producer_execution_id=None,
+        index=None,
         from_sequence=0,
         stride=None,
         prefetch=protocol.DEFAULT_PREFETCH,
     ):
-        """Subscribe to a stream. ``stride`` is an optional
-        ``{"start", "stop", "step"}`` dict restricting which positions
-        are delivered — built via ``protocol.stride`` /
-        ``slice_stride`` / ``partition_stride``. ``None`` means no
-        filtering (identity stride).
+        """Subscribe to a stream, by ``stream_id`` (the ``id`` from a
+        ``stream_register`` reply) or by ``producer_execution_id`` +
+        ``index`` — the stream at that index on the producer's step.
+
+        ``stride`` is an optional ``{"start", "stop", "step"}`` dict
+        restricting which positions are delivered — built via
+        ``protocol.stride`` / ``slice_stride`` / ``partition_stride``.
+        ``None`` means no filtering (identity stride).
 
         ``prefetch`` is the delivery window — the server pushes at most
         this many items beyond what's been acknowledged. The default is
         large enough to be invisible; lower it to exercise credit-gated
         delivery."""
+        if stream_id is None:
+            assert producer_execution_id is not None and index is not None
+            stream_id = protocol.stream_id_for(producer_execution_id, index)
         self._sub_execution_ids[subscription_id] = execution_id
         self.send(
             protocol.stream_subscribe(
                 execution_id,
                 subscription_id,
-                producer_execution_id,
-                index,
+                stream_id,
                 from_sequence=from_sequence,
                 stride=stride,
                 prefetch=prefetch,

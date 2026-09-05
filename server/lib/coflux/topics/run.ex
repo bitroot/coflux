@@ -65,6 +65,7 @@ defmodule Coflux.Topics.Run do
         createdAt: step.created_at,
         arguments: Enum.map(step.arguments, &build_value/1),
         requires: step.requires,
+        streams: %{},
         executions: %{}
       })
     else
@@ -105,7 +106,6 @@ defmodule Coflux.Topics.Run do
           inputs: %{},
           result: nil,
           metrics: %{},
-          streams: %{},
           # Nothing has run yet, so what the execution will start from is also
           # what it currently holds.
           checkpoints: build_checkpoints(checkpoints, checkpoints)
@@ -183,26 +183,13 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:stream_dependency, execution_external_id, producer_execution_id, index,
-          producer_metadata}
+         {:stream_dependency, execution_external_id, stream_id, module, target}
        ) do
-    dependency = %{
-      type: "stream",
-      execution: build_execution(producer_metadata),
-      index: index
-    }
+    dependency = %{type: "stream", streamId: stream_id, module: module, target: target}
 
-    update_execution(
-      topic,
-      execution_external_id,
-      fn topic, base_path ->
-        Topic.merge(
-          topic,
-          base_path ++ [:dependencies, "#{producer_execution_id}:#{index}"],
-          dependency
-        )
-      end
-    )
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.merge(topic, base_path ++ [:dependencies, stream_id], dependency)
+    end)
   end
 
   defp process_notification(topic, {:child, parent_execution_external_id, child}) do
@@ -249,34 +236,69 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(
-         topic,
-         {:stream_opened, execution_external_id, index, buffer, timeout_ms, created_at}
-       ) do
-    update_execution(topic, execution_external_id, fn topic, base_path ->
-      Topic.set(topic, base_path ++ [:streams, Integer.to_string(index)], %{
-        buffer: buffer,
-        timeoutMs: timeout_ms,
-        openedAt: created_at,
-        closedAt: nil,
-        reason: nil,
-        error: nil
-      })
-    end)
+  # An execution registered on one of the step's streams — opening it, or
+  # resuming it after a suspend (`continued`). Streams live under the step
+  # in the topic, with the attempts that have produced into each.
+  defp process_notification(topic, {:stream_registered, step_number, index, info}) do
+    step_key = "#{topic.state.external_run_id}:#{step_number}"
+    index_key = Integer.to_string(index)
+    path = [:steps, step_key, :streams, index_key]
+
+    cond do
+      info.workspace_id not in topic.state.workspace_ids ->
+        topic
+
+      not Map.has_key?(topic.value.steps, step_key) ->
+        topic
+
+      true ->
+        case get_in(topic.value, path) do
+          nil ->
+            Topic.set(topic, path, %{
+              id: info.id,
+              index: index,
+              position: info.position,
+              workspaceId: info.workspace_id,
+              buffer: info.buffer,
+              timeoutMs: info.timeout_ms,
+              openedAt: info.opened_at,
+              attempts: [info.attempt],
+              closedAt: nil,
+              closedBy: nil,
+              reason: nil,
+              error: nil
+            })
+
+          existing ->
+            attempts =
+              if info.attempt in existing.attempts,
+                do: existing.attempts,
+                else: existing.attempts ++ [info.attempt]
+
+            topic
+            |> Topic.set(path ++ [:attempts], attempts)
+            |> Topic.set(path ++ [:buffer], info.buffer)
+            |> Topic.set(path ++ [:timeoutMs], info.timeout_ms)
+        end
+    end
   end
 
   defp process_notification(
          topic,
-         {:stream_closed, execution_external_id, index, reason, error, closed_at}
+         {:stream_closed, step_number, index, reason, error, attempt, closed_at}
        ) do
-    index_key = Integer.to_string(index)
+    step_key = "#{topic.state.external_run_id}:#{step_number}"
+    path = [:steps, step_key, :streams, Integer.to_string(index)]
 
-    update_execution(topic, execution_external_id, fn topic, base_path ->
+    if get_in(topic.value, path) do
       topic
-      |> Topic.set(base_path ++ [:streams, index_key, :closedAt], closed_at)
-      |> Topic.set(base_path ++ [:streams, index_key, :reason], reason)
-      |> Topic.set(base_path ++ [:streams, index_key, :error], error)
-    end)
+      |> Topic.set(path ++ [:closedAt], closed_at)
+      |> Topic.set(path ++ [:closedBy], attempt)
+      |> Topic.set(path ++ [:reason], reason)
+      |> Topic.set(path ++ [:error], error)
+    else
+      topic
+    end
   end
 
   defp process_notification(
@@ -414,6 +436,7 @@ defmodule Coflux.Topics.Run do
              createdAt: step.created_at,
              arguments: Enum.map(step.arguments, &build_value/1),
              requires: step.requires,
+             streams: build_streams(step.streams, workspace_ids),
              executions:
                step.executions
                |> Enum.filter(fn {_, execution} ->
@@ -455,7 +478,6 @@ defmodule Coflux.Topics.Run do
                            upper: def_data.upper
                          }}
                       end),
-                    streams: build_streams(execution.streams),
                     checkpoints:
                       build_checkpoints(
                         execution.checkpoints.before,
@@ -479,13 +501,8 @@ defmodule Coflux.Topics.Run do
       {id, {:asset, asset}} ->
         {id, %{type: "asset", assetId: id, asset: build_asset(asset)}}
 
-      {id, {:stream, index, execution}} ->
-        {id,
-         %{
-           type: "stream",
-           execution: build_execution(execution),
-           index: index
-         }}
+      {id, {:stream, stream_id, module, target}} ->
+        {id, %{type: "stream", streamId: stream_id, module: module, target: target}}
     end)
   end
 
@@ -618,41 +635,34 @@ defmodule Coflux.Topics.Run do
     Map.new(values, fn {name, value} -> {name, build_value(value)} end)
   end
 
-  defp build_streams(streams) do
-    Map.new(streams, fn
-      {index, buffer, timeout_ms, opened_at, nil, nil, nil} ->
-        {Integer.to_string(index),
-         %{
-           buffer: buffer,
-           timeoutMs: timeout_ms,
-           openedAt: opened_at,
-           closedAt: nil,
-           reason: nil,
-           error: nil
-         }}
-
-      {index, buffer, timeout_ms, opened_at, closed_at, reason, nil} ->
-        {Integer.to_string(index),
-         %{
-           buffer: buffer,
-           timeoutMs: timeout_ms,
-           openedAt: opened_at,
-           closedAt: closed_at,
-           reason: Atom.to_string(reason),
-           error: nil
-         }}
-
-      {index, buffer, timeout_ms, opened_at, closed_at, reason, {type, message, frames}} ->
-        {Integer.to_string(index),
-         %{
-           buffer: buffer,
-           timeoutMs: timeout_ms,
-           openedAt: opened_at,
-           closedAt: closed_at,
-           reason: Atom.to_string(reason),
-           error: %{type: type, message: message, frames: build_frames(frames)}
-         }}
+  # Streams belong to the step. Only those in a workspace the topic is
+  # showing are included — a re-run in another workspace opens its own.
+  defp build_streams(streams, workspace_ids) do
+    streams
+    |> Enum.filter(fn {_index, stream} -> stream.workspace_id in workspace_ids end)
+    |> Map.new(fn {index, stream} ->
+      {Integer.to_string(index),
+       %{
+         id: stream.id,
+         index: stream.index,
+         position: stream.position,
+         workspaceId: stream.workspace_id,
+         buffer: stream.buffer,
+         timeoutMs: stream.timeout_ms,
+         openedAt: stream.opened_at,
+         attempts: stream.attempts,
+         closedAt: stream.closed_at,
+         closedBy: stream.closed_by,
+         reason: if(stream.reason, do: Atom.to_string(stream.reason)),
+         error: build_stream_error(stream.error)
+       }}
     end)
+  end
+
+  defp build_stream_error(nil), do: nil
+
+  defp build_stream_error({type, message, frames}) do
+    %{type: type, message: message, frames: build_frames(frames)}
   end
 
   defp execution_attempt({ext_id, _module, _target}) do

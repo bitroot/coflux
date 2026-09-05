@@ -6,6 +6,8 @@ The suspense can be either _explicit_ or _implicit_. In either case, it's import
 
 State that needs to survive the suspension, but isn't the result of a task, can be kept in a [checkpoint](/checkpoints).
 
+A task that produces a [stream](/streams) can suspend from inside its generator. The stream pauses rather than closing, and the resumed execution continues it, so consumers see one unbroken stream.
+
 Suspense is useful as a way of freeing up resources used by a waiting execution.
 
 ## Explicit suspense

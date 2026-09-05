@@ -293,8 +293,14 @@ defmodule Coflux.Handlers.Worker do
           {[{:close, 4000, "execution_invalid"}], nil}
         end
 
+      # A request rather than a notification: the server allocates the
+      # stream's index per step (so its id is unique across attempts and
+      # workspaces) and decides whether the registration resumes a stream
+      # paused by a suspend. The producer needs the reply — id, index and
+      # the head to sequence from — before it can embed the handle in its
+      # result or append anything.
       "stream_register" ->
-        [execution_id, index | rest] = message["params"]
+        [execution_id, position | rest] = message["params"]
         buffer = Enum.at(rest, 0)
         timeout_ms = Enum.at(rest, 1)
 
@@ -302,15 +308,22 @@ defmodule Coflux.Handlers.Worker do
           case Orchestration.register_stream(
                  state.project_id,
                  execution_id,
-                 index,
+                 position,
                  buffer,
                  timeout_ms,
                  state.session_id
                ) do
-            :ok -> {[], state}
-            # Idempotent — a duplicate register is harmless.
-            {:error, :already_registered} -> {[], state}
-            {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
+            {:ok, %{id: id, index: index, head: head}} ->
+              {[success_message(message["id"], %{"id" => id, "index" => index, "head" => head})],
+               state}
+
+            # The execution has already been finalised (e.g. it suspended
+            # and a still-alive driver thread is registering late).
+            {:error, :completed} ->
+              {[error_message(message["id"], "execution_completed")], state}
+
+            {:error, :not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
           end
         else
           {[{:close, 4000, "execution_invalid"}], nil}
@@ -342,6 +355,15 @@ defmodule Coflux.Handlers.Worker do
               {[], state}
 
             {:error, :already_appended} ->
+              {[], state}
+
+            # A finalised execution (typically one that suspended, whose
+            # driver thread is still running down) must not interleave with
+            # the execution that now owns the stream.
+            {:error, :completed} ->
+              {[], state}
+
+            {:error, :not_producer} ->
               {[], state}
 
             {:error, :not_found} ->
@@ -377,6 +399,7 @@ defmodule Coflux.Handlers.Worker do
             :ok -> {[], state}
             {:error, :already_closed} -> {[], state}
             {:error, :not_registered} -> {[], state}
+            {:error, :completed} -> {[], state}
             {:error, :not_found} -> {[{:close, 4000, "execution_invalid"}], nil}
           end
         else
@@ -387,8 +410,7 @@ defmodule Coflux.Handlers.Worker do
         [
           subscription_id,
           consumer_execution_id,
-          producer_execution_id,
-          index,
+          stream_id,
           from_sequence,
           stride | rest
         ] = message["params"]
@@ -429,8 +451,7 @@ defmodule Coflux.Handlers.Worker do
                  state.session_id,
                  subscription_id,
                  consumer_execution_id,
-                 producer_execution_id,
-                 index,
+                 stream_id,
                  from_sequence,
                  stride,
                  prefetch,
@@ -439,17 +460,16 @@ defmodule Coflux.Handlers.Worker do
             :ok ->
               {[], state}
 
-            # If the stream doesn't exist yet (or producer vanished), push an
-            # immediate close so the consumer doesn't wait forever. Carry
-            # the reason atom verbatim — consumers decide how to surface
-            # "not_found" in their own idiom.
-            {:error, reason}
-            when reason in [:stream_not_found, :producer_not_found] ->
+            # If the stream doesn't exist, push an immediate close so the
+            # consumer doesn't wait forever. Carry the reason atom verbatim
+            # — consumers decide how to surface "not_found" in their own
+            # idiom.
+            {:error, :stream_not_found} ->
               {[
                  command_message("stream_closed", [
                    consumer_execution_id,
                    subscription_id,
-                   Atom.to_string(reason),
+                   "stream_not_found",
                    nil
                  ])
                ], state}
@@ -789,14 +809,15 @@ defmodule Coflux.Handlers.Worker do
         state
       ) do
     # `reason` is a string ("complete" / "errored" / "cancelled" /
-    # "abandoned" / "crashed" / "timeout" / "suspended" / "recurred");
-    # `error` is non-nil only for "errored" — the producer's actual
-    # `{type, message, frames}`. Other reasons travel as the string
-    # alone; the consumer adapter decides how to represent them.
+    # "abandoned" / "crashed" / "timeout" / "recurred"); `error` is
+    # non-nil only for "errored" — the producer's actual `{type, message,
+    # frames}`. Other reasons travel as the string alone; the consumer
+    # adapter decides how to represent them.
     #
-    # "suspended" / "recurred" mean the producer was superseded rather
-    # than failing: the successor owns a new stream, so this one is
-    # terminal even though nothing went wrong.
+    # "recurred" means the producer finished an iteration rather than
+    # failing: the next iteration opens its own streams, so this one is
+    # terminal even though nothing went wrong. A suspend never closes a
+    # stream — the resuming execution continues it.
     {[
        command_message("stream_closed", [
          execution_external_id,

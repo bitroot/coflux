@@ -6,6 +6,14 @@ generator in a background thread. Both sync (``def`` + ``yield``) and
 async (``async def`` + ``yield``) generators are supported; async
 generators get a fresh event loop confined to their worker thread.
 
+A stream belongs to the step, not the execution. Registering is a
+round-trip: the server allocates the stream's index within the step and
+tells the driver whether this registration resumes a stream a suspended
+predecessor left paused — in which case items continue the existing
+sequence, and consumers see one unbroken stream across the suspension.
+That is what makes ``cf.suspend()`` inside a generator body the way to
+write a producer that pauses and carries on.
+
 The consumer side owns a module-level ``StreamRegistry``: open consumer
 subscriptions are keyed by subscription id. The registry's dispatcher
 handlers (``stream_items``/``stream_closed``) route incoming pushes from
@@ -61,11 +69,18 @@ def stream(
     handles the registration automatically — you don't need to call
     ``cf.stream`` explicitly.
 
-    Registration happens at call time: the driver thread starts, the
-    server is told about the stream, and any later serialisation sees a
-    regular ``Stream`` handle. That means ``cf.stream`` must be called
-    inside a task or workflow body (where an execution context is
-    active); calling it from module scope or outside a task raises.
+    Registration happens at call time: the server is asked to register
+    the stream (a round-trip, like ``submit``), the driver thread starts,
+    and any later serialisation sees a regular ``Stream`` handle. That
+    means ``cf.stream`` must be called inside a task or workflow body
+    (where an execution context is active); calling it from module scope
+    or outside a task raises.
+
+    Streams are matched across a suspension by the order they're
+    registered in, so code that registers several streams before
+    suspending has to register them in the same order when it resumes —
+    the same determinism suspend already requires of the code before the
+    suspend point.
 
     Unspecified options inherit from the enclosing task's
     ``streams=cf.Streams(...)``. Explicit options override per-call.
@@ -88,9 +103,9 @@ def stream(
             ``timedelta``, or ``None`` to disable.
 
     Returns:
-        A ``Stream`` handle referencing the newly registered stream.
-        It serialises as ``{"type": "stream", "id": ...}`` and is
-        iterable by downstream tasks.
+        A ``Stream`` handle referencing the registered stream. It
+        serialises as ``{"type": "stream", "id": ...}`` and is iterable
+        by downstream tasks.
     """
     if not (inspect.isgenerator(generator) or inspect.isasyncgen(generator)):
         raise TypeError(
@@ -116,7 +131,10 @@ class StreamDriver:
 
     def __init__(self, execution_id: str) -> None:
         self._execution_id = execution_id
-        self._next_index = 0
+        # Registration order within this execution. The server matches a
+        # resuming execution's k-th registration onto the paused stream a
+        # suspended predecessor registered k-th.
+        self._next_position = 0
         self._threads: list[threading.Thread] = []
         self._generators: list[Any] = []
         self._lock = threading.Lock()
@@ -127,6 +145,12 @@ class StreamDriver:
         # registration time); the driver never waits.
         self._demand_cv = threading.Condition()
         self._demand: dict[int, int | None] = {}
+        # Credits granted for an index we haven't been told about yet. The
+        # server grants demand while it handles a registration — before
+        # the reply carrying the stream's index reaches us — so the grant
+        # can overtake the reply. Held here until ``register`` learns the
+        # index, then applied.
+        self._pending_demand: dict[int, int] = {}
         self._closing = False
         self._demand_handler_registered = False
         self._force_close_handler_registered = False
@@ -152,6 +176,11 @@ class StreamDriver:
         async generators run inside a fresh event loop confined to that
         thread.
 
+        Registration is a request to the server, which replies with the
+        stream's id, its index within the step, and the head to sequence
+        from. A new stream starts at 0; one resumed after a suspend
+        continues from where the suspended execution left it.
+
         ``buffer`` is the producer-side backpressure budget. ``None``
         means unbounded (no flow control); ``0`` means strict lockstep
         (producer waits for a consumer to ack each item before emitting
@@ -162,25 +191,39 @@ class StreamDriver:
         worker (CLI) closes the stream with reason "timeout" if no item
         is appended within that window. ``None`` disables the timeout.
 
-        Returns the stream's opaque ``id`` (``<execution_id>_<index>``)
-        for embedding in the serialized value as a stream reference.
+        Returns the stream's opaque ``id`` for embedding in the serialized
+        value as a stream reference.
         """
         self._ensure_demand_handler_registered()
         self._ensure_force_close_handler_registered()
 
         with self._lock:
-            index = self._next_index
-            self._next_index += 1
+            position = self._next_position
+            self._next_position += 1
+
+        request_id = protocol.request_stream_register(
+            self._execution_id, position, buffer=buffer, timeout_ms=timeout_ms
+        )
+        response = get_dispatcher().wait_for_response(request_id)
+        if response is None:
+            raise RuntimeError("timed out registering stream")
+        if response.get("error"):
+            error = response["error"]
+            raise RuntimeError(f"{error['code']}: {error['message']}")
+        registration = response.get("result") or {}
+        stream_id: str = registration["id"]
+        index: int = registration["index"]
+        head: int = registration.get("head", -1)
 
         with self._demand_cv:
-            # Unbounded ⇒ driver never waits. Bounded ⇒ starts at 0; the
-            # server issues a credit grant once demand calculation warrants
-            # it (or on first consumer subscribing).
-            self._demand[index] = None if buffer is None else 0
-
-        protocol.send_stream_register(
-            self._execution_id, index, buffer=buffer, timeout_ms=timeout_ms
-        )
+            # Unbounded ⇒ driver never waits. Bounded ⇒ starts from whatever
+            # the server has already granted: it issues a credit grant while
+            # handling the registration when demand warrants it (a larger
+            # buffer to pre-warm, or — for a resumed stream — subscribers
+            # already waiting), and that grant may have arrived ahead of
+            # the reply.
+            pending = self._pending_demand.pop(index, 0)
+            self._demand[index] = None if buffer is None else pending
 
         is_async = inspect.isasyncgen(generator)
         target = self._run_async if is_async else self._run
@@ -192,7 +235,7 @@ class StreamDriver:
         # context and would lose those settings.
         parent_context = contextvars.copy_context()
         thread = threading.Thread(
-            target=lambda: parent_context.run(target, index, generator),
+            target=lambda: parent_context.run(target, index, generator, head + 1),
             name=f"stream-{self._execution_id}-{index}",
             daemon=False,
         )
@@ -203,7 +246,7 @@ class StreamDriver:
             self._by_index[index] = entry
         thread.start()
 
-        return compose_stream_id(self._execution_id, index)
+        return stream_id
 
     def _ensure_demand_handler_registered(self) -> None:
         if self._demand_handler_registered:
@@ -230,7 +273,11 @@ class StreamDriver:
         if index is None or n <= 0:
             return
         with self._demand_cv:
-            current = self._demand.get(index)
+            if index not in self._demand:
+                # Overtook the register reply — see ``_pending_demand``.
+                self._pending_demand[index] = self._pending_demand.get(index, 0) + n
+                return
+            current = self._demand[index]
             if current is None:
                 # Unbounded — nothing to account for.
                 return
@@ -301,9 +348,13 @@ class StreamDriver:
         with self._demand_cv:
             return index in self._force_closed
 
-    def _run(self, index: int, generator: Any) -> None:
-        """Run one sync generator to exhaustion (or error)."""
-        sequence = 0
+    def _run(self, index: int, generator: Any, start_sequence: int) -> None:
+        """Run one sync generator to exhaustion (or error).
+
+        ``start_sequence`` is where numbering begins: 0 for a new stream,
+        or one past the head of a stream this execution is resuming.
+        """
+        sequence = start_sequence
         try:
             iterator = iter(generator)
             while True:
@@ -331,6 +382,12 @@ class StreamDriver:
             # lifecycle closure on execution-end, or has already recorded
             # the force-close reason (e.g. "timeout").
             return
+        except SystemExit:
+            # The generator body suspended (``cf.suspend()`` / implicit
+            # suspense). The stream stays open — paused — for the
+            # execution that resumes the step to continue, so nothing is
+            # sent: a close here would end it for every consumer.
+            return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
                 # Worker already recorded the close; don't overwrite.
@@ -349,7 +406,7 @@ class StreamDriver:
                 return
             protocol.send_stream_close(self._execution_id, index)
 
-    def _run_async(self, index: int, generator: Any) -> None:
+    def _run_async(self, index: int, generator: Any, start_sequence: int) -> None:
         """Run one async generator in a fresh event loop on this thread.
 
         The loop handle is recorded so ``close_all`` can schedule aclose()
@@ -360,7 +417,7 @@ class StreamDriver:
         asyncio.set_event_loop(loop)
 
         async def iterate() -> None:
-            sequence = 0
+            sequence = start_sequence
             iterator = generator.__aiter__()
             while True:
                 # The demand wait uses a threading.Condition, which would
@@ -386,6 +443,9 @@ class StreamDriver:
         try:
             loop.run_until_complete(iterate())
         except (GeneratorExit, asyncio.CancelledError):
+            return
+        except SystemExit:
+            # Suspended from inside the generator — see ``_run``.
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
@@ -881,25 +941,6 @@ def _stream_registry() -> StreamRegistry:
     return _registry_instance
 
 
-def compose_stream_id(execution_id: str, index: int) -> str:
-    """Build the opaque stream id from its two components.
-
-    Joined with ``_`` because the alternatives are overloaded: ``:`` is
-    used inside the execution id, ``#`` is used for attempt numbers, ``/``
-    separates module/target. Execution ids use only alphanumerics, so
-    ``rpartition('_')`` is unambiguous on the parse side.
-    """
-    return f"{execution_id}_{index}"
-
-
-def parse_stream_id(id: str) -> tuple[str, int]:
-    """Reverse of ``compose_stream_id``. Raises ValueError on bad input."""
-    exec_id, sep, index = id.rpartition("_")
-    if not sep or not exec_id:
-        raise ValueError(f"invalid stream id: {id!r}")
-    return exec_id, int(index)
-
-
 def _open_subscription(
     stream_id: str,
     stride: tuple[int, int | None, int],
@@ -910,15 +951,12 @@ def _open_subscription(
     ``stride`` is a ``(start, stop, step)`` tuple — any chain of
     slice/partition/stride calls on the handle collapses to a single
     stride before this point. The wire message is the same whichever
-    reader the caller asked for; only local delivery differs.
+    reader the caller asked for; only local delivery differs. The stream
+    id is opaque here — the server resolves it.
     """
     ctx = get_context()
     execution_id = ctx.execution_id
     subscription_id, iterator = _stream_registry().allocate(execution_id, factory)
-
-    # Split the opaque id for the wire message, which still takes
-    # producer_execution_id + index positionally.
-    producer_execution_id, index = parse_stream_id(stream_id)
 
     start, stop, step = stride
     wire_stride = {"start": start, "stop": stop, "step": step}
@@ -926,8 +964,7 @@ def _open_subscription(
     protocol.send_stream_subscribe(
         execution_id,
         subscription_id,
-        producer_execution_id,
-        index,
+        stream_id,
         0,
         _PREFETCH,
         stride=wire_stride,

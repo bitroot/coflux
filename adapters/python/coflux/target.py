@@ -324,6 +324,21 @@ def _build_definition(
         if p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
             raise TypeError(f"Unsupported parameter type ({p.kind})")
     parameters_ = [_build_parameter(p) for p in parameters]
+    # A generator-bodied target's result is its stream handle, never
+    # ``None``, so it could never recur — and each recurrence would open a
+    # fresh stream anyway. The continuous form is a suspend inside the
+    # generator: the resumed execution carries on the same stream.
+    if (
+        recurrent
+        and not is_stub
+        and (inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn))
+    ):
+        raise TypeError(
+            f"{fn.__name__}: recurrent=True can't be combined with a generator "
+            "body. To keep producing across pauses, call cf.suspend() inside "
+            "the generator instead — the resumed execution continues the same "
+            "stream."
+        )
     return TargetDefinition(
         type,
         parameters_,

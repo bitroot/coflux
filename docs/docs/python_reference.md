@@ -284,6 +284,44 @@ cf.Retries(
 | `backoff` | `tuple` | `(1, 60)` | Backoff range (min, max) in seconds |
 | `when` | type, tuple, callable, or `None` | `None` | Exception filter (`None` = retry on any error) |
 
+### `Streams`
+
+Default stream configuration for a target, passed as `streams=` to `@task` / `@workflow`. Only applies to targets that produce [streams](./streams.md).
+
+```python
+cf.Streams(
+    buffer: int | None = 0,
+    timeout: float | timedelta | None = None,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `buffer` | `int \| None` | `0` | How many items the producer may run ahead of its slowest consumer (`0` = lockstep, `None` = no backpressure) |
+| `timeout` | `float \| timedelta \| None` | `None` | Idle timeout: the stream is closed if no item is appended within this window |
+
+## Streams
+
+Ordered sequences of values produced by one execution and consumed by others as they grow. See [streams](./streams.md).
+
+### `stream(generator, *, buffer=..., timeout=...)`
+
+Registers a generator as a stream and returns a `Stream` handle to embed in a return value or pass to another task. A task whose body is itself a generator is registered automatically, with its result being the handle. Unspecified options inherit from the target's `Streams` configuration. Must be called inside a task or workflow body.
+
+### `Stream`
+
+A handle to a stream, typed by its items (`Stream[T]`).
+
+| Method | Description |
+|--------|-------------|
+| `for item in stream` / `async for` | Iterate from the first item, blocking until each arrives, ending when the stream closes |
+| `stream.slice(start, stop=None)` | A view of positions `[start, stop)` |
+| `stream.partition(n, i)` | A view of every `n`-th item starting at `i`, for parallel consumers |
+| `stream.stride(start=0, stop=None, step=1)` | The general form of the above |
+| `stream.id` | An opaque identifier for the stream, as shown in Studio |
+
+Views compose, and can be passed to other tasks. If the producer raised, iterating raises the same error.
+
 ## Checkpoints
 
 State that survives across executions of a step — retries, suspensions, recurrences and re-runs. See [checkpoints](./checkpoints.md).

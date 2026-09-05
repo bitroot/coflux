@@ -349,66 +349,88 @@ defmodule Coflux.Orchestration.Epoch do
                   end
                 end)
 
-              # Copy streams, their items, and any closure rows. An execution's
-              # streams may be mid-production (items appended, no closure) —
-              # carry them forward so consumers can keep reading after rotation.
-              Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
+              # Copy streams (per step) with their registrations, items and any
+              # closure rows. A stream may be mid-production, or paused by a
+              # suspend (items appended, no closure) — carry it forward so
+              # consumers can keep reading, and a resuming execution can keep
+              # appending, after rotation.
+              Enum.each(step_ids, fn {old_step_id, new_step_id} ->
                 {:ok, streams} =
                   query(
                     source_db,
-                    "SELECT `index`, buffer, timeout_ms, created_at FROM streams WHERE execution_id = ?1",
-                    {old_exec_id}
+                    "SELECT id, workspace_id, `index`, position, created_at FROM streams WHERE step_id = ?1",
+                    {old_step_id}
                   )
 
-                Enum.each(streams, fn {index, buffer, timeout_ms, stream_created_at} ->
-                  {:ok, _} =
+                Enum.each(streams, fn {old_stream_id, workspace_id, index, position,
+                                       stream_created_at} ->
+                  {:ok, new_stream_id} =
                     insert_one(target_db, :streams, %{
-                      execution_id: new_exec_id,
+                      step_id: new_step_id,
+                      workspace_id: remap_workspace_id(source_db, target_db, workspace_id),
                       index: index,
-                      buffer: buffer,
-                      timeout_ms: timeout_ms,
+                      position: position,
                       created_at: stream_created_at
                     })
+
+                  {:ok, registrations} =
+                    query(
+                      source_db,
+                      """
+                      SELECT execution_id, buffer, timeout_ms, created_at
+                      FROM stream_registrations
+                      WHERE stream_id = ?1
+                      """,
+                      {old_stream_id}
+                    )
+
+                  Enum.each(registrations, fn {old_exec_id, buffer, timeout_ms,
+                                               registration_created_at} ->
+                    {:ok, _} =
+                      insert_one(target_db, :stream_registrations, %{
+                        stream_id: new_stream_id,
+                        execution_id: Map.fetch!(execution_ids, old_exec_id),
+                        buffer: buffer,
+                        timeout_ms: timeout_ms,
+                        created_at: registration_created_at
+                      })
+                  end)
 
                   {:ok, items} =
                     query(
                       source_db,
                       """
-                      SELECT sequence, value_id, created_at
+                      SELECT sequence, value_id, execution_id, created_at
                       FROM stream_items
-                      WHERE execution_id = ?1 AND `index` = ?2
+                      WHERE stream_id = ?1
                       """,
-                      {old_exec_id, index}
+                      {old_stream_id}
                     )
 
-                  Enum.each(items, fn {sequence, value_id, item_created_at} ->
-                    new_value_id = ensure_value(source_db, target_db, value_id)
-
+                  Enum.each(items, fn {sequence, value_id, old_exec_id, item_created_at} ->
                     {:ok, _} =
                       insert_one(target_db, :stream_items, %{
-                        execution_id: new_exec_id,
-                        index: index,
+                        stream_id: new_stream_id,
                         sequence: sequence,
-                        value_id: new_value_id,
+                        value_id: ensure_value(source_db, target_db, value_id),
+                        execution_id: Map.fetch!(execution_ids, old_exec_id),
                         created_at: item_created_at
                       })
                   end)
 
                   case query_one(
                          source_db,
-                         "SELECT reason, error_id, created_at FROM stream_closures WHERE execution_id = ?1 AND `index` = ?2",
-                         {old_exec_id, index}
+                         "SELECT reason, error_id, execution_id, created_at FROM stream_closures WHERE stream_id = ?1",
+                         {old_stream_id}
                        ) do
-                    {:ok, {reason, error_id, closure_created_at}} ->
-                      new_error_id =
-                        if error_id, do: ensure_error(source_db, target_db, error_id)
-
+                    {:ok, {reason, error_id, old_exec_id, closure_created_at}} ->
                       {:ok, _} =
                         insert_one(target_db, :stream_closures, %{
-                          execution_id: new_exec_id,
-                          index: index,
+                          stream_id: new_stream_id,
                           reason: reason,
-                          error_id: new_error_id,
+                          error_id:
+                            if(error_id, do: ensure_error(source_db, target_db, error_id)),
+                          execution_id: Map.fetch!(execution_ids, old_exec_id),
                           created_at: closure_created_at
                         })
 
@@ -605,26 +627,42 @@ defmodule Coflux.Orchestration.Epoch do
     {:ok, stream_deps} =
       query(
         source_db,
-        "SELECT stream_ref_id, stream_index, created_at FROM stream_dependencies WHERE execution_id = ?1",
+        "SELECT stream_ref_id, created_at FROM stream_dependencies WHERE execution_id = ?1",
         {old_exec_id}
       )
 
-    Enum.each(stream_deps, fn {old_ref_id, stream_index, created_at} ->
-      new_ref_id = ensure_execution_ref(source_db, target_db, old_ref_id)
+    Enum.each(stream_deps, fn {old_ref_id, created_at} ->
+      new_ref_id = ensure_stream_ref(source_db, target_db, old_ref_id)
 
       {:ok, _} =
         insert_one(
           target_db,
           :stream_dependencies,
-          %{
-            execution_id: new_exec_id,
-            stream_ref_id: new_ref_id,
-            stream_index: stream_index,
-            created_at: created_at
-          },
+          %{execution_id: new_exec_id, stream_ref_id: new_ref_id, created_at: created_at},
           on_conflict: "DO NOTHING"
         )
     end)
+  end
+
+  defp ensure_stream_ref(source_db, target_db, old_ref_id) do
+    {:ok, {run_ext_id, step_number, index, module, target}} =
+      query_one!(
+        source_db,
+        "SELECT run_external_id, step_number, `index`, module, target FROM stream_refs WHERE id = ?1",
+        {old_ref_id}
+      )
+
+    {:ok, ref_id} =
+      Coflux.Orchestration.Streams.get_or_create_stream_ref(
+        target_db,
+        run_ext_id,
+        step_number,
+        index,
+        module,
+        target
+      )
+
+    ref_id
   end
 
   defp copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id) do

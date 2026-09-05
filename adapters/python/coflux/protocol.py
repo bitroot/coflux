@@ -505,16 +505,23 @@ def request_flush(execution_id: str) -> int:
     return get_protocol().send_request("flush", {"execution_id": execution_id})
 
 
-def send_stream_register(
+def request_stream_register(
     execution_id: str,
-    index: int,
+    position: int,
     buffer: int | None = None,
     timeout_ms: int | None = None,
-) -> None:
-    """Register a stream owned by this execution.
+) -> int:
+    """Request registration of this execution's ``position``-th stream.
 
-    ``index`` is worker-assigned and monotonic per execution (0, 1, 2, ...);
-    it identifies the stream within its producer execution.
+    ``position`` is the order in which this execution registers its
+    streams (0, 1, 2, ...). The server decides what the registration
+    means: a new stream of the step, or a resumption of one left paused
+    by a suspended predecessor at the same position. The response is
+    ``{"id", "index", "head"}`` — the stream's id
+    (``<run>:<step>_<index>``), its index within the step (what appends,
+    closes and demand grants carry from then on), and the last sequence
+    already in the stream (``-1`` for a new stream; the producer
+    continues from ``head + 1``).
 
     ``buffer`` is the producer-side backpressure budget. ``None`` opts out
     of backpressure entirely; the server won't issue demand grants and
@@ -524,15 +531,15 @@ def send_stream_register(
 
     ``timeout_ms`` is the idle-timeout budget (milliseconds). If set, the
     worker (CLI) force-closes the stream with reason "timeout" when no
-    item has been appended for that long. Purely informational for the
-    server; enforcement happens in the worker.
+    item has been appended for that long. Recorded by the server for
+    display; enforcement happens in the worker.
     """
-    params: dict[str, Any] = {"execution_id": execution_id, "index": index}
+    params: dict[str, Any] = {"execution_id": execution_id, "position": position}
     if buffer is not None:
         params["buffer"] = buffer
     if timeout_ms is not None:
         params["timeout_ms"] = timeout_ms
-    get_protocol().send_message("stream_register", params)
+    return get_protocol().send_request("stream_register", params)
 
 
 def send_stream_append(
@@ -587,18 +594,18 @@ def send_stream_close(
 def send_stream_subscribe(
     execution_id: str,
     subscription_id: int,
-    producer_execution_id: str,
-    index: int,
+    stream_id: str,
     from_sequence: int,
     prefetch: int,
     stride: dict[str, Any] | None = None,
 ) -> None:
-    """Open a consumer subscription to a stream owned by another execution.
+    """Open a consumer subscription to a stream.
 
     ``execution_id`` is the consumer's own execution — the server uses it
-    to track who's subscribed and where to push items. ``stride`` is an
-    optional ``{"start": int, "stop": int|None, "step": int}`` dict
-    restricting which sequence positions are delivered; any chain of
+    to track who's subscribed and where to push items. ``stream_id`` is
+    the stream's opaque id from its handle. ``stride`` is an optional
+    ``{"start": int, "stop": int|None, "step": int}`` dict restricting
+    which sequence positions are delivered; any chain of
     slice/partition/stride calls on the handle composes into a single
     stride before reaching here.
 
@@ -609,8 +616,7 @@ def send_stream_subscribe(
     params: dict[str, Any] = {
         "execution_id": execution_id,
         "subscription_id": subscription_id,
-        "producer_execution_id": producer_execution_id,
-        "index": index,
+        "stream_id": stream_id,
         "from_sequence": from_sequence,
         "prefetch": prefetch,
     }

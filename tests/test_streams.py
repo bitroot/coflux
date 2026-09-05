@@ -17,6 +17,7 @@ Two common patterns:
 import time
 
 import pytest
+from support import cli
 from support.manifest import task, workflow
 from support.protocol import (
     execution_handle,
@@ -285,12 +286,13 @@ def test_subscribe_to_unknown_producer_closes_immediately(worker):
         _items, closed = cons_ex.conn.drain_stream(subscription_id=1)
         cons_ex.conn.complete(cons_ex.execution_id)
 
-        assert closed.get("reason") == "producer_not_found"
+        assert closed.get("reason") == "stream_not_found"
         assert closed.get("error") is None
 
 
 def test_topic_exposes_stream_state(worker):
-    """Studio topic gets `streams` per execution: opened, closed, error."""
+    """Studio topic gets `streams` per step: opened, closed, error, and the
+    attempts that produced into each."""
     targets = [workflow("test", "producer")]
 
     with worker(targets) as ctx:
@@ -308,12 +310,16 @@ def test_topic_exposes_stream_state(worker):
         ctx.result(prod_resp["runId"])
 
         snapshot = ctx.inspect(prod_resp["runId"])
-        # The run snapshot has a `steps → {run:step → {executions → {attempt → {...}}}}` shape.
-        step = next(iter(snapshot["steps"].values()))
-        execution = next(iter(step["executions"].values()))
-        streams = execution["streams"]
+        # The run snapshot has a `steps → {run:step → {streams, executions}}`
+        # shape: streams belong to the step, not to an attempt.
+        step_id, step = next(iter(snapshot["steps"].items()))
+        streams = step["streams"]
 
         assert "0" in streams and "1" in streams
+        assert streams["0"]["id"] == f"{step_id}_0"
+        assert streams["1"]["id"] == f"{step_id}_1"
+        assert streams["0"]["attempts"] == [1]
+        assert streams["0"]["closedBy"] == 1
         assert streams["0"]["openedAt"] is not None
         assert streams["0"]["closedAt"] is not None
         assert streams["0"]["reason"] == "complete"
@@ -1131,45 +1137,64 @@ def test_slowest_consumer_leaving_releases_producer(worker):
         ctx.result(prod_resp["runId"])
 
 
-def test_suspended_producer_closes_stream_as_superseded(worker):
-    """A producer that suspends leaves its stream terminal.
+def test_suspended_producer_stream_is_continued_by_resumed_execution(worker):
+    """A producer that suspends leaves its stream paused, not closed.
 
-    A stream is owned by exactly one execution, so the resumed execution
-    registers its own under a new id rather than continuing this one.
-    The attached consumer must therefore be told the stream is over —
-    and told *why*, since "suspended" is not a failure and shouldn't
-    read like one.
+    Streams belong to the step: the execution that resumes it registers at
+    the same position, is handed the same stream (and where its sequence
+    left off), and appends to it. A consumer sees one unbroken stream —
+    including one that subscribed while the step was suspended.
     """
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
     with worker(targets, concurrency=3) as ctx:
         ctx.submit("test", "producer")
         prod_ex = ctx.executor.next_execute()
-        prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        first = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        assert first["index"] == 0 and first["head"] == -1
         prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
 
         ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
         cons_ex.conn.stream_subscribe(
-            cons_ex.execution_id,
-            subscription_id=1,
-            producer_execution_id=prod_ex.execution_id,
-            index=0,
+            cons_ex.execution_id, subscription_id=1, stream_id=first["id"]
         )
         items = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
         assert [i[0] for i in items["items"]] == [0]
 
         prod_ex.conn.suspend(prod_ex.execution_id)
 
-        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
-        assert closed["reason"] == "suspended"
-        assert closed.get("error") is None
-
-        # The resumed execution is a distinct execution owning a distinct
-        # stream — which is exactly why the old one had to be closed.
+        # The resumed execution is a distinct execution — but it continues
+        # the same stream from where the suspended one left it.
         prod2 = ctx.executor.next_execute()
         assert prod2.execution_id != prod_ex.execution_id
-        prod2.conn.stream_register(prod2.execution_id, 0)
+
+        # Nothing closed for the live consumer in the meantime.
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=0.5)
+
+        # A consumer subscribing while the step is paused gets the backlog
+        # and then waits, rather than being told the stream is over.
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=2, stream_id=first["id"]
+        )
+        backlog = cons_ex.conn.recv_push("stream_items", subscription_id=2, timeout=2)
+        assert [i[0] for i in backlog["items"]] == [0]
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_closed", subscription_id=2, timeout=0.5)
+
+        resumed = prod2.conn.stream_register(prod2.execution_id, 0)
+        assert resumed == {"id": first["id"], "index": 0, "head": 0}
+
+        prod2.conn.stream_append(prod2.execution_id, 0, 1, "v1")
+        items = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [(i[0], i[1]["value"]) for i in items["items"]] == [(1, "v1")]
+        items = cons_ex.conn.recv_push("stream_items", subscription_id=2, timeout=2)
+        assert [(i[0], i[1]["value"]) for i in items["items"]] == [(1, "v1")]
+
+        prod2.conn.stream_close(prod2.execution_id, 0)
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "complete"
         prod2.conn.complete(prod2.execution_id, value="done")
 
         cons_ex.conn.complete(cons_ex.execution_id)
@@ -1215,15 +1240,158 @@ def test_recurrent_producer_closes_stream_each_iteration(worker):
         assert closed["reason"] == "recurred"
 
         # The next iteration is a separate execution with a separate
-        # stream; the old handle does not follow it.
+        # stream — the step's next index, rather than a continuation of the
+        # closed one; the old handle does not follow it.
         tick2 = ctx.executor.next_execute()
         assert tick2.execution_id != tick1.execution_id
-        tick2.conn.stream_register(tick2.execution_id, 0)
-        tick2.conn.stream_append(tick2.execution_id, 0, 0, "tick-1")
+        fresh = tick2.conn.stream_register(tick2.execution_id, 0)
+        assert fresh["index"] == 1 and fresh["head"] == -1
+        tick2.conn.stream_append(tick2.execution_id, fresh["index"], 0, "tick-1")
         with pytest.raises(TimeoutError):
             cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=0.5)
 
         cons_ex.conn.complete(cons_ex.execution_id)
+
+
+def _far_future_ms():
+    """An execute_after that keeps a suspended step's successor pending
+    for the rest of the test, so the step can be re-run or cancelled
+    while paused."""
+    return int(time.time() * 1000) + 3_600_000
+
+
+def test_rerun_of_suspended_step_continues_stream(worker):
+    """Re-running a suspended step cancels its pending successor — which
+    never produced anything — and the new attempt continues the paused
+    stream. A manual "resume now" doesn't reset it.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        first = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=first["id"]
+        )
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        prod_ex.conn.suspend(prod_ex.execution_id, execute_after=_far_future_ms())
+
+        ctx.rerun(resp["stepId"])
+        prod2 = ctx.executor.next_execute()
+        with pytest.raises(TimeoutError):
+            cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=0.5)
+
+        resumed = prod2.conn.stream_register(prod2.execution_id, 0)
+        assert resumed == {"id": first["id"], "index": 0, "head": 0}
+
+        prod2.conn.stream_append(prod2.execution_id, 0, 1, "v1")
+        items = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [(i[0], i[1]["value"]) for i in items["items"]] == [(1, "v1")]
+
+        prod2.conn.stream_close(prod2.execution_id, 0)
+        prod2.conn.complete(prod2.execution_id, value="done")
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+
+def test_cancelling_suspended_step_closes_paused_stream(worker):
+    """Cancelling the pending successor of a suspended producer ends the
+    step, so the paused stream is closed for its consumers — as
+    "cancelled", even though the cancelled execution itself never
+    produced into it.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        first = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=first["id"]
+        )
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        prod_ex.conn.suspend(prod_ex.execution_id, execute_after=_far_future_ms())
+
+        # The pending successor is the step's next attempt.
+        ctx.cancel(f"{resp['stepId']}:2")
+
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "cancelled"
+        assert closed.get("error") is None
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+
+def test_rerun_of_live_producer_starts_fresh_stream(worker):
+    """Re-running a step whose attempt is mid-stream cancels that attempt,
+    which closes its stream; the new attempt opens a fresh stream under
+    the step's next index rather than continuing the cancelled one.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        first = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=first["id"]
+        )
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        ctx.rerun(resp["stepId"])
+
+        closed = cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "cancelled"
+
+        prod2 = ctx.executor.next_execute()
+        fresh = prod2.conn.stream_register(prod2.execution_id, 0)
+        assert fresh["index"] == 1 and fresh["head"] == -1
+        assert fresh["id"] != first["id"]
+        prod2.conn.stream_close(prod2.execution_id, fresh["index"])
+        prod2.conn.complete(prod2.execution_id, value="done")
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+
+
+def test_stream_is_not_continued_across_workspaces(worker):
+    """A derived-workspace re-run of a suspended step opens its own stream
+    rather than appending to the base's paused one. Writes never cross
+    workspaces (a derived consumer could still read the base's stream).
+    """
+    targets = [workflow("test", "producer")]
+
+    with worker(targets, workspace="base", concurrency=2) as ctx_base:
+        resp = ctx_base.submit("test", "producer")
+        prod_ex = ctx_base.executor.next_execute()
+        first = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+        prod_ex.conn.suspend(prod_ex.execution_id, execute_after=_far_future_ms())
+        saved_host = ctx_base.host
+
+    cli.workspaces_create("derived", base="base", host=saved_host, workspace="derived")
+
+    with worker(targets, workspace="derived") as ctx_derived:
+        ctx_derived.rerun(resp["stepId"])
+        ex1 = ctx_derived.executor.next_execute()
+        fresh = ex1.conn.stream_register(ex1.execution_id, 0)
+        assert fresh["index"] == 1 and fresh["head"] == -1
+        assert fresh["id"] != first["id"]
+        ex1.conn.stream_close(ex1.execution_id, fresh["index"])
+        ex1.conn.complete(ex1.execution_id, value="done")
 
 
 # --- Idle timeout -------------------------------------------------------
@@ -1345,8 +1513,7 @@ def test_timeout_visible_in_topic(worker):
 
         snapshot = ctx.inspect(prod_resp["runId"])
         step = next(iter(snapshot["steps"].values()))
-        execution = next(iter(step["executions"].values()))
-        stream = execution["streams"]["0"]
+        stream = step["streams"]["0"]
         assert stream["timeoutMs"] == 120
         assert stream["reason"] == "timeout"
         assert stream["error"] is None

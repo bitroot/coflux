@@ -59,24 +59,26 @@ type ExecutionHandler interface {
 	SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error)
 	// NotifyTerminated notifies the server that an execution's process has exited
 	NotifyTerminated(ctx context.Context, executionID string) error
-	// StreamRegister declares a new stream owned by an execution.
-	// Index is worker-assigned, monotonic per execution — it identifies
-	// the stream within its producer execution. Buffer is the optional
-	// backpressure budget; nil means unbounded (no flow control).
-	// TimeoutMs is the optional idle-timeout budget (milliseconds);
-	// purely informational for the server (enforced at the worker/CLI).
-	StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error
+	// StreamRegister declares an execution's k-th stream (`position`).
+	// The server allocates the stream's index within its step and decides
+	// whether the registration resumes a stream paused by a suspend; the
+	// result carries the stream's id, its index and the head to sequence
+	// from. Buffer is the optional backpressure budget; nil means
+	// unbounded (no flow control). TimeoutMs is the optional idle-timeout
+	// budget (milliseconds); enforced at the worker/CLI, recorded by the
+	// server for display.
+	StreamRegister(ctx context.Context, executionID string, position int, buffer *int, timeoutMs *int) (*adapter.StreamRegisterResult, error)
 	// StreamAppend appends an item to a stream. Sequence is worker-assigned,
 	// monotonic per stream — it identifies the item within its stream.
 	StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error
 	// StreamClose closes a stream. ``reason`` is "complete" | "errored" | "timeout".
 	// When nil, inferred from ``err`` (nil→complete, non-nil→errored).
 	StreamClose(ctx context.Context, executionID string, index int, err *adapter.StreamCloseError, reason *string) error
-	// StreamSubscribe opens a consumer subscription to a stream owned
-	// by another execution. `stride` is an optional
+	// StreamSubscribe opens a consumer subscription to a stream by its
+	// id (`<run>:<step>_<index>`). `stride` is an optional
 	// {"start", "stop", "step"} map restricting which positions are
 	// delivered; nil means no filtering.
-	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any, prefetch int) error
+	StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, streamID string, fromSequence int, stride map[string]any, prefetch int) error
 	// StreamAck reports consumer progress. `count` and `sequence` are
 	// cumulative — how many items have been processed, and the highest
 	// sequence among them. Frees delivery credit server-side.
@@ -355,7 +357,7 @@ loop:
 			// throttle means at most one per window per execution.
 			p.handleCheckpointUpdate(execCtx, executionID, params, logger)
 
-		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input", "flush":
+		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input", "flush", "stream_register":
 			// Dispatch async: these can block on the server (e.g. a
 			// `select` that waits for a child execution). Blocking the
 			// message loop here would stop us reading the adapter's
@@ -367,9 +369,6 @@ loop:
 
 		case "register_group":
 			p.handleRegisterGroup(execCtx, executionID, params, logger)
-
-		case "stream_register":
-			p.handleStreamRegister(execCtx, executionID, params, logger)
 
 		case "stream_append":
 			p.handleStreamAppend(execCtx, executionID, params, logger)
@@ -609,22 +608,6 @@ func (p *Pool) handleRegisterGroup(ctx context.Context, executionID string, para
 	}
 }
 
-func (p *Pool) handleStreamRegister(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
-	var req adapter.StreamRegisterParams
-	if err := json.Unmarshal(params, &req); err != nil {
-		logger.Error("failed to parse stream_register message", "error", err)
-		return
-	}
-
-	if err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Index, req.Buffer, req.TimeoutMs); err != nil {
-		logger.Error("failed to register stream", "error", err)
-		return
-	}
-	if req.TimeoutMs != nil {
-		p.streamTimers.Register(streamKey{req.ExecutionID, req.Index}, *req.TimeoutMs)
-	}
-}
-
 func (p *Pool) handleStreamAppend(ctx context.Context, executionID string, params json.RawMessage, logger *slog.Logger) {
 	var req adapter.StreamAppendParams
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -671,8 +654,7 @@ func (p *Pool) handleStreamSubscribe(ctx context.Context, executionID string, pa
 		ctx,
 		req.ExecutionID,
 		req.SubscriptionID,
-		req.ProducerExecutionID,
-		req.Index,
+		req.StreamID,
 		req.FromSequence,
 		req.Stride,
 		req.Prefetch,
@@ -744,6 +726,31 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 				out["error"] = resolved.Error
 			}
 			result = out
+		}
+
+	case "stream_register":
+		var req adapter.StreamRegisterParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		registered, err := p.handler.StreamRegister(ctx, req.ExecutionID, req.Position, req.Buffer, req.TimeoutMs)
+		if err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "stream_register_error", Message: err.Error()}
+		} else {
+			// The idle timer is keyed by the server-allocated index, which
+			// is what the adapter's appends and closes carry from here on.
+			// It's per execution: a resumed stream's timer starts afresh
+			// with the resuming execution, and a suspension doesn't count
+			// against it.
+			if req.TimeoutMs != nil {
+				p.streamTimers.Register(streamKey{req.ExecutionID, registered.Index}, *req.TimeoutMs)
+			}
+			result = map[string]any{
+				"id":    registered.ID,
+				"index": registered.Index,
+				"head":  registered.Head,
+			}
 		}
 
 	case "persist_asset":

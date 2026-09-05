@@ -298,6 +298,12 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
     starts a fresh subscription from sequence 0, so a stream can be iterated
     multiple times and each iteration sees the whole sequence.
 
+    A stream belongs to the step that produces it. If the producer
+    suspends, the stream pauses rather than ending, and the execution that
+    resumes the step appends to it — so iteration simply waits through
+    the suspension and carries on. Any other way the producer ends closes
+    the stream.
+
     ``async for`` works too, and does the same thing — the difference is
     only in how the consumer waits. Prefer it in ``async def`` bodies:
     the sync iterator blocks its thread between items, which in an async
@@ -315,8 +321,8 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
         id: str,
         stride: Stride = (0, None, 1),
     ):
-        # Opaque identifier of the form ``<producer_execution_id>_<index>``.
-        # Users may see this in the CLI/Studio but shouldn't need to parse it.
+        # Opaque identifier of the form ``<run>:<step>_<index>``. Users may
+        # see this in the CLI/Studio but shouldn't need to parse it.
         self._id = id
         self._stride = stride
 
