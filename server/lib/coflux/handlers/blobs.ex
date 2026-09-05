@@ -4,6 +4,7 @@ defmodule Coflux.Handlers.Blobs do
   alias Coflux.{Auth, Utils}
 
   @key_regex ~r/\A[0-9a-f]{64}\z/
+  @range_regex ~r/\Abytes=(\d*)-(\d*)\z/
 
   def init(req, opts) do
     bindings = :cowboy_req.bindings(req)
@@ -41,27 +42,51 @@ defmodule Coflux.Handlers.Blobs do
   end
 
   defp handle(req, "HEAD", key, opts) do
-    status =
-      cond do
-        not valid_key?(key) -> 404
-        File.exists?(blob_path(key)) -> 200
-        true -> 404
+    req =
+      case blob_stat(key) do
+        {:ok, path, size} ->
+          :cowboy_req.reply(200, %{"accept-ranges" => "bytes"}, {:sendfile, 0, size, path}, req)
+
+        :error ->
+          :cowboy_req.reply(404, %{}, req)
       end
 
-    req = :cowboy_req.reply(status, %{}, req)
     {:ok, req, opts}
   end
 
   defp handle(req, "GET", key, opts) do
-    with true <- valid_key?(key),
-         {:ok, content} <- File.read(blob_path(key)) do
-      req = :cowboy_req.reply(200, %{}, content, req)
-      {:ok, req, opts}
-    else
-      _ ->
-        req = :cowboy_req.reply(404, %{}, "Not found", req)
-        {:ok, req, opts}
-    end
+    req =
+      case blob_stat(key) do
+        {:ok, path, size} ->
+          case parse_range(:cowboy_req.header("range", req), size) do
+            :none ->
+              :cowboy_req.reply(
+                200,
+                %{"accept-ranges" => "bytes"},
+                {:sendfile, 0, size, path},
+                req
+              )
+
+            {:range, first, last} ->
+              :cowboy_req.reply(
+                206,
+                %{
+                  "accept-ranges" => "bytes",
+                  "content-range" => "bytes #{first}-#{last}/#{size}"
+                },
+                {:sendfile, first, last - first + 1, path},
+                req
+              )
+
+            :unsatisfiable ->
+              :cowboy_req.reply(416, %{"content-range" => "bytes */#{size}"}, "", req)
+          end
+
+        :error ->
+          :cowboy_req.reply(404, %{}, "Not found", req)
+      end
+
+    {:ok, req, opts}
   end
 
   defp handle(req, "PUT", key, opts) do
@@ -90,6 +115,62 @@ defmodule Coflux.Handlers.Blobs do
 
   defp blob_path(<<a::binary-size(2), b::binary-size(2)>> <> c) do
     Utils.data_path("blobs/#{a}/#{b}/#{c}")
+  end
+
+  defp blob_stat(key) do
+    if valid_key?(key) do
+      path = blob_path(key)
+
+      case File.stat(path) do
+        {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, path, size}
+        _ -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  # Parses a single byte range. Anything unsupported (multiple ranges, other
+  # units, unparsable values) is treated as if no range were requested.
+  defp parse_range(:undefined, _size), do: :none
+
+  defp parse_range(header, size) do
+    case Regex.run(@range_regex, header, capture: :all_but_first) do
+      [first, last] -> resolve_range(first, last, size)
+      nil -> :none
+    end
+  end
+
+  defp resolve_range("", "", _size), do: :none
+
+  defp resolve_range("", suffix, size) do
+    case String.to_integer(suffix) do
+      0 -> :unsatisfiable
+      count -> satisfiable(max(size - count, 0), size - 1, size)
+    end
+  end
+
+  defp resolve_range(first, "", size) do
+    satisfiable(String.to_integer(first), size - 1, size)
+  end
+
+  defp resolve_range(first, last, size) do
+    first = String.to_integer(first)
+    last = String.to_integer(last)
+
+    if first > last do
+      :none
+    else
+      satisfiable(first, min(last, size - 1), size)
+    end
+  end
+
+  defp satisfiable(first, last, size) do
+    if first >= size do
+      :unsatisfiable
+    else
+      {:range, first, last}
+    end
   end
 
   defp valid_key?(key) when is_binary(key), do: Regex.match?(@key_regex, key)

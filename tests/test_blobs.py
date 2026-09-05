@@ -26,6 +26,21 @@ def _request(server, project_id, method, raw_path, body=None):
         conn.close()
 
 
+def _request_headers(server, project_id, method, raw_path, headers=None):
+    """Like ``_request``, but also returns the response headers (lowercased)."""
+    conn, request_headers = _conn(server, project_id)
+    if headers:
+        request_headers = {**request_headers, **headers}
+    try:
+        conn.request(method, raw_path, headers=request_headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        response_headers = {k.lower(): v for k, v in resp.getheaders()}
+        return resp.status, response_headers, data
+    finally:
+        conn.close()
+
+
 def _hex_sha256(b):
     return hashlib.sha256(b).hexdigest()
 
@@ -116,3 +131,140 @@ def test_no_files_created_outside_blobs_dir(isolated_server):
             assert len(entry) == 2 and all(c in "0123456789abcdef" for c in entry), (
                 f"unexpected blob shard: {entry!r}"
             )
+
+
+def _put_blob(server, project_id, body):
+    """PUT a blob and return its key."""
+    key = _hex_sha256(body)
+    status, _ = _request(server, project_id, "PUT", f"/blobs/{key}", body=body)
+    assert status == 204
+    return key
+
+
+@pytest.fixture
+def sample_blob(server, project_id):
+    """A ~1000 byte blob, returning ``(key, body)``."""
+    body = (bytes(range(256)) * 4)[:1000]
+    return _put_blob(server, project_id, body), body
+
+
+def test_get_full_advertises_ranges(server, project_id, sample_blob):
+    """A rangeless GET returns the whole blob and advertises range support."""
+    key, body = sample_blob
+    status, headers, data = _request_headers(server, project_id, "GET", f"/blobs/{key}")
+    assert status == 200
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-length"] == str(len(body))
+    assert data == body
+
+
+def test_head_returns_size(server, project_id, sample_blob):
+    """HEAD reports the size without a body."""
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "HEAD", f"/blobs/{key}"
+    )
+    assert status == 200
+    assert headers["content-length"] == str(len(body))
+    assert headers["accept-ranges"] == "bytes"
+    assert data == b""
+
+
+def test_get_range_prefix(server, project_id, sample_blob):
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=0-9"}
+    )
+    assert status == 206
+    assert data == body[:10]
+    assert headers["content-range"] == f"bytes 0-9/{len(body)}"
+    assert headers["content-length"] == "10"
+
+
+def test_get_range_open_ended(server, project_id, sample_blob):
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=990-"}
+    )
+    assert status == 206
+    assert data == body[990:]
+    assert headers["content-range"] == f"bytes 990-999/{len(body)}"
+
+
+def test_get_range_suffix(server, project_id, sample_blob):
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=-10"}
+    )
+    assert status == 206
+    assert data == body[-10:]
+    assert headers["content-range"] == f"bytes 990-999/{len(body)}"
+
+
+def test_get_range_clamped_to_size(server, project_id, sample_blob):
+    """A last-byte beyond the end is clamped rather than rejected."""
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=990-5000"}
+    )
+    assert status == 206
+    assert data == body[990:]
+    assert headers["content-range"] == f"bytes 990-999/{len(body)}"
+
+
+def test_get_range_beyond_end_unsatisfiable(server, project_id, sample_blob):
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=1000-"}
+    )
+    assert status == 416
+    assert headers["content-range"] == f"bytes */{len(body)}"
+    assert data == b""
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    [
+        "bytes=5-2",  # inverted
+        "items=0-1",  # unsupported unit
+        "bytes=0-1,5-6",  # multiple ranges
+        "bytes=abc",  # unparsable
+    ],
+)
+def test_get_ignores_unsupported_ranges(server, project_id, sample_blob, range_header):
+    """Ranges we don't support fall back to serving the whole blob."""
+    key, body = sample_blob
+    status, headers, data = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": range_header}
+    )
+    assert status == 200
+    assert data == body
+    assert "content-range" not in headers
+
+
+def test_empty_blob_ranges(server, project_id):
+    """An empty blob serves a zero-length 200, and any range is unsatisfiable."""
+    key = _put_blob(server, project_id, b"")
+
+    status, headers, data = _request_headers(server, project_id, "GET", f"/blobs/{key}")
+    assert status == 200
+    assert headers["content-length"] == "0"
+    assert data == b""
+
+    status, headers, _ = _request_headers(
+        server, project_id, "GET", f"/blobs/{key}", {"Range": "bytes=0-"}
+    )
+    assert status == 416
+    assert headers["content-range"] == "bytes */0"
+
+
+def test_options_advertises_range_cors(server, project_id):
+    """Preflight allows the Range header and exposes the range response headers."""
+    key = "0" * 64
+    status, headers, _ = _request_headers(
+        server, project_id, "OPTIONS", f"/blobs/{key}"
+    )
+    assert status == 204
+    assert "range" in headers["access-control-allow-headers"].split(",")
+    exposed = headers["access-control-expose-headers"].split(",")
+    assert "content-range" in exposed

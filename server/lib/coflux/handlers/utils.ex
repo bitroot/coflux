@@ -115,7 +115,9 @@ defmodule Coflux.Handlers.Utils do
 
     headers = %{
       "access-control-allow-methods" => "OPTIONS, GET, POST, PUT, PATCH, DELETE",
-      "access-control-allow-headers" => "content-type,authorization,x-api-version,x-project",
+      "access-control-allow-headers" =>
+        "content-type,authorization,x-api-version,x-project,range",
+      "access-control-expose-headers" => "content-length,content-range,accept-ranges",
       "access-control-max-age" => "86400"
     }
 
