@@ -131,12 +131,24 @@ class ExecutorConnection:
         self._next_request_id += 1
         msg["id"] = rid
         self.send(msg)
-        while True:
-            incoming = self.recv()
-            if incoming.get("id") == rid:
-                return incoming
-            # Park non-matching messages (typically notifications).
-            self._buffer.append(incoming)
+        # Hold non-matching messages (typically notifications) aside and
+        # restore them afterwards. They must not go back onto `_buffer`
+        # mid-loop: `recv` serves the buffer before the socket, so a
+        # re-buffered message would be popped straight back out and the
+        # loop would spin without ever reading the reply. A stream_demand
+        # grant arriving ahead of a stream_register reply is the everyday
+        # case.
+        held = []
+        try:
+            while True:
+                incoming = self.recv()
+                if incoming.get("id") == rid:
+                    self._buffer[:0] = held
+                    return incoming
+                held.append(incoming)
+        except (TimeoutError, ConnectionError):
+            self._buffer[:0] = held
+            raise
 
     def submit_task(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child task execution and return the target execution ID."""
@@ -416,32 +428,41 @@ class ExecutorConnection:
         for asserting that the window actually stops delivery.
         """
         items = []
+        # Messages for other subscriptions (or other methods) are held
+        # aside and restored on exit — see `_request` for why they can't
+        # be appended back onto `_buffer` while the loop is still reading.
+        held = []
         deadline = time.time() + timeout
-        while True:
-            remaining = max(0.01, deadline - time.time())
-            msg = self.recv(timeout=remaining)
-            method = msg.get("method")
-            params = msg.get("params", {})
-            if params.get("subscription_id") != subscription_id or method not in (
-                "stream_items",
-                "stream_closed",
-            ):
-                self._buffer.append(msg)
-                continue
-            if method == "stream_items":
-                batch = params.get("items", [])
-                items.extend(batch)
-                count, sequence = self._record_items(subscription_id, batch)
-                if ack and batch:
-                    self.stream_ack(
-                        self._sub_execution_ids[subscription_id],
-                        subscription_id,
-                        count,
-                        sequence,
-                    )
-                continue
-            # stream_closed — terminal
-            return items, params
+        try:
+            while True:
+                remaining = max(0.01, deadline - time.time())
+                msg = self.recv(timeout=remaining)
+                method = msg.get("method")
+                params = msg.get("params", {})
+                if params.get("subscription_id") != subscription_id or method not in (
+                    "stream_items",
+                    "stream_closed",
+                ):
+                    held.append(msg)
+                    continue
+                if method == "stream_items":
+                    batch = params.get("items", [])
+                    items.extend(batch)
+                    count, sequence = self._record_items(subscription_id, batch)
+                    if ack and batch:
+                        self.stream_ack(
+                            self._sub_execution_ids[subscription_id],
+                            subscription_id,
+                            count,
+                            sequence,
+                        )
+                    continue
+                # stream_closed — terminal
+                self._buffer[:0] = held
+                return items, params
+        except (TimeoutError, ConnectionError):
+            self._buffer[:0] = held
+            raise
 
     def _record_items(self, subscription_id, batch):
         """Fold a delivered batch into this subscription's cumulative

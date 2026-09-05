@@ -1538,11 +1538,10 @@ def test_clean_stream_keeps_completion_succeeded(worker):
         prod_ex.conn.complete(prod_ex.execution_id, value=1)
         ctx.result(prod_resp["runId"])
 
-        snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(
-            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
-        )
-        assert execution["completion"]["kind"] == "succeeded"
+        # The value is recorded before the completion, which lands when the
+        # worker reports the process exited — so wait for it rather than
+        # reading the snapshot straight away.
+        assert _wait_for_completion(ctx, prod_resp["runId"], 1) == "succeeded"
 
 
 def test_stream_error_promotes_completion_to_stream_errored(worker):
@@ -1566,11 +1565,10 @@ def test_stream_error_promotes_completion_to_stream_errored(worker):
         prod_ex.conn.complete(prod_ex.execution_id, value=1)
         ctx.result(prod_resp["runId"])
 
-        snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(
-            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
-        )
-        assert execution["completion"]["kind"] == "stream_errored"
+        # The value is recorded before the completion, which lands when the
+        # worker reports the process exited — so wait for it rather than
+        # reading the snapshot straight away.
+        assert _wait_for_completion(ctx, prod_resp["runId"], 1) == "stream_errored"
 
 
 def test_stream_timeout_promotes_completion_to_stream_timeout(worker):
@@ -1594,11 +1592,10 @@ def test_stream_timeout_promotes_completion_to_stream_timeout(worker):
         prod_ex.conn.complete(prod_ex.execution_id, value=1)
         ctx.result(prod_resp["runId"])
 
-        snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(
-            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
-        )
-        assert execution["completion"]["kind"] == "stream_timeout"
+        # The value is recorded before the completion, which lands when the
+        # worker reports the process exited — so wait for it rather than
+        # reading the snapshot straight away.
+        assert _wait_for_completion(ctx, prod_resp["runId"], 1) == "stream_timeout"
 
 
 def test_stream_error_outranks_timeout(worker):
@@ -1629,11 +1626,10 @@ def test_stream_error_outranks_timeout(worker):
         prod_ex.conn.complete(prod_ex.execution_id, value=1)
         ctx.result(prod_resp["runId"])
 
-        snapshot = ctx.inspect(prod_resp["runId"])
-        execution = next(
-            iter(snapshot["steps"][f"{prod_resp['runId']}:1"]["executions"].values())
-        )
-        assert execution["completion"]["kind"] == "stream_errored"
+        # The value is recorded before the completion, which lands when the
+        # worker reports the process exited — so wait for it rather than
+        # reading the snapshot straight away.
+        assert _wait_for_completion(ctx, prod_resp["runId"], 1) == "stream_errored"
 
 
 def _wait_for_completion(ctx, run_id, step_num, timeout=5):
