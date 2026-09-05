@@ -14,6 +14,8 @@ The task recurs as long as it returns `None`. Returning any other value complete
 
 Each iteration is a fresh execution starting from the top, so anything that needs to carry forward between them — a cursor, say — belongs in a [checkpoint](./checkpoints.md).
 
+A recurrent task can't have a generator body: each iteration would produce a separate [stream](./streams.md), and the result would never be `None`. For a stream that continues across pauses, suspend from inside the generator instead.
+
 ## Delay
 
 By default, recurring tasks restart immediately. Use `delay` to wait between executions:

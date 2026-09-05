@@ -260,8 +260,14 @@ def register_group_notification(execution_id, group_id, name=None):
 # --- Stream messages (producer side: adapter → server) ---
 
 
-def stream_register(execution_id, index, buffer=None, timeout_ms=None):
-    params = {"execution_id": execution_id, "index": index}
+def stream_register(execution_id, position, buffer=None, timeout_ms=None):
+    """Register the execution's ``position``-th stream. A request: the
+    server replies with ``{"id", "index", "head"}`` — the stream's id,
+    its index within the step (what appends and closes carry), and the
+    last sequence already in it (``-1`` for a new stream, or the resume
+    point when the registration continues a stream a suspended
+    predecessor left paused)."""
+    params = {"execution_id": execution_id, "position": position}
     if buffer is not None:
         params["buffer"] = buffer
     if timeout_ms is not None:
@@ -269,10 +275,18 @@ def stream_register(execution_id, index, buffer=None, timeout_ms=None):
     return {"method": "stream_register", "params": params}
 
 
+def stream_id_for(execution_id, index):
+    """The id of the stream at ``index`` on the step ``execution_id``
+    belongs to: ``<run>:<step>_<index>``. Streams belong to steps, so
+    the attempt in the execution id is dropped."""
+    step_id = execution_id.rsplit(":", 1)[0]
+    return f"{step_id}_{index}"
+
+
 def stream_append(execution_id, index, sequence, value, format="json"):
     """Append an item to a stream. ``value`` is the raw JSON value.
 
-    ``index`` identifies the stream within its execution; ``sequence``
+    ``index`` identifies the stream within its step; ``sequence``
     identifies the item within the stream. Builds a Value wire-form
     message with an empty references list. Tests that need references
     should build the Value dict manually.
@@ -313,13 +327,12 @@ DEFAULT_PREFETCH = 1000
 def stream_subscribe(
     execution_id,
     subscription_id,
-    producer_execution_id,
-    index,
+    stream_id,
     from_sequence=0,
     stride=None,
     prefetch=DEFAULT_PREFETCH,
 ):
-    """Subscribe to a stream.
+    """Subscribe to a stream by its id (see ``stream_id_for``).
 
     ``prefetch`` bounds how many items the server will push beyond what
     has been acknowledged via ``stream_ack``.
@@ -331,8 +344,7 @@ def stream_subscribe(
     params = {
         "execution_id": execution_id,
         "subscription_id": subscription_id,
-        "producer_execution_id": producer_execution_id,
-        "index": index,
+        "stream_id": stream_id,
         "from_sequence": from_sequence,
         "prefetch": prefetch,
     }

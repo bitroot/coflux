@@ -39,6 +39,7 @@ const sidebars: SidebarsConfig = {
         "deferring",
         "suspense",
         "checkpoints",
+        "streams",
         "select",
       ],
     },

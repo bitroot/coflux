@@ -189,14 +189,20 @@ defmodule Coflux.Orchestration do
   end
 
   # Stream producer messages — worker registers a stream, appends items,
-  # and closes the stream. `index` identifies the stream within its
-  # producer execution; `sequence` identifies an item within the stream.
-  # Both are worker-assigned and monotonic from 0.
+  # and closes the stream.
+  #
+  # `register_stream` is a request: `position` is the order in which the
+  # execution registered the stream (its k-th), and the reply carries the
+  # stream's id, its server-allocated step `index`, and the `head` to
+  # sequence from (`-1` for a new stream; the last sequence of a paused
+  # stream the execution is resuming after a suspend). Appends and closes
+  # then address the stream by that `index`; `sequence` identifies an item
+  # within the stream, worker-assigned and monotonic.
 
-  def register_stream(project_id, execution_id, index, buffer, timeout_ms, session_id) do
+  def register_stream(project_id, execution_id, position, buffer, timeout_ms, session_id) do
     call_server(
       project_id,
-      {:register_stream, execution_id, index, buffer, timeout_ms, session_id}
+      {:register_stream, execution_id, position, buffer, timeout_ms, session_id}
     )
   end
 
@@ -209,16 +215,15 @@ defmodule Coflux.Orchestration do
   end
 
   # Stream consumer messages — consumer opens a subscription to receive
-  # items from a producer's stream; server pushes stream_items /
-  # stream_closed commands to the consumer's session.
+  # items from a stream (by its id, `<run>:<step>_<index>`); server pushes
+  # stream_items / stream_closed commands to the consumer's session.
 
   def subscribe_stream(
         project_id,
         session_id,
         subscription_id,
         consumer_execution_id,
-        producer_execution_id,
-        index,
+        stream_id,
         from_sequence,
         filter,
         prefetch,
@@ -226,8 +231,8 @@ defmodule Coflux.Orchestration do
       ) do
     call_server(
       project_id,
-      {:subscribe_stream, session_id, subscription_id, consumer_execution_id,
-       producer_execution_id, index, from_sequence, filter, prefetch, progress}
+      {:subscribe_stream, session_id, subscription_id, consumer_execution_id, stream_id,
+       from_sequence, filter, prefetch, progress}
     )
   end
 
@@ -304,11 +309,8 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_run, run_id, pid})
   end
 
-  def subscribe_stream_topic(project_id, execution_external_id, index, pid) do
-    call_server(
-      project_id,
-      {:subscribe_stream_topic, execution_external_id, index, pid}
-    )
+  def subscribe_stream_topic(project_id, stream_id, pid) do
+    call_server(project_id, {:subscribe_stream_topic, stream_id, pid})
   end
 
   def subscribe_targets(project_id, workspace_id, pid) do

@@ -140,24 +140,32 @@ defmodule Coflux.Orchestration.Server do
               # them from the DB.
               #
               # stream_subscriptions: {consumer_execution_id, subscription_id} ->
-              #     %{consumer_execution_external_id, producer_execution_id,
-              #       index, cursor, stride, prefetch, delivered, acked_count,
-              #       acked_seq, pending_close}
-              # stream_subscribers: {producer_execution_id, index} -> MapSet of
+              #     %{consumer_execution_external_id, stream_id, cursor,
+              #       stride, prefetch, delivered, acked_count, acked_seq,
+              #       pending_close}
+              # stream_subscribers: stream_id -> MapSet of
               #     {consumer_execution_id, subscription_id}
               stream_subscriptions: %{},
               stream_subscribers: %{},
 
               # Per-stream producer state for backpressure. Only present
               # when the producer opted in by registering with a non-nil
-              # buffer. Keyed by {producer_execution_id, index}.
+              # buffer. Keyed by stream_id (the `streams` row).
               #
-              #   %{buffer, demand_granted, session_id, execution_external_id}
+              #   %{buffer, demand_granted, session_id, execution_external_id,
+              #     index}
               #
               # * buffer                — configured backpressure budget
-              # * demand_granted        — cumulative credits sent so far
+              # * demand_granted        — cumulative credits sent so far, in
+              #                           sequence space (so a producer
+              #                           resuming a paused stream starts at
+              #                           head + 1)
               # * session_id            — where to route stream_demand
-              # * execution_external_id — external id for the command wire
+              # * execution_external_id — the current producer, for the wire
+              # * index                 — the stream's step index, for the wire
+              #
+              # A stream that spans a suspension changes producer: the
+              # resuming execution's registration replaces this entry.
               #
               # The watermark the budget is measured against is the
               # *slowest* subscriber's acknowledged position, recomputed
@@ -1588,7 +1596,11 @@ defmodule Coflux.Orchestration.Server do
 
       if base_workspace_id == workspace_id ||
            is_workspace_ancestor?(state, base_workspace_id, workspace_id) do
-        state = cancel_active_step_executions(state, step.id, workspace_id)
+        # A live attempt is cancelled and its streams closed, so the new
+        # attempt starts fresh. A pending successor of a suspended attempt
+        # never produced anything, so its cancellation leaves the paused
+        # streams open and the new attempt continues them.
+        state = cancel_active_step_executions(state, step.id, workspace_id, streams: :registered)
 
         {:ok, _execution_id, attempt, state} =
           rerun_step(state, step, workspace_id, created_by: access[:principal_id])
@@ -1933,42 +1945,69 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # A producer declares its k-th stream (`position`). The server decides
+  # whether that continues a paused stream of the step — one left open by a
+  # suspended execution — or opens a new one, and replies with the stream's
+  # id, its step index and the head it should sequence from.
   def handle_call(
-        {:register_stream, execution_external_id, index, buffer, timeout_ms, session_external_id},
+        {:register_stream, execution_external_id, position, buffer, timeout_ms,
+         session_external_id},
         _from,
         state
       ) do
-    case Map.fetch(state.execution_ids, execution_external_id) do
-      {:ok, execution_id} ->
-        case Streams.register_stream(state.db, execution_id, index, buffer, timeout_ms) do
-          {:ok, created_at} ->
-            # Resolve the session's external id to the internal one —
-            # send_session (which delivers stream_demand) indexes by the
-            # internal id.
-            internal_session_id =
-              Map.get(state.session_ids, session_external_id)
+    with {:ok, execution_id} <-
+           Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
+         {:ok, false} <- Results.has_completion?(state.db, execution_id) do
+      {:ok, {step_id, workspace_id, _attempt}} =
+        Runs.get_execution_location(state.db, execution_id)
 
-            state =
-              state
-              |> maybe_init_stream_producer(
-                execution_id,
-                execution_external_id,
-                index,
-                buffer,
-                internal_session_id
-              )
-              |> notify_stream_opened(execution_id, index, buffer, timeout_ms, created_at)
-              |> maybe_send_initial_demand(execution_id, index)
-              |> flush_notifications()
+      {:ok, registration} =
+        Streams.register(
+          state.db,
+          step_id,
+          workspace_id,
+          execution_id,
+          position,
+          buffer,
+          timeout_ms
+        )
 
-            {:reply, :ok, state}
+      {:ok, stream} = Streams.get_stream(state.db, registration.id)
 
-          {:error, :already_registered} ->
-            {:reply, {:error, :already_registered}, state}
+      external_id =
+        stream_external_id(stream.run_external_id, stream.step_number, stream.index)
+
+      state =
+        if registration.created_at do
+          # Resolve the session's external id to the internal one —
+          # send_session (which delivers stream_demand) indexes by the
+          # internal id.
+          internal_session_id = Map.get(state.session_ids, session_external_id)
+
+          state
+          |> init_stream_producer(
+            stream,
+            execution_external_id,
+            buffer,
+            registration.head,
+            internal_session_id
+          )
+          |> notify_stream_registered(stream, execution_id, registration, buffer, timeout_ms)
+          # Lockstep (buffer=0) stays paused until a consumer attaches; a
+          # larger buffer lets the producer pre-warm. A resuming producer
+          # picks up whatever demand its subscribers have already built.
+          |> refresh_stream_demand(stream.id)
+          |> flush_notifications()
+        else
+          # The same execution registering the same position again —
+          # idempotent, nothing new to announce.
+          state
         end
 
-      :error ->
-        {:reply, {:error, :not_found}, state}
+      {:reply, {:ok, %{id: external_id, index: stream.index, head: registration.head}}, state}
+    else
+      {:ok, true} -> {:reply, {:error, :completed}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -1977,112 +2016,97 @@ defmodule Coflux.Orchestration.Server do
         _from,
         state
       ) do
-    case Map.fetch(state.execution_ids, execution_external_id) do
-      {:ok, execution_id} ->
-        case Streams.append_item(
-               state.db,
-               execution_id,
-               index,
-               sequence,
-               normalize_value(value)
-             ) do
-          {:ok, created_at} ->
-            # If we came out of a server restart with no in-memory
-            # producer state for this stream, rebuild it now from the
-            # persisted buffer so subsequent consumer advances can
-            # refresh demand. The appending session is the producer.
-            producer_session_id =
-              case find_session_for_execution(state, execution_external_id) do
-                {:ok, sid} -> sid
-                :error -> nil
-              end
-
-            state =
-              state
-              |> ensure_stream_producer(
-                execution_id,
-                execution_external_id,
-                index,
-                producer_session_id
-              )
-              |> push_stream_item(execution_id, index, sequence, value)
-              |> notify_stream_item_appended(
-                execution_id,
-                index,
-                sequence,
-                value,
-                created_at
-              )
-              |> flush_notifications()
-
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+    # Appends are refused once the execution has a completion: after a
+    # suspend the resuming execution owns the stream, and a still-alive
+    # predecessor must not interleave with it.
+    with {:ok, execution_id} <-
+           Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
+         {:ok, stream_id} <- resolve_step_stream(state.db, execution_id, index),
+         {:ok, false} <- Results.has_completion?(state.db, execution_id),
+         {:ok, created_at} <-
+           Streams.append_item(
+             state.db,
+             stream_id,
+             execution_id,
+             sequence,
+             normalize_value(value)
+           ) do
+      # If we came out of a server restart with no in-memory producer
+      # state for this stream, rebuild it now from the persisted config so
+      # subsequent consumer advances can refresh demand. The appending
+      # session is the producer.
+      producer_session_id =
+        case find_session_for_execution(state, execution_external_id) do
+          {:ok, sid} -> sid
+          :error -> nil
         end
 
-      :error ->
-        {:reply, {:error, :not_found}, state}
+      state =
+        state
+        |> ensure_stream_producer(stream_id, producer_session_id)
+        |> push_stream_item(stream_id, sequence, value)
+        |> notify_stream_item_appended(stream_id, execution_id, sequence, value, created_at)
+        |> flush_notifications()
+
+      {:reply, :ok, state}
+    else
+      {:ok, true} -> {:reply, {:error, :completed}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:close_stream, execution_external_id, index, close_spec}, _from, state) do
-    case Map.fetch(state.execution_ids, execution_external_id) do
-      {:ok, execution_id} ->
-        {spec, reason, error} =
-          case close_spec do
-            nil ->
-              {:complete, :complete, nil}
+    with {:ok, execution_id} <-
+           Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
+         {:ok, stream_id} <- resolve_step_stream(state.db, execution_id, index),
+         {:ok, false} <- Results.has_completion?(state.db, execution_id) do
+      {spec, reason, error} =
+        case close_spec do
+          nil ->
+            {:complete, :complete, nil}
 
-            :timeout ->
-              {:timeout, :timeout, nil}
+          :timeout ->
+            {:timeout, :timeout, nil}
 
-            {type, message, frames} ->
-              {{:errored, type, message, frames}, :errored, {type, message, frames}}
-          end
-
-        case Streams.close_stream(state.db, execution_id, index, spec) do
-          {:ok, closed_at} ->
-            state =
-              state
-              |> push_stream_closed(execution_id, index, reason, error)
-              |> notify_stream_closed(execution_id, index, reason, error, closed_at)
-              |> drop_stream_producer({execution_id, index})
-              |> flush_notifications()
-
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+          {type, message, frames} ->
+            {{:errored, type, message, frames}, :errored, {type, message, frames}}
         end
 
-      :error ->
-        {:reply, {:error, :not_found}, state}
+      case Streams.close_stream(state.db, stream_id, execution_id, spec) do
+        {:ok, closed_at} ->
+          state =
+            state
+            |> push_stream_closed(stream_id, reason, error)
+            |> notify_stream_closed(stream_id, execution_id, reason, error, closed_at)
+            |> drop_stream_producer(stream_id)
+            |> flush_notifications()
+
+          {:reply, :ok, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:ok, true} -> {:reply, {:error, :completed}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call(
         {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
-         producer_execution_external_id, index, from_sequence, stride, prefetch, progress},
+         stream_external_id, from_sequence, stride, prefetch, progress},
         _from,
         state
       ) do
-    # Producer may already have terminated — resolve from DB (active epoch)
-    # rather than the in-memory active-execution cache.
-    producer_result =
-      case resolve_internal_execution_id(state, producer_execution_external_id) do
-        {:ok, id} -> {:ok, id}
-        {:error, :not_found} -> {:error, :producer_not_found}
-      end
-
     with {:ok, _session_id} <-
            Map.fetch(state.session_ids, session_external_id)
            |> ok_or(:session_not_found),
          {:ok, consumer_execution_id} <-
            Map.fetch(state.execution_ids, consumer_execution_external_id)
            |> ok_or(:consumer_not_found),
-         {:ok, producer_execution_id} <- producer_result,
-         {:ok, true} <- Streams.exists?(state.db, producer_execution_id, index),
+         # The stream's run may have been rotated into an older epoch —
+         # resolving by id copies it forward if so.
+         {:ok, stream_id} <- resolve_stream_id(state, stream_external_id),
          key = {consumer_execution_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
       # `progress` is nil for a fresh subscribe and carries the CLI's
@@ -2110,8 +2134,7 @@ defmodule Coflux.Orchestration.Server do
 
       subscription = %{
         consumer_execution_external_id: consumer_execution_external_id,
-        producer_execution_id: producer_execution_id,
-        index: index,
+        stream_id: stream_id,
         cursor: from_sequence,
         stride: stride,
         prefetch: prefetch,
@@ -2125,38 +2148,18 @@ defmodule Coflux.Orchestration.Server do
         state
         |> Map.update!(:stream_subscriptions, &Map.put(&1, key, subscription))
         |> Map.update!(:stream_subscribers, fn m ->
-          Map.update(
-            m,
-            {producer_execution_id, index},
-            MapSet.new([key]),
-            &MapSet.put(&1, key)
-          )
+          Map.update(m, stream_id, MapSet.new([key]), &MapSet.put(&1, key))
         end)
 
       # Post-restart recovery: producer state may be missing. The
-      # producer's session isn't necessarily the one the subscribe
-      # came from — look it up across sessions by external execution
-      # id.
-      producer_session_id =
-        case find_session_for_execution(state, producer_execution_external_id) do
-          {:ok, sid} -> sid
-          :error -> nil
-        end
-
-      state =
-        ensure_stream_producer(
-          state,
-          producer_execution_id,
-          producer_execution_external_id,
-          index,
-          producer_session_id
-        )
+      # producer's session isn't necessarily the one the subscribe came
+      # from — look it up from the stream's current producer.
+      state = ensure_stream_producer(state, stream_id, producer_session_id(state, stream_id))
 
       # First subscriber (or a later one whose cursor exceeds the prior
       # max) may unblock the producer — recompute demand before pushing
       # backlog so any delivered items keep the credit maths honest.
-      state =
-        refresh_stream_demand(state, {producer_execution_id, index})
+      state = refresh_stream_demand(state, stream_id)
 
       # If the stream has already closed, record that as pending first so
       # the pump can emit it — but only once the backlog it's allowed to
@@ -2165,29 +2168,27 @@ defmodule Coflux.Orchestration.Server do
       state = mark_closed_if_closed(state, key)
       state = pump_subscription(state, key)
 
-      # Record the subscribe as a lineage edge (consumer -> producer stream).
-      # Done unconditionally on subscribe, independent of whether items end
-      # up being read. Uses execution_refs so the edge survives epoch
-      # rotation.
-      {:ok, stream_ref_id} =
-        Runs.create_execution_ref_for(state.db, producer_execution_id)
+      # Record the subscribe as a lineage edge (consumer -> stream). Done
+      # unconditionally on subscribe, independent of whether items end up
+      # being read. Uses stream_refs so the edge survives epoch rotation.
+      {:ok, stream_ref_id} = Streams.create_stream_ref_for(state.db, stream_id)
 
       {:ok, inserted_id} =
-        Runs.record_stream_dependency(state.db, consumer_execution_id, stream_ref_id, index)
+        Streams.record_dependency(state.db, consumer_execution_id, stream_ref_id)
 
       state =
         if inserted_id do
           {:ok, {run_external_id}} =
             Runs.get_external_run_id_for_execution(state.db, consumer_execution_id)
 
-          {producer_ext_id, _module, _target} =
-            producer_metadata = resolve_execution_ref(state.db, stream_ref_id)
+          {:ok, {stream_run_ext_id, step_number, index, module, target}} =
+            Streams.get_stream_ref(state.db, stream_ref_id)
 
           notify_listeners(
             state,
             {:run, run_external_id},
-            {:stream_dependency, consumer_execution_external_id, producer_ext_id, index,
-             producer_metadata}
+            {:stream_dependency, consumer_execution_external_id,
+             stream_external_id(stream_run_ext_id, step_number, index), module, target}
           )
         else
           state
@@ -2197,8 +2198,8 @@ defmodule Coflux.Orchestration.Server do
 
       {:reply, :ok, state}
     else
-      {:ok, false} -> {:reply, {:error, :stream_not_found}, state}
       true -> {:reply, {:error, :already_subscribed}, state}
+      {:error, :not_found} -> {:reply, {:error, :stream_not_found}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -2234,7 +2235,7 @@ defmodule Coflux.Orchestration.Server do
         )
 
       state = pump_subscription(state, key)
-      state = refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
+      state = refresh_stream_demand(state, sub.stream_id)
 
       {:reply, :ok, flush_notifications(state)}
     else
@@ -2956,15 +2957,10 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:subscribe_stream_topic, execution_external_id, index, pid},
-        _from,
-        state
-      ) do
-    case build_stream_topic_initial(state, execution_external_id, index) do
+  def handle_call({:subscribe_stream_topic, stream_external_id, pid}, _from, state) do
+    case build_stream_topic_initial(state, stream_external_id) do
       {:ok, initial} ->
-        {:ok, ref, state} =
-          add_listener(state, {:stream, execution_external_id, index}, pid)
+        {:ok, ref, state} = add_listener(state, {:stream, stream_external_id}, pid)
 
         {:reply, {:ok, initial, ref}, state}
 
@@ -3019,42 +3015,27 @@ defmodule Coflux.Orchestration.Server do
     {:reply, :ok, state}
   end
 
-  defp maybe_init_stream_producer(
-         state,
-         _execution_id,
-         _execution_external_id,
-         _index,
-         nil,
-         _session_id
-       ) do
+  # Producer-side backpressure state for a stream, (re)initialised on
+  # every registration. A resuming execution replaces the entry left by
+  # the suspended one: the session changes, and its credit starts at the
+  # head it was told to sequence from.
+  defp init_stream_producer(state, stream, _execution_external_id, nil, _head, _session_id) do
     # buffer=nil means the producer has opted out of backpressure — no
     # tracking required on the server side. It'll emit freely and the
-    # adapter's driver never waits.
-    state
+    # adapter's driver never waits. Drop anything a previous producer of
+    # the stream left behind.
+    drop_stream_producer(state, stream.id)
   end
 
-  defp maybe_init_stream_producer(
-         state,
-         execution_id,
-         execution_external_id,
-         index,
-         buffer,
-         session_id
-       )
+  defp init_stream_producer(state, stream, execution_external_id, buffer, head, session_id)
        when is_integer(buffer) and buffer >= 0 do
-    put_in(state.stream_producers[{execution_id, index}], %{
+    put_in(state.stream_producers[stream.id], %{
       buffer: buffer,
-      demand_granted: 0,
+      demand_granted: head + 1,
       session_id: session_id,
-      execution_external_id: execution_external_id
+      execution_external_id: execution_external_id,
+      index: stream.index
     })
-  end
-
-  defp maybe_send_initial_demand(state, execution_id, index) do
-    # At registration time there are no subscribers yet. Allow the
-    # producer to pre-warm up to `buffer` items; lockstep (buffer=0)
-    # stays paused until a consumer attaches.
-    refresh_stream_demand(state, {execution_id, index})
   end
 
   # Recompute the target demand for one stream and, if it's grown,
@@ -3083,8 +3064,8 @@ defmodule Coflux.Orchestration.Server do
   # mark. The target *rising* does have to be noticed, though, which is
   # why drop_subscription refreshes: losing the slowest subscriber
   # raises the minimum, and nothing else would recompute it.
-  defp refresh_stream_demand(state, key) do
-    case Map.fetch(state.stream_producers, key) do
+  defp refresh_stream_demand(state, stream_id) do
+    case Map.fetch(state.stream_producers, stream_id) do
       :error ->
         state
 
@@ -3104,41 +3085,41 @@ defmodule Coflux.Orchestration.Server do
         if not Map.has_key?(state.sessions, producer.session_id) do
           state
         else
-          refresh_stream_demand_for(state, key, producer)
+          refresh_stream_demand_for(state, stream_id, producer)
         end
     end
   end
 
-  defp refresh_stream_demand_for(state, {_execution_id, index} = key, producer) do
-    has_subscribers = has_stream_subscribers?(state, key)
-    watermark = slowest_ack_watermark(state, key)
+  defp refresh_stream_demand_for(state, stream_id, producer) do
+    has_subscribers = has_stream_subscribers?(state, stream_id)
+    watermark = slowest_ack_watermark(state, stream_id)
     bump = if has_subscribers, do: 1, else: 0
     target = watermark + producer.buffer + bump
     delta = target - producer.demand_granted
 
     if delta > 0 do
       state
-      |> put_in([Access.key(:stream_producers), key, :demand_granted], target)
+      |> put_in([Access.key(:stream_producers), stream_id, :demand_granted], target)
       |> send_session(
         producer.session_id,
-        {:stream_demand, producer.execution_external_id, index, delta}
+        {:stream_demand, producer.execution_external_id, producer.index, delta}
       )
     else
       state
     end
   end
 
-  defp has_stream_subscribers?(state, key) do
-    case Map.get(state.stream_subscribers, key) do
+  defp has_stream_subscribers?(state, stream_id) do
+    case Map.get(state.stream_subscribers, stream_id) do
       nil -> false
       set -> MapSet.size(set) > 0
     end
   end
 
-  defp slowest_ack_watermark(state, key) do
+  defp slowest_ack_watermark(state, stream_id) do
     watermarks =
       state.stream_subscribers
-      |> Map.get(key, MapSet.new())
+      |> Map.get(stream_id, MapSet.new())
       |> Enum.flat_map(fn sub_key ->
         case Map.get(state.stream_subscriptions, sub_key) do
           nil -> []
@@ -3168,55 +3149,82 @@ defmodule Coflux.Orchestration.Server do
 
   defp ack_watermark(%{acked_seq: acked_seq}), do: acked_seq + 1
 
-  defp drop_stream_producer(state, key) do
-    Map.update!(state, :stream_producers, &Map.delete(&1, key))
+  defp drop_stream_producer(state, stream_id) do
+    Map.update!(state, :stream_producers, &Map.delete(&1, stream_id))
   end
 
   # Lazily rebuild stream_producer state from the DB if it's missing.
   # Used after server restart — in-memory producer state is gone but
-  # the ``streams`` table still has the buffer. We rebuild on first
-  # append or subscribe for a given stream, recovering flow control.
+  # the registration still has the config. We rebuild on first append or
+  # subscribe for a given stream, recovering flow control.
   #
   # ``session_id`` is the internal id of the producer's current session;
   # supply ``nil`` if not known, in which case demand grants will be
   # deferred until the session is resolvable.
-  defp ensure_stream_producer(
-         state,
-         execution_id,
-         execution_external_id,
-         index,
-         session_id
-       ) do
-    key = {execution_id, index}
+  defp ensure_stream_producer(state, stream_id, session_id) do
+    if Map.has_key?(state.stream_producers, stream_id) do
+      state
+    else
+      case Streams.get_config(state.db, stream_id) do
+        {:ok, {nil, _timeout_ms}} ->
+          # Stream opted out of backpressure; nothing to track.
+          state
 
-    cond do
-      Map.has_key?(state.stream_producers, key) ->
-        state
+        {:ok, {buffer, _timeout_ms}} when is_integer(buffer) ->
+          # Reconstruct state. demand_granted starts at items already
+          # produced — we assume earlier-us granted enough for those,
+          # and rely on the producer having kept its local credit
+          # counter consistent.
+          {:ok, head} = Streams.get_stream_head(state.db, stream_id)
+          {:ok, stream} = Streams.get_stream(state.db, stream_id)
 
-      true ->
-        case Streams.get_buffer(state.db, execution_id, index) do
-          {:ok, nil} ->
-            # Stream opted out of backpressure; nothing to track.
-            state
+          put_in(state.stream_producers[stream_id], %{
+            buffer: buffer,
+            demand_granted: head + 1,
+            session_id: session_id,
+            execution_external_id: producer_external_id(state.db, stream_id),
+            index: stream.index
+          })
 
-          {:ok, buffer} when is_integer(buffer) ->
-            # Reconstruct state. demand_granted starts at items already
-            # produced — we assume earlier-us granted enough for those,
-            # and rely on the producer having kept its local credit
-            # counter consistent.
-            {:ok, head} = Streams.get_stream_head(state.db, execution_id, index)
-            items_produced = if head < 0, do: 0, else: head + 1
+        {:error, :not_found} ->
+          state
+      end
+    end
+  end
 
-            put_in(state.stream_producers[key], %{
-              buffer: buffer,
-              demand_granted: items_produced,
-              session_id: session_id,
-              execution_external_id: execution_external_id
-            })
+  # External id of the stream's current producer (its latest registrant),
+  # or nil if it has none.
+  defp producer_external_id(db, stream_id) do
+    with {:ok, execution_id} <- Streams.get_producer(db, stream_id),
+         {:ok, {r, s, a}} <- Runs.get_execution_key(db, execution_id) do
+      execution_external_id(r, s, a)
+    else
+      _ -> nil
+    end
+  end
 
-          {:error, :not_found} ->
-            state
+  # The session the stream's current producer is running on, if it's live.
+  defp producer_session_id(state, stream_id) do
+    case producer_external_id(state.db, stream_id) do
+      nil ->
+        nil
+
+      ext_id ->
+        case find_session_for_execution(state, ext_id) do
+          {:ok, sid} -> sid
+          :error -> nil
         end
+    end
+  end
+
+  # The stream a producer means by `index`: the one with that step index
+  # on the producer's own step.
+  defp resolve_step_stream(db, execution_id, index) do
+    {:ok, {step_id, _workspace_id, _attempt}} = Runs.get_execution_location(db, execution_id)
+
+    case Streams.get_stream_by_step_index(db, step_id, index) do
+      {:ok, stream_id} -> {:ok, stream_id}
+      {:error, :not_found} -> {:error, :not_registered}
     end
   end
 
@@ -4162,14 +4170,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Cancel a single execution: record :cancelled, abort if assigned, cancel descendants.
-  defp do_cancel_execution(state, execution_id, workspace_id) do
+  #
+  # `streams: :step` (the default) closes every open stream of the step in
+  # the workspace, so a consumer waiting on a paused stream is released when
+  # the pending successor is cancelled. `streams: :registered` closes only
+  # the streams the cancelled execution itself produced into — used by
+  # re-run, where cancelling a never-started successor must leave the
+  # paused stream for the new attempt to continue.
+  defp do_cancel_execution(state, execution_id, workspace_id, opts \\ []) do
     # Write the completion row (kind = cancelled) and fire notifications.
     # The result row is left untouched: if the worker already produced a
     # value, it stays; otherwise nothing is recorded. UI shows "cancelled"
     # via the completion kind, with any prior result visible in the
     # sidebar.
     state =
-      case record_and_notify_result(state, execution_id, :cancelled, nil) do
+      case record_and_notify_result(state, execution_id, :cancelled, nil, nil, opts) do
         {:ok, state} -> state
         {:error, :already_recorded} -> state
         {:error, :already_completed} -> state
@@ -4179,7 +4194,8 @@ defmodule Coflux.Orchestration.Server do
     # subsequent `append_item` from the producer will fail with `:closed`,
     # signalling the worker to stop. Recorded as :lifecycle — consumers
     # derive the ExecutionCancelled error from the recorded result.
-    state = close_open_streams(state, execution_id)
+    state =
+      close_open_streams(state, execution_id, :lifecycle, Keyword.get(opts, :streams, :step))
 
     state =
       case Runs.get_execution_key(state.db, execution_id) do
@@ -4266,12 +4282,12 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Cancel all active (unresolved) executions for a step in a workspace.
-  defp cancel_active_step_executions(state, step_id, workspace_id) do
+  defp cancel_active_step_executions(state, step_id, workspace_id, opts) do
     {:ok, active_execution_ids} =
       Runs.get_active_execution_ids_for_step(state.db, step_id, workspace_id)
 
     Enum.reduce(active_execution_ids, state, fn exec_id, state ->
-      do_cancel_execution(state, exec_id, workspace_id)
+      do_cancel_execution(state, exec_id, workspace_id, opts)
     end)
   end
 
@@ -5403,7 +5419,9 @@ defmodule Coflux.Orchestration.Server do
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
     {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
-    {:ok, run_stream_dependencies} = Runs.get_run_stream_dependencies(db, run.id)
+    {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
+    {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
+    streams_by_step = build_run_streams(db, run_streams)
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
     {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
@@ -5569,6 +5587,7 @@ defmodule Coflux.Orchestration.Server do
            created_at: step.created_at,
            arguments: arguments,
            requires: requires,
+           streams: Map.get(streams_by_step, step.id, %{}),
            executions:
              run_executions
              |> Enum.filter(&(elem(&1, 1) == step.id))
@@ -5621,11 +5640,12 @@ defmodule Coflux.Orchestration.Server do
                stream_deps =
                  run_stream_dependencies
                  |> Map.get(execution_id, [])
-                 |> Map.new(fn {stream_ref_id, stream_index} ->
-                   {producer_ext_id, _module, _target} =
-                     execution = resolve_execution_ref(db, stream_ref_id)
+                 |> Map.new(fn stream_ref_id ->
+                   {:ok, {stream_run_ext_id, step_number, index, module, target}} =
+                     Streams.get_stream_ref(db, stream_ref_id)
 
-                   {"#{producer_ext_id}:#{stream_index}", {:stream, stream_index, execution}}
+                   id = stream_external_id(stream_run_ext_id, step_number, index)
+                   {id, {:stream, id, module, target}}
                  end)
 
                dependencies =
@@ -5639,8 +5659,6 @@ defmodule Coflux.Orchestration.Server do
                      )
                    )
                  )
-
-               streams = streams_with_resolved_reasons(db, execution_id)
 
                {:ok, {checkpoints_before, checkpoints_after}} =
                  Checkpoints.get_execution_snapshots(
@@ -5670,7 +5688,6 @@ defmodule Coflux.Orchestration.Server do
                   result_created_by: result_created_by,
                   children: Map.get(run_children, execution_id, []),
                   metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
-                  streams: streams,
                   checkpoints: %{
                     before: enrich_checkpoints(checkpoints_before, db),
                     after: enrich_checkpoints(checkpoints_after, db)
@@ -6176,6 +6193,53 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  defp stream_external_id(run_external_id, step_number, index) do
+    "#{run_external_id}:#{step_number}_#{index}"
+  end
+
+  # `<run>:<step>_<index>`. Run ids are alphanumeric and step numbers are
+  # integers, so the last `_` unambiguously separates the index.
+  defp parse_stream_external_id(id) when is_binary(id) do
+    case String.split(id, "_") do
+      parts when length(parts) >= 2 ->
+        {index_s, prefix_parts} = List.pop_at(parts, -1)
+
+        with {index, ""} when index >= 0 <- Integer.parse(index_s),
+             {:ok, run_external_id, step_number} <- parse_step_id(Enum.join(prefix_parts, "_")) do
+          {:ok, run_external_id, step_number, index}
+        else
+          _ -> {:error, :invalid_format}
+        end
+
+      _ ->
+        {:error, :invalid_format}
+    end
+  end
+
+  defp parse_stream_external_id(_), do: {:error, :invalid_format}
+
+  # Resolve a stream's external id to its row in the active epoch, copying
+  # its run forward from an archived epoch if that's where it lives.
+  defp resolve_stream_id(state, external_id) do
+    with {:ok, run_ext_id, step_number, index} <- parse_stream_external_id(external_id) do
+      case Streams.get_stream_id_by_key(state.db, run_ext_id, step_number, index) do
+        {:ok, id} ->
+          {:ok, id}
+
+        {:error, :not_found} ->
+          case find_and_copy_run_from_archives(state, run_ext_id) do
+            {:ok, _remap} ->
+              Streams.get_stream_id_by_key(state.db, run_ext_id, step_number, index)
+
+            :not_found ->
+              {:error, :not_found}
+          end
+      end
+    else
+      {:error, :invalid_format} -> {:error, :not_found}
+    end
+  end
+
   defp parse_step_id(step_id) do
     case String.split(step_id, ":", parts: 2) do
       [run_external_id, step_number_s] ->
@@ -6358,7 +6422,18 @@ defmodule Coflux.Orchestration.Server do
   # The completion row is written later via complete_execution (triggered by
   # notify_terminated for worker-involved cases, or by the server-initiated
   # paths directly when no worker is involved).
-  defp record_and_notify_result(state, execution_id, result, _module, created_by \\ nil) do
+  # `opts[:streams]` selects which open streams an immediately-completing
+  # result closes (see `close_open_streams/4`): `:step` by default, or
+  # `:registered` when a re-run cancels a never-started successor and the
+  # paused streams must survive for the new attempt.
+  defp record_and_notify_result(
+         state,
+         execution_id,
+         result,
+         _module,
+         created_by \\ nil,
+         opts \\ []
+       ) do
     result =
       case result do
         {:value, value} -> {:value, normalize_value(value)}
@@ -6384,7 +6459,7 @@ defmodule Coflux.Orchestration.Server do
         state =
           if writes_completion_immediately?(result) do
             state
-            |> maybe_close_open_streams(result, execution_id)
+            |> maybe_close_open_streams(result, execution_id, Keyword.get(opts, :streams, :step))
             |> fire_completion_notification(execution_id, timestamp)
           else
             state
@@ -6397,27 +6472,24 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # Which of the immediately-completing shapes should close the
-  # execution's open streams. Deliberately the same set that
-  # derive_lifecycle_info can name — closing a stream whose reason we
-  # can't derive would push a nil reason, which consumers coerce to a
-  # clean "complete" and silently accept as a truncated stream.
+  # Which of the immediately-completing shapes should close the step's
+  # open streams. Deliberately the same set that derive_lifecycle_info
+  # can name — closing a stream whose reason we can't derive would push a
+  # nil reason, which consumers coerce to a clean "complete" and silently
+  # accept as a truncated stream.
   #
   # :deferred / :cached / :spawned never reach here with open streams
   # (the execution was superseded before its body ran, so it appended
   # nothing).
   #
-  # :suspended / :recurred *are* included. A stream is owned by exactly
-  # one execution (see the `streams` table invariants), so a successor
-  # does not continue its predecessor's stream — it registers its own
-  # under a new execution id, and consumer references are concrete to
-  # the original. That makes the predecessor's stream terminal at the
-  # moment it suspends or recurs. Leaving it open would strand every
-  # attached consumer: no further item can ever be appended to it, and
-  # no later event would close it.
-  defp maybe_close_open_streams(state, result, execution_id) do
+  # :suspended is deliberately *not* included: a suspend pauses the
+  # step's streams, and the execution that resumes the step continues
+  # them, so consumers see one unbroken sequence. :recurred *is*
+  # included — a recurrent iteration finishing is a completion, and the
+  # next iteration opens its own streams.
+  defp maybe_close_open_streams(state, result, execution_id, scope) do
     if closes_streams_on_completion?(result) do
-      close_open_streams(state, execution_id)
+      close_open_streams(state, execution_id, :lifecycle, scope)
     else
       state
     end
@@ -6427,7 +6499,6 @@ defmodule Coflux.Orchestration.Server do
   defp closes_streams_on_completion?({:abandoned, _}), do: true
   defp closes_streams_on_completion?({:crashed, _}), do: true
   defp closes_streams_on_completion?({:timeout, _}), do: true
-  defp closes_streams_on_completion?({:suspended, _}), do: true
   defp closes_streams_on_completion?({:recurred, _}), do: true
   defp closes_streams_on_completion?(_), do: false
 
@@ -6587,15 +6658,17 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Value result + drain: dispatch on stream closure outcomes.
-  #   * any owned stream closed `:errored` → `:stream_errored` (retried)
-  #   * else any owned stream closed `:timeout` → `:partial` (not retried,
-  #     not cacheable)
+  #   * any stream this execution closed `:errored` → `:stream_errored`
+  #     (retried)
+  #   * else any stream it closed `:timeout` → `:stream_timeout` (not
+  #     retried, not cacheable)
   #   * else `:succeeded`
-  # `close_open_streams` runs first so any still-open streams get a
-  # `:lifecycle` row (which doesn't influence the dispatch — only the
-  # explicit `:errored`/`:timeout` reasons do).
+  # `close_open_streams` runs first so any of the step's streams still
+  # open get a `:complete` row — the step finished, so they're done. That
+  # doesn't influence the dispatch; only the explicit `:errored` /
+  # `:timeout` reasons do.
   defp finalize_success_completion(state, execution_id) do
-    state = close_open_streams(state, execution_id)
+    state = close_open_streams(state, execution_id, :complete)
 
     {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
 
@@ -6752,38 +6825,47 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  # Closes every stream owned by `execution_id` that doesn't yet have a
-  # closure row, and pushes a `stream_closed` notification to every active
-  # subscriber. Streams already closed by the producer (clean or errored)
-  # are left untouched.
+  # Closes the step's open streams on behalf of `execution_id`, and pushes
+  # a `stream_closed` notification to every active subscriber. Streams
+  # already closed by the producer (clean or errored) are left untouched.
   #
-  # The closure is recorded on disk with reason :lifecycle (no error on
-  # the closure row). On the wire, we resolve that to a specific reason
-  # (:cancelled / :abandoned / :crashed / :timeout / :errored) by looking
-  # at the execution's completion — consumers then decide how to handle
-  # each case.
-  defp close_open_streams(state, execution_id, spec \\ :lifecycle) do
-    {:ok, indexes} = Streams.get_open_streams_for_execution(state.db, execution_id)
+  # `scope` picks which streams: `:step` (default) is every open stream
+  # of the execution's step in its workspace — including paused streams
+  # left by an earlier suspended attempt, which nothing else would close.
+  # `:registered` is only the streams this execution produced into; used
+  # when a re-run cancels a pending successor so the paused streams
+  # survive for the new attempt.
+  #
+  # `spec` is how the closure is recorded: `:lifecycle` (the reason is
+  # derived on read from the closing execution's completion), `:timeout`
+  # or `:complete`.
+  defp close_open_streams(state, execution_id, spec \\ :lifecycle, scope \\ :step) do
+    {:ok, stream_ids} =
+      case scope do
+        :step ->
+          {:ok, {step_id, workspace_id, _attempt}} =
+            Runs.get_execution_location(state.db, execution_id)
+
+          Streams.get_open_stream_ids_for_step(state.db, step_id, workspace_id)
+
+        :registered ->
+          Streams.get_open_stream_ids_for_execution(state.db, execution_id)
+      end
 
     {push_reason, push_error} =
       case spec do
         :lifecycle -> derive_lifecycle_info(state.db, execution_id)
         :timeout -> {:timeout, nil}
+        :complete -> {:complete, nil}
       end
 
-    Enum.reduce(indexes, state, fn index, state ->
-      case Streams.close_stream(state.db, execution_id, index, spec) do
+    Enum.reduce(stream_ids, state, fn stream_id, state ->
+      case Streams.close_stream(state.db, stream_id, execution_id, spec) do
         {:ok, closed_at} ->
           state
-          |> push_stream_closed(execution_id, index, push_reason, push_error)
-          |> notify_stream_closed(
-            execution_id,
-            index,
-            push_reason,
-            push_error,
-            closed_at
-          )
-          |> drop_stream_producer({execution_id, index})
+          |> push_stream_closed(stream_id, push_reason, push_error)
+          |> notify_stream_closed(stream_id, execution_id, push_reason, push_error, closed_at)
+          |> drop_stream_producer(stream_id)
 
         {:error, :already_closed} ->
           state
@@ -6791,32 +6873,66 @@ defmodule Coflux.Orchestration.Server do
     end)
   end
 
-  # Returns the streams list for `execution_id` for the run topic's
-  # initial state. Shape:
-  #   `{index, buffer, opened_at, closed_at | nil, reason | nil, error | nil}`
-  #
-  # DB closures are recorded with reason :complete / :errored / :lifecycle.
-  # For :lifecycle we resolve the actual cause (from the execution's
-  # completion kind) and surface that directly as the reason —
-  # :cancelled / :abandoned / :crashed / :timeout / :errored — so Studio
-  # doesn't have to deal with a generic "lifecycle" bucket. `error` is
-  # non-nil only when the reason is :errored.
-  defp streams_with_resolved_reasons(db, execution_id) do
-    {:ok, rows} = Streams.get_streams_with_closures_for_execution(db, execution_id)
+  # Streams for the run topic's initial state, grouped by step id:
+  # `%{step_id => %{index => entry}}`. Each entry is the same shape the
+  # `:stream_registered` / `:stream_closed` notifications build up, with
+  # `:lifecycle` closures resolved to their specific cause against the
+  # closing execution.
+  defp build_run_streams(db, run_streams) do
+    run_streams
+    |> Enum.group_by(& &1.step_id)
+    |> Map.new(fn {step_id, streams} ->
+      {step_id,
+       Map.new(streams, fn stream ->
+         {:ok, registrations} = Streams.get_registrations(db, stream.id)
+         {buffer, timeout_ms} = latest_registration_config(registrations)
 
-    Enum.map(rows, fn
-      {index, buffer, timeout_ms, opened_at, nil, nil, nil} ->
-        {index, buffer, timeout_ms, opened_at, nil, nil, nil}
+         {:ok, workspace_external_id} =
+           Workspaces.get_workspace_external_id(db, stream.workspace_id)
 
-      {index, buffer, timeout_ms, opened_at, closed_at, :lifecycle, _} ->
-        {resolved_reason, resolved_error} = derive_lifecycle_info(db, execution_id)
-        {index, buffer, timeout_ms, opened_at, closed_at, resolved_reason, resolved_error}
+         {reason, error, closed_by_attempt} =
+           if stream.closed_at do
+             {reason, error} =
+               resolve_closure_reason(db, stream.reason, stream.error, stream.closed_by)
 
-      {index, buffer, timeout_ms, opened_at, closed_at, reason, error} ->
-        {index, buffer, timeout_ms, opened_at, closed_at, reason, error}
+             {:ok, {_r, _s, attempt}} = Runs.get_execution_key(db, stream.closed_by)
+             {reason, error, attempt}
+           else
+             {nil, nil, nil}
+           end
+
+         {stream.index,
+          %{
+            id: stream_external_id(stream.run_external_id, stream.step_number, stream.index),
+            index: stream.index,
+            position: stream.position,
+            workspace_id: workspace_external_id,
+            buffer: buffer,
+            timeout_ms: timeout_ms,
+            opened_at: stream.created_at,
+            attempts: Enum.map(registrations, fn {_id, attempt, _b, _t, _c} -> attempt end),
+            closed_at: stream.closed_at,
+            closed_by: closed_by_attempt,
+            reason: reason,
+            error: error
+          }}
+       end)}
     end)
   end
 
+  defp latest_registration_config([]), do: {nil, nil}
+
+  defp latest_registration_config(registrations) do
+    {_id, _attempt, buffer, timeout_ms, _created_at} = List.last(registrations)
+    {buffer, timeout_ms}
+  end
+
+  # A `:lifecycle` closure's meaning comes from the closing execution's
+  # completion; any other reason is stored directly.
+  defp resolve_closure_reason(db, :lifecycle, _stored_error, closed_by),
+    do: derive_lifecycle_info(db, closed_by)
+
+  defp resolve_closure_reason(_db, reason, stored_error, _closed_by), do: {reason, stored_error}
   # Derive a semantic reason + optional error for a lifecycle stream
   # closure, from the execution's completion kind. Used when pushing
   # closures to live consumers and when late subscribers attach to
@@ -6849,15 +6965,11 @@ defmodule Coflux.Orchestration.Server do
       {:ok, {:timeout, _, _, _, _}} ->
         {:timeout, nil}
 
-      # The producer didn't fail — it suspended, or finished a recurrent
-      # iteration. Either way *this* stream is finished: the successor
-      # registers its own under a new execution id and consumer
-      # references are concrete to the original, so nothing more can
-      # arrive here. Reported distinctly rather than as :abandoned so a
-      # truncated-by-recurrence stream doesn't read as a worker failure.
-      {:ok, {:suspended, _, _, _, _}} ->
-        {:suspended, nil}
-
+      # The producer didn't fail — it finished a recurrent iteration, and
+      # the next iteration opens its own streams. Reported distinctly
+      # rather than as :abandoned so a truncated-by-recurrence stream
+      # doesn't read as a worker failure. (A suspend never closes a
+      # stream, so it never appears here.)
       {:ok, {:recurred, _, _, _, _}} ->
         {:recurred, nil}
 
@@ -6986,19 +7098,43 @@ defmodule Coflux.Orchestration.Server do
         {:ok, state}
 
       has_result? ->
-        # Mid-drain (value result recorded, completion pending): a
-        # wall-clock timeout here means the drain was cut short. Close the
-        # remaining open streams as :timeout so complete_execution promotes
-        # the completion to :stream_timeout — otherwise the kill would land
-        # as a clean :succeeded with silently truncated streams.
-        state =
-          if result == :timeout do
-            close_open_streams(state, execution_id, :timeout)
-          else
-            state
-          end
+        # Mid-drain: the value result is recorded and the completion is
+        # pending while the execution's streams drain.
+        cond do
+          # A wall-clock timeout here means the drain was cut short. Close
+          # the remaining open streams as :timeout so complete_execution
+          # promotes the completion to :stream_timeout — otherwise the
+          # kill would land as a clean :succeeded with silently truncated
+          # streams.
+          result == :timeout ->
+            {:ok, close_open_streams(state, execution_id, :timeout)}
 
-        {:ok, state}
+          # A generator-bodied producer suspends from inside its body,
+          # after its value (the stream handle) was recorded. Write the
+          # completion so the successor is scheduled and the streams stay
+          # paused for it. The run topic's `:result` isn't re-fired: the
+          # value stands, and the completion carries the suspension.
+          match?({:suspended, _, _}, result) ->
+            {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+            {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+            {successor_id, _recurred?, state} =
+              decide_and_create_successor(state, execution_id, step, workspace_id, result)
+
+            case Results.record_completion(state.db, execution_id, :suspended,
+                   successor_id: successor_id,
+                   created_by: created_by
+                 ) do
+              {:ok, completion_at} ->
+                {:ok, fire_completion_notification(state, execution_id, completion_at)}
+
+              {:error, :already_completed} ->
+                {:ok, state}
+            end
+
+          true ->
+            {:ok, state}
+        end
 
       true ->
         {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
@@ -8285,46 +8421,64 @@ defmodule Coflux.Orchestration.Server do
 
   # --- Stream topic notifications (for Studio subscribers) ---
   # These flow through `notify_listeners` → the run topic and the
-  # per-stream `{:stream, execution_ext_id, index}` inspection topic,
-  # distinct from the session-directed `push_stream_*` helpers which
-  # target subscribed consumer sessions' WebSockets.
+  # per-stream `{:stream, stream_external_id}` inspection topic, distinct
+  # from the session-directed `push_stream_*` helpers which target
+  # subscribed consumer sessions' WebSockets.
 
   # Bounded tail of items held by the stream inspection topic. Long
   # streams don't need to materialise every item — the UI loads older
   # items on demand.
   @stream_topic_tail_size 200
 
-  defp notify_stream_opened(state, execution_id, index, buffer, timeout_ms, created_at) do
-    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
-    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+  # An execution registered on a stream: either opening it or resuming it
+  # after a suspend. The run topic keeps streams under their step, with
+  # the attempts that have produced into each.
+  defp notify_stream_registered(state, stream, execution_id, registration, buffer, timeout_ms) do
+    {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
+
+    {:ok, workspace_external_id} =
+      Workspaces.get_workspace_external_id(state.db, stream.workspace_id)
+
+    ext_id = stream_external_id(stream.run_external_id, stream.step_number, stream.index)
+
+    state =
+      notify_listeners(
+        state,
+        {:run, stream.run_external_id},
+        {:stream_registered, stream.step_number, stream.index,
+         %{
+           id: ext_id,
+           position: stream.position,
+           workspace_id: workspace_external_id,
+           attempt: attempt,
+           buffer: buffer,
+           timeout_ms: timeout_ms,
+           continued: registration.continued,
+           opened_at: stream.created_at
+         }}
+      )
 
     notify_listeners(
       state,
-      {:run, r},
-      {:stream_opened, execution_ext_id, index, buffer, timeout_ms, created_at}
+      {:stream, ext_id},
+      {:registered, attempt, buffer, timeout_ms, registration.created_at}
     )
   end
 
-  defp notify_stream_item_appended(
-         state,
-         execution_id,
-         index,
-         sequence,
-         value,
-         created_at
-       ) do
-    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
-    topic = {:stream, execution_ext_id, index}
+  defp notify_stream_item_appended(state, stream_id, execution_id, sequence, value, created_at) do
+    {:ok, ext_id} = stream_external_id_for(state.db, stream_id)
+    topic = {:stream, ext_id}
 
     # Skip the build_value (which hits the DB to resolve refs) when the
     # inspection topic has no active subscribers.
     if Map.has_key?(state.topics, topic) do
+      {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
       resolved = build_value(normalize_value(value), state.db)
 
       notify_listeners(
         state,
         topic,
-        {:item_appended, sequence, resolved, created_at}
+        {:item_appended, sequence, resolved, attempt, created_at}
       )
     else
       state
@@ -8333,90 +8487,101 @@ defmodule Coflux.Orchestration.Server do
 
   # Fire the stream-closed notification on run + stream topics. `reason`
   # is a semantic atom from the full set (:complete / :errored /
-  # :cancelled / :abandoned / :crashed / :timeout) — Studio renders each
-  # directly in UI-appropriate language, rather than displaying a
-  # fabricated exception type. `error` is non-nil only for :errored.
-  defp notify_stream_closed(state, execution_id, index, reason, error, closed_at) do
-    {:ok, {r, _s, _a}} = Runs.get_execution_key(state.db, execution_id)
-    {:ok, execution_ext_id} = execution_external_id_for(state.db, execution_id)
+  # :cancelled / :abandoned / :crashed / :timeout / :recurred) — Studio
+  # renders each directly in UI-appropriate language, rather than
+  # displaying a fabricated exception type. `error` is non-nil only for
+  # :errored. `execution_id` is the execution that closed the stream.
+  defp notify_stream_closed(state, stream_id, execution_id, reason, error, closed_at) do
+    {:ok, stream} = Streams.get_stream(state.db, stream_id)
+    ext_id = stream_external_id(stream.run_external_id, stream.step_number, stream.index)
+    {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
 
     encoded_error = encode_stream_error_summary(error)
-
     reason_str = if reason, do: Atom.to_string(reason)
 
     state =
       notify_listeners(
         state,
-        {:run, r},
-        {:stream_closed, execution_ext_id, index, reason_str, encoded_error, closed_at}
+        {:run, stream.run_external_id},
+        {:stream_closed, stream.step_number, stream.index, reason_str, encoded_error, attempt,
+         closed_at}
       )
 
     notify_listeners(
       state,
-      {:stream, execution_ext_id, index},
-      {:closed, reason_str, encoded_error, closed_at}
+      {:stream, ext_id},
+      {:closed, reason_str, encoded_error, attempt, closed_at}
     )
   end
 
-  # Build the initial state for a newly-opened stream inspection topic.
-  # Returns {:ok, state} with producer metadata, opened/closed timestamps,
-  # closure info (with lifecycle errors already derived), bounded tail of
-  # items, and the total item count.
-  defp build_stream_topic_initial(state, execution_ext_id, index) do
-    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_ext_id),
-         {:ok, true} <- Streams.exists?(state.db, execution_id, index),
-         {:ok, opened_at} <- Streams.get_opened_at(state.db, execution_id, index),
-         {:ok, buffer} <- Streams.get_buffer(state.db, execution_id, index),
-         {:ok, timeout_ms} <- Streams.get_timeout_ms(state.db, execution_id, index),
+  # Build the initial state for a newly-opened stream inspection topic:
+  # the step it belongs to, its config and producers, closure info (with
+  # lifecycle reasons already derived), a bounded tail of items, and the
+  # total item count.
+  defp build_stream_topic_initial(state, stream_external_id) do
+    with {:ok, stream_id} <- resolve_stream_id(state, stream_external_id),
+         {:ok, stream} <- Streams.get_stream(state.db, stream_id),
+         {:ok, registrations} <- Streams.get_registrations(state.db, stream_id),
          {:ok, {items, total_count}} <-
-           Streams.get_stream_tail(state.db, execution_id, index, @stream_topic_tail_size) do
+           Streams.get_stream_tail(state.db, stream_id, @stream_topic_tail_size) do
       # Keep the tuple shape here — the topic module runs TopicUtils.build_value
       # on each item's value to produce the JSON-encodable form, matching
       # how live :item_appended notifications are handled.
       resolved_items =
-        Enum.map(items, fn {sequence, value, created_at} ->
-          {sequence, build_value(value, state.db), created_at}
+        Enum.map(items, fn {sequence, value, attempt, created_at} ->
+          {sequence, build_value(value, state.db), attempt, created_at}
         end)
 
-      closure = build_stream_topic_closure(state, execution_id, index)
+      {buffer, timeout_ms} = latest_registration_config(registrations)
+
+      {:ok, workspace_external_id} =
+        Workspaces.get_workspace_external_id(state.db, stream.workspace_id)
 
       {:ok,
        %{
-         producer: build_stream_producer(state.db, execution_ext_id, execution_id),
+         id: stream_external_id,
+         step: %{
+           stepId: "#{stream.run_external_id}:#{stream.step_number}",
+           module: stream.module,
+           target: stream.target
+         },
+         workspaceId: workspace_external_id,
+         index: stream.index,
+         position: stream.position,
          buffer: buffer,
          timeoutMs: timeout_ms,
-         openedAt: opened_at,
-         closure: closure,
+         openedAt: stream.created_at,
+         attempts: Enum.map(registrations, fn {_id, attempt, _b, _t, _c} -> attempt end),
+         closure: build_stream_topic_closure(state, stream_id),
          items: resolved_items,
          totalCount: total_count,
          tailSize: @stream_topic_tail_size
        }}
     else
-      {:ok, false} -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
+      {:error, _reason} -> {:error, :not_found}
     end
   end
 
-  defp build_stream_topic_closure(state, execution_id, index) do
-    case Streams.get_stream_closure(state.db, execution_id, index) do
+  defp build_stream_topic_closure(state, stream_id) do
+    case Streams.get_stream_closure(state.db, stream_id) do
       {:ok, nil} ->
         nil
 
-      {:ok, {reason, stored_error, closed_at}} ->
-        # DB stores `:lifecycle` for closures driven by the producer
-        # execution ending; on read we resolve that to the specific
-        # cause (:cancelled / :abandoned / :crashed / :timeout /
-        # :errored) so clients don't need to know about the internal
+      {:ok, {reason, stored_error, closed_by, closed_at}} ->
+        # DB stores `:lifecycle` for closures driven by an execution
+        # ending; on read we resolve that to the specific cause
+        # (:cancelled / :abandoned / :crashed / :timeout / :errored /
+        # :recurred) so clients don't need to know about the internal
         # bucket. `error` only accompanies a genuine :errored close.
         {effective_reason, effective_error} =
-          case reason do
-            :lifecycle -> derive_lifecycle_info(state.db, execution_id)
-            _ -> {reason, stored_error}
-          end
+          resolve_closure_reason(state.db, reason, stored_error, closed_by)
+
+        {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, closed_by)
 
         %{
           reason: if(effective_reason, do: Atom.to_string(effective_reason)),
           error: encode_stream_error_summary(effective_error),
+          attempt: attempt,
           closedAt: closed_at
         }
     end
@@ -8435,18 +8600,13 @@ defmodule Coflux.Orchestration.Server do
     }
   end
 
-  defp build_stream_producer(db, execution_ext_id, execution_id) do
-    # The external execution_id already encodes run + step + attempt, so
-    # the producer reference only carries identifier + module/target —
-    # matching ExecutionReference on the wire.
-    {:ok, step} = Runs.get_step_for_execution(db, execution_id)
-    Coflux.TopicUtils.build_execution({execution_ext_id, step.module, step.target})
-  end
+  defp stream_external_id_for(db, stream_id) do
+    case Streams.get_stream(db, stream_id) do
+      {:ok, stream} ->
+        {:ok, stream_external_id(stream.run_external_id, stream.step_number, stream.index)}
 
-  defp execution_external_id_for(db, execution_id) do
-    case Runs.get_execution_key(db, execution_id) do
-      {:ok, {r, s, a}} -> {:ok, execution_external_id(r, s, a)}
-      err -> err
+      err ->
+        err
     end
   end
 
@@ -8513,13 +8673,7 @@ defmodule Coflux.Orchestration.Server do
           state
         else
           {:ok, items} =
-            Streams.get_stream_items(
-              state.db,
-              sub.producer_execution_id,
-              sub.index,
-              sub.cursor,
-              @backlog_page_size
-            )
+            Streams.get_stream_items(state.db, sub.stream_id, sub.cursor, @backlog_page_size)
 
           if items == [] do
             state
@@ -8613,7 +8767,7 @@ defmodule Coflux.Orchestration.Server do
 
     # The push moved this consumer's cursor forward, which may have moved
     # the slowest-subscriber watermark and unblocked the producer.
-    refresh_stream_demand(state, {sub.producer_execution_id, sub.index})
+    refresh_stream_demand(state, sub.stream_id)
   end
 
   # Resolve the consumer's current session and send, skipping if the
@@ -8637,10 +8791,8 @@ defmodule Coflux.Orchestration.Server do
   # stride or credit semantics must be made there *and* mirrored here.
   # Anything this path declines to send is left untouched and durable,
   # so the pump re-reads it in order — declining is always safe.
-  defp push_stream_item(state, producer_execution_id, index, sequence, value) do
-    stream_key = {producer_execution_id, index}
-
-    subscribers = Map.get(state.stream_subscribers, stream_key, MapSet.new())
+  defp push_stream_item(state, stream_id, sequence, value) do
+    subscribers = Map.get(state.stream_subscribers, stream_id, MapSet.new())
 
     state =
       Enum.reduce(subscribers, state, fn key, state ->
@@ -8714,7 +8866,7 @@ defmodule Coflux.Orchestration.Server do
 
     # Subscriber cursors may have advanced — recompute demand once per
     # stream (cheaper than once per subscriber, same result).
-    refresh_stream_demand(state, stream_key)
+    refresh_stream_demand(state, stream_id)
   end
 
   # On close, tell every subscriber. `reason` is a semantic atom
@@ -8728,9 +8880,8 @@ defmodule Coflux.Orchestration.Server do
   # stream head, and emitting the close now would land it ahead of the
   # items the consumer hasn't been given room for yet. Each subscription
   # emits its close once it has drained.
-  defp push_stream_closed(state, producer_execution_id, index, reason, error) do
-    subscribers =
-      Map.get(state.stream_subscribers, {producer_execution_id, index}, MapSet.new())
+  defp push_stream_closed(state, stream_id, reason, error) do
+    subscribers = Map.get(state.stream_subscribers, stream_id, MapSet.new())
 
     reason_str = if reason, do: Atom.to_string(reason)
     encoded_error = encode_stream_error(error)
@@ -8738,7 +8889,7 @@ defmodule Coflux.Orchestration.Server do
     # The stream is closed in the DB by the time we get here, so the head
     # is final. Read it once and record it on each pending close rather
     # than re-querying per subscriber per ack for the rest of the drain.
-    {:ok, head} = Streams.get_stream_head(state.db, producer_execution_id, index)
+    {:ok, head} = Streams.get_stream_head(state.db, stream_id)
 
     Enum.reduce(subscribers, state, fn key, state ->
       state
@@ -8827,24 +8978,21 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp do_mark_closed(state, sub, key) do
-    case Streams.get_stream_closure(state.db, sub.producer_execution_id, sub.index) do
+    case Streams.get_stream_closure(state.db, sub.stream_id) do
       {:ok, nil} ->
         state
 
-      {:ok, {reason, stored_error, _closed_at}} ->
+      {:ok, {reason, stored_error, closed_by, _closed_at}} ->
         # Resolve :lifecycle to the specific cause for the wire — same
         # treatment as live closures so late subscribers don't get a
         # less-informative signal than those attached at close time.
         {effective_reason, effective_error} =
-          case reason do
-            :lifecycle -> derive_lifecycle_info(state.db, sub.producer_execution_id)
-            _ -> {reason, stored_error}
-          end
+          resolve_closure_reason(state.db, reason, stored_error, closed_by)
 
         reason_str = if effective_reason, do: Atom.to_string(effective_reason)
 
         # Already closed, so the head is final — see mark_pending_close.
-        {:ok, head} = Streams.get_stream_head(state.db, sub.producer_execution_id, sub.index)
+        {:ok, head} = Streams.get_stream_head(state.db, sub.stream_id)
 
         mark_pending_close(
           state,
@@ -8862,7 +9010,7 @@ defmodule Coflux.Orchestration.Server do
         state
 
       {:ok, sub} ->
-        stream_key = {sub.producer_execution_id, sub.index}
+        stream_key = sub.stream_id
 
         state
         |> Map.update!(:stream_subscriptions, &Map.delete(&1, key))

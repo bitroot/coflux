@@ -290,16 +290,29 @@ type RegisterGroupParams struct {
 	Name        *string `json:"name,omitempty"`
 }
 
-// StreamRegisterParams for stream_register notification.
-// Index is worker-assigned, monotonic per execution — it identifies the
-// stream within its producer execution. Buffer is the optional
-// backpressure budget; nil means unbounded (no flow control). TimeoutMs
-// is the optional idle-timeout budget (milliseconds) — nil disables it.
+// StreamRegisterParams for the stream_register request. Position is the
+// order in which the execution registered the stream (its k-th, from 0);
+// the server allocates the stream's index within its step and replies
+// with a StreamRegisterResult. Buffer is the optional backpressure
+// budget; nil means unbounded (no flow control). TimeoutMs is the
+// optional idle-timeout budget (milliseconds) — nil disables it.
 type StreamRegisterParams struct {
 	ExecutionID string `json:"execution_id"`
-	Index       int    `json:"index"`
+	Position    int    `json:"position"`
 	Buffer      *int   `json:"buffer,omitempty"`
 	TimeoutMs   *int   `json:"timeout_ms,omitempty"`
+}
+
+// StreamRegisterResult is the reply to stream_register. ID is the
+// stream's id (`<run>:<step>_<index>`); Index is its index within the
+// step, which appends, closes and demand grants carry from then on; Head
+// is the last sequence already in the stream — -1 for a new stream, or
+// the resume point when the registration continues a stream paused by a
+// suspend (the producer sequences from Head+1).
+type StreamRegisterResult struct {
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+	Head  int    `json:"head"`
 }
 
 // StreamDemandParams for stream_demand notification pushed CLI → adapter.
@@ -335,21 +348,21 @@ type StreamCloseError struct {
 	Traceback string `json:"traceback"`
 }
 
-// StreamSubscribeParams for stream_subscribe notification. `Stride`
-// (when present) restricts which sequence positions are delivered: the
-// positions `start, start+step, start+2·step, …` up to (but not
-// including) `stop`. Any chain of slice/partition/stride calls on the
-// consumer side composes into a single stride before the wire.
-// `Prefetch` is the adapter's delivery window: the server won't send
-// more than this many items beyond what the adapter has acknowledged.
+// StreamSubscribeParams for stream_subscribe notification. `StreamID`
+// is the stream's id (`<run>:<step>_<index>`). `Stride` (when present)
+// restricts which sequence positions are delivered: the positions
+// `start, start+step, start+2·step, …` up to (but not including) `stop`.
+// Any chain of slice/partition/stride calls on the consumer side
+// composes into a single stride before the wire. `Prefetch` is the
+// adapter's delivery window: the server won't send more than this many
+// items beyond what the adapter has acknowledged.
 type StreamSubscribeParams struct {
-	ExecutionID         string         `json:"execution_id"` // consumer
-	SubscriptionID      int            `json:"subscription_id"`
-	ProducerExecutionID string         `json:"producer_execution_id"`
-	Index               int            `json:"index"`
-	FromSequence        int            `json:"from_sequence"`
-	Stride              map[string]any `json:"stride,omitempty"`
-	Prefetch            int            `json:"prefetch"`
+	ExecutionID    string         `json:"execution_id"` // consumer
+	SubscriptionID int            `json:"subscription_id"`
+	StreamID       string         `json:"stream_id"`
+	FromSequence   int            `json:"from_sequence"`
+	Stride         map[string]any `json:"stride,omitempty"`
+	Prefetch       int            `json:"prefetch"`
 }
 
 // StreamAckParams for stream_ack notification. `Count` and `Sequence`

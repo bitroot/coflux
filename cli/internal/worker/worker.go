@@ -97,14 +97,13 @@ type streamSubKey struct {
 // `delivered` would under-grant it, and could deadlock a consumer that
 // has already drained its queue and so has nothing left to ack.
 type streamSubscription struct {
-	producerExecutionID string
-	index               int
-	nextSequence        int
-	stride              map[string]any
-	prefetch            int
-	delivered           int
-	ackCount            int
-	ackSequence         int
+	streamID     string
+	nextSequence int
+	stride       map[string]any
+	prefetch     int
+	delivered    int
+	ackCount     int
+	ackSequence  int
 }
 
 type executionState struct {
@@ -1430,23 +1429,44 @@ func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID 
 	return conn.Notify("register_group", executionID, groupID, name)
 }
 
-func (w *Worker) StreamRegister(ctx context.Context, executionID string, index int, buffer *int, timeoutMs *int) error {
-	conn, err := w.requireConn()
+// StreamRegister declares an execution's k-th stream to the server, which
+// allocates the stream's index within its step and decides whether the
+// registration resumes a stream paused by a suspend. A request rather
+// than a notification: the producer needs the reply (id, index, head)
+// before it can embed the handle in its result or append anything.
+func (w *Worker) StreamRegister(ctx context.Context, executionID string, position int, buffer *int, timeoutMs *int) (*adapter.StreamRegisterResult, error) {
+	conn, err := w.waitForConn(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The wire protocol takes buffer and timeout_ms positionally; nil
-	// encodes to JSON null. Server reads [execution_id, index, buffer,
-	// timeout_ms?]; omitting the trailing timeout_ms keeps compat with
-	// older server builds that don't read it.
-	var bufferArg any
+	// encodes to JSON null. Server reads [execution_id, position, buffer,
+	// timeout_ms].
+	var bufferArg, timeoutArg any
 	if buffer != nil {
 		bufferArg = *buffer
 	}
-	if timeoutMs == nil {
-		return conn.Notify("stream_register", executionID, index, bufferArg)
+	if timeoutMs != nil {
+		timeoutArg = *timeoutMs
 	}
-	return conn.Notify("stream_register", executionID, index, bufferArg, *timeoutMs)
+	result, err := conn.Request(ctx, "stream_register", executionID, position, bufferArg, timeoutArg)
+	if err != nil {
+		return nil, err
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("stream_register: unexpected result type %T", result)
+	}
+	id, _ := m["id"].(string)
+	index, indexOk := m["index"].(float64)
+	if id == "" || !indexOk {
+		return nil, fmt.Errorf("stream_register: malformed result %v", result)
+	}
+	head := -1
+	if h, ok := m["head"].(float64); ok {
+		head = int(h)
+	}
+	return &adapter.StreamRegisterResult{ID: id, Index: int(index), Head: head}, nil
 }
 
 func (w *Worker) StreamAppend(ctx context.Context, executionID string, index int, sequence int, value *adapter.Value) error {
@@ -1485,7 +1505,7 @@ func (w *Worker) StreamClose(ctx context.Context, executionID string, index int,
 	return conn.Notify("stream_close", executionID, index, errTuple, *reason)
 }
 
-func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, producerExecutionID string, index int, fromSequence int, stride map[string]any, prefetch int) error {
+func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscriptionID int, streamID string, fromSequence int, stride map[string]any, prefetch int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
@@ -1496,17 +1516,16 @@ func (w *Worker) StreamSubscribe(ctx context.Context, executionID string, subscr
 	// immediately after this send.
 	w.streamSubsMu.Lock()
 	w.streamSubs[streamSubKey{executionID, subscriptionID}] = &streamSubscription{
-		producerExecutionID: producerExecutionID,
-		index:               index,
-		nextSequence:        fromSequence,
-		stride:              stride,
-		prefetch:            prefetch,
-		ackSequence:         fromSequence - 1,
+		streamID:     streamID,
+		nextSequence: fromSequence,
+		stride:       stride,
+		prefetch:     prefetch,
+		ackSequence:  fromSequence - 1,
 	}
 	w.streamSubsMu.Unlock()
 
-	// Params: [subscription_id, consumer_execution_id, producer_execution_id, index, from_sequence, stride, prefetch]
-	return conn.Notify("stream_subscribe", subscriptionID, executionID, producerExecutionID, index, fromSequence, stride, prefetch)
+	// Params: [subscription_id, consumer_execution_id, stream_id, from_sequence, stride, prefetch]
+	return conn.Notify("stream_subscribe", subscriptionID, executionID, streamID, fromSequence, stride, prefetch)
 }
 
 // StreamAck forwards a consumer's cumulative progress to the server,
@@ -2153,8 +2172,7 @@ func (w *Worker) resubscribeStreams(known map[string]struct{}) {
 			"acked_seq":   r.sub.ackSequence,
 		}
 		err := conn.Notify("stream_subscribe", r.key.subscriptionID, r.key.executionID,
-			r.sub.producerExecutionID, r.sub.index, r.sub.nextSequence, r.sub.stride,
-			r.sub.prefetch, progress)
+			r.sub.streamID, r.sub.nextSequence, r.sub.stride, r.sub.prefetch, progress)
 		if err != nil {
 			// Connection dropped again — the next reconnect retries.
 			w.logger.Debug("stream re-subscribe failed", "execution_id", r.key.executionID,

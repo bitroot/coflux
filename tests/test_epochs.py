@@ -1,5 +1,7 @@
 """Tests for epoch database rotation and cross-epoch behavior."""
 
+import time
+
 from support import cli
 from support.helpers import api_post, managed_worker, poll_result
 from support.manifest import task, workflow
@@ -435,3 +437,76 @@ def test_idempotency_across_epoch_boundary(isolated_server, tmp_path):
         run_id2 = resp2["runId"]
 
         assert run_id1 == run_id2
+
+
+def test_stream_readable_across_epoch_boundary(isolated_server, tmp_path):
+    """A stream produced before rotation can still be read after it.
+
+    Resolving the stream id copies its run forward — streams, items and
+    closure included — so a late consumer replays the backlog.
+    """
+    server, host, project_id = isolated_server
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
+        resp = cli.submit("test/producer", host=host)
+        prod = executor.next_execute()
+        stream = prod.conn.stream_register(prod.execution_id, 0)
+        prod.conn.stream_append(prod.execution_id, 0, 0, "a")
+        prod.conn.stream_append(prod.execution_id, 0, 1, "b")
+        prod.conn.stream_close(prod.execution_id, 0)
+        prod.conn.complete(prod.execution_id, value="done")
+        assert poll_result(resp["runId"], host)["value"]["data"] == "done"
+
+        _rotate_epoch(server.port, project_id)
+
+        cli.submit("test/consumer", host=host)
+        cons = executor.next_execute()
+        cons.conn.stream_subscribe(
+            cons.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        items, closed = cons.conn.drain_stream(subscription_id=1)
+        assert [item[1]["value"] for item in items] == ["a", "b"]
+        assert closed["reason"] == "complete"
+        cons.conn.complete(cons.execution_id)
+
+
+def test_paused_stream_continued_across_epoch_boundary(isolated_server, tmp_path):
+    """A stream left paused by a suspend survives rotation as paused.
+
+    Its registrations and the suspended completion are carried forward, so
+    a re-run in the new epoch continues the same stream from its head.
+    """
+    server, host, project_id = isolated_server
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
+        resp = cli.submit("test/producer", host=host)
+        prod = executor.next_execute()
+        stream = prod.conn.stream_register(prod.execution_id, 0)
+        prod.conn.stream_append(prod.execution_id, 0, 0, "a")
+        # Keep the successor pending, so the step is paused across rotation.
+        prod.conn.suspend(
+            prod.execution_id, execute_after=int(time.time() * 1000) + 3_600_000
+        )
+
+        _rotate_epoch(server.port, project_id)
+
+        cli.runs_rerun(resp["stepId"], host=host)
+        prod2 = executor.next_execute()
+        resumed = prod2.conn.stream_register(prod2.execution_id, 0)
+        assert resumed == {"id": stream["id"], "index": 0, "head": 0}
+        prod2.conn.stream_append(prod2.execution_id, 0, 1, "b")
+        prod2.conn.stream_close(prod2.execution_id, 0)
+        prod2.conn.complete(prod2.execution_id, value="done")
+        assert poll_result(resp["runId"], host)["value"]["data"] == "done"
+
+        cli.submit("test/consumer", host=host)
+        cons = executor.next_execute()
+        cons.conn.stream_subscribe(
+            cons.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        items, closed = cons.conn.drain_stream(subscription_id=1)
+        assert [item[1]["value"] for item in items] == ["a", "b"]
+        assert closed["reason"] == "complete"
+        cons.conn.complete(cons.execution_id)

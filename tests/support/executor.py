@@ -131,12 +131,24 @@ class ExecutorConnection:
         self._next_request_id += 1
         msg["id"] = rid
         self.send(msg)
-        while True:
-            incoming = self.recv()
-            if incoming.get("id") == rid:
-                return incoming
-            # Park non-matching messages (typically notifications).
-            self._buffer.append(incoming)
+        # Hold non-matching messages (typically notifications) aside and
+        # restore them afterwards. They must not go back onto `_buffer`
+        # mid-loop: `recv` serves the buffer before the socket, so a
+        # re-buffered message would be popped straight back out and the
+        # loop would spin without ever reading the reply. A stream_demand
+        # grant arriving ahead of a stream_register reply is the everyday
+        # case.
+        held = []
+        try:
+            while True:
+                incoming = self.recv()
+                if incoming.get("id") == rid:
+                    self._buffer[:0] = held
+                    return incoming
+                held.append(incoming)
+        except (TimeoutError, ConnectionError):
+            self._buffer[:0] = held
+            raise
 
     def submit_task(self, execution_id, module, target, arguments, **kwargs):
         """Submit a child task execution and return the target execution ID."""
@@ -292,15 +304,23 @@ class ExecutorConnection:
 
     # --- Stream producer helpers ---
 
-    def stream_register(self, execution_id, index, buffer=None, timeout_ms=None):
-        """Notify that a new stream exists. ``buffer`` enables
-        backpressure; ``timeout_ms`` enables idle-timeout enforcement
-        at the worker."""
-        self.send(
+    def stream_register(self, execution_id, position, buffer=None, timeout_ms=None):
+        """Register the execution's ``position``-th stream and return the
+        server's reply: ``{"id", "index", "head"}``. ``buffer`` enables
+        backpressure; ``timeout_ms`` enables idle-timeout enforcement at
+        the worker.
+
+        For a first attempt the index equals the position, so tests that
+        don't care about the reply can keep addressing the stream by the
+        position they registered."""
+        resp = self._request(
             protocol.stream_register(
-                execution_id, index, buffer=buffer, timeout_ms=timeout_ms
+                execution_id, position, buffer=buffer, timeout_ms=timeout_ms
             )
         )
+        if resp.get("error"):
+            raise RuntimeError(f"stream_register error: {resp['error']}")
+        return resp["result"]
 
     def stream_append(self, execution_id, index, sequence, value, format="json"):
         """Append an item (raw JSON value) to a stream."""
@@ -318,29 +338,36 @@ class ExecutorConnection:
         self,
         execution_id,
         subscription_id,
-        producer_execution_id,
-        index,
+        stream_id=None,
+        *,
+        producer_execution_id=None,
+        index=None,
         from_sequence=0,
         stride=None,
         prefetch=protocol.DEFAULT_PREFETCH,
     ):
-        """Subscribe to a stream. ``stride`` is an optional
-        ``{"start", "stop", "step"}`` dict restricting which positions
-        are delivered — built via ``protocol.stride`` /
-        ``slice_stride`` / ``partition_stride``. ``None`` means no
-        filtering (identity stride).
+        """Subscribe to a stream, by ``stream_id`` (the ``id`` from a
+        ``stream_register`` reply) or by ``producer_execution_id`` +
+        ``index`` — the stream at that index on the producer's step.
+
+        ``stride`` is an optional ``{"start", "stop", "step"}`` dict
+        restricting which positions are delivered — built via
+        ``protocol.stride`` / ``slice_stride`` / ``partition_stride``.
+        ``None`` means no filtering (identity stride).
 
         ``prefetch`` is the delivery window — the server pushes at most
         this many items beyond what's been acknowledged. The default is
         large enough to be invisible; lower it to exercise credit-gated
         delivery."""
+        if stream_id is None:
+            assert producer_execution_id is not None and index is not None
+            stream_id = protocol.stream_id_for(producer_execution_id, index)
         self._sub_execution_ids[subscription_id] = execution_id
         self.send(
             protocol.stream_subscribe(
                 execution_id,
                 subscription_id,
-                producer_execution_id,
-                index,
+                stream_id,
                 from_sequence=from_sequence,
                 stride=stride,
                 prefetch=prefetch,
@@ -401,32 +428,41 @@ class ExecutorConnection:
         for asserting that the window actually stops delivery.
         """
         items = []
+        # Messages for other subscriptions (or other methods) are held
+        # aside and restored on exit — see `_request` for why they can't
+        # be appended back onto `_buffer` while the loop is still reading.
+        held = []
         deadline = time.time() + timeout
-        while True:
-            remaining = max(0.01, deadline - time.time())
-            msg = self.recv(timeout=remaining)
-            method = msg.get("method")
-            params = msg.get("params", {})
-            if params.get("subscription_id") != subscription_id or method not in (
-                "stream_items",
-                "stream_closed",
-            ):
-                self._buffer.append(msg)
-                continue
-            if method == "stream_items":
-                batch = params.get("items", [])
-                items.extend(batch)
-                count, sequence = self._record_items(subscription_id, batch)
-                if ack and batch:
-                    self.stream_ack(
-                        self._sub_execution_ids[subscription_id],
-                        subscription_id,
-                        count,
-                        sequence,
-                    )
-                continue
-            # stream_closed — terminal
-            return items, params
+        try:
+            while True:
+                remaining = max(0.01, deadline - time.time())
+                msg = self.recv(timeout=remaining)
+                method = msg.get("method")
+                params = msg.get("params", {})
+                if params.get("subscription_id") != subscription_id or method not in (
+                    "stream_items",
+                    "stream_closed",
+                ):
+                    held.append(msg)
+                    continue
+                if method == "stream_items":
+                    batch = params.get("items", [])
+                    items.extend(batch)
+                    count, sequence = self._record_items(subscription_id, batch)
+                    if ack and batch:
+                        self.stream_ack(
+                            self._sub_execution_ids[subscription_id],
+                            subscription_id,
+                            count,
+                            sequence,
+                        )
+                    continue
+                # stream_closed — terminal
+                self._buffer[:0] = held
+                return items, params
+        except (TimeoutError, ConnectionError):
+            self._buffer[:0] = held
+            raise
 
     def _record_items(self, subscription_id, batch):
         """Fold a delivered batch into this subscription's cumulative
