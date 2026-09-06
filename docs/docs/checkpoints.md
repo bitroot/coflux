@@ -73,7 +73,7 @@ Writes are throttled and delivered in the background, so a crash can lose up to 
 
 In the polling example above, that means a crash may cause some orders to be fetched twice — which is fine, because `process_order` is submitted with the same arguments and can be memoized.
 
-Whatever has been written when an execution suspends, returns, or fails is always delivered before the next attempt starts. You only need to think about this for a side effect *within* an execution that must not be repeated. `cf.flush()` gives an explicit boundary:
+Whatever has been written when an execution suspends, returns, or fails is delivered before the next attempt starts — with one deliberate exception, described under [consistency](#consistency) below. You only need to think about this for a side effect *within* an execution that must not be repeated. `cf.flush()` gives an explicit boundary:
 
 ```python
 cursor.set(next_cursor)
@@ -82,6 +82,14 @@ send_notification()
 ```
 
 `cf.flush()` returns once the server has acknowledged the write.
+
+## Consistency
+
+A step's checkpoints are one snapshot of its progress rather than a set of independent cells: whatever has been written is delivered as a single delta and applied at once. Deltas are only cut where the execution could resume from — never part-way through consuming something a replay can't re-read.
+
+That's what keeps state derived from a [stream](./streams.md) honest. A checkpoint written in the loop body is published in the same delta as the cursor advance that consumes the item, so a running total never counts an item the cursor says was never read. If the iteration doesn't finish — a `break`, an exception, a lost worker — the item stays unconsumed and the writes derived from it are dropped, because the next attempt reads that item again.
+
+A replay therefore repeats whole items rather than fractions of one. That isn't exactly-once: the item *is* delivered again, so anything else the loop body did happens again too. [Memoize](./memoizing.md) what it calls.
 
 ## Scope
 

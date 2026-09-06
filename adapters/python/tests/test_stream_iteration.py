@@ -49,6 +49,11 @@ class _FakeContext:
         self.suspended = []
         self.probes = []
         self.available = False
+        # Ordered log of everything the subscription does to checkpoint
+        # state, so tests can assert on the bracket itself. What the real
+        # context does with held writes is tested against the real context,
+        # in ``test_checkpoint_publication.py``.
+        self.events = []
         self._occurrences = {}
 
     def next_cursor_occurrence(self, name):
@@ -63,6 +68,13 @@ class _FakeContext:
 
     def checkpoint_set(self, name, value):
         self.checkpoints[name] = value
+        self.events.append(("set", name, value))
+
+    def hold_checkpoints(self):
+        self.events.append(("hold",))
+
+    def release_checkpoints(self, *, publish):
+        self.events.append(("release", publish))
 
     def stream_available(self, stream_id, sequence):
         """Stands in for the server's answer. Tests set ``available`` to
@@ -565,3 +577,122 @@ def test_zero_timeout_suspends_once_caught_up(harness):
     assert harness.context.probes == [(PRODUCER_STREAM_ID, 1)]
     assert harness.context.suspended == [(None, (PRODUCER_STREAM_ID, 1))]
     assert harness.context.checkpoints == {CURSOR: 1}
+
+
+# --- holding writes while an item is in hand ---------------------------------
+#
+# Where there's a cursor, whatever the loop body derives from an item has to
+# reach the server in the same delta as the cursor advance that consumes it,
+# or a crash between the two leaves the successor counting on from a position
+# it never reached. These cover the iterator's half of that — when it takes a
+# hold and how it releases one.
+
+
+def test_body_writes_are_held_until_the_item_retires(harness):
+    """The hold spans the loop body, and is released by the retire that
+    writes the cursor — so the pair leaves as one delta."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"], [1, "b"]], close="complete")
+
+    for total, _value in enumerate(Stream(PRODUCER_STREAM_ID), start=1):
+        harness.context.checkpoint_set("total", total)
+
+    assert harness.context.events == [
+        ("hold",),
+        ("set", "total", 1),
+        ("set", CURSOR, 1),
+        ("release", True),
+        ("hold",),
+        ("set", "total", 2),
+        ("set", CURSOR, 2),
+        ("release", True),
+    ]
+
+
+def test_async_iteration_holds_the_same_way(harness):
+    """`async for` shares the accounting, including the bracket."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"]], close="complete")
+
+    async def consume():
+        async for _value in Stream(PRODUCER_STREAM_ID):
+            harness.context.checkpoint_set("total", 1)
+
+    asyncio.run(consume())
+
+    assert harness.context.events == [
+        ("hold",),
+        ("set", "total", 1),
+        ("set", CURSOR, 1),
+        ("release", True),
+    ]
+
+
+def test_breaking_mid_item_releases_without_publishing(harness):
+    """The cursor is deliberately not advanced for an abandoned item, so
+    the item will be delivered again — and anything derived from it must
+    not be recorded, or the replay counts it twice."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"], [1, "b"]])
+
+    for _value in Stream(PRODUCER_STREAM_ID):
+        harness.context.checkpoint_set("total", 1)
+        break
+    gc.collect()
+
+    assert harness.context.events == [
+        ("hold",),
+        ("set", "total", 1),
+        ("release", False),
+    ]
+    assert CURSOR not in harness.context.checkpoints
+
+
+def test_an_exception_in_the_body_discards_the_same_way(harness):
+    """Unwinding through the loop body abandons the item just as `break`
+    does; the retry re-reads it."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"]])
+
+    with pytest.raises(RuntimeError):
+        for _value in Stream(PRODUCER_STREAM_ID):
+            harness.context.checkpoint_set("total", 1)
+            raise RuntimeError("boom")
+    gc.collect()
+
+    assert ("release", False) in harness.context.events
+    assert CURSOR not in harness.context.checkpoints
+
+
+def test_suspending_leaves_nothing_held(harness):
+    """The suspension happens after the retire, so the cursor advance and
+    the body's writes are published before the handshake goes out. That's
+    what makes a pause neither lose nor repeat an item."""
+    harness.context.suspense_timeout = 0
+    harness.context.available = False
+    harness.serve([[0, "a"]])
+
+    iterator = iter(Stream(PRODUCER_STREAM_ID))
+    assert next(iterator) == "a"
+    harness.context.checkpoint_set("total", 1)
+    with pytest.raises(Suspending):
+        next(iterator)
+
+    assert harness.context.events == [
+        ("hold",),
+        ("set", "total", 1),
+        ("set", CURSOR, 1),
+        ("release", True),
+    ]
+
+
+def test_nothing_is_held_without_a_cursor(harness):
+    """Outside a suspense scope there's no recorded position for derived
+    state to disagree with, so iteration doesn't take a hold at all and
+    writes go out as they always have."""
+    harness.serve([[0, "a"], [1, "b"]], close="complete")
+
+    for _value in Stream(PRODUCER_STREAM_ID):
+        harness.context.checkpoint_set("total", 1)
+
+    assert [event for event in harness.context.events if event[0] != "set"] == []

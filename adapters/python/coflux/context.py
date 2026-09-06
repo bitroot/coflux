@@ -130,6 +130,16 @@ class ExecutorContext:
         # guarded by ``self._lock``.
         self._checkpoint_wire: dict[str, Any] = {}
         self._checkpoint_values: dict[str, Any] = {}
+        # Writes held back until the execution is somewhere it could resume
+        # from. ``_checkpoint_holds`` counts the non-replayable inputs
+        # currently in the body's hands (see ``hold_checkpoints``); while it
+        # is non-zero, writes accumulate here instead of going on the wire.
+        # A name is either set or reset, never both — the later write
+        # replaces the earlier one, so the delta only describes the net
+        # effect, exactly as the worker-side throttle coalesces them.
+        self._checkpoint_holds = 0
+        self._checkpoint_pending_set: dict[str, Any] = {}
+        self._checkpoint_pending_reset: set[str] = set()
         # Occurrence counts for auto-named stream cursors, so two loops
         # over an identical view of the same stream get distinct
         # checkpoints. Keyed by the content-addressed base name; the
@@ -635,18 +645,118 @@ class ExecutorContext:
         with self._lock:
             self._checkpoint_values[name] = value
             self._checkpoint_wire.pop(name, None)
-        protocol.send_checkpoint_update(
-            self.execution_id, set_={name: serialize_value(value)}
-        )
+        # Serialised here rather than at publication time: the value is the
+        # one the caller passed, and holding a reference to a mutable object
+        # would record whatever it became later instead.
+        self._record_checkpoint_delta(set_={name: serialize_value(value)})
 
     def checkpoint_reset(self, name: str) -> None:
         with self._lock:
             self._checkpoint_values.pop(name, None)
             self._checkpoint_wire.pop(name, None)
-        protocol.send_checkpoint_update(self.execution_id, reset=[name])
+        self._record_checkpoint_delta(reset=[name])
+
+    def hold_checkpoints(self) -> None:
+        """Note that a non-replayable input is in the body's hands.
+
+        Checkpoint state is one snapshot of a step's progress rather than a
+        set of independent cells — the server stores an execution's row-set
+        as a complete snapshot and applies each delta in a transaction. What
+        decides whether that snapshot is *coherent* is where the deltas get
+        cut, and one cut at an arbitrary point describes a state the
+        execution was never in.
+
+        That only matters for state derived from something a replay can't
+        re-read. A result resolves again; a stream item does not — its
+        position lives in a cursor, and if the cursor and whatever the body
+        derived from the item reach the server separately, a crash in
+        between leaves the successor counting on from a position it never
+        actually reached.
+
+        So writes made while an item is in hand are held, and published in
+        the same delta as the cursor advance that retires it. The pair moves
+        together or not at all, and a replay repeats whole items rather than
+        fractions of one.
+
+        Balanced by ``release_checkpoints``. Nested holds — a body iterating
+        two streams — publish at the outermost release, the only point at
+        which every cursor involved is up to date.
+        """
+        with self._lock:
+            self._checkpoint_holds += 1
+
+    def release_checkpoints(self, *, publish: bool) -> None:
+        """Retire a hold taken by ``hold_checkpoints``.
+
+        ``publish`` says whether the item the hold covered was consumed. On
+        the way out of a completed iteration it is true, and the held writes
+        go out with the cursor advance. Where the item is abandoned instead
+        — ``break``, an exception, a dropped iterator — it is false: the
+        cursor was never advanced, so the item will be delivered again, and
+        anything derived from it must not be recorded or the replay counts
+        it twice.
+
+        Discarding drops the whole pending delta, including writes made
+        under an enclosing hold. That is not over-eager: an enclosing hold
+        means that iteration has not advanced its own cursor either, so
+        everything pending derives from an item that is still unconsumed.
+        """
+        with self._lock:
+            if not self._checkpoint_holds:
+                return
+            self._checkpoint_holds -= 1
+            held = self._checkpoint_holds
+            if not publish:
+                self._checkpoint_pending_set.clear()
+                self._checkpoint_pending_reset.clear()
+        if publish and not held:
+            self._publish_checkpoints()
+
+    def _record_checkpoint_delta(
+        self,
+        set_: dict[str, Any] | None = None,
+        reset: list[str] | None = None,
+    ) -> None:
+        """Put a write on the wire, or hold it for the next safe point."""
+        with self._lock:
+            if self._checkpoint_holds:
+                for name, value in (set_ or {}).items():
+                    self._checkpoint_pending_set[name] = value
+                    self._checkpoint_pending_reset.discard(name)
+                for name in reset or []:
+                    self._checkpoint_pending_reset.add(name)
+                    self._checkpoint_pending_set.pop(name, None)
+                return
+        protocol.send_checkpoint_update(self.execution_id, set_=set_, reset=reset)
+
+    def _publish_checkpoints(self) -> None:
+        """Send whatever is being held, as a single delta."""
+        with self._lock:
+            set_ = self._checkpoint_pending_set
+            reset = self._checkpoint_pending_reset
+            self._checkpoint_pending_set = {}
+            self._checkpoint_pending_reset = set()
+        if set_ or reset:
+            protocol.send_checkpoint_update(
+                self.execution_id,
+                set_=set_ or None,
+                # Sorted only so the delta is deterministic; the server
+                # applies the whole thing at once either way.
+                reset=sorted(reset) or None,
+            )
 
     def flush(self) -> None:
-        """Block until buffered state has reached the server."""
+        """Block until buffered state has reached the server.
+
+        Publishes anything currently held first. An explicit flush is the
+        caller declaring this point consistent, which is what makes it the
+        escape hatch for state that has to be durable before a side effect —
+        including inside a loop body, where the runtime would otherwise wait
+        for the iteration to end. The cursor advance is still to come at
+        that point, so a flush there deliberately records derived state
+        ahead of the position it came from.
+        """
+        self._publish_checkpoints()
         request_id = protocol.request_flush(self.execution_id)
         self._wait_response(request_id)
 

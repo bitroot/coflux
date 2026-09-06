@@ -135,7 +135,7 @@ If thirty seconds pass with nothing arriving, the execution suspends. It is resu
 
 Two things follow from the body restarting:
 
-- **Anything derived from the stream needs its own [checkpoint](./checkpoints.md).** The position survives; your running total doesn't, unless you keep it somewhere durable. The two have to move together, or the resumed execution will count from a stale total.
+- **Anything derived from the stream needs its own [checkpoint](./checkpoints.md).** The position survives; your running total doesn't, unless you keep it somewhere durable. Keeping the two in step is the runtime's job: a checkpoint written in the loop body is published in the same delta as the cursor advance that consumes the item, so the pair moves together or not at all.
 - **The scope covers the loop body too.** A `.result()` inside it inherits the same timeout, so the usual care about re-execution applies — [memoize](./memoizing.md) what the body calls.
 
 A bare `cf.suspense()` means what it means for a result: don't wait at all. The consumer asks the server whether the next item is there, and suspends only if it isn't — so a zero timeout costs a round trip whenever the local queue is momentarily empty, rather than a wasted restart. Whether to suspend is always the server's answer, never a guess from the consumer's own queue, which is fed asynchronously and so says nothing about what the stream holds.

@@ -41,7 +41,13 @@ class Checkpoint(Generic[T]):
     a checkpoint as at-least-once and make the code that follows a read safe
     to re-run from it. ``cf.flush()`` gives an explicit boundary where that
     isn't good enough. Whatever is written before an execution suspends,
-    returns or fails is always delivered.
+    returns or fails is delivered.
+
+    Writes are cut into deltas only where the execution could resume from
+    them, so a checkpoint is always read back as part of a state the step was
+    actually in: one written while a stream item is in a loop body's hands is
+    published with the cursor advance that consumes it, and dropped if that
+    iteration never finishes.
 
     A checkpoint is not part of any cache, memo or defer key, and a step that
     resolves from the cache never runs and never sees one.
@@ -162,7 +168,9 @@ def flush() -> None:
         send_notification()
 
     Not needed before suspending, returning or raising — those are flushed
-    automatically.
+    automatically. Inside a stream loop body it also publishes what is being
+    held for the current item, ahead of the cursor advance that would
+    normally carry it.
     """
     get_context().flush()
 

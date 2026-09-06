@@ -707,7 +707,9 @@ class _Subscription:
         self._acked_sequence = -1
         # Sequence of the item handed to the caller by the previous
         # ``__next__`` and not yet retired. It only counts as processed
-        # once the caller comes back for another one.
+        # once the caller comes back for another one, and where there is a
+        # cursor it also holds the execution's checkpoint writes back —
+        # see ``_take_in_hand``.
         self._in_hand: int | None = None
         # Retired items not yet reported.
         self._unreported = 0
@@ -756,6 +758,17 @@ class _Subscription:
         if self._done:
             return
         self._done = True
+        if self._in_hand is not None and self._resume is not None:
+            # Abandoned rather than consumed: the cursor is deliberately not
+            # advanced (see the ack note above), so the item will be
+            # delivered again and anything the body derived from it must not
+            # be recorded, or the replay counts it twice.
+            try:
+                get_context().release_checkpoints(publish=False)
+            except Exception:  # noqa: BLE001, S110
+                # `close` also runs from `__del__`, by which point the
+                # execution context may be gone. Nothing to publish then.
+                pass
         self._in_hand = None
         self._unreported = 0
         _stream_registry().drop(self._subscription_id)
@@ -782,6 +795,20 @@ class _Subscription:
             # `__del__` must never raise.
             pass
 
+    def _take_in_hand(self, sequence: int) -> None:
+        """Hand an item to the caller, pending its retirement.
+
+        Where this subscription keeps a cursor, it also holds the
+        execution's checkpoint writes (``hold_checkpoints``) until the item
+        retires, so that whatever the loop body derives from it is
+        published in the same delta as the cursor advance that consumes it.
+        Outside a suspense scope there is no cursor, no recorded position
+        for derived state to disagree with, and so nothing to hold.
+        """
+        self._in_hand = sequence
+        if self._resume is not None:
+            get_context().hold_checkpoints()
+
     def _retire_in_hand(self) -> None:
         """Count the previously-yielded item as processed.
 
@@ -800,11 +827,15 @@ class _Subscription:
             # Same boundary the acknowledgement uses: the item counts as
             # processed once the caller comes back for another. A
             # suspension flushes checkpoints before it is recorded, so a
-            # pause never loses or repeats an item; a crash between the
-            # loop body and this write would replay the last one, which is
-            # the at-least-once contract checkpoints give.
+            # pause never loses or repeats an item, and a crash before this
+            # point replays the whole item — the advance and whatever the
+            # body derived from it are published together, below.
             self._resume.position += 1
             get_context().checkpoint_set(self._resume.name, self._resume.position)
+            # Releases the hold taken in ``_take_in_hand``, publishing the
+            # cursor advance and whatever the loop body wrote while holding
+            # the item as one delta.
+            get_context().release_checkpoints(publish=True)
         if self._unreported >= _ACK_BATCH:
             self._flush_ack()
 
@@ -929,7 +960,7 @@ class _StreamIterator(_Subscription, Iterator[Any]):
             raise StopIteration
 
         sequence, value = item
-        self._in_hand = sequence
+        self._take_in_hand(sequence)
         return deserialize_value(value)
 
 
@@ -1036,7 +1067,7 @@ class _AsyncStreamIterator(_Subscription):
             raise StopAsyncIteration
 
         sequence, value = item
-        self._in_hand = sequence
+        self._take_in_hand(sequence)
         return deserialize_value(value)
 
 
