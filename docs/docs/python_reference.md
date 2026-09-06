@@ -341,7 +341,7 @@ cf.Checkpoint[T | None](
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `name` | `str` | required | Checkpoint name, unique within the step |
+| `name` | `str` | required | Checkpoint name, unique within the step. Can't start with `_`, which is reserved for adapter-managed state |
 | `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None` |
 
 `T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. Types only inform type checkers — nothing is enforced at runtime.
@@ -353,6 +353,10 @@ The current value, or the declared default if it isn't set. A checkpoint explici
 #### `checkpoint.set(value) -> None`
 
 Sets the value, replacing anything already there.
+
+#### `checkpoint.update(fn: Callable[[T], T]) -> T`
+
+Sets the value to `fn(current)` and returns what was stored. `fn` receives the declared default when the checkpoint isn't set. A read followed by a write, not an atomic swap.
 
 #### `checkpoint.reset() -> None`
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Generic, TypeVar, overload
 
 from .state import get_context
@@ -106,6 +107,27 @@ class Checkpoint(Generic[T]):
     def set(self, value: T) -> None:
         """Set the value, replacing anything already there."""
         get_context().checkpoint_set(self._name, value)
+
+    def update(self, fn: Callable[[T], T]) -> T:
+        """Set the value to ``fn(current)``, and return what was stored.
+
+        The read-modify-write that most checkpoints do — advancing a
+        cursor, accumulating a total — without naming the old value::
+
+            n = count.update(lambda x: x + 1)
+
+        ``fn`` receives the declared default when the checkpoint isn't set,
+        exactly as ``get()`` would return it.
+
+        This is a read followed by a write, not an atomic swap: two threads
+        of one execution updating the same checkpoint can still lose one of
+        the updates. That only arises if you share a checkpoint across
+        threads — a task body and a ``cf.stream`` generator, say — in which
+        case guard it yourself.
+        """
+        value = fn(self.get())
+        self.set(value)
+        return value
 
     def reset(self) -> None:
         """Clear the checkpoint, so ``get()`` returns the declared default.

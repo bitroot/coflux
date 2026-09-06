@@ -125,10 +125,10 @@ By default, iterating a stream waits as long as it takes — the consumer holds 
 
 ```python
 @cf.task()
-def handle_readings(readings: cf.Stream[dict]):
+def handle_events(events: cf.Stream[dict]):
     with cf.suspense(30):
-        for reading in readings:
-            store.submit(reading)
+        for event in events:
+            store.submit(event)
 ```
 
 If thirty seconds pass with nothing arriving, the execution suspends. It is resumed when the stream next holds the item it was waiting for — or when the stream closes, since it will never hold it then. The resumed execution runs the body from the top, as always — but it doesn't re-read the stream. The adapter keeps the consumed position in a checkpoint of its own, named after the stream and the view being read, and re-subscribes there, so each item is delivered to exactly one attempt.
@@ -150,9 +150,9 @@ The two halves compose. Have the workflow *submit* the consumer rather than wait
 
 ```python
 @cf.workflow()
-def readings_pipeline():
-    readings = meter()                        # returns once the stream is registered
-    return handle_readings.submit(readings)   # a handle, not a result
+def events_pipeline():
+    events = tail_events()                 # returns once the stream is registered
+    return handle_events.submit(events)    # a handle, not a result
 ```
 
 Calling the producer doesn't block — a generator task's result *is* the stream reference, recorded before the first item — and submitting the consumer doesn't either, so the workflow step finishes immediately. Between bursts the producer is suspended, the consumer is suspended, and the workflow is done: nothing is running, and the consumer is only scheduled again once there is something for it to read.

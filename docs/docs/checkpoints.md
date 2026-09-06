@@ -38,11 +38,20 @@ cursor = cf.Checkpoint("cursor", default=0)
 The name identifies storage scoped to the step, so declaring the handle at module level is fine — it isn't module state.
 
 ```python
-cursor.get()        # the current value, or the default if unset
-cursor.set(value)   # replace the value
-cursor.reset()      # clear it, so get() returns the default again
-cursor.is_set()     # whether it has a value
+cursor.get()          # the current value, or the default if unset
+cursor.set(value)     # replace the value
+cursor.update(fn)     # set it to fn(current), and return that
+cursor.reset()        # clear it, so get() returns the default again
+cursor.is_set()       # whether it has a value
 ```
+
+`update` is the read-modify-write most checkpoints do — advancing a cursor, accumulating a total — without naming the old value:
+
+```python
+n = count.update(lambda x: x + 1)
+```
+
+`fn` receives the declared default when the checkpoint isn't set, so an unset checkpoint needs no special case at the call site. It's a read then a write rather than an atomic swap, so if you share one checkpoint between a task body and a `cf.stream` generator, guard it yourself.
 
 Reads are served locally: the effective state arrives with the execution, and an execution always sees its own writes. Nothing round-trips to the server.
 
