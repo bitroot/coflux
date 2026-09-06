@@ -59,6 +59,36 @@ func init() {
 	submitCmd.MarkFlagsMutuallyExclusive("memo", "no-memo")
 }
 
+// padArguments fills in the defaults for arguments that weren't given on the
+// command line.
+//
+// Arguments are positional, so a submission that omits its trailing defaults
+// and one that spells them out would otherwise derive different cache, memo
+// and defer keys for the same call. Adapters bind their own defaults against
+// the signature before submitting; this is the equivalent here, using the
+// defaults the workflow was registered with (already JSON-encoded).
+//
+// Padding stops at a parameter with no default, since nothing after it could
+// be positioned without it.
+func padArguments(arguments [][]any, parameters any) [][]any {
+	params, ok := parameters.([]any)
+	if !ok {
+		return arguments
+	}
+	for _, p := range params[min(len(arguments), len(params)):] {
+		param, ok := p.(map[string]any)
+		if !ok {
+			return arguments
+		}
+		def, ok := param["default"].(string)
+		if !ok {
+			return arguments
+		}
+		arguments = append(arguments, []any{"json", def})
+	}
+	return arguments
+}
+
 func runSubmit(cmd *cobra.Command, args []string) error {
 	target := args[0]
 	arguments := args[1:]
@@ -94,6 +124,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	for i, arg := range arguments {
 		submitArgs[i] = []any{"json", arg}
 	}
+	submitArgs = padArguments(submitArgs, workflow["parameters"])
 
 	// Build options from workflow definition
 	options := make(map[string]any)

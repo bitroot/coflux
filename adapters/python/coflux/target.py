@@ -571,6 +571,23 @@ class Target(t.Generic[P, T]):
     def fn(self) -> t.Callable[P, T]:
         return self._fn
 
+    def _bind_arguments(self, args: tuple[t.Any, ...]) -> tuple[t.Any, ...]:
+        """Fill in the defaults for arguments the caller left out.
+
+        Arguments are always sent in full, so that two call sites differing
+        only in whether they spelled a default out submit the same list —
+        otherwise they'd derive different cache, memo and defer keys for what
+        is the same call. Binding against the signature uses the real default
+        objects, so nothing is lost the way it would be by reconstructing them
+        from the manifest's JSON.
+
+        Every parameter is positional-or-keyword (enforced when the target is
+        defined), so the bound arguments are always a plain positional tuple.
+        """
+        bound = inspect.signature(self._fn).bind(*args)
+        bound.apply_defaults()
+        return bound.args
+
     def submit(self, *args: P.args, **kwargs: P.kwargs) -> Execution[T]:
         """Submit this target for execution and return a handle."""
         if kwargs:
@@ -582,7 +599,7 @@ class Target(t.Generic[P, T]):
         # been registered via cf.stream(...) — the caller becomes the
         # producer, the callee gets a Stream handle. Bare generators
         # raise; the user should wrap them explicitly.
-        serialized_args = [serialize_value(arg) for arg in args]
+        serialized_args = [serialize_value(arg) for arg in self._bind_arguments(args)]
 
         # Use only the declared wait_for from the decorator
         wait_for_val = (
