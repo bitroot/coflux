@@ -735,6 +735,72 @@ defmodule Coflux.Orchestration.Streams do
     end)
   end
 
+  # Records that `execution_id` is gated on the stream reaching `sequence`.
+  #
+  # Written when a consumer suspends mid-iteration, against the *successor*
+  # execution — which has not run, so it has no lineage row of its own yet.
+  # If it later subscribes, `record_dependency`'s `DO NOTHING` leaves this
+  # sequence in place.
+  # No transaction of its own: this is a single insert, and its only caller
+  # runs inside `Runs.rerun_step`'s transaction — SQLite has no nested
+  # transactions.
+  def record_wait(db, execution_id, stream_ref_id, sequence) do
+    {:ok, _} =
+      insert_one(
+        db,
+        :stream_dependencies,
+        %{
+          execution_id: execution_id,
+          stream_ref_id: stream_ref_id,
+          sequence: sequence,
+          created_at: current_timestamp()
+        },
+        on_conflict: "(execution_id, stream_ref_id) DO UPDATE SET sequence = excluded.sequence"
+      )
+
+    :ok
+  end
+
+  # `[{stream_ref_id, sequence}, ...]` for the waits an execution is gated
+  # on. Lineage-only edges (a NULL sequence) are not waits and are excluded.
+  def get_wait_dependencies(db, execution_id) do
+    query(
+      db,
+      """
+      SELECT stream_ref_id, sequence
+      FROM stream_dependencies
+      WHERE execution_id = ?1 AND sequence IS NOT NULL
+      """,
+      {execution_id}
+    )
+  end
+
+  # Highest sequence in the stream, or -1 when it holds no items.
+  def get_head(db, stream_id) do
+    case query_one(
+           db,
+           "SELECT MAX(sequence) FROM stream_items WHERE stream_id = ?1",
+           {stream_id}
+         ) do
+      {:ok, {nil}} -> {:ok, -1}
+      {:ok, {head}} -> {:ok, head}
+    end
+  end
+
+  # Whether the stream has recorded a closure. A closed stream never gains
+  # another item, so a consumer waiting on one has to be woken rather than
+  # left gated forever.
+  def closed?(db, stream_id) do
+    case query_one(
+           db,
+           "SELECT 1 FROM stream_closures WHERE stream_id = ?1",
+           {stream_id}
+         ) do
+      {:ok, nil} -> false
+      {:ok, _} -> true
+    end
+  end
+
   # `%{execution_id => [stream_ref_id, ...]}` for every consumer execution
   # in the run.
   def get_run_dependencies(db, run_id) do

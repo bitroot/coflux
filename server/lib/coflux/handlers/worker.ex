@@ -593,15 +593,28 @@ defmodule Coflux.Handlers.Worker do
         end
 
       "suspend" ->
-        [execution_id, execute_after] = message["params"]
+        [execution_id, execute_after | rest] = message["params"]
         # TODO: validate execute_after
+
+        # An optional stream to wait on: a consumer that suspended
+        # mid-iteration wants its successor held until the stream reaches
+        # the sequence it stopped at (or closes). Older adapters send two
+        # params and get the unconditional behaviour.
+        dependencies =
+          case rest do
+            [%{"stream_id" => stream_id, "sequence" => sequence}] ->
+              [{:stream, stream_id, sequence}]
+
+            _ ->
+              []
+          end
 
         if is_recognised_execution?(execution_id, state) do
           :ok =
             Orchestration.record_result(
               state.project_id,
               execution_id,
-              {:suspended, execute_after, []}
+              {:suspended, execute_after, dependencies}
             )
 
           {[], state}
@@ -798,6 +811,10 @@ defmodule Coflux.Handlers.Worker do
       end)
 
     {[command_message("stream_items", [execution_external_id, subscription_id, encoded])], state}
+  end
+
+  def websocket_info({:stream_timer_pause, execution_external_id, index, paused}, state) do
+    {[command_message("stream_timer_pause", [execution_external_id, index, paused])], state}
   end
 
   def websocket_info({:stream_demand, execution_external_id, index, n}, state) do
@@ -1005,6 +1022,12 @@ defmodule Coflux.Handlers.Worker do
     base = %{"winner" => idx}
 
     case detail do
+      # A stream handle resolves with no value — the item reaches the
+      # consumer through its own subscription; this only says "stop
+      # waiting".
+      :available ->
+        Map.put(base, "status", "ok")
+
       {:value, value} ->
         Map.merge(base, %{"status" => "ok", "value" => compose_value(value)})
 

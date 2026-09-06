@@ -115,7 +115,49 @@ def fetch_pages(url: str): ...
 
 If the producer doesn't append an item within that window, the stream is closed as timed out and the generator is stopped. The window counts time spent waiting for consumer demand too, so with a lockstep buffer a slow or absent consumer can time out the producer. The producing execution still completes with its value, but is excluded from [caching](./caching.md) and [memoizing](./memoizing.md).
 
-The timeout is measured from the last item appended, per execution. A suspended step is not idle, so the pause between a suspend and its resumption doesn't count; the timer starts again when the resumed execution registers. There is no consumer-side timeout: iterating a stream waits as long as it takes.
+The timeout is measured from the last item appended, per execution. A suspended step is not idle, so the pause between a suspend and its resumption doesn't count; the timer starts again when the resumed execution registers. The same applies from the other side: while every consumer of a stream is suspended waiting on it (below), the producer's countdown is paused — a consumer's nap isn't the producer being idle, and otherwise a lockstep producer could be timed out by the very consumers waiting for it.
+
+This timeout is the producer's. For the consumer's, see below.
+
+## Suspending while consuming
+
+By default, iterating a stream waits as long as it takes — the consumer holds its worker slot through every gap. Iterating inside a [`cf.suspense`](./suspense.md) scope instead gives the slot up when the stream goes quiet:
+
+```python
+@cf.task()
+def handle_readings(readings: cf.Stream[dict]):
+    with cf.suspense(30):
+        for reading in readings:
+            store.submit(reading)
+```
+
+If thirty seconds pass with nothing arriving, the execution suspends. It is resumed when the stream next holds the item it was waiting for — or when the stream closes, since it will never hold it then. The resumed execution runs the body from the top, as always — but it doesn't re-read the stream. The adapter keeps the consumed position in a checkpoint of its own, named after the stream and the view being read, and re-subscribes there, so each item is delivered to exactly one attempt.
+
+Two things follow from the body restarting:
+
+- **Anything derived from the stream needs its own [checkpoint](./checkpoints.md).** The position survives; your running total doesn't, unless you keep it somewhere durable. The two have to move together, or the resumed execution will count from a stale total.
+- **The scope covers the loop body too.** A `.result()` inside it inherits the same timeout, so the usual care about re-execution applies — [memoize](./memoizing.md) what the body calls.
+
+A bare `cf.suspense()` means what it means for a result: don't wait at all. The consumer asks the server whether the next item is there, and suspends only if it isn't — so a zero timeout costs a round trip whenever the local queue is momentarily empty, rather than a wasted restart. Whether to suspend is always the server's answer, never a guess from the consumer's own queue, which is fed asynchronously and so says nothing about what the stream holds.
+
+Pick the threshold with `buffer` in mind. Under the default lockstep budget the producer is never more than one item ahead, so a short threshold makes the consumer suspend on nearly every item; give the producer a `buffer` (or `buffer=None`) when the consumer is going to nap.
+
+The cursor is never cleared. Re-running a consumer that already drained its stream therefore does nothing — it resumes at the end. Clear the step's checkpoints to make it read again.
+
+### An idle pipeline
+
+The two halves compose. Have the workflow *submit* the consumer rather than wait on it, and a whole pipeline can sit idle holding no worker slots at all:
+
+```python
+@cf.workflow()
+def readings_pipeline():
+    readings = meter()                        # returns once the stream is registered
+    return handle_readings.submit(readings)   # a handle, not a result
+```
+
+Calling the producer doesn't block — a generator task's result *is* the stream reference, recorded before the first item — and submitting the consumer doesn't either, so the workflow step finishes immediately. Between bursts the producer is suspended, the consumer is suspended, and the workflow is done: nothing is running, and the consumer is only scheduled again once there is something for it to read.
+
+The trade is that the run's result is a handle rather than a value. It still resolves — anything reading it waits for the consumer's result the usual way — but to see the value directly you look at the consumer's step.
 
 ## Workspaces
 

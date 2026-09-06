@@ -14,6 +14,7 @@ from typing import Any, get_type_hints
 from . import protocol
 from .context import ExecutorContext
 from .dispatcher import start_dispatcher
+from .errors import Suspending
 from .models import Input
 from .output import capture_output
 from .serialization import deserialize_value, serialize_value
@@ -193,6 +194,23 @@ def execute_target(
         # calls from generator bodies don't race), and stdout writes are
         # serialised by Protocol._write_lock.
         ctx.wait_streams()
+
+        # A generator body may have asked to suspend while draining. The
+        # driver only records the request and stops its siblings, so that
+        # every generator's cleanup runs before the execution is finalised
+        # — the handshake happens here, on the executor thread.
+        pending = ctx.take_stream_suspension()
+        if pending is not None:
+            execute_after, stream_wait = pending
+            ctx.finish_suspension(execute_after, stream_wait)
+
+    except Suspending as suspending:
+        # Raised at the suspend point and allowed to unwind the whole body
+        # first, so `finally` blocks and cancelled tasks run while the
+        # execution is still live and its checkpoint writes still land.
+        if ctx is None:
+            raise
+        ctx.finish_suspension(suspending.execute_after, suspending.stream_wait)
 
     except Exception as e:  # noqa: BLE001
         # Any failure in user code is reported back to the server as an

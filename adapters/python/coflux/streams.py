@@ -43,8 +43,8 @@ from typing import Any, final
 
 from . import protocol
 from .dispatcher import get_dispatcher
-from .errors import raise_for_close
-from .models import Stream
+from .errors import Suspending, raise_for_close
+from .models import Stream, Stride
 from .serialization import deserialize_value, serialize_value
 from .state import get_context
 from .target import Streams, _validate_buffer, _validate_timeout
@@ -152,6 +152,12 @@ class StreamDriver:
         # index, then applied.
         self._pending_demand: dict[int, int] = {}
         self._closing = False
+        # Set when a generator body suspends. The handshake belongs on the
+        # executor thread, once every driver has wound down, so a driver
+        # only records the request and stops. A one-tuple, so an
+        # ``execute_after`` of ``None`` stays distinguishable from "no
+        # request".
+        self._suspend_request: tuple[int | None, tuple[str, int] | None] | None = None
         self._demand_handler_registered = False
         self._force_close_handler_registered = False
         # Indexes of streams the worker (CLI) has force-closed — typically
@@ -348,6 +354,10 @@ class StreamDriver:
         with self._demand_cv:
             return index in self._force_closed
 
+    def _is_closing(self) -> bool:
+        with self._demand_cv:
+            return self._closing
+
     def _run(self, index: int, generator: Any, start_sequence: int) -> None:
         """Run one sync generator to exhaustion (or error).
 
@@ -382,11 +392,16 @@ class StreamDriver:
             # lifecycle closure on execution-end, or has already recorded
             # the force-close reason (e.g. "timeout").
             return
-        except SystemExit:
+        except Suspending as suspending:
             # The generator body suspended (``cf.suspend()`` / implicit
             # suspense). The stream stays open — paused — for the
             # execution that resumes the step to continue, so nothing is
             # sent: a close here would end it for every consumer.
+            #
+            # The handshake happens on the executor thread once every
+            # driver has stopped, so that cleanup here (and in the other
+            # generators) lands before the execution is finalised.
+            self._record_suspension(suspending.execute_after, suspending.stream_wait)
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
@@ -402,7 +417,15 @@ class StreamDriver:
                 traceback=tb,
             )
         else:
-            if self._is_force_closed(index):
+            if self._is_force_closed(index) or self._is_closing():
+                # Either the worker already recorded a close, or the driver
+                # is shutting down — in which case this StopIteration came
+                # from ``close_all`` closing the generator out from under
+                # us between the demand check and ``next()``, not from the
+                # body finishing. Reporting a normal close here would end
+                # the stream for every consumer, including the suspend
+                # case, where it has to stay paused for the execution that
+                # resumes the step.
                 return
             protocol.send_stream_close(self._execution_id, index)
 
@@ -444,8 +467,9 @@ class StreamDriver:
             loop.run_until_complete(iterate())
         except (GeneratorExit, asyncio.CancelledError):
             return
-        except SystemExit:
+        except Suspending as suspending:
             # Suspended from inside the generator — see ``_run``.
+            self._record_suspension(suspending.execute_after, suspending.stream_wait)
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
@@ -460,7 +484,15 @@ class StreamDriver:
                 traceback=tb,
             )
         else:
-            if self._is_force_closed(index):
+            if self._is_force_closed(index) or self._is_closing():
+                # Either the worker already recorded a close, or the driver
+                # is shutting down — in which case this StopIteration came
+                # from ``close_all`` closing the generator out from under
+                # us between the demand check and ``next()``, not from the
+                # body finishing. Reporting a normal close here would end
+                # the stream for every consumer, including the suspend
+                # case, where it has to stay paused for the execution that
+                # resumes the step.
                 return
             protocol.send_stream_close(self._execution_id, index)
         finally:
@@ -481,6 +513,35 @@ class StreamDriver:
                 if entry["generator"] is generator:
                     entry["loop"] = loop
                     return
+
+    def _record_suspension(
+        self,
+        execute_after: int | None,
+        stream_wait: tuple[str, int] | None = None,
+    ) -> None:
+        """Note that a generator body asked to suspend, and stop the rest.
+
+        Closing the siblings is what lets the executor's ``wait_all()``
+        return: they would otherwise keep producing, and nothing else is
+        going to interrupt them. Their streams stay open — paused — because
+        the driver skips ``send_stream_close`` on ``GeneratorExit`` and the
+        server leaves a suspended execution's streams alone.
+
+        First request wins; a second generator suspending while we tear
+        down is the same suspension.
+        """
+        with self._lock:
+            if self._suspend_request is None:
+                self._suspend_request = (execute_after, stream_wait)
+        # Outside the lock: close_all takes both _demand_cv and _lock.
+        self.close_all()
+
+    def take_suspension(self) -> tuple[int | None, tuple[str, int] | None] | None:
+        """Claim any recorded suspension request. See ``_record_suspension``."""
+        with self._lock:
+            request = self._suspend_request
+            self._suspend_request = None
+            return request
 
     def wait_all(self) -> None:
         """Block until every worker thread has finished."""
@@ -561,6 +622,71 @@ _PREFETCH = 16
 _ACK_BATCH = max(1, _PREFETCH // 2)
 
 
+_CURSOR_PREFIX = "_cursor"
+
+
+class _Resume:
+    """Cursor state for a subscription that is allowed to suspend.
+
+    Only created inside a ``cf.suspense`` scope; outside one there is no
+    cursor and iteration blocks for as long as it takes, exactly as it
+    always has.
+
+    ``position`` counts items of *this view*, not raw sequences — a
+    partition consumer counts its own items — which is what makes
+    resuming a plain slice on the same view.
+    """
+
+    __slots__ = ("name", "position", "stream_id", "stride", "timeout")
+
+    def __init__(
+        self,
+        name: str,
+        position: int,
+        timeout: float,
+        stream_id: str,
+        stride: Stride,
+    ) -> None:
+        self.name = name
+        self.position = position
+        self.timeout = timeout
+        self.stream_id = stream_id
+        # The view's *original* stride, so the mapping from position to
+        # sequence stays fixed as the position advances.
+        self.stride = stride
+
+    def next_sequence(self) -> int:
+        """Absolute sequence of the item this view wants next.
+
+        A composed stride is a linear map, so item k of any view sits at
+        ``start + k*step``. That's both where a resumed subscription starts
+        and what the server gates a suspension on — no stride needed at the
+        far end, just the one number.
+        """
+        start, _stop, step = self.stride
+        return start + self.position * step
+
+
+def _cursor_name(ctx: Any, stream_id: str, stride: Stride) -> str:
+    """Content-addressed checkpoint name for a view's cursor.
+
+    Derived from what is being consumed rather than from call order, so it
+    survives branching, and a producer re-run — which opens a new stream,
+    hence a new id — starts a fresh cursor rather than resuming a
+    brand-new stream at a stale offset. The stride is part of the name
+    because two partitions of one stream are different views with
+    different positions.
+
+    Two loops over an *identical* view in one body are the one case
+    content addressing can't separate, so they fall back to an occurrence
+    counter.
+    """
+    start, stop, step = stride
+    name = f"{_CURSOR_PREFIX}/{stream_id}/{start},{stop},{step}"
+    occurrence = ctx.next_cursor_occurrence(name)
+    return name if not occurrence else f"{name}#{occurrence}"
+
+
 class _Subscription:
     """Bookkeeping shared by the sync and async subscription readers.
 
@@ -585,6 +711,13 @@ class _Subscription:
         self._in_hand: int | None = None
         # Retired items not yet reported.
         self._unreported = 0
+        # Cursor state, when this subscription was opened somewhere it is
+        # allowed to suspend. ``None`` everywhere else.
+        self._resume: _Resume | None = None
+
+    def attach_resume(self, resume: _Resume | None) -> None:
+        """Give this subscription its cursor. Called before subscribing."""
+        self._resume = resume
 
     def on_items(self, items: list[list[Any]]) -> None:
         """Called by the registry when the server pushes items for this
@@ -663,8 +796,34 @@ class _Subscription:
         self._acked_sequence = max(self._acked_sequence, self._in_hand)
         self._in_hand = None
         self._unreported += 1
+        if self._resume is not None:
+            # Same boundary the acknowledgement uses: the item counts as
+            # processed once the caller comes back for another. A
+            # suspension flushes checkpoints before it is recorded, so a
+            # pause never loses or repeats an item; a crash between the
+            # loop body and this write would replay the last one, which is
+            # the at-least-once contract checkpoints give.
+            self._resume.position += 1
+            get_context().checkpoint_set(self._resume.name, self._resume.position)
         if self._unreported >= _ACK_BATCH:
             self._flush_ack()
+
+    def _suspend(self, resume: _Resume) -> None:
+        """Give up the worker slot until there is more to read. Never returns.
+
+        The subscription is released first. An abandoned one keeps holding
+        the producer's backpressure watermark down until the server tears
+        it down, and this execution is about to go away regardless.
+
+        No delay: the successor is gated on the stream instead, and the
+        server releases it when the item lands or the stream closes. Every
+        way an execution can end closes its open streams, so a producer
+        that dies still wakes us rather than leaving us gated forever.
+        """
+        self.close()
+        get_context().suspend_execution(
+            None, stream_wait=(resume.stream_id, resume.next_sequence())
+        )
 
     def _flush_ack(self) -> None:
         if self._unreported == 0:
@@ -712,6 +871,31 @@ class _StreamIterator(_Subscription, Iterator[Any]):
     def on_closed(self, reason: str, error: dict[str, Any] | None) -> None:
         self._queue.put(_Closed(reason, error))
 
+    def _wait_for_item(self) -> Any:
+        """Block for the next item, suspending instead if that's allowed.
+
+        Outside a ``cf.suspense`` scope this waits indefinitely, as it
+        always has. Inside one, a gap longer than the scope's timeout means
+        the execution gives up its worker slot rather than holding it
+        through the wait.
+        """
+        resume = self._resume
+        if resume is None:
+            return self._queue.get()
+        if resume.timeout:
+            try:
+                return self._queue.get(timeout=resume.timeout)
+            except queue.Empty:
+                pass
+        # An empty queue says nothing about the stream — items arrive
+        # asynchronously — so the server decides, exactly as it does for a
+        # result. If the item is already there its push is in flight, and
+        # blocking for it is bounded: a dispatcher EOF wakes every
+        # iterator with a synthetic close.
+        if get_context().stream_available(resume.stream_id, resume.next_sequence()):
+            return self._queue.get()
+        self._suspend(resume)
+
     def __iter__(self) -> _StreamIterator:
         return self
 
@@ -734,7 +918,7 @@ class _StreamIterator(_Subscription, Iterator[Any]):
             # the producer may be waiting on precisely the acknowledgement
             # we're batching, so holding it back would deadlock.
             self._flush_ack()
-            item = self._queue.get()
+            item = self._wait_for_item()
 
         if isinstance(item, _Closed):
             # Same release path as an early exit — the server has already
@@ -808,6 +992,25 @@ class _AsyncStreamIterator(_Subscription):
         """
         self.close()
 
+    async def _wait_for_item(self) -> Any:
+        """Await the next item, suspending instead if that's allowed.
+
+        The sync path's counterpart. Cancelling a ``Queue.get`` leaves the
+        item in the queue for the next reader, so timing out here doesn't
+        drop anything.
+        """
+        resume = self._resume
+        if resume is None:
+            return await self._queue.get()
+        if resume.timeout:
+            try:
+                return await asyncio.wait_for(self._queue.get(), resume.timeout)
+            except asyncio.TimeoutError:
+                pass
+        if get_context().stream_available(resume.stream_id, resume.next_sequence()):
+            return await self._queue.get()
+        self._suspend(resume)
+
     async def __aenter__(self) -> _AsyncStreamIterator:
         return self
 
@@ -825,7 +1028,7 @@ class _AsyncStreamIterator(_Subscription):
             # the sync path does: a lockstep producer may be waiting on
             # precisely the acknowledgement we're batching.
             self._flush_ack()
-        item = await self._queue.get()
+        item = await self._wait_for_item()
 
         if isinstance(item, _Closed):
             self.close()
@@ -956,9 +1159,28 @@ def _open_subscription(
     """
     ctx = get_context()
     execution_id = ctx.execution_id
+
+    # A cursor is kept only where iteration is allowed to suspend. Outside
+    # a suspense scope nothing is written and behaviour is unchanged.
+    resume: _Resume | None = None
+    timeout = ctx.suspense_timeout
+    if timeout is not None:
+        name = _cursor_name(ctx, stream_id, stride)
+        try:
+            position = ctx.checkpoint_get(name)
+        except KeyError:
+            position = 0
+        resume = _Resume(name, position, timeout, stream_id, stride)
+
     subscription_id, iterator = _stream_registry().allocate(execution_id, factory)
+    iterator.attach_resume(resume)
 
     start, stop, step = stride
+    if resume is not None and resume.position:
+        # Resume where the last attempt stopped, so the server begins
+        # delivery there rather than the consumer reading a backlog in
+        # order to discard it.
+        start = resume.next_sequence()
     wire_stride = {"start": start, "stop": stop, "step": step}
 
     protocol.send_stream_subscribe(

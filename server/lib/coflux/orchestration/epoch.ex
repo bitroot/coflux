@@ -627,18 +627,23 @@ defmodule Coflux.Orchestration.Epoch do
     {:ok, stream_deps} =
       query(
         source_db,
-        "SELECT stream_ref_id, created_at FROM stream_dependencies WHERE execution_id = ?1",
+        "SELECT stream_ref_id, sequence, created_at FROM stream_dependencies WHERE execution_id = ?1",
         {old_exec_id}
       )
 
-    Enum.each(stream_deps, fn {old_ref_id, created_at} ->
+    Enum.each(stream_deps, fn {old_ref_id, sequence, created_at} ->
       new_ref_id = ensure_stream_ref(source_db, target_db, old_ref_id)
 
       {:ok, _} =
         insert_one(
           target_db,
           :stream_dependencies,
-          %{execution_id: new_exec_id, stream_ref_id: new_ref_id, created_at: created_at},
+          %{
+            execution_id: new_exec_id,
+            stream_ref_id: new_ref_id,
+            sequence: sequence,
+            created_at: created_at
+          },
           on_conflict: "DO NOTHING"
         )
     end)

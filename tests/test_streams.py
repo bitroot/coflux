@@ -1928,3 +1928,206 @@ def test_backpressure_partition_consumer_advances_demand_past_unmatched(worker):
         prod_ex.conn.complete(prod_ex.execution_id)
         cons_ex.conn.complete(cons_ex.execution_id)
         ctx.result(prod_resp["runId"])
+
+
+# --- Consumer-side suspension: gating the successor on the stream ------------
+#
+# A consumer that suspends mid-iteration names the stream and the absolute
+# sequence it stopped at. The successor isn't dispatched until the stream
+# reaches that sequence — or closes, which is the only other way the wait
+# could ever end.
+
+
+def _suspended_consumer(ctx, stream_id, sequence):
+    """Run a consumer up to the point of suspending on ``stream_id``."""
+    ctx.submit("test", "consumer")
+    cons_ex = ctx.executor.next_execute()
+    cons_ex.conn.stream_subscribe(
+        cons_ex.execution_id, subscription_id=1, stream_id=stream_id
+    )
+    # No delay: the stream gate is the only thing that can hold the
+    # successor back, so a dispatch here would mean the gate isn't working.
+    cons_ex.conn.suspend(
+        cons_ex.execution_id,
+        stream_wait=(stream_id, sequence),
+    )
+    return cons_ex
+
+
+def test_stream_wait_holds_successor_until_the_item_lands(worker):
+    """The successor is held with no delay set, and appending the sequence
+    it was waiting for is what dispatches it."""
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        # Consumed item 0, so it is waiting for sequence 1.
+        _suspended_consumer(ctx, stream["id"], sequence=1)
+
+        # Nothing to wake it yet.
+        with pytest.raises(TimeoutError):
+            ctx.executor.next_execute(timeout=1)
+
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
+
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+
+def test_stream_wait_is_released_by_the_stream_closing(worker):
+    """A closed stream will never reach the sequence, so the waiter is
+    released rather than stranded — it re-subscribes and sees the closure."""
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        _suspended_consumer(ctx, stream["id"], sequence=1)
+
+        with pytest.raises(TimeoutError):
+            ctx.executor.next_execute(timeout=1)
+
+        # Sequence 1 never arrives; the stream ends instead.
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+
+def test_stream_wait_already_satisfied_does_not_hold_the_successor(worker):
+    """The item can arrive between the consumer deciding to suspend and the
+    server recording it. The gate is a condition, not an edge, so an
+    already-met wait schedules straight away."""
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
+
+        # Waiting for a sequence the stream already holds.
+        _suspended_consumer(ctx, stream["id"], sequence=1)
+
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+
+def test_suspended_consumer_does_not_time_out_the_producer(worker):
+    """A consumer's nap is not the producer being idle.
+
+    The mirror of the rule that a suspended *producer* isn't idle: while
+    every consumer of a stream is suspended waiting on it, the producer's
+    idle countdown is paused. Without this, a lockstep producer would be
+    force-closed by the very consumers waiting for it — they stop
+    acknowledging when they suspend, so it can't emit, so its idle window
+    runs out.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(
+            prod_ex.execution_id, 0, buffer=None, timeout_ms=150
+        )
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        _suspended_consumer(ctx, stream["id"], sequence=1)
+
+        # Well past the 150ms window. The countdown is paused, so no
+        # force-close arrives and the stream is still open to append.
+        with pytest.raises(TimeoutError):
+            prod_ex.conn.recv_push("stream_force_close", timeout=1.5)
+
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
+
+        # Appending released the waiter, which also restarts the countdown.
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+
+        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
+        assert force["reason"] == "timeout"
+        prod_ex.conn.complete(prod_ex.execution_id)
+
+
+def test_stream_select_reports_whether_the_sequence_is_available(worker):
+    """The consumer asks the server rather than trusting its own queue.
+
+    Items arrive asynchronously, so an empty queue means "nothing has
+    arrived yet", not "the stream has nothing" — a consumer that decided
+    for itself would suspend before hearing anything, be rescheduled at
+    once because the item was there all along, and never make progress.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        # Appends are fire-and-forget; the push confirms it landed.
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # Sequence 0 exists, so the poll resolves — no value, just "stop
+        # waiting"; the item reaches the consumer via its subscription.
+        resolved = cons_ex.conn.select(
+            cons_ex.execution_id,
+            [{"type": "stream", "id": stream["id"], "sequence": 0}],
+            timeout_ms=0,
+            suspend=False,
+        )
+        assert resolved["winner"] == 0
+        assert resolved["status"] == "ok"
+
+        # Sequence 1 doesn't yet, and a poll never suspends — it reports
+        # nothing and leaves the decision to the consumer.
+        assert (
+            cons_ex.conn.select(
+                cons_ex.execution_id,
+                [{"type": "stream", "id": stream["id"], "sequence": 1}],
+                timeout_ms=0,
+                suspend=False,
+            )
+            is None
+        )
+
+        # A closed stream will never reach it, so that resolves too.
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        cons_ex.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        closed = cons_ex.conn.select(
+            cons_ex.execution_id,
+            [{"type": "stream", "id": stream["id"], "sequence": 1}],
+            timeout_ms=0,
+            suspend=False,
+        )
+        assert closed["status"] == "ok"
+
+        cons_ex.conn.complete(cons_ex.execution_id)
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")

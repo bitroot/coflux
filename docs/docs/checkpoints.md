@@ -84,6 +84,10 @@ A checkpoint belongs to the step that actually executes. A step resolved from th
 Checkpoints are scoped to a step within a run, so a recurring workflow keeps its checkpoints for as long as its run is alive — across every recurrence, retry and suspension. But if recurrence stops (retries are exhausted, the task returns a non-`None` value, or the run is cancelled), submitting the workflow again creates a new run with a fresh step, which starts from the declared defaults.
 :::
 
+## Reserved names
+
+Names starting with an underscore belong to the adapter, and `cf.Checkpoint("_...")` raises. They're currently used for the cursors behind [stream](./streams.md) suspension, which track how far a consumer has read; you'll see them alongside your own in Studio. The Python variable name is unrestricted — only the checkpoint's name matters, so `_cursor = cf.Checkpoint("cursor")` is fine.
+
 ## Size
 
 A checkpoint value is serialized like any other, so a large one is stored as a [blob](./blobs.md) and downloaded at the start of every execution of the step. That's cheap for a cursor and expensive for a large dataframe — prefer keeping checkpoints small, and use an [asset](./assets.md) for anything substantial.

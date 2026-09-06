@@ -115,6 +115,10 @@ defmodule Coflux.Orchestration.Server do
 
               # execution_id -> MapSet of execution_ids that this execution is waiting on
               pending_dependencies: %{},
+              # Stream waits indexed by stream, so an append can check for
+              # waiters with one lookup instead of scanning every pending
+              # dependency. Derived from pending_dependencies; rebuilt with it.
+              stream_dependency_keys: %{},
 
               # execution_id -> MapSet of execution_ids that are waiting on this execution
               dependency_waiters: %{},
@@ -2046,6 +2050,7 @@ defmodule Coflux.Orchestration.Server do
         |> ensure_stream_producer(stream_id, producer_session_id)
         |> push_stream_item(stream_id, sequence, value)
         |> notify_stream_item_appended(stream_id, execution_id, sequence, value, created_at)
+        |> update_dependencies_on_stream(stream_id, sequence)
         |> flush_notifications()
 
       {:reply, :ok, state}
@@ -2078,6 +2083,7 @@ defmodule Coflux.Orchestration.Server do
             state
             |> push_stream_closed(stream_id, reason, error)
             |> notify_stream_closed(stream_id, execution_id, reason, error, closed_at)
+            |> update_dependencies_on_stream(stream_id, :closed)
             |> drop_stream_producer(stream_id)
             |> flush_notifications()
 
@@ -4668,11 +4674,32 @@ defmodule Coflux.Orchestration.Server do
     dependency_keys = Keyword.get(opts, :dependency_keys, [])
     created_by = Keyword.get(opts, :created_by)
 
-    # Separate execution and input dependencies
-    {exec_deps, input_deps} =
-      Enum.reduce(dependency_keys, {[], []}, fn
-        {:execution, id}, {execs, inputs} -> {[id | execs], inputs}
-        {:input, id}, {execs, inputs} -> {execs, [id | inputs]}
+    # Separate execution, input and stream dependencies.
+    #
+    # A stream wait arrives naming the stream externally, and is persisted
+    # against a *stream ref* — the same indirection subscription lineage
+    # uses, so the edge survives epoch rotation. A stream that can't be
+    # resolved is dropped rather than recorded: gating on it would strand
+    # the successor forever.
+    {exec_deps, input_deps, stream_waits} =
+      Enum.reduce(dependency_keys, {[], [], []}, fn
+        {:execution, id}, {execs, inputs, streams} ->
+          {[id | execs], inputs, streams}
+
+        {:input, id}, {execs, inputs, streams} ->
+          {execs, [id | inputs], streams}
+
+        {:stream, external_id, sequence}, {execs, inputs, streams} ->
+          case resolve_stream_id(state, external_id) do
+            {:ok, stream_id} ->
+              case Streams.create_stream_ref_for(state.db, stream_id) do
+                {:ok, ref_id} -> {execs, inputs, [{ref_id, sequence} | streams]}
+                {:error, :not_found} -> {execs, inputs, streams}
+              end
+
+            {:error, :not_found} ->
+              {execs, inputs, streams}
+          end
       end)
 
     # Convert internal dependency execution IDs to execution_ref IDs
@@ -4692,6 +4719,7 @@ defmodule Coflux.Orchestration.Server do
            execute_after,
            dependency_ref_ids,
            input_deps,
+           stream_waits,
            created_by
          ) do
       {:ok, execution_id, attempt, created_at} ->
@@ -4973,6 +5001,7 @@ defmodule Coflux.Orchestration.Server do
     |> remap_config_ids(id_mappings)
     |> copy_in_flight_runs()
     |> Map.put(:pending_dependencies, %{})
+    |> Map.put(:stream_dependency_keys, %{})
     |> Map.put(:dependency_waiters, %{})
     |> initialize_pending_dependencies()
     |> maybe_start_index_build()
@@ -6865,6 +6894,7 @@ defmodule Coflux.Orchestration.Server do
           state
           |> push_stream_closed(stream_id, push_reason, push_error)
           |> notify_stream_closed(stream_id, execution_id, push_reason, push_error, closed_at)
+          |> update_dependencies_on_stream(stream_id, :closed)
           |> drop_stream_producer(stream_id)
 
         {:error, :already_closed} ->
@@ -7562,6 +7592,10 @@ defmodule Coflux.Orchestration.Server do
       {:input, _input_id} ->
         # Input dependencies are not shown in the queue
         nil
+
+      {:stream, _stream_id, _sequence} ->
+        # Nor stream waits — the queue lists executions being waited on.
+        nil
     end)
     |> Enum.reject(&is_nil/1)
   end
@@ -7688,9 +7722,53 @@ defmodule Coflux.Orchestration.Server do
           end)
       end
 
+    # Collect unmet stream waits. Only rows with a sequence are waits;
+    # the rest of the table is subscription lineage. This runs solely for
+    # executions that have not been assigned yet, which is what makes it
+    # safe for the sequence to stay on the row after the gate clears — a
+    # completed execution's row is never read back here.
+    stream_dependencies =
+      case Streams.get_wait_dependencies(db, execution_id) do
+        {:ok, waits} ->
+          Enum.reduce(waits, MapSet.new(), fn {stream_ref_id, sequence}, acc ->
+            case resolve_stream_ref_id(db, stream_ref_id) do
+              {:ok, stream_id} ->
+                if stream_reached?(db, stream_id, sequence) do
+                  acc
+                else
+                  MapSet.put(acc, {:stream, stream_id, sequence})
+                end
+
+              {:error, :not_found} ->
+                # The stream is gone (a pruned epoch, say). Waiting on it
+                # forever would strand the execution, so treat it as met.
+                acc
+            end
+          end)
+      end
+
     argument_dependencies
     |> MapSet.union(result_dependencies)
     |> MapSet.union(input_dependencies)
+    |> MapSet.union(stream_dependencies)
+  end
+
+  # A stream wait is met once the stream holds the sequence, or can never
+  # hold it because it closed.
+  defp stream_reached?(db, stream_id, sequence) do
+    case Streams.get_head(db, stream_id) do
+      {:ok, head} -> head >= sequence || Streams.closed?(db, stream_id)
+    end
+  end
+
+  defp resolve_stream_ref_id(db, stream_ref_id) do
+    case Streams.get_stream_ref(db, stream_ref_id) do
+      {:ok, {run_external_id, step_number, index, _module, _target}} ->
+        Streams.get_stream_id_by_key(db, run_external_id, step_number, index)
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+    end
   end
 
   # Walk references and collect tagged dependency keys that are still pending.
@@ -7753,12 +7831,83 @@ defmodule Coflux.Orchestration.Server do
         put_in(state, [Access.key(:pending_dependencies), execution_id], dependencies)
 
       Enum.reduce(dependencies, state, fn dependency_id, state ->
-        update_in(
-          state,
+        state
+        |> update_in(
           [Access.key(:dependency_waiters), Access.key(dependency_id, MapSet.new())],
           &MapSet.put(&1, execution_id)
         )
+        |> index_stream_dependency(dependency_id)
       end)
+    end
+  end
+
+  # Stream waits get a secondary index, keyed by stream. Appends are hot,
+  # and without it every appended item would have to scan the whole
+  # dependency_waiters map to find out whether anything was waiting; with
+  # it the check is one map lookup that almost always misses.
+  defp index_stream_dependency(state, {:stream, stream_id, _sequence} = key) do
+    was_waiting = stream_has_waiters?(state, stream_id)
+
+    state =
+      update_in(
+        state,
+        [Access.key(:stream_dependency_keys), Access.key(stream_id, MapSet.new())],
+        &MapSet.put(&1, key)
+      )
+
+    # First waiter: the producer's idle countdown stops. A consumer's nap
+    # is not the producer being idle — the mirror of the existing rule
+    # that a suspended producer's own pause doesn't count against it.
+    if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
+  end
+
+  defp index_stream_dependency(state, _key), do: state
+
+  defp unindex_stream_dependency(state, {:stream, stream_id, _sequence} = key) do
+    state =
+      update_in(
+        state,
+        [Access.key(:stream_dependency_keys), Access.key(stream_id, MapSet.new())],
+        &MapSet.delete(&1, key)
+      )
+
+    if MapSet.size(state.stream_dependency_keys[stream_id] || MapSet.new()) == 0 do
+      state
+      |> update_in([Access.key(:stream_dependency_keys)], &Map.delete(&1, stream_id))
+      |> set_stream_timer_paused(stream_id, false)
+    else
+      state
+    end
+  end
+
+  defp unindex_stream_dependency(state, _key), do: state
+
+  defp stream_has_waiters?(state, stream_id) do
+    MapSet.size(Map.get(state.stream_dependency_keys, stream_id, MapSet.new())) > 0
+  end
+
+  # Tell the producer's worker to stop or restart the stream's idle
+  # countdown. Enforcement is worker-side, so this is the only way to say
+  # it. A producer with no live session has no timer to pause.
+  #
+  # Deliberately resolved from the database rather than from
+  # `stream_producers`: that map only exists to track demand, so a stream
+  # with `buffer=nil` has no entry at all — and an unbuffered producer is
+  # exactly what you pair with a suspending consumer, so it is the case
+  # that most needs this. Infrequent enough for the lookup not to matter:
+  # once when the first waiter arrives, once when the last one clears.
+  defp set_stream_timer_paused(state, stream_id, paused) do
+    with execution_external_id when is_binary(execution_external_id) <-
+           producer_external_id(state.db, stream_id),
+         {:ok, session_id} <- find_session_for_execution(state, execution_external_id),
+         {:ok, stream} <- Streams.get_stream(state.db, stream_id) do
+      send_session(
+        state,
+        session_id,
+        {:stream_timer_pause, execution_external_id, stream.index, paused}
+      )
+    else
+      _ -> state
     end
   end
 
@@ -7777,11 +7926,12 @@ defmodule Coflux.Orchestration.Server do
 
             # Clean up empty waiter entries
             if MapSet.size(state.dependency_waiters[dependency_id] || MapSet.new()) == 0 do
-              update_in(
-                state,
+              state
+              |> update_in(
                 [Access.key(:dependency_waiters)],
                 &Map.delete(&1, dependency_id)
               )
+              |> unindex_stream_dependency(dependency_id)
             else
               state
             end
@@ -7885,19 +8035,46 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Called when a stream gains an item, or closes. Wakes any execution that
+  # suspended mid-iteration and is gated on this stream.
+  #
+  # `head` is the highest sequence now available, or `:closed` — a closed
+  # stream will never reach the sequence anyone is still waiting for, so
+  # every waiter on it is released rather than stranded. The consumer
+  # re-subscribes at its checkpoint cursor and sees the closure.
+  defp update_dependencies_on_stream(state, stream_id, head) do
+    case Map.fetch(state.stream_dependency_keys, stream_id) do
+      {:ok, keys} ->
+        keys
+        |> Enum.filter(fn {:stream, _stream_id, sequence} ->
+          head == :closed || head >= sequence
+        end)
+        |> Enum.reduce(state, &clear_dependency_key(&2, &1))
+
+      :error ->
+        state
+    end
+  end
+
   # Called when an input response is recorded. Resolves the {:input, id}
   # dependency for any executions that were waiting on this input.
   defp update_dependencies_on_input(state, input_id) do
-    dependency_key = {:input, input_id}
+    clear_dependency_key(state, {:input, input_id})
+  end
 
+  # Drop one dependency key: forget its waiter set, and take the key out of
+  # each waiter's pending set, scheduling any execution that has nothing
+  # left to wait for.
+  defp clear_dependency_key(state, dependency_key) do
     case Map.fetch(state.dependency_waiters, dependency_key) do
       {:ok, waiters} ->
         state =
-          update_in(
-            state,
+          state
+          |> update_in(
             [Access.key(:dependency_waiters)],
             &Map.delete(&1, dependency_key)
           )
+          |> unindex_stream_dependency(dependency_key)
 
         Enum.reduce(waiters, state, fn waiter_id, state ->
           case Map.fetch(state.pending_dependencies, waiter_id) do
@@ -8098,6 +8275,37 @@ defmodule Coflux.Orchestration.Server do
               {:ok, {:pending, {:execution, pending_ext_id}, {:execution, pending_execution_id}}},
               state
             }
+        end
+    end
+  end
+
+  # A stream handle asks one question: has the stream reached this
+  # sequence (or closed, so it never will)? A consumer can't answer it
+  # itself — its queue is fed asynchronously, so an empty one means
+  # "nothing has arrived yet", not "the stream has nothing".
+  #
+  # Resolving carries no value: the item reaches the consumer through the
+  # subscription it already holds. The answer only says "there is
+  # something, stop waiting".
+  defp process_select_handle(
+         state,
+         %{"type" => "stream", "id" => stream_external_id} = handle,
+         _from_execution_id,
+         _from_execution_external_id
+       ) do
+    sequence = Map.get(handle, "sequence", 0)
+
+    case resolve_stream_id(state, stream_external_id) do
+      {:error, :not_found} ->
+        {{:error, :not_found}, state}
+
+      {:ok, stream_id} ->
+        if stream_reached?(state.db, stream_id, sequence) do
+          {{:ok, {:resolved, :available}}, state}
+        else
+          {{:ok,
+            {:pending, {:stream, stream_external_id}, {:stream, stream_external_id, sequence}}},
+           state}
         end
     end
   end

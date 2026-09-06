@@ -24,14 +24,56 @@ fires, or forever if none was configured.
 
 import asyncio
 import gc
-from types import SimpleNamespace
 
 import pytest
 
 from coflux import protocol, streams
+from coflux.errors import Suspending
 from coflux.models import Stream
 
 PRODUCER_STREAM_ID = "Eproducer_0"
+
+
+class _FakeContext:
+    """Stands in for ``ExecutorContext`` — only what subscriptions reach for.
+
+    ``suspense_timeout`` is ``None`` by default, which is the no-cursor
+    path: no checkpoint is written and iteration blocks indefinitely. The
+    resume tests set it to opt into cursor tracking.
+    """
+
+    def __init__(self):
+        self.execution_id = "Econsumer"
+        self.suspense_timeout = None
+        self.checkpoints = {}
+        self.suspended = []
+        self.probes = []
+        self.available = False
+        self._occurrences = {}
+
+    def next_cursor_occurrence(self, name):
+        occurrence = self._occurrences.get(name, 0)
+        self._occurrences[name] = occurrence + 1
+        return occurrence
+
+    def checkpoint_get(self, name):
+        if name not in self.checkpoints:
+            raise KeyError(name)
+        return self.checkpoints[name]
+
+    def checkpoint_set(self, name, value):
+        self.checkpoints[name] = value
+
+    def stream_available(self, stream_id, sequence):
+        """Stands in for the server's answer. Tests set ``available`` to
+        say what it should report; the default is "nothing there", which
+        is what makes a consumer suspend."""
+        self.probes.append((stream_id, sequence))
+        return self.available
+
+    def suspend_execution(self, delay=None, stream_wait=None):
+        self.suspended.append((delay, stream_wait))
+        raise Suspending(None, stream_wait)
 
 
 class _FakeDispatcher:
@@ -60,8 +102,10 @@ class _Harness:
         self.registry = registry
         self.dispatcher = dispatcher
         self.subscribes = []
+        self.strides = []
         self.unsubscribes = []
         self.acks = []
+        self.context = _FakeContext()
         self._items = []
         self._close = None
 
@@ -81,6 +125,7 @@ class _Harness:
         stride=None,
     ):
         self.subscribes.append(subscription_id)
+        self.strides.append(stride)
         if self._items:
             self.registry._on_items(
                 {"subscription_id": subscription_id, "items": list(self._items)}
@@ -108,9 +153,7 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(streams, "_registry_instance", registry)
     monkeypatch.setattr(streams, "get_dispatcher", lambda: dispatcher)
-    monkeypatch.setattr(
-        streams, "get_context", lambda: SimpleNamespace(execution_id="Econsumer")
-    )
+    monkeypatch.setattr(streams, "get_context", lambda: h.context)
     # Values go on the wire as tagged envelopes; the lifecycle is what's
     # under test, so keep them opaque.
     monkeypatch.setattr(streams, "deserialize_value", lambda value: value)
@@ -377,3 +420,148 @@ def test_async_iterator_requires_a_running_loop(harness):
     than failing somewhere further in."""
     with pytest.raises(RuntimeError, match="running event loop"):
         Stream(PRODUCER_STREAM_ID).__aiter__()
+
+
+# --- Resuming from a checkpoint cursor ---------------------------------------
+#
+# A subscription opened inside a `cf.suspense` scope keeps its position in
+# an adapter-managed checkpoint, so the execution that resumes the step
+# carries on rather than re-reading from sequence 0. Outside such a scope
+# none of this engages and iteration behaves exactly as it always has.
+
+CURSOR = f"_cursor/{PRODUCER_STREAM_ID}/0,None,1"
+
+
+def test_no_cursor_outside_a_suspense_scope(harness):
+    """The default path writes no checkpoint and never suspends."""
+    harness.serve([[0, "a"], [1, "b"]], close="complete")
+
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["a", "b"]
+    assert harness.context.checkpoints == {}
+    assert harness.context.suspended == []
+
+
+def test_cursor_advances_as_items_are_consumed(harness):
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"], [1, "b"], [2, "c"]], close="complete")
+
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["a", "b", "c"]
+    assert harness.context.checkpoints == {CURSOR: 3}
+
+
+def test_cursor_lags_the_item_in_hand(harness):
+    """An item counts as consumed only once the caller comes back for the
+    next one — the same boundary the acknowledgement uses, so a suspension
+    mid-body replays that item rather than skipping it."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"], [1, "b"]])
+
+    iterator = iter(Stream(PRODUCER_STREAM_ID))
+    assert next(iterator) == "a"
+    # "a" is in hand, not yet retired.
+    assert harness.context.checkpoints == {}
+    assert next(iterator) == "b"
+    assert harness.context.checkpoints == {CURSOR: 1}
+
+
+def test_resume_subscribes_at_the_cursor(harness):
+    """The server starts delivery at the cursor, rather than the consumer
+    reading a backlog in order to discard it."""
+    harness.context.suspense_timeout = 30
+    harness.context.checkpoints[CURSOR] = 2
+    harness.serve([[2, "c"]], close="complete")
+
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["c"]
+    assert harness.strides == [{"start": 2, "stop": None, "step": 1}]
+    # Counting continues from where it resumed.
+    assert harness.context.checkpoints == {CURSOR: 3}
+
+
+def test_resume_of_a_partition_counts_its_own_items(harness):
+    """A partition consumer's cursor counts items of its view, not raw
+    sequences, so resuming is a plain slice on the same view."""
+    harness.context.suspense_timeout = 30
+    name = f"_cursor/{PRODUCER_STREAM_ID}/1,None,4"
+    harness.context.checkpoints[name] = 3
+    harness.serve([], close="complete")
+
+    assert list(Stream(PRODUCER_STREAM_ID).partition(4, 1)) == []
+    # Item 3 of the view sits at sequence 1 + 3*4.
+    assert harness.strides == [{"start": 13, "stop": None, "step": 4}]
+
+
+def test_identical_views_get_distinct_cursors(harness):
+    """Content addressing can't separate two loops over the same view, so
+    they fall back to an occurrence counter."""
+    harness.context.suspense_timeout = 30
+    harness.serve([[0, "a"]], close="complete")
+
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["a"]
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["a"]
+
+    assert harness.context.checkpoints == {CURSOR: 1, f"{CURSOR}#1": 1}
+
+
+def test_idle_stream_suspends_and_releases_the_subscription(harness):
+    """Nothing arrives within the timeout, so the execution gives up its
+    worker slot — after unsubscribing, since an abandoned subscription
+    would pin the producer's backpressure watermark."""
+    harness.context.suspense_timeout = 0.01
+    harness.serve([])
+
+    with pytest.raises(Suspending):
+        list(Stream(PRODUCER_STREAM_ID))
+
+    # The local wait expired, then the server confirmed there was nothing.
+    assert harness.context.probes == [(PRODUCER_STREAM_ID, 0)]
+    # No delay — the successor is gated on the stream instead, and the
+    # server releases it when the next item lands or the stream closes.
+    assert harness.context.suspended == [(None, (PRODUCER_STREAM_ID, 0))]
+    assert harness.unsubscribes == harness.subscribes
+
+
+def test_the_server_decides_whether_to_suspend(harness):
+    """An empty queue is not evidence that the stream is empty — items
+    arrive asynchronously, so a consumer that checked locally would
+    suspend before hearing anything, wake at once because the item had
+    been there all along, and repeat forever. The server is asked
+    instead, exactly as it is for a result."""
+    harness.context.suspense_timeout = 0
+    # Only the first item is delivered on subscribe; the second arrives
+    # after the server has been asked, which is the ordering that broke a
+    # consumer deciding for itself — it would have suspended here.
+    harness.serve([[0, "a"]])
+
+    def available(stream_id, sequence):
+        harness.context.probes.append((stream_id, sequence))
+        subscription_id = harness.subscribes[-1]
+        harness.registry._on_items(
+            {"subscription_id": subscription_id, "items": [[1, "b"]]}
+        )
+        harness.registry._on_closed(
+            {"subscription_id": subscription_id, "reason": "complete"}
+        )
+        return True
+
+    harness.context.stream_available = available
+
+    assert list(Stream(PRODUCER_STREAM_ID)) == ["a", "b"]
+    assert harness.context.probes == [(PRODUCER_STREAM_ID, 1)]
+    assert harness.context.suspended == []
+
+
+def test_zero_timeout_suspends_once_caught_up(harness):
+    """With nothing left, the server says so and the consumer suspends —
+    once, gated on the sequence it is waiting for."""
+    harness.context.suspense_timeout = 0
+    harness.context.available = False
+    harness.serve([[0, "a"]])
+
+    iterator = iter(Stream(PRODUCER_STREAM_ID))
+    assert next(iterator) == "a"
+    with pytest.raises(Suspending):
+        next(iterator)
+
+    assert harness.context.probes == [(PRODUCER_STREAM_ID, 1)]
+    assert harness.context.suspended == [(None, (PRODUCER_STREAM_ID, 1))]
+    assert harness.context.checkpoints == {CURSOR: 1}

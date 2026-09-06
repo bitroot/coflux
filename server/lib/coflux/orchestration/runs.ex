@@ -1,5 +1,5 @@
 defmodule Coflux.Orchestration.Runs do
-  alias Coflux.Orchestration.{Models, Results, Values, TagSets, CacheConfigs, Utils}
+  alias Coflux.Orchestration.{Models, Results, Values, TagSets, CacheConfigs, Utils, Streams}
 
   import Coflux.Store
 
@@ -548,6 +548,7 @@ defmodule Coflux.Orchestration.Runs do
         execute_after,
         dependency_ref_ids,
         input_dependency_ids \\ [],
+        stream_waits \\ [],
         created_by \\ nil
       ) do
     with_transaction(db, fn ->
@@ -572,6 +573,15 @@ defmodule Coflux.Orchestration.Runs do
           {:execution_id, :input_id, :created_at},
           Enum.map(input_dependency_ids, &{execution_id, &1, now})
         )
+
+      # A consumer that suspended mid-stream: gate the successor until the
+      # stream reaches the sequence it was waiting for. Written through
+      # Streams so the on-conflict rule stays in one place — a lineage row
+      # for this execution can already exist if it subscribed before
+      # suspending again.
+      Enum.each(stream_waits, fn {stream_ref_id, sequence} ->
+        :ok = Streams.record_wait(db, execution_id, stream_ref_id, sequence)
+      end)
 
       {:ok, execution_id, attempt, now}
     end)

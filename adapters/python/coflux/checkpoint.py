@@ -8,6 +8,13 @@ from .state import get_context
 
 T = TypeVar("T")
 
+# Checkpoint names starting with this are the adapter's own. Reserved as a
+# namespace rather than name by name, so later internal state doesn't need
+# another round of this. Enforced here in ``Checkpoint`` rather than in the
+# context's checkpoint_get/set/reset, which are the path the adapter's own
+# cursors go through.
+RESERVED_PREFIX = "_"
+
 
 class Checkpoint(Generic[T]):
     """A named value that survives across executions of a step.
@@ -48,7 +55,8 @@ class Checkpoint(Generic[T]):
     nothing is enforced at runtime.
 
     Args:
-        name: Checkpoint name, unique within the step.
+        name: Checkpoint name, unique within the step. Can't start with
+            ``_`` — that prefix is reserved for adapter-managed state.
         default: Value returned when the checkpoint has never been set, or has
             been reset. Client-side only — the server never sees it.
     """
@@ -63,6 +71,12 @@ class Checkpoint(Generic[T]):
     # ``-> T`` on ``default`` and ``get()``, which it can't when ``T`` is
     # non-optional and no default was given.
     def __init__(self, name: str, *, default: Any = None) -> None:
+        if name.startswith(RESERVED_PREFIX):
+            raise ValueError(
+                f"checkpoint name {name!r} is reserved: names starting with"
+                f" {RESERVED_PREFIX!r} are used for adapter-managed state,"
+                " such as the cursors behind stream suspension"
+            )
         self._name = name
         self._default = default
 

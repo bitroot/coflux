@@ -196,10 +196,16 @@ def cancel_request(request_id, execution_id, handles):
     }
 
 
-def suspend_request(request_id, execution_id, execute_after=None):
+def suspend_request(request_id, execution_id, execute_after=None, stream_wait=None):
+    """``stream_wait`` is a ``(stream_id, sequence)`` pair for a consumer
+    that suspended mid-iteration: the successor is held until the stream
+    reaches that sequence, or closes."""
     params = {"execution_id": execution_id}
     if execute_after is not None:
         params["execute_after"] = execute_after
+    if stream_wait is not None:
+        stream_id, sequence = stream_wait
+        params["stream_wait"] = {"stream_id": stream_id, "sequence": sequence}
     return {"id": request_id, "method": "suspend", "params": params}
 
 

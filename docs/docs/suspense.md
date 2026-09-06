@@ -53,3 +53,7 @@ with cf.suspense(10):
 :::warning
 It's important that any tasks called within the suspense block _or before it_ are [memoized](/memoizing) (or cached). Otherwise the task is likely to keep suspending as a new task will be spawned on each execution.
 :::
+
+## Suspense and streams
+
+A suspense scope also applies to iterating a [stream](/streams): a gap longer than the timeout suspends the consumer, and the resumed execution carries on from where it stopped rather than re-reading. Unlike a result — which the re-run simply resolves again — a stream's position isn't naturally replayable, so the adapter keeps it in a [checkpoint](/checkpoints) of its own. Anything _derived_ from the stream is still yours to checkpoint. See [suspending while consuming](/streams#suspending-while-consuming).

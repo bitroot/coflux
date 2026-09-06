@@ -254,9 +254,19 @@ CREATE TABLE stream_refs (
 -- is written when a consumer subscribes (regardless of whether items are
 -- read), so data lineage is preserved even for subscriptions that yield no
 -- values.
+--
+-- `sequence` annotates that edge for a consumer that suspended while
+-- reading: it is the sequence the execution was gated on, and the
+-- execution is not scheduled until the stream reaches it (or closes). It
+-- stays populated afterwards — it is a record of where this attempt
+-- resumed from, not live state needing cleanup, and only
+-- `compute_pending_dependencies` reads it, which runs solely for
+-- executions that have not been assigned yet. NULL means a plain lineage
+-- edge, which is every row written by subscribing.
 CREATE TABLE stream_dependencies (
   execution_id INTEGER NOT NULL,
   stream_ref_id INTEGER NOT NULL,
+  sequence INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (execution_id, stream_ref_id),
   FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
