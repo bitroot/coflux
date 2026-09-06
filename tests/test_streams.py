@@ -545,6 +545,8 @@ def test_unsubscribe_prevents_receiving_full_stream(worker):
     consumer if they're in flight when the server processes unsubscribe.
     The meaningful check is that the consumer stops seeing items before
     the full stream is delivered — not that unsubscribe is synchronous.
+    The barrier below narrows that window rather than closing it, so the
+    tolerance stays.
     """
     targets = [workflow("test", "producer"), workflow("test", "consumer")]
 
@@ -566,6 +568,12 @@ def test_unsubscribe_prevents_receiving_full_stream(worker):
         first = cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=3)
         assert first["items"][0][1]["value"] == 0
         cons_ex.conn.stream_unsubscribe(cons_ex.execution_id, subscription_id=1)
+        # Unsubscribe is a notification and the producer has its own
+        # connection, so without a barrier the appends below can be handled
+        # first and the consumer sees the whole stream. Flush is a request:
+        # returning from it means the unsubscribe ahead of it on this
+        # connection has been processed and forwarded.
+        cons_ex.conn.flush(cons_ex.execution_id)
 
         # Producer keeps appending after unsubscribe.
         for i in range(1, 10):
@@ -2178,12 +2186,14 @@ def test_stream_dependency_reported_for_each_consumer_attempt(worker):
         prod_ex.conn.stream_close(prod_ex.execution_id, 0)
         prod_ex.conn.complete(prod_ex.execution_id, value="done")
 
+        # Both attempts have finished by now, so neither is still waiting.
         expected = {
             stream["id"]: {
                 "type": "stream",
                 "streamId": stream["id"],
                 "module": "test",
                 "target": "producer",
+                "pending": False,
             }
         }
         _, step = next(iter(ctx.inspect(cons_resp["runId"])["steps"].items()))
