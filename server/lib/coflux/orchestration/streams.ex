@@ -718,8 +718,10 @@ defmodule Coflux.Orchestration.Streams do
     end
   end
 
-  # Records that `execution_id` subscribed to the stream. Returns
-  # `{:ok, id}` for a new edge, `{:ok, nil}` if it already existed.
+  # Records that `execution_id` subscribed to the stream. An edge may
+  # already exist — `record_wait` writes one against an execution before it
+  # runs — so this is idempotent, and the subscribe is announced to the run
+  # topic either way rather than only when a row is written.
   def record_dependency(db, execution_id, stream_ref_id) do
     with_transaction(db, fn ->
       insert_one(

@@ -2131,3 +2131,62 @@ def test_stream_select_reports_whether_the_sequence_is_available(worker):
 
         cons_ex.conn.complete(cons_ex.execution_id)
         prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+
+def test_stream_dependency_reported_for_each_consumer_attempt(worker):
+    """The lineage edge reaches an already-open topic on every attempt.
+
+    A consumer that suspends mid-stream has its wait recorded against the
+    successor before that successor runs, so the successor's subscribe
+    finds the row already there. With neither the wait nor that subscribe
+    announced, a topic open for the run showed the dependency against the
+    first attempt only — while a reload, built from the snapshot, showed
+    it against all of them.
+    """
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0)
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+
+        cons_resp = ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+
+        # Open the topic before anything subscribes, so every edge below has
+        # to arrive as an update rather than being read from the snapshot.
+        ctx.inspect(cons_resp["runId"])
+
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        cons_ex.conn.suspend(cons_ex.execution_id, stream_wait=(stream["id"], 1))
+
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
+
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.stream_subscribe(
+            cons2.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        cons2.conn.complete(cons2.execution_id)
+        # Ordered on the one connection, so a result means the subscribe
+        # before it has been processed — and its notification sent.
+        ctx.result(cons_resp["runId"])
+
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+        expected = {
+            stream["id"]: {
+                "type": "stream",
+                "streamId": stream["id"],
+                "module": "test",
+                "target": "producer",
+            }
+        }
+        _, step = next(iter(ctx.inspect(cons_resp["runId"])["steps"].items()))
+        assert sorted(step["executions"]) == ["1", "2"]
+        for attempt, execution in step["executions"].items():
+            assert execution["dependencies"] == expected, f"attempt {attempt}"

@@ -2179,26 +2179,24 @@ defmodule Coflux.Orchestration.Server do
       # being read. Uses stream_refs so the edge survives epoch rotation.
       {:ok, stream_ref_id} = Streams.create_stream_ref_for(state.db, stream_id)
 
-      {:ok, inserted_id} =
-        Streams.record_dependency(state.db, consumer_execution_id, stream_ref_id)
+      {:ok, _} = Streams.record_dependency(state.db, consumer_execution_id, stream_ref_id)
+
+      # Announced whether or not the insert was new: the row may already
+      # exist as a wait recorded against this execution before it ran. The
+      # topic merges, so re-announcing an edge it already holds is harmless.
+      {:ok, {run_external_id}} =
+        Runs.get_external_run_id_for_execution(state.db, consumer_execution_id)
+
+      {:ok, {stream_run_ext_id, step_number, index, module, target}} =
+        Streams.get_stream_ref(state.db, stream_ref_id)
 
       state =
-        if inserted_id do
-          {:ok, {run_external_id}} =
-            Runs.get_external_run_id_for_execution(state.db, consumer_execution_id)
-
-          {:ok, {stream_run_ext_id, step_number, index, module, target}} =
-            Streams.get_stream_ref(state.db, stream_ref_id)
-
-          notify_listeners(
-            state,
-            {:run, run_external_id},
-            {:stream_dependency, consumer_execution_external_id,
-             stream_external_id(stream_run_ext_id, step_number, index), module, target}
-          )
-        else
-          state
-        end
+        notify_listeners(
+          state,
+          {:run, run_external_id},
+          {:stream_dependency, consumer_execution_external_id,
+           stream_external_id(stream_run_ext_id, step_number, index), module, target}
+        )
 
       state = flush_notifications(state)
 
@@ -4817,6 +4815,23 @@ defmodule Coflux.Orchestration.Server do
             {:targets, ws_ext_id},
             {:step, step.module, step.target, step.type, run.external_id, step.number, attempt}
           )
+
+        # Announce the stream waits `rerun_step` recorded. They are lineage
+        # edges against an execution that hasn't run yet, so without this
+        # nothing announces them until it subscribes — and it may never get
+        # that far. A topic opened later reads them from the snapshot.
+        state =
+          Enum.reduce(stream_waits, state, fn {stream_ref_id, _sequence}, state ->
+            {:ok, {stream_run_ext_id, stream_step_number, index, module, target}} =
+              Streams.get_stream_ref(state.db, stream_ref_id)
+
+            notify_listeners(
+              state,
+              {:run, run.external_id},
+              {:stream_dependency, execution_external_id,
+               stream_external_id(stream_run_ext_id, stream_step_number, index), module, target}
+            )
+          end)
 
         # Notify run topic about input dependencies for this execution
         state =
