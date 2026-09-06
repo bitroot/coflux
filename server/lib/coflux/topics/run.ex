@@ -76,7 +76,7 @@ defmodule Coflux.Topics.Run do
   defp process_notification(
          topic,
          {:execution, step_number, attempt, execution_external_id, workspace_external_id,
-          created_at, execute_after, dependencies, created_by, checkpoints}
+          created_at, execute_after, dependencies, created_by, checkpoints, pending_dependencies}
        ) do
     if workspace_external_id in topic.state.workspace_ids do
       Topic.set(
@@ -100,7 +100,11 @@ defmodule Coflux.Topics.Run do
           assets: %{},
           dependencies:
             Map.new(dependencies, fn {dependency_id, dependency} ->
-              {dependency_id, build_dependency(dependency)}
+              {dependency_id,
+               build_dependency(
+                 dependency,
+                 MapSet.member?(pending_dependencies, dependency_id)
+               )}
             end),
           children: [],
           inputs: %{},
@@ -162,11 +166,25 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
+  # Which dependencies the execution is still waiting on. Sent as the whole
+  # set rather than a delta: a result that redirects (to a suspend's
+  # successor, say) clears a dependency keyed by the execution originally
+  # referenced, so there's no dependable one-to-one between what resolved
+  # and which entry it releases.
   defp process_notification(
          topic,
-         {:result_dependency, execution_external_id, dependency_id, dependency}
+         {:pending_dependencies, execution_external_id, pending}
        ) do
-    dependency = build_dependency(dependency)
+    set_pending_dependencies(topic, execution_external_id, fn dependency_id ->
+      MapSet.member?(pending, dependency_id)
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:result_dependency, execution_external_id, dependency_id, dependency, pending}
+       ) do
+    dependency = build_dependency(dependency, pending)
 
     update_execution(
       topic,
@@ -183,9 +201,15 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:stream_dependency, execution_external_id, stream_id, module, target}
+         {:stream_dependency, execution_external_id, stream_id, module, target, pending}
        ) do
-    dependency = %{type: "stream", streamId: stream_id, module: module, target: target}
+    dependency = %{
+      type: "stream",
+      streamId: stream_id,
+      module: module,
+      target: target,
+      pending: pending
+    }
 
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.merge(topic, base_path ++ [:dependencies, stream_id], dependency)
@@ -217,7 +241,8 @@ defmodule Coflux.Topics.Run do
          topic,
          {:completion, execution_external_id, kind, successor, completion_at}
        ) do
-    update_execution(topic, execution_external_id, fn topic, base_path ->
+    topic
+    |> update_execution(execution_external_id, fn topic, base_path ->
       topic
       |> Topic.set(base_path ++ [:completedAt], completion_at)
       |> Topic.set(base_path ++ [:completion], %{
@@ -225,6 +250,9 @@ defmodule Coflux.Topics.Run do
         successor: successor
       })
     end)
+    # Nothing is outstanding once the execution has finished, whatever state
+    # its dependencies are in - the rule the snapshot applies too.
+    |> set_pending_dependencies(execution_external_id, fn _ -> false end)
   end
 
   defp process_notification(topic, {:checkpoints, execution_external_id, checkpoints}) do
@@ -328,27 +356,30 @@ defmodule Coflux.Topics.Run do
 
   defp process_notification(
          topic,
-         {:input_dependency, execution_external_id, input_external_id, title, response_type}
+         {:input_dependency, execution_external_id, input_external_id, title, response_type,
+          pending}
        ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:dependencies, input_external_id], %{
         type: "input",
         inputId: input_external_id,
         title: title,
-        status: response_type
+        status: response_type,
+        pending: pending
       })
     end)
   end
 
   defp process_notification(
          topic,
-         {:asset_dependency, execution_external_id, asset_external_id, asset}
+         {:asset_dependency, execution_external_id, asset_external_id, asset, pending}
        ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
       Topic.set(topic, base_path ++ [:dependencies, asset_external_id], %{
         type: "asset",
         assetId: asset_external_id,
-        asset: build_asset(asset)
+        asset: build_asset(asset),
+        pending: pending
       })
     end)
   end
@@ -381,6 +412,27 @@ defmodule Coflux.Topics.Run do
             [:steps, step_id, :executions, attempt, :inputs, input_external_id, :status],
             response_type
           )
+        else
+          topic
+        end
+      end)
+    end)
+  end
+
+  defp set_pending_dependencies(topic, execution_external_id, pending?) do
+    Enum.reduce(topic.value.steps, topic, fn {step_id, step}, topic ->
+      Enum.reduce(step.executions, topic, fn {attempt, execution}, topic ->
+        if execution.executionId == execution_external_id do
+          execution
+          |> Map.get(:dependencies, %{})
+          |> Map.keys()
+          |> Enum.reduce(topic, fn dependency_id, topic ->
+            Topic.set(
+              topic,
+              [:steps, step_id, :executions, attempt, :dependencies, dependency_id, :pending],
+              pending?.(dependency_id)
+            )
+          end)
         else
           topic
         end
@@ -459,7 +511,11 @@ defmodule Coflux.Topics.Run do
                       Map.new(execution.assets, fn {external_asset_id, asset} ->
                         {external_asset_id, build_asset(asset)}
                       end),
-                    dependencies: build_dependencies(execution.dependencies),
+                    dependencies:
+                      build_dependencies(
+                        execution.dependencies,
+                        Map.get(execution, :pending_dependencies, MapSet.new())
+                      ),
                     children: Enum.map(execution.children, &build_child(&1, run.external_id)),
                     inputs: Map.get(execution, :inputs, %{}),
                     result: build_result(execution.result, execution.result_created_by),
@@ -490,26 +546,55 @@ defmodule Coflux.Topics.Run do
     }
   end
 
-  defp build_dependencies(dependencies) do
+  # `pending` marks a dependency the execution is still waiting on. It's
+  # carried per entry rather than as a count so the graph can point at the
+  # one that's holding a step back.
+  defp build_dependencies(dependencies, pending) do
     Map.new(dependencies, fn
       {id, {:result, execution}} ->
-        {id, %{type: "result", execution: build_execution(execution)}}
+        {id,
+         %{
+           type: "result",
+           execution: build_execution(execution),
+           pending: MapSet.member?(pending, id)
+         }}
 
       {id, {:input, title, status}} ->
-        {id, %{type: "input", inputId: id, title: title, status: status}}
+        {id,
+         %{
+           type: "input",
+           inputId: id,
+           title: title,
+           status: status,
+           pending: MapSet.member?(pending, id)
+         }}
 
       {id, {:asset, asset}} ->
-        {id, %{type: "asset", assetId: id, asset: build_asset(asset)}}
+        {id,
+         %{
+           type: "asset",
+           assetId: id,
+           asset: build_asset(asset),
+           pending: MapSet.member?(pending, id)
+         }}
 
       {id, {:stream, stream_id, module, target}} ->
-        {id, %{type: "stream", streamId: stream_id, module: module, target: target}}
+        {id,
+         %{
+           type: "stream",
+           streamId: stream_id,
+           module: module,
+           target: target,
+           pending: MapSet.member?(pending, id)
+         }}
     end)
   end
 
-  defp build_dependency(execution) do
+  defp build_dependency(execution, pending) do
     %{
       type: "result",
-      execution: build_execution(execution)
+      execution: build_execution(execution),
+      pending: pending
     }
   end
 

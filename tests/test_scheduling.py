@@ -109,6 +109,63 @@ def test_wait_for(worker):
         assert ctx.result(run_id)["value"]["data"] == "all done"
 
 
+def test_pending_dependencies_exposed_in_run_topic(worker):
+    """The run topic marks the dependencies an execution is still waiting on."""
+    targets = [
+        workflow("test", "main"),
+        task("test", "producer"),
+        task("test", "consumer", parameters=["data"], wait_for=[0]),
+    ]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        ref_a = ex0.conn.submit_task(ex0.execution_id, "test", "producer", [])
+        consumer_args = [
+            {
+                "type": "inline",
+                "format": "json",
+                "value": None,
+                "references": [["execution", ref_a]],
+            }
+        ]
+        ex0.conn.submit_task(
+            ex0.execution_id, "test", "consumer", consumer_args, wait_for=[0]
+        )
+
+        ex1 = ctx.executor.next_execute()
+        assert ex1.target == "producer"
+
+        # The consumer is held behind the producer. That gate comes from a
+        # wait_for argument reference rather than a recorded dependency, but
+        # it still shows up among the dependencies, marked pending.
+        steps = ctx.inspect(run_id)["steps"]
+        producer_id = next(s for s in steps.values() if s["target"] == "producer")[
+            "executions"
+        ]["1"]["executionId"]
+        consumer = next(s for s in steps.values() if s["target"] == "consumer")
+        dependency = consumer["executions"]["1"]["dependencies"][producer_id]
+        assert dependency["type"] == "result"
+        assert dependency["pending"] is True
+
+        ex1.conn.complete(ex1.execution_id, value=42)
+
+        ex2 = ctx.executor.next_execute(timeout=5)
+        assert ex2.target == "consumer"
+
+        # Released once the producer has a result.
+        steps = ctx.inspect(run_id)["steps"]
+        consumer = next(s for s in steps.values() if s["target"] == "consumer")
+        released = consumer["executions"]["1"]["dependencies"][producer_id]
+        assert released["pending"] is False
+
+        ex2.conn.complete(ex2.execution_id, value="done")
+        ex0.conn.complete(ex0.execution_id, value="all done")
+        ctx.result(run_id)
+
+
 def test_wait_for_multiple_dependencies(worker):
     """Task with wait_for on two args waits for both referenced executions."""
     targets = [

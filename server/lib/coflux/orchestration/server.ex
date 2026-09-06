@@ -1402,7 +1402,7 @@ defmodule Coflux.Orchestration.Server do
          child_added: child_added
        }} ->
         # Compute and register pending dependencies for non-memoised executions
-        {state, pending_dependencies} =
+        {state, pending_dependencies, argument_dependencies, unresolved_dependencies} =
           if step_id && !memo_hit do
             wait_for = Keyword.get(opts, :wait_for) || []
 
@@ -1412,9 +1412,11 @@ defmodule Coflux.Orchestration.Server do
             state =
               register_pending_dependencies(state, execution_id, pending_dependencies)
 
-            {state, pending_dependencies}
+            {state, pending_dependencies,
+             build_argument_dependencies(state.db, step_id, wait_for),
+             unresolved_dependency_ids(state.db, execution_id)}
           else
-            {state, MapSet.new()}
+            {state, MapSet.new(), %{}, MapSet.new()}
           end
 
         group_id = Keyword.get(opts, :group_id)
@@ -1486,7 +1488,8 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               {:run, run.external_id},
               {:execution, step_number, attempt, execution_external_id, ws_ext_id, created_at,
-               execute_after, %{}, nil, enrich_checkpoints(checkpoints, state.db)}
+               execute_after, argument_dependencies, nil,
+               enrich_checkpoints(checkpoints, state.db), unresolved_dependencies}
             )
           else
             state
@@ -2195,7 +2198,7 @@ defmodule Coflux.Orchestration.Server do
           state,
           {:run, run_external_id},
           {:stream_dependency, consumer_execution_external_id,
-           stream_external_id(stream_run_ext_id, step_number, index), module, target}
+           stream_external_id(stream_run_ext_id, step_number, index), module, target, false}
         )
 
       state = flush_notifications(state)
@@ -2421,7 +2424,7 @@ defmodule Coflux.Orchestration.Server do
               state,
               {:run, run_external_id},
               {:asset_dependency, from_execution_external_id, asset_external_id,
-               {asset_name, total_count, total_size, entry}}
+               {asset_name, total_count, total_size, entry}, false}
             )
           else
             state
@@ -4754,6 +4757,14 @@ defmodule Coflux.Orchestration.Server do
         state =
           register_pending_dependencies(state, execution_id, pending_dependencies)
 
+        dependencies =
+          Map.merge(
+            build_argument_dependencies(state.db, step.id, step.wait_for),
+            dependencies
+          )
+
+        unresolved_dependencies = unresolved_dependency_ids(state.db, execution_id)
+
         step_requires =
           if step.requires_tag_set_id do
             {:ok, tag_set} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
@@ -4794,7 +4805,8 @@ defmodule Coflux.Orchestration.Server do
           |> notify_listeners(
             {:run, run.external_id},
             {:execution, step.number, attempt, execution_external_id, ws_ext_id, created_at,
-             execute_after, dependencies, principal, enrich_checkpoints(checkpoints, state.db)}
+             execute_after, dependencies, principal, enrich_checkpoints(checkpoints, state.db),
+             unresolved_dependencies}
           )
           |> notify_listeners(
             {:modules, ws_ext_id},
@@ -4829,7 +4841,11 @@ defmodule Coflux.Orchestration.Server do
               state,
               {:run, run.external_id},
               {:stream_dependency, execution_external_id,
-               stream_external_id(stream_run_ext_id, stream_step_number, index), module, target}
+               stream_external_id(stream_run_ext_id, stream_step_number, index), module, target,
+               MapSet.member?(
+                 unresolved_dependencies,
+                 stream_external_id(stream_run_ext_id, stream_step_number, index)
+               )}
             )
           end)
 
@@ -4854,7 +4870,7 @@ defmodule Coflux.Orchestration.Server do
                   state,
                   {:run, run.external_id},
                   {:input_dependency, execution_external_id, input_ext_id, input_title,
-                   response_type}
+                   response_type, MapSet.member?(unresolved_dependencies, input_ext_id)}
                 )
 
               _ ->
@@ -5694,15 +5710,27 @@ defmodule Coflux.Orchestration.Server do
 
                dependencies =
                  Map.merge(
-                   result_deps,
+                   build_argument_dependencies(db, step.id, step.wait_for),
                    Map.merge(
-                     stream_deps,
+                     result_deps,
                      Map.merge(
-                       Map.get(input_deps_by_execution, execution_id, %{}),
-                       Map.get(asset_deps_by_execution, execution_id, %{})
+                       stream_deps,
+                       Map.merge(
+                         Map.get(input_deps_by_execution, execution_id, %{}),
+                         Map.get(asset_deps_by_execution, execution_id, %{})
+                       )
                      )
                    )
                  )
+
+               # Nothing is outstanding for an execution that has finished:
+               # it isn't waiting on anything any more, whatever state its
+               # dependencies are in. Skipping those also keeps a large
+               # finished run's snapshot from re-deriving every dependency.
+               pending_dependencies =
+                 if completed_at,
+                   do: MapSet.new(),
+                   else: unresolved_dependency_ids(db, execution_id)
 
                {:ok, {checkpoints_before, checkpoints_after}} =
                  Checkpoints.get_execution_snapshots(
@@ -5727,6 +5755,7 @@ defmodule Coflux.Orchestration.Server do
                   groups: execution_groups,
                   assets: assets,
                   dependencies: dependencies,
+                  pending_dependencies: pending_dependencies,
                   inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
                   result: result,
                   result_created_by: result_created_by,
@@ -7615,9 +7644,11 @@ defmodule Coflux.Orchestration.Server do
     |> Enum.reject(&is_nil/1)
   end
 
-  # Send a queue notification with the current pending dependencies for an execution.
-  # Converts tagged dependency keys to external IDs.
-  defp notify_queue_dependencies(state, execution_id, pending_dependency_ids) do
+  # Send a notification with the current pending dependencies for an execution.
+  # The queue lists the executions being waited on, as external IDs; the run
+  # only needs the number of gates left, so input and stream waits count
+  # there even though the queue drops them.
+  defp notify_pending_dependencies(state, execution_id, pending_dependency_ids) do
     case Runs.get_execution_key(state.db, execution_id) do
       {:ok, {r, s, a}} ->
         execution_ext_id = execution_external_id(r, s, a)
@@ -7628,10 +7659,15 @@ defmodule Coflux.Orchestration.Server do
         {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
         ws_ext_id = workspace_external_id(state, workspace_id)
 
-        notify_listeners(
-          state,
+        state
+        |> notify_listeners(
           {:queue, ws_ext_id},
           {:dependencies, execution_ext_id, dependency_ext_ids}
+        )
+        |> notify_listeners(
+          {:run, r},
+          {:pending_dependencies, execution_ext_id,
+           unresolved_dependency_ids(state.db, execution_id)}
         )
 
       {:error, _} ->
@@ -7680,6 +7716,122 @@ defmodule Coflux.Orchestration.Server do
 
       register_pending_dependencies(state, execution.execution_id, pending_dependencies)
     end)
+  end
+
+  # The execution references carried by the arguments named in `wait_for`,
+  # as {run_external_id, step_number, attempt}. These gate the execution
+  # before it ever runs, but live in the step's arguments rather than the
+  # dependency table, so nothing else surfaces them.
+  defp argument_reference_keys(db, step_id, wait_for) do
+    if wait_for && wait_for != [] do
+      {:ok, arguments} = Runs.get_step_arguments(db, step_id)
+
+      wait_for
+      |> Enum.flat_map(fn index ->
+        case Enum.at(arguments, index) do
+          {:raw, _, references} -> references
+          {:blob, _, _, references} -> references
+          nil -> []
+        end
+      end)
+      |> Enum.flat_map(fn
+        {:execution, run_ext, step_num, attempt} -> [{run_ext, step_num, attempt}]
+        _ -> []
+      end)
+      |> Enum.uniq()
+    else
+      []
+    end
+  end
+
+  # Those same references, shaped as run topic dependencies.
+  defp build_argument_dependencies(db, step_id, wait_for) do
+    db
+    |> argument_reference_keys(step_id, wait_for)
+    |> Map.new(fn {run_ext, step_num, attempt} ->
+      ext_id = execution_external_id(run_ext, step_num, attempt)
+
+      {module, target} =
+        case Runs.get_module_target(db, run_ext, step_num, attempt) do
+          {:ok, {m, t}} -> {m, t}
+          {:ok, nil} -> {nil, nil}
+        end
+
+      {ext_id, {:result, {ext_id, module, target}}}
+    end)
+  end
+
+  # Whether the execution these coordinates name has produced a result,
+  # following redirects (a suspend's successor, a spawn's target) the way
+  # the assignment gate does.
+  defp execution_result_pending?(db, run_ext, step_num, attempt) do
+    case Runs.get_execution_id(db, run_ext, step_num, attempt) do
+      {:ok, {execution_id}} when not is_nil(execution_id) ->
+        match?({:pending, _}, resolve_result(db, execution_id))
+
+      _ ->
+        false
+    end
+  end
+
+  # Which of an execution's dependencies are still outstanding, keyed as the
+  # run topic's dependency map is. Related to `pending_dependencies` but not
+  # the same thing: that's the assignment gate, computed once and amended as
+  # dependencies clear, whereas this is re-derived per dependency for
+  # display. A completed execution reports nothing - it isn't waiting on
+  # anything any more, whatever state its dependencies are in.
+  defp unresolved_dependency_ids(db, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(db, execution_id)
+
+    recorded_keys =
+      case Runs.get_result_dependencies(db, execution_id) do
+        {:ok, dependencies} ->
+          Enum.map(dependencies, fn {ref_id} ->
+            {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
+            {run_ext, step_num, attempt}
+          end)
+      end
+
+    execution_ids =
+      (recorded_keys ++ argument_reference_keys(db, step.id, step.wait_for))
+      |> Enum.uniq()
+      |> Enum.filter(fn {run_ext, step_num, attempt} ->
+        execution_result_pending?(db, run_ext, step_num, attempt)
+      end)
+      |> MapSet.new(fn {run_ext, step_num, attempt} ->
+        execution_external_id(run_ext, step_num, attempt)
+      end)
+
+    input_ids =
+      case Runs.get_input_dependencies(db, execution_id) do
+        {:ok, deps} ->
+          deps
+          |> Enum.reject(fn {input_id} -> Inputs.is_input_responded?(db, input_id) end)
+          |> MapSet.new(fn {input_id} ->
+            {:ok, run_ext, number} = Inputs.get_input_run_and_number(db, input_id)
+            input_external_id(run_ext, number)
+          end)
+      end
+
+    stream_ids =
+      case Streams.get_wait_dependencies(db, execution_id) do
+        {:ok, waits} ->
+          waits
+          |> Enum.filter(fn {stream_ref_id, sequence} ->
+            case resolve_stream_ref_id(db, stream_ref_id) do
+              {:ok, stream_id} -> !stream_reached?(db, stream_id, sequence)
+              {:error, :not_found} -> false
+            end
+          end)
+          |> MapSet.new(fn {stream_ref_id, _sequence} ->
+            {:ok, {run_ext, step_number, index, _module, _target}} =
+              Streams.get_stream_ref(db, stream_ref_id)
+
+            stream_external_id(run_ext, step_number, index)
+          end)
+      end
+
+    execution_ids |> MapSet.union(input_ids) |> MapSet.union(stream_ids)
   end
 
   # Compute the set of execution IDs that the given execution is waiting on.
@@ -8038,7 +8190,7 @@ defmodule Coflux.Orchestration.Server do
                   put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
                 end
               end)
-              |> notify_queue_dependencies(waiter_id, updated)
+              |> notify_pending_dependencies(waiter_id, updated)
 
             :error ->
               state
@@ -8112,7 +8264,7 @@ defmodule Coflux.Orchestration.Server do
                   put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
                 end
               end)
-              |> notify_queue_dependencies(waiter_id, updated)
+              |> notify_pending_dependencies(waiter_id, updated)
 
             :error ->
               state
@@ -8264,7 +8416,8 @@ defmodule Coflux.Orchestration.Server do
             notify_listeners(
               state,
               {:run, run_external_id},
-              {:result_dependency, from_execution_external_id, dep_ext_id, dependency}
+              {:result_dependency, from_execution_external_id, dep_ext_id, dependency,
+               match?({:pending, _}, resolve_result(state.db, execution_id))}
             )
           else
             state
@@ -8364,7 +8517,7 @@ defmodule Coflux.Orchestration.Server do
             |> notify_listeners(
               {:run, run_external_id},
               {:input_dependency, from_execution_external_id, input_external_id, title,
-               response_type}
+               response_type, is_nil(response_type)}
             )
             |> notify_listeners(
               {:inputs, ws_ext_id},

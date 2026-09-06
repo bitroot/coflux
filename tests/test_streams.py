@@ -2178,12 +2178,14 @@ def test_stream_dependency_reported_for_each_consumer_attempt(worker):
         prod_ex.conn.stream_close(prod_ex.execution_id, 0)
         prod_ex.conn.complete(prod_ex.execution_id, value="done")
 
+        # Both attempts have finished by now, so neither is still waiting.
         expected = {
             stream["id"]: {
                 "type": "stream",
                 "streamId": stream["id"],
                 "module": "test",
                 "target": "producer",
+                "pending": False,
             }
         }
         _, step = next(iter(ctx.inspect(cons_resp["runId"])["steps"].items()))
