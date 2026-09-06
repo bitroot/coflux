@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from coflux import protocol, streams
+from coflux.errors import Suspending
 from coflux.streams import StreamDriver
 
 
@@ -129,15 +130,48 @@ def test_suspend_inside_the_generator_sends_no_close(harness):
 
     def gen():
         yield "a"
-        # ``cf.suspend()`` ends the calling thread with SystemExit once the
-        # server has confirmed the suspension. The stream must be left
-        # paused for the resumed execution, not closed.
-        raise SystemExit(0)
+        # ``cf.suspend()`` raises ``Suspending`` at the suspend point; the
+        # handshake happens later, on the executor thread. The stream must
+        # be left paused for the resumed execution, not closed.
+        raise Suspending(1234)
 
     driver.register(gen(), buffer=None)
     driver.wait_all()
 
     assert h.appends == [(0, 0, "a")]
+    assert h.closes == []
+    # Recorded for the executor to complete once every driver has stopped.
+    assert driver.take_suspension() == (1234, None)
+    # Claimed exactly once.
+    assert driver.take_suspension() is None
+
+
+def test_suspend_stops_sibling_generators(harness):
+    """One generator suspending winds the others down, so ``wait_all``
+    returns rather than waiting on producers that would never stop."""
+    h = harness({"id": "run1:2_0", "index": 0, "head": -1})
+    driver = StreamDriver("run1:2:1")
+
+    started = threading.Event()
+
+    def sibling():
+        yield "sibling"
+        started.set()
+        while True:
+            # Would run forever if nothing closed it.
+            yield "more"
+
+    def suspending():
+        started.wait(timeout=5)
+        raise Suspending(None)
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    driver.register(sibling(), buffer=None)
+    driver.register(suspending(), buffer=None)
+    driver.wait_all()
+
+    assert driver.take_suspension() == (None, None)
+    # Neither stream was closed — both are paused for the resumed execution.
     assert h.closes == []
 
 

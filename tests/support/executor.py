@@ -236,9 +236,13 @@ class ExecutorConnection:
         )
         return self._request(msg)
 
-    def suspend(self, execution_id, execute_after=None):
-        """Suspend the current execution."""
-        msg = protocol.suspend_request(None, execution_id, execute_after)
+    def suspend(self, execution_id, execute_after=None, stream_wait=None):
+        """Suspend the current execution.
+
+        ``stream_wait`` is a ``(stream_id, sequence)`` pair gating the
+        successor on that stream reaching the sequence, or closing.
+        """
+        msg = protocol.suspend_request(None, execution_id, execute_after, stream_wait)
         return self._request(msg)
 
     def checkpoint_set(self, execution_id, **values):

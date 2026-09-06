@@ -340,11 +340,24 @@ def request_upload_blob(
     )
 
 
-def request_suspend(execution_id: str, execute_after: int | None = None) -> int:
-    """Request to suspend execution."""
+def request_suspend(
+    execution_id: str,
+    execute_after: int | None = None,
+    stream_wait: tuple[str, int] | None = None,
+) -> int:
+    """Request to suspend execution.
+
+    ``stream_wait`` is a ``(stream_id, sequence)`` pair for a consumer that
+    suspended partway through iterating: the successor is held until the
+    stream reaches that sequence, or closes. Without it the successor is
+    scheduled on ``execute_after`` alone.
+    """
     params: dict[str, Any] = {"execution_id": execution_id}
     if execute_after is not None:
         params["execute_after"] = execute_after
+    if stream_wait is not None:
+        stream_id, sequence = stream_wait
+        params["stream_wait"] = {"stream_id": stream_id, "sequence": sequence}
     return get_protocol().send_request("suspend", params)
 
 

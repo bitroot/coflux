@@ -38,11 +38,20 @@ cursor = cf.Checkpoint("cursor", default=0)
 The name identifies storage scoped to the step, so declaring the handle at module level is fine — it isn't module state.
 
 ```python
-cursor.get()        # the current value, or the default if unset
-cursor.set(value)   # replace the value
-cursor.reset()      # clear it, so get() returns the default again
-cursor.is_set()     # whether it has a value
+cursor.get()          # the current value, or the default if unset
+cursor.set(value)     # replace the value
+cursor.update(fn)     # set it to fn(current), and return that
+cursor.reset()        # clear it, so get() returns the default again
+cursor.is_set()       # whether it has a value
 ```
+
+`update` is the read-modify-write most checkpoints do — advancing a cursor, accumulating a total — without naming the old value:
+
+```python
+n = count.update(lambda x: x + 1)
+```
+
+`fn` receives the declared default when the checkpoint isn't set, so an unset checkpoint needs no special case at the call site. It's a read then a write rather than an atomic swap, so if you share one checkpoint between a task body and a `cf.stream` generator, guard it yourself.
 
 Reads are served locally: the effective state arrives with the execution, and an execution always sees its own writes. Nothing round-trips to the server.
 
@@ -64,7 +73,7 @@ Writes are throttled and delivered in the background, so a crash can lose up to 
 
 In the polling example above, that means a crash may cause some orders to be fetched twice — which is fine, because `process_order` is submitted with the same arguments and can be memoized.
 
-Whatever has been written when an execution suspends, returns, or fails is always delivered before the next attempt starts. You only need to think about this for a side effect *within* an execution that must not be repeated. `cf.flush()` gives an explicit boundary:
+Whatever has been written when an execution suspends, returns, or fails is delivered before the next attempt starts — with one deliberate exception, described under [consistency](#consistency) below. You only need to think about this for a side effect *within* an execution that must not be repeated. `cf.flush()` gives an explicit boundary:
 
 ```python
 cursor.set(next_cursor)
@@ -73,6 +82,14 @@ send_notification()
 ```
 
 `cf.flush()` returns once the server has acknowledged the write.
+
+## Consistency
+
+A step's checkpoints are one snapshot of its progress rather than a set of independent cells: whatever has been written is delivered as a single delta and applied at once. Deltas are only cut where the execution could resume from — never part-way through consuming something a replay can't re-read.
+
+That's what keeps state derived from a [stream](./streams.md) honest. A checkpoint written in the loop body is published in the same delta as the cursor advance that consumes the item, so a running total never counts an item the cursor says was never read. If the iteration doesn't finish — a `break`, an exception, a lost worker — the item stays unconsumed and the writes derived from it are dropped, because the next attempt reads that item again.
+
+A replay therefore repeats whole items rather than fractions of one. That isn't exactly-once: the item *is* delivered again, so anything else the loop body did happens again too. [Memoize](./memoizing.md) what it calls.
 
 ## Scope
 
@@ -83,6 +100,10 @@ A checkpoint belongs to the step that actually executes. A step resolved from th
 :::warning
 Checkpoints are scoped to a step within a run, so a recurring workflow keeps its checkpoints for as long as its run is alive — across every recurrence, retry and suspension. But if recurrence stops (retries are exhausted, the task returns a non-`None` value, or the run is cancelled), submitting the workflow again creates a new run with a fresh step, which starts from the declared defaults.
 :::
+
+## Reserved names
+
+Names starting with an underscore belong to the adapter, and `cf.Checkpoint("_...")` raises. They're currently used for the cursors behind [stream](./streams.md) suspension, which track how far a consumer has read; you'll see them alongside your own in Studio. The Python variable name is unrestricted — only the checkpoint's name matters, so `_cursor = cf.Checkpoint("cursor")` is fine.
 
 ## Size
 

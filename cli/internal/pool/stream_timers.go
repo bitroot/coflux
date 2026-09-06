@@ -27,6 +27,12 @@ type streamKey struct {
 type streamTimer struct {
 	timeout time.Duration
 	timer   *time.Timer
+	// paused while every consumer of this stream is suspended waiting on
+	// it. Their nap is not the producer being idle — the mirror of the
+	// rule that a suspended producer's own pause doesn't count — and
+	// without this a lockstep producer would be timed out by the very
+	// consumers waiting for it.
+	paused bool
 }
 
 // streamTimers is a concurrency-safe registry of active stream timers
@@ -66,14 +72,35 @@ func (s *streamTimers) Register(key streamKey, timeoutMs int) {
 	s.mu.Unlock()
 }
 
+// SetPaused stops or restarts a stream's countdown. Pausing leaves the
+// entry in place so a later append or close still finds it; resuming
+// starts a fresh full-length window rather than resuming a partial one,
+// which is the same thing a resumed producer gets.
+func (s *streamTimers) SetPaused(key streamKey, paused bool) {
+	s.mu.Lock()
+	st, ok := s.timers[key]
+	if ok {
+		st.paused = paused
+	}
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	st.timer.Stop()
+	if !paused {
+		st.timer.Reset(st.timeout)
+	}
+}
+
 // Reset restarts the countdown for a stream. No-op if no timer was
 // registered (stream has no timeout configured, or was already
-// cleared).
+// cleared), or while it is paused.
 func (s *streamTimers) Reset(key streamKey) {
 	s.mu.Lock()
 	st, ok := s.timers[key]
+	paused := ok && st.paused
 	s.mu.Unlock()
-	if !ok {
+	if !ok || paused {
 		return
 	}
 	// time.Timer.Reset is safe to call on a timer that has already

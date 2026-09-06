@@ -18,7 +18,11 @@ def _target(
         "module": module,
         "name": name,
         "type": type,
-        "parameters": [{"name": p} for p in (parameters or [])],
+        # A parameter is either a name, or a dict for one carrying a default
+        # (JSON-encoded, as the adapter reports it).
+        "parameters": [
+            {"name": p} if isinstance(p, str) else dict(p) for p in (parameters or [])
+        ],
     }
     if retries is not None:
         target["retries"] = retries

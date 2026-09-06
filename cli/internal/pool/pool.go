@@ -27,7 +27,7 @@ type ExecutionHandler interface {
 	// UploadBlob uploads a local file as a blob
 	UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error)
 	// Suspend suspends an execution
-	Suspend(ctx context.Context, executionID string, executeAfter *int64) error
+	Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait) error
 	// Cancel cancels one or more handles (executions and/or inputs)
 	Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error
 	// RegisterGroup registers a group for organizing child executions
@@ -194,6 +194,14 @@ func (p *Pool) spawnExecutor(ctx context.Context) (*adapter.Executor, error) {
 	}
 
 	return exec, nil
+}
+
+// SetStreamTimerPaused stops or restarts a producer stream's idle
+// countdown. The server pauses it while every consumer of the stream is
+// suspended waiting on it, so a consumer's nap can't time out the
+// producer it is waiting for.
+func (p *Pool) SetStreamTimerPaused(executionID string, index int, paused bool) {
+	p.streamTimers.SetPaused(streamKey{executionID, index}, paused)
 }
 
 // Execute runs a target. Uses a warm executor if available, otherwise spawns
@@ -828,7 +836,7 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		// suspension, so anything still buffered has to land first — otherwise
 		// it resumes from a stale checkpoint.
 		p.flushCheckpoints(ctx, req.ExecutionID, "suspend", logger)
-		if err := p.handler.Suspend(ctx, req.ExecutionID, req.ExecuteAfter); err != nil {
+		if err := p.handler.Suspend(ctx, req.ExecutionID, req.ExecuteAfter, req.StreamWait); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "suspend_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}

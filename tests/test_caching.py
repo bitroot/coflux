@@ -282,3 +282,49 @@ def test_run_level_memo_inherited_by_child_tasks(worker):
 
         ex0.conn.complete(ex0.execution_id, value="done")
         assert ctx.result(run_id)["value"]["data"] == "done"
+
+
+def test_submit_fills_in_omitted_defaults(worker):
+    """A workflow submitted without its trailing defaults records them anyway.
+
+    Adapters bind their own defaults before submitting, so a submission that
+    arrives without a signature to bind against - the CLI here - is padded
+    from the manifest. Otherwise the same call keys differently depending on
+    whether the default was spelled out.
+    """
+    targets = [
+        workflow(
+            "test",
+            "main",
+            parameters=["x", {"name": "y", "default": "1"}, {"name": "z", "default": "2"}],
+        ),
+    ]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "main", "42")
+
+        ex = ctx.executor.next_execute()
+        assert [a["value"] for a in ex.arguments] == [42, 1, 2]
+
+        ex.conn.complete(ex.execution_id, value="done")
+        assert ctx.result(resp["runId"])["value"]["data"] == "done"
+
+
+def test_submit_keeps_explicit_values(worker):
+    """Padding only fills in what was left out."""
+    targets = [
+        workflow(
+            "test",
+            "main",
+            parameters=["x", {"name": "y", "default": "1"}, {"name": "z", "default": "2"}],
+        ),
+    ]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "main", "42", "9")
+
+        ex = ctx.executor.next_execute()
+        assert [a["value"] for a in ex.arguments] == [42, 9, 2]
+
+        ex.conn.complete(ex.execution_id, value="done")
+        assert ctx.result(resp["runId"])["value"]["data"] == "done"

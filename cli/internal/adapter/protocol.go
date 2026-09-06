@@ -117,8 +117,12 @@ type SelectResult struct {
 
 // SelectHandle identifies a single handle in a select call.
 type SelectHandle struct {
-	Type string `json:"type"` // "execution" or "input"
+	Type string `json:"type"` // "execution", "input" or "stream"
 	ID   string `json:"id"`
+	// Sequence is only meaningful for a "stream" handle: the absolute
+	// sequence the consumer is waiting for. Omitted for the others, which
+	// resolve on their own terms.
+	Sequence *int64 `json:"sequence,omitempty"`
 }
 
 // ReadyMessage is sent by executor when it's ready for work
@@ -256,6 +260,17 @@ type GetAssetResult struct {
 type SuspendParams struct {
 	ExecutionID  string `json:"execution_id"`
 	ExecuteAfter *int64 `json:"execute_after,omitempty"` // timestamp in ms
+	// StreamWait, when set, holds the successor until the stream reaches
+	// the given sequence (or closes) — a consumer that suspended partway
+	// through iterating, rather than one waiting on the clock.
+	StreamWait *StreamWait `json:"stream_wait,omitempty"`
+}
+
+// StreamWait names the stream and absolute sequence a suspended consumer
+// is waiting for.
+type StreamWait struct {
+	StreamID string `json:"stream_id"`
+	Sequence int64  `json:"sequence"`
 }
 
 // CancelParams for cancel request

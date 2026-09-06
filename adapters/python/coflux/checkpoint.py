@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Generic, TypeVar, overload
 
 from .state import get_context
 
 T = TypeVar("T")
+
+# Checkpoint names starting with this are the adapter's own. Reserved as a
+# namespace rather than name by name, so later internal state doesn't need
+# another round of this. Enforced here in ``Checkpoint`` rather than in the
+# context's checkpoint_get/set/reset, which are the path the adapter's own
+# cursors go through.
+RESERVED_PREFIX = "_"
 
 
 class Checkpoint(Generic[T]):
@@ -33,7 +41,13 @@ class Checkpoint(Generic[T]):
     a checkpoint as at-least-once and make the code that follows a read safe
     to re-run from it. ``cf.flush()`` gives an explicit boundary where that
     isn't good enough. Whatever is written before an execution suspends,
-    returns or fails is always delivered.
+    returns or fails is delivered.
+
+    Writes are cut into deltas only where the execution could resume from
+    them, so a checkpoint is always read back as part of a state the step was
+    actually in: one written while a stream item is in a loop body's hands is
+    published with the cursor advance that consumes it, and dropped if that
+    iteration never finishes.
 
     A checkpoint is not part of any cache, memo or defer key, and a step that
     resolves from the cache never runs and never sees one.
@@ -48,7 +62,8 @@ class Checkpoint(Generic[T]):
     nothing is enforced at runtime.
 
     Args:
-        name: Checkpoint name, unique within the step.
+        name: Checkpoint name, unique within the step. Can't start with
+            ``_`` — that prefix is reserved for adapter-managed state.
         default: Value returned when the checkpoint has never been set, or has
             been reset. Client-side only — the server never sees it.
     """
@@ -63,6 +78,12 @@ class Checkpoint(Generic[T]):
     # ``-> T`` on ``default`` and ``get()``, which it can't when ``T`` is
     # non-optional and no default was given.
     def __init__(self, name: str, *, default: Any = None) -> None:
+        if name.startswith(RESERVED_PREFIX):
+            raise ValueError(
+                f"checkpoint name {name!r} is reserved: names starting with"
+                f" {RESERVED_PREFIX!r} are used for adapter-managed state,"
+                " such as the cursors behind stream suspension"
+            )
         self._name = name
         self._default = default
 
@@ -92,6 +113,27 @@ class Checkpoint(Generic[T]):
     def set(self, value: T) -> None:
         """Set the value, replacing anything already there."""
         get_context().checkpoint_set(self._name, value)
+
+    def update(self, fn: Callable[[T], T]) -> T:
+        """Set the value to ``fn(current)``, and return what was stored.
+
+        The read-modify-write that most checkpoints do — advancing a
+        cursor, accumulating a total — without naming the old value::
+
+            n = count.update(lambda x: x + 1)
+
+        ``fn`` receives the declared default when the checkpoint isn't set,
+        exactly as ``get()`` would return it.
+
+        This is a read followed by a write, not an atomic swap: two threads
+        of one execution updating the same checkpoint can still lose one of
+        the updates. That only arises if you share a checkpoint across
+        threads — a task body and a ``cf.stream`` generator, say — in which
+        case guard it yourself.
+        """
+        value = fn(self.get())
+        self.set(value)
+        return value
 
     def reset(self) -> None:
         """Clear the checkpoint, so ``get()`` returns the declared default.
@@ -126,7 +168,9 @@ def flush() -> None:
         send_notification()
 
     Not needed before suspending, returning or raising — those are flushed
-    automatically.
+    automatically. Inside a stream loop body it also publishes what is being
+    held for the current item, ahead of the cursor advance that would
+    normally carry it.
     """
     get_context().flush()
 

@@ -425,6 +425,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	conn.RegisterHandler("stream_items", w.handleStreamItems)
 	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
 	conn.RegisterHandler("stream_demand", w.handleStreamDemand)
+	conn.RegisterHandler("stream_timer_pause", w.handleStreamTimerPause)
 	conn.SetOnSession(w.handleSession)
 
 	if err := conn.Connect(ctx); err != nil {
@@ -874,6 +875,31 @@ func (w *Worker) handleStreamDemand(params []any) error {
 	})
 }
 
+// handleStreamTimerPause stops or restarts a producer stream's idle
+// countdown. Params: [execution_id, index, paused]. The server pauses it
+// while every consumer of the stream is suspended waiting on it — their
+// nap is not the producer being idle, and without this a lockstep
+// producer would be timed out by the consumers waiting for it.
+func (w *Worker) handleStreamTimerPause(params []any) error {
+	if len(params) < 3 {
+		return fmt.Errorf("stream_timer_pause: insufficient params")
+	}
+	executionID, ok := params[0].(string)
+	if !ok {
+		return fmt.Errorf("stream_timer_pause: execution_id is not a string (got %T)", params[0])
+	}
+	index, ok := params[1].(float64)
+	if !ok {
+		return fmt.Errorf("stream_timer_pause: index is not a number (got %T)", params[1])
+	}
+	paused, ok := params[2].(bool)
+	if !ok {
+		return fmt.Errorf("stream_timer_pause: paused is not a bool (got %T)", params[2])
+	}
+	w.pool.SetStreamTimerPaused(executionID, int(index), paused)
+	return nil
+}
+
 func (w *Worker) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -1146,6 +1172,12 @@ func (w *Worker) Select(ctx context.Context, params *adapter.SelectParams) (*ada
 	case "ok":
 		valueArr, ok := resultMap["value"].([]any)
 		if !ok {
+			if _, present := resultMap["value"]; !present {
+				// A stream handle resolves without one: the answer is only
+				// "there is something, stop waiting", and the item itself
+				// reaches the consumer over its own subscription.
+				break
+			}
 			return nil, fmt.Errorf("ok status missing value tuple: %v", resultMap)
 		}
 		value, err := api.ParseValue(valueArr)
@@ -1323,12 +1355,20 @@ func (w *Worker) GetAsset(ctx context.Context, executionID string, assetID strin
 	return entriesMap, nil
 }
 
-func (w *Worker) Suspend(ctx context.Context, executionID string, executeAfter *int64) error {
+func (w *Worker) Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Python params: (execution_id, execute_after_ms)
+	// Params: (execution_id, execute_after_ms[, stream_wait]). The third is
+	// only sent when there is one, so the message stays the shape older
+	// servers expect.
+	if streamWait != nil {
+		return conn.Notify("suspend", executionID, executeAfter, map[string]any{
+			"stream_id": streamWait.StreamID,
+			"sequence":  streamWait.Sequence,
+		})
+	}
 	return conn.Notify("suspend", executionID, executeAfter)
 }
 

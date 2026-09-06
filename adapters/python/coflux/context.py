@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from . import protocol
 from .dispatcher import get_dispatcher
@@ -21,6 +21,7 @@ from .errors import (
     ExecutionCrashed,
     ExecutionTimeout,
     InputDismissed,
+    Suspending,
     create_execution_error,
 )
 from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
@@ -83,7 +84,10 @@ def _timeout_to_ms(timeout: float | dt.timedelta | None) -> int | None:
 _group_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_group_id", default=None
 )
-# Context variable for timeout tracking (not yet enforced)
+# Enclosing `cf.suspense` timeout. Read by `select` when deciding how long
+# to wait before suspending, and by stream subscriptions, where it also
+# switches on cursor tracking so a resumed execution carries on rather than
+# re-reading from the start.
 _timeout: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "_timeout", default=None
 )
@@ -126,6 +130,23 @@ class ExecutorContext:
         # guarded by ``self._lock``.
         self._checkpoint_wire: dict[str, Any] = {}
         self._checkpoint_values: dict[str, Any] = {}
+        # Writes held back until the execution is somewhere it could resume
+        # from. ``_checkpoint_holds`` counts the non-replayable inputs
+        # currently in the body's hands (see ``hold_checkpoints``); while it
+        # is non-zero, writes accumulate here instead of going on the wire.
+        # A name is either set or reset, never both — the later write
+        # replaces the earlier one, so the delta only describes the net
+        # effect, exactly as the worker-side throttle coalesces them.
+        self._checkpoint_holds = 0
+        self._checkpoint_pending_set: dict[str, Any] = {}
+        self._checkpoint_pending_reset: set[str] = set()
+        # Occurrence counts for auto-named stream cursors, so two loops
+        # over an identical view of the same stream get distinct
+        # checkpoints. Keyed by the content-addressed base name; the
+        # count is deterministic across attempts as long as subscriptions
+        # are opened in the same order, which is the determinism suspend
+        # already requires.
+        self._cursor_occurrences: dict[str, int] = {}
 
     def set_default_streams(self, streams: Streams | None) -> None:
         """Record the decorator's stream config so ``cf.stream(...)`` can
@@ -624,25 +645,136 @@ class ExecutorContext:
         with self._lock:
             self._checkpoint_values[name] = value
             self._checkpoint_wire.pop(name, None)
-        protocol.send_checkpoint_update(
-            self.execution_id, set_={name: serialize_value(value)}
-        )
+        # Serialised here rather than at publication time: the value is the
+        # one the caller passed, and holding a reference to a mutable object
+        # would record whatever it became later instead.
+        self._record_checkpoint_delta(set_={name: serialize_value(value)})
 
     def checkpoint_reset(self, name: str) -> None:
         with self._lock:
             self._checkpoint_values.pop(name, None)
             self._checkpoint_wire.pop(name, None)
-        protocol.send_checkpoint_update(self.execution_id, reset=[name])
+        self._record_checkpoint_delta(reset=[name])
+
+    def hold_checkpoints(self) -> None:
+        """Note that a non-replayable input is in the body's hands.
+
+        Checkpoint state is one snapshot of a step's progress rather than a
+        set of independent cells — the server stores an execution's row-set
+        as a complete snapshot and applies each delta in a transaction. What
+        decides whether that snapshot is *coherent* is where the deltas get
+        cut, and one cut at an arbitrary point describes a state the
+        execution was never in.
+
+        That only matters for state derived from something a replay can't
+        re-read. A result resolves again; a stream item does not — its
+        position lives in a cursor, and if the cursor and whatever the body
+        derived from the item reach the server separately, a crash in
+        between leaves the successor counting on from a position it never
+        actually reached.
+
+        So writes made while an item is in hand are held, and published in
+        the same delta as the cursor advance that retires it. The pair moves
+        together or not at all, and a replay repeats whole items rather than
+        fractions of one.
+
+        Balanced by ``release_checkpoints``. Nested holds — a body iterating
+        two streams — publish at the outermost release, the only point at
+        which every cursor involved is up to date.
+        """
+        with self._lock:
+            self._checkpoint_holds += 1
+
+    def release_checkpoints(self, *, publish: bool) -> None:
+        """Retire a hold taken by ``hold_checkpoints``.
+
+        ``publish`` says whether the item the hold covered was consumed. On
+        the way out of a completed iteration it is true, and the held writes
+        go out with the cursor advance. Where the item is abandoned instead
+        — ``break``, an exception, a dropped iterator — it is false: the
+        cursor was never advanced, so the item will be delivered again, and
+        anything derived from it must not be recorded or the replay counts
+        it twice.
+
+        Discarding drops the whole pending delta, including writes made
+        under an enclosing hold. That is not over-eager: an enclosing hold
+        means that iteration has not advanced its own cursor either, so
+        everything pending derives from an item that is still unconsumed.
+        """
+        with self._lock:
+            if not self._checkpoint_holds:
+                return
+            self._checkpoint_holds -= 1
+            held = self._checkpoint_holds
+            if not publish:
+                self._checkpoint_pending_set.clear()
+                self._checkpoint_pending_reset.clear()
+        if publish and not held:
+            self._publish_checkpoints()
+
+    def _record_checkpoint_delta(
+        self,
+        set_: dict[str, Any] | None = None,
+        reset: list[str] | None = None,
+    ) -> None:
+        """Put a write on the wire, or hold it for the next safe point."""
+        with self._lock:
+            if self._checkpoint_holds:
+                for name, value in (set_ or {}).items():
+                    self._checkpoint_pending_set[name] = value
+                    self._checkpoint_pending_reset.discard(name)
+                for name in reset or []:
+                    self._checkpoint_pending_reset.add(name)
+                    self._checkpoint_pending_set.pop(name, None)
+                return
+        protocol.send_checkpoint_update(self.execution_id, set_=set_, reset=reset)
+
+    def _publish_checkpoints(self) -> None:
+        """Send whatever is being held, as a single delta."""
+        with self._lock:
+            set_ = self._checkpoint_pending_set
+            reset = self._checkpoint_pending_reset
+            self._checkpoint_pending_set = {}
+            self._checkpoint_pending_reset = set()
+        if set_ or reset:
+            protocol.send_checkpoint_update(
+                self.execution_id,
+                set_=set_ or None,
+                # Sorted only so the delta is deterministic; the server
+                # applies the whole thing at once either way.
+                reset=sorted(reset) or None,
+            )
 
     def flush(self) -> None:
-        """Block until buffered state has reached the server."""
+        """Block until buffered state has reached the server.
+
+        Publishes anything currently held first. An explicit flush is the
+        caller declaring this point consistent, which is what makes it the
+        escape hatch for state that has to be durable before a side effect —
+        including inside a loop body, where the runtime would otherwise wait
+        for the iteration to end. The cursor advance is still to come at
+        that point, so a flush there deliberately records derived state
+        ahead of the position it came from.
+        """
+        self._publish_checkpoints()
         request_id = protocol.request_flush(self.execution_id)
         self._wait_response(request_id)
 
     def suspend_execution(
-        self, delay: float | dt.timedelta | dt.datetime | None = None
-    ) -> None:
-        """Suspend the current execution, optionally resuming after a delay."""
+        self,
+        delay: float | dt.timedelta | dt.datetime | None = None,
+        stream_wait: tuple[str, int] | None = None,
+    ) -> NoReturn:
+        """Signal that this execution should suspend.
+
+        Raises rather than performing the handshake here. The server
+        records a suspension as a completion, and a completed execution's
+        checkpoint writes are rejected — so everything that runs while the
+        body unwinds (``finally`` blocks, cancelled tasks, generator
+        cleanup) has to happen *before* the request is sent, or its state
+        is silently dropped. ``finish_suspension`` completes it once the
+        body is done.
+        """
         execute_after = None
         if isinstance(delay, dt.datetime):
             execute_after = int(delay.timestamp() * 1000)
@@ -657,11 +789,83 @@ class ExecutorContext:
                 ).timestamp()
                 * 1000
             )
-        request_id = protocol.request_suspend(self.execution_id, execute_after)
+        raise Suspending(execute_after, stream_wait)
+
+    def finish_suspension(
+        self,
+        execute_after: int | None,
+        stream_wait: tuple[str, int] | None = None,
+    ) -> None:
+        """Complete a suspension once the body has unwound. Never returns.
+
+        Stops any in-flight stream producers and joins their driver threads
+        first, so their cleanup runs while the execution is still live.
+
+        Winding the generators down does *not* close their streams: the
+        driver skips ``send_stream_close`` on ``GeneratorExit``, and the
+        server leaves a suspended execution's streams paused rather than
+        closing them, so the execution that resumes the step continues
+        them.
+
+        ``stream_wait`` gates the successor on a stream reaching a
+        sequence, for a consumer that suspended partway through iterating.
+        """
+        try:
+            self.close_streams()
+            self.wait_streams()
+        except Exception:  # noqa: BLE001, S110
+            # Best-effort teardown — the suspension below is what matters.
+            pass
+        request_id = protocol.request_suspend(
+            self.execution_id, execute_after, stream_wait
+        )
         self._wait_response(request_id)
         # Suspension confirmed. Block until the server aborts this execution.
         get_dispatcher().wait_closed()
         raise SystemExit(0)
+
+    def take_stream_suspension(
+        self,
+    ) -> tuple[int | None, tuple[str, int] | None] | None:
+        """Claim a suspension requested from inside a generator body.
+
+        Returns ``(execute_after, stream_wait)`` — either of which may
+        itself be ``None`` — or ``None`` when no generator asked to
+        suspend. The executor checks this after its streams have drained.
+        """
+        return self._stream_driver.take_suspension()
+
+    def stream_available(self, stream_id: str, sequence: int) -> bool:
+        """Whether ``stream_id`` has reached ``sequence``, or has closed.
+
+        The consumer can't answer this itself. Its queue is fed
+        asynchronously, so an empty one means "nothing has arrived yet",
+        not "the stream has nothing" — checking locally right after
+        subscribing always finds it empty, whatever the stream holds.
+
+        A poll, never a suspension: the server reports what it knows and
+        the decision of what to do about it stays here, so a suspension
+        still unwinds the body before the handshake.
+        """
+        request_id = protocol.request_select(
+            self.execution_id,
+            [{"type": "stream", "id": stream_id, "sequence": sequence}],
+            timeout_ms=0,
+            suspend=False,
+        )
+        return self._wait_response(request_id) is not None
+
+    @property
+    def suspense_timeout(self) -> float | None:
+        """The enclosing ``cf.suspense`` timeout, or ``None`` outside one."""
+        return _timeout.get()
+
+    def next_cursor_occurrence(self, name: str) -> int:
+        """Count of prior subscriptions in this execution sharing ``name``."""
+        with self._lock:
+            occurrence = self._cursor_occurrences.get(name, 0)
+            self._cursor_occurrences[name] = occurrence + 1
+            return occurrence
 
     def _parse_response(self, msg: dict) -> Any:
         """Extract the result from a response message, raising on error."""

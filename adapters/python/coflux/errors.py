@@ -5,6 +5,37 @@ from __future__ import annotations
 import importlib
 
 
+class Suspending(BaseException):
+    """Internal control-flow signal: this execution wants to suspend.
+
+    Raised at the suspend point — ``cf.suspend()``, or a wait expiring
+    inside a ``cf.suspense`` scope — and caught by the executor, or by the
+    stream driver when the suspend point is inside a generator body.
+
+    Derives from ``BaseException`` so a bare ``except Exception`` in user
+    code can't swallow a suspension, the same protection ``SystemExit``
+    provided before.
+
+    The handshake with the server deliberately happens *after* this has
+    unwound the body rather than at the suspend point. The server records
+    a suspension as a completion, and a completed execution's checkpoint
+    writes are rejected, so anything running during unwinding — ``finally``
+    blocks, cancelled tasks — has to happen while the execution is still
+    live. See ``ExecutorContext.finish_suspension``.
+    """
+
+    def __init__(
+        self,
+        execute_after: int | None = None,
+        stream_wait: tuple[str, int] | None = None,
+    ):
+        self.execute_after = execute_after
+        # (stream_id, sequence) when the suspension is waiting on a stream
+        # rather than the clock.
+        self.stream_wait = stream_wait
+        super().__init__("execution suspending")
+
+
 class ExecutionError(Exception):
     """Raised when a child execution failed.
 
