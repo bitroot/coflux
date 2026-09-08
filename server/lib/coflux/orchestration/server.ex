@@ -6137,13 +6137,32 @@ defmodule Coflux.Orchestration.Server do
   # Searches archived epochs across both tiers (unindexed, then indexed via Bloom).
   # `query_fn` receives an archive DB handle and returns `{:found, result}` or `:not_found`.
   # `bloom_fn` receives the epoch index and returns candidate epoch IDs.
+  # Query one archived epoch, treating an unreadable file as a miss.
+  #
+  # A corrupt archive opens cleanly — SQLite only reads the schema when a
+  # statement is prepared — so the failure lands inside the query, where
+  # `Store` matches on success. Without this, one bad file takes the
+  # project's orchestration server down on every lookup that reaches the
+  # archives, rather than costing that lookup one epoch's worth of rows.
+  defp query_epoch(state, epoch_id, archive_db, query_fn) do
+    query_fn.(archive_db)
+  rescue
+    error ->
+      Logger.error(
+        "Couldn't read archived epoch #{epoch_id} in project #{state.project_id}: " <>
+          Exception.message(error)
+      )
+
+      :not_found
+  end
+
   defp search_archived_epochs(state, query_fn, bloom_fn) do
     # Tier 1: Check unindexed DBs (always open, newest first)
     unindexed = Epochs.unindexed_dbs(state.epochs)
 
     result =
-      Enum.reduce_while(unindexed, :not_found, fn {_epoch_id, archive_db}, :not_found ->
-        case query_fn.(archive_db) do
+      Enum.reduce_while(unindexed, :not_found, fn {epoch_id, archive_db}, :not_found ->
+        case query_epoch(state, epoch_id, archive_db, query_fn) do
           {:found, _} = found -> {:halt, found}
           :not_found -> {:cont, :not_found}
         end
@@ -6167,7 +6186,7 @@ defmodule Coflux.Orchestration.Server do
           case Exqlite.Sqlite3.open(path) do
             {:ok, archive_db} ->
               try do
-                case query_fn.(archive_db) do
+                case query_epoch(state, epoch_id, archive_db, query_fn) do
                   {:found, _} = found -> {:halt, found}
                   :not_found -> {:cont, :not_found}
                 end

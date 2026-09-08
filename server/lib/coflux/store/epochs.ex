@@ -85,32 +85,42 @@ defmodule Coflux.Store.Epochs do
   function, so that the index always knows about all archived epochs.
 
   The current active file is renamed to the archive path and a fresh
-  active file is created. The old DB handle remains valid (Linux fd
-  semantics) and moves to the unindexed list.
+  active file is created. The archived database is reopened at its new
+  path and moves to the unindexed list.
 
-  Returns {:ok, new_epoch_state, old_db}.
+  Returns {:ok, new_epoch_state, archived_db}.
   """
   def rotate(%__MODULE__{} = state, epoch_id) do
     active = active_path(state.project_id, state.name)
     archive = Path.join(archive_dir(state.project_id, state.name), "#{epoch_id}.sqlite")
 
-    # Rename current active → archive (old fd remains valid)
+    # Close before renaming, and reopen at the path the file now has.
+    #
+    # A handle carried across the rename keeps the fd, but SQLite derives
+    # the journal path from the path the connection was *opened* with — so
+    # it would go on journalling to `active`, which by then holds the next
+    # epoch's database. The first read transaction on such a handle finds
+    # the successor's journal sitting at its own journal path, takes it for
+    # a hot journal, rolls those pages into the file its fd points at, and
+    # truncates that file to the size the journal header records. The
+    # archive ends up with its successor's page 1, truncated to its
+    # successor's length: "malformed database schema - invalid rootpage".
+    :ok = Sqlite3.close(state.active_db)
     :ok = File.rename(active, archive)
+    {:ok, archived_db} = Sqlite3.open(archive)
 
     # Create fresh active file
     {:ok, new_db} = Sqlite3.open(active)
     :ok = Migrations.run(new_db, state.name)
 
-    old_db = state.active_db
-
     new_state = %{
       state
       | active_db: new_db,
-        unindexed: state.unindexed ++ [{epoch_id, old_db}],
+        unindexed: state.unindexed ++ [{epoch_id, archived_db}],
         archived_ids: state.archived_ids ++ [epoch_id]
     }
 
-    {:ok, new_state, old_db}
+    {:ok, new_state, archived_db}
   end
 
   @doc """
