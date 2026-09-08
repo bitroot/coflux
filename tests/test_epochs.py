@@ -351,7 +351,7 @@ def test_asset_reference_across_epoch_boundary(isolated_server, tmp_path):
 
         asset_result = ex1.conn.persist_asset(
             ex1.execution_id,
-            [asset_file],
+            {"epoch_asset.txt": asset_file},
             metadata={"name": "epoch_asset"},
         )
         assert "asset_id" in asset_result

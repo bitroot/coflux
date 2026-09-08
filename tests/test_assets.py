@@ -31,7 +31,7 @@ def test_persist_and_get_asset(worker, tmp_path):
         # Persist the file as an asset
         asset_result = ex1.conn.persist_asset(
             ex1.execution_id,
-            [str(asset_file)],
+            {"asset.txt": str(asset_file)},
             metadata={"name": "my_asset"},
         )
         assert "asset_id" in asset_result
@@ -89,7 +89,7 @@ def test_asset_inspect_and_download(worker, tmp_path):
 
         asset_result = ex1.conn.persist_asset(
             ex1.execution_id,
-            [src_path],
+            {"data.txt": src_path},
             metadata={"name": "cli_test_asset"},
         )
         asset_id = asset_result["asset_id"]
@@ -126,3 +126,40 @@ def test_asset_inspect_and_download(worker, tmp_path):
         ctx.get_blob(blob_key, blob_output)
         with open(blob_output) as f:
             assert f.read() == "asset content for CLI test"
+
+
+def test_asset_entry_paths_are_not_flattened(worker, tmp_path):
+    """An asset holds a directory tree, so entries keep their own paths.
+
+    Two files can share a basename in different directories, which is why
+    the path within the asset is chosen by the caller rather than derived
+    from the file being uploaded.
+    """
+    targets = [workflow("test", "main"), task("test", "producer")]
+
+    with worker(targets, concurrency=2) as ctx:
+        ctx.submit("test", "main")
+
+        ex0 = ctx.executor.next_execute()
+        ref_prod = ex0.conn.submit_task(ex0.execution_id, "test", "producer", [])
+        ex1 = ctx.executor.next_execute()
+
+        first = tmp_path / "first.txt"
+        first.write_text("one")
+        second = tmp_path / "second.txt"
+        second.write_text("two")
+
+        asset_result = ex1.conn.persist_asset(
+            ex1.execution_id,
+            {"a/same.txt": str(first), "a/b/same.txt": str(second)},
+            metadata={"name": "tree"},
+        )
+        asset_id = asset_result["asset_id"]
+
+        ex1.conn.complete(ex1.execution_id, value="produced")
+        assert ex0.conn.resolve(ex0.execution_id, ref_prod)["value"] == "produced"
+
+        entries = ex0.conn.get_asset(ex0.execution_id, asset_id)["entries"]
+        assert sorted(entries) == ["a/b/same.txt", "a/same.txt"]
+        # Distinct content, so distinct blobs — neither overwrote the other.
+        assert entries["a/same.txt"][0] != entries["a/b/same.txt"][0]

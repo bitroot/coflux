@@ -1272,7 +1272,7 @@ func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputPar
 	return inputExternalID, nil
 }
 
-func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error) {
+func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths map[string]string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error) {
 	// Upload each file and create entries
 	// Server format: {path: [blob_key, size, metadata]}
 	entries := make(map[string][]any)
@@ -1282,8 +1282,10 @@ func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []s
 		entries[path] = entry
 	}
 
-	// Upload local files
-	for _, path := range paths {
+	// Upload local files. The key is the path within the asset, which is
+	// not the file's basename: an asset can hold a directory tree, and two
+	// files in it can share a name.
+	for assetPath, path := range paths {
 		key, err := w.blobs.Upload(path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload %s: %w", path, err)
@@ -1300,7 +1302,7 @@ func (w *Worker) PersistAsset(ctx context.Context, executionID string, paths []s
 				entryMetadata["type"] = mimeType
 			}
 		}
-		entries[filepath.Base(path)] = []any{key, size, entryMetadata}
+		entries[assetPath] = []any{key, size, entryMetadata}
 	}
 
 	// Get asset name from metadata if provided
@@ -1446,9 +1448,22 @@ func (s checkpointSink) SetCheckpoints(ctx context.Context, executionID string, 
 	return err
 }
 
-func (w *Worker) DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string) error {
+func (w *Worker) DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string, offset, length *int64) error {
 	// Download blob to the target path
-	return w.blobs.DownloadTo(blobKey, targetPath)
+	if offset == nil && length == nil {
+		return w.blobs.DownloadTo(blobKey, targetPath)
+	}
+	var start int64
+	if offset != nil {
+		start = *offset
+	}
+	// A negative length reads to the end of the blob, which is what an
+	// offset with no length means.
+	size := int64(-1)
+	if length != nil {
+		size = *length
+	}
+	return w.blobs.DownloadRangeTo(blobKey, targetPath, start, size)
 }
 
 func (w *Worker) UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error) {

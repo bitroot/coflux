@@ -265,7 +265,7 @@ def request_select(
 
 def request_persist_asset(
     execution_id: str,
-    paths: list[str] | None = None,
+    paths: dict[str, str] | None = None,
     metadata: dict[str, Any] | None = None,
     entries: dict[str, tuple[str, int, dict[str, Any]]] | None = None,
 ) -> int:
@@ -273,7 +273,7 @@ def request_persist_asset(
 
     Args:
         execution_id: The execution this asset belongs to.
-        paths: Local file paths to upload and include.
+        paths: Local files to upload, as {path within the asset: local path}.
         metadata: Asset-level metadata (e.g. name).
         entries: Pre-resolved entries referencing existing blobs.
             Each value is (blob_key, size, entry_metadata).
@@ -311,16 +311,22 @@ def request_download_blob(
     execution_id: str,
     blob_key: str,
     target_path: str,
+    offset: int | None = None,
+    length: int | None = None,
 ) -> int:
-    """Request to download a blob to a local file."""
-    return get_protocol().send_request(
-        "download_blob",
-        {
-            "execution_id": execution_id,
-            "blob_key": blob_key,
-            "target_path": target_path,
-        },
-    )
+    """Request to download a blob, or a byte range of one, to a local file."""
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "blob_key": blob_key,
+        "target_path": target_path,
+    }
+    # Omitted rather than sent as null, so the message keeps the shape
+    # older CLIs expect.
+    if offset is not None:
+        params["offset"] = offset
+    if length is not None:
+        params["length"] = length
+    return get_protocol().send_request("download_blob", params)
 
 
 def request_upload_blob(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import tempfile
 import typing as t
 from pathlib import Path
 
@@ -41,6 +42,21 @@ class AssetEntry(t.NamedTuple):
         target.parent.mkdir(parents=True, exist_ok=True)
         ctx.download_blob(self.blob_key, target)
         return target
+
+    def read(self, offset: int = 0, length: int | None = None) -> bytes:
+        """Read bytes from this entry without restoring the whole file.
+
+        Reads to the end of the file when ``length`` is omitted.
+
+        Useful for formats that seek rather than read straight through — a
+        Parquet footer, say — where restoring a large file to read a few
+        kilobytes of it would be wasteful.
+        """
+        ctx = get_context()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "range"
+            ctx.download_blob(self.blob_key, target, offset=offset, length=length)
+            return target.read_bytes()
 
 
 class AssetMetadata(t.NamedTuple):

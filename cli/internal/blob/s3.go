@@ -80,6 +80,47 @@ func (s *S3Store) Get(key string) (io.ReadCloser, error) {
 	return output.Body, nil
 }
 
+// GetRange retrieves a byte range of a blob
+func (s *S3Store) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	if length == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	ctx := context.Background()
+	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.s3Key(key)),
+		Range:  aws.String(rangeHeader(offset, length)),
+	})
+	if err != nil {
+		// Check for not found errors
+		var noSuchKey *types.NoSuchKey
+		var notFound *types.NotFound
+		if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get S3 object range: %w", err)
+	}
+	return output.Body, nil
+}
+
+// Exists reports whether a blob is already stored
+func (s *S3Store) Exists(key string) (bool, error) {
+	ctx := context.Background()
+	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.s3Key(key)),
+	})
+	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		var notFound *types.NotFound
+		if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to head S3 object: %w", err)
+	}
+	return true, nil
+}
+
 // Put stores a blob and returns its key
 func (s *S3Store) Put(reader io.Reader) (string, error) {
 	// Read content to compute key
@@ -91,6 +132,10 @@ func (s *S3Store) Put(reader io.Reader) (string, error) {
 	key, err := ComputeKey(bytes.NewReader(content))
 	if err != nil {
 		return "", err
+	}
+
+	if skipUpload(s, key, len(content)) {
+		return key, nil
 	}
 
 	ctx := context.Background()

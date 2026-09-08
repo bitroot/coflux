@@ -14,12 +14,45 @@ import (
 type Store interface {
 	// Get retrieves a blob by key, returns nil if not found
 	Get(key string) (io.ReadCloser, error)
+	// GetRange retrieves a byte range of a blob, returns nil if not found.
+	// A negative length reads to the end of the blob.
+	GetRange(key string, offset, length int64) (io.ReadCloser, error)
+	// Exists reports whether a blob is already stored
+	Exists(key string) (bool, error)
 	// Put stores a blob and returns its key (content-addressed)
 	Put(reader io.Reader) (string, error)
 	// Upload uploads a file and returns its key
 	Upload(path string) (string, error)
 	// Download downloads a blob to a file, returns true if successful
 	Download(key, path string) (bool, error)
+}
+
+// Blobs at or above this size are checked for existence before being
+// uploaded.
+const existsCheckThreshold = 1 << 20 // 1 MiB
+
+// skipUpload reports whether content with this key is already stored, and
+// so needn't be sent again. Content addressing makes re-uploading it
+// redundant, but asking costs a round trip, so it's only worth it once the
+// content is big enough that re-sending would cost more than asking.
+//
+// A failed check reports "not stored": this is only an optimisation, and
+// uploading something that's already there is always safe.
+func skipUpload(store Store, key string, size int) bool {
+	if size < existsCheckThreshold {
+		return false
+	}
+	exists, err := store.Exists(key)
+	return err == nil && exists
+}
+
+// rangeHeader formats an HTTP byte range. A negative length means "to the
+// end of the blob".
+func rangeHeader(offset, length int64) string {
+	if length < 0 {
+		return fmt.Sprintf("bytes=%d-", offset)
+	}
+	return fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
 }
 
 // Manager manages multiple blob stores with fallback
@@ -42,6 +75,24 @@ func NewManager(stores []Store, cacheDir string, threshold int) *Manager {
 func (m *Manager) Get(key string) (io.ReadCloser, error) {
 	for _, store := range m.stores {
 		reader, err := store.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if reader != nil {
+			return reader, nil
+		}
+	}
+	return nil, fmt.Errorf("blob not found: %s", key)
+}
+
+// GetRange retrieves a byte range of a blob from any store. A negative
+// length reads to the end of the blob.
+func (m *Manager) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	// Deliberately not served from the cache: it holds whole blobs, and
+	// Download treats the file merely existing as a complete one, so a
+	// range must never be written there.
+	for _, store := range m.stores {
+		reader, err := store.GetRange(key, offset, length)
 		if err != nil {
 			return nil, err
 		}
@@ -117,6 +168,33 @@ func (m *Manager) DownloadTo(key, targetPath string) error {
 	}
 
 	return fmt.Errorf("blob not found: %s", key)
+}
+
+// DownloadRangeTo downloads a byte range of a blob to a specific path. A
+// negative length reads to the end of the blob.
+func (m *Manager) DownloadRangeTo(key, targetPath string, offset, length int64) error {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(targetPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if length == 0 {
+		return nil
+	}
+
+	reader, err := m.GetRange(key, offset, length)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = reader.Close() }()
+
+	_, err = io.Copy(f, reader)
+	return err
 }
 
 // CachePath returns the cache path for a blob key
