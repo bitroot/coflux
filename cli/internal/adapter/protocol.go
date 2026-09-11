@@ -234,10 +234,10 @@ type SelectParams struct {
 
 // PersistAssetParams for persist_asset request
 type PersistAssetParams struct {
-	ExecutionID string           `json:"execution_id"`
-	Paths       []string         `json:"paths,omitempty"`
-	Metadata    map[string]any   `json:"metadata,omitempty"`
-	Entries     map[string][]any `json:"entries,omitempty"` // Pre-resolved entries: {path: [blob_key, size, metadata]}
+	ExecutionID string            `json:"execution_id"`
+	Paths       map[string]string `json:"paths,omitempty"` // Files to upload: {path within the asset: local path}
+	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Entries     map[string][]any  `json:"entries,omitempty"` // Pre-resolved entries: {path: [blob_key, size, metadata]}
 }
 
 // PersistAssetResult is the response to persist_asset
@@ -434,11 +434,14 @@ type StreamClosedParams struct {
 	Error          map[string]any `json:"error,omitempty"`
 }
 
-// DownloadBlobParams for download_blob request
+// DownloadBlobParams for download_blob request. Offset and length are
+// optional: with neither, the whole blob is downloaded.
 type DownloadBlobParams struct {
 	ExecutionID string `json:"execution_id"`
 	BlobKey     string `json:"blob_key"`
 	TargetPath  string `json:"target_path"`
+	Offset      *int64 `json:"offset,omitempty"`
+	Length      *int64 `json:"length,omitempty"`
 }
 
 // UploadBlobParams for upload_blob request

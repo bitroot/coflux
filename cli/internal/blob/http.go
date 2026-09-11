@@ -55,6 +55,67 @@ func (s *HTTPStore) Get(key string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
+// GetRange retrieves a byte range of a blob
+func (s *HTTPStore) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	if length == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	url := fmt.Sprintf("%s/%s", s.baseURL, key)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", rangeHeader(offset, length))
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if s.project != "" {
+		req.Header.Set("X-Project", s.project)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil, nil
+	}
+	// A store that ignores the range header answers 200 with the whole
+	// blob, which would silently be the wrong bytes.
+	if resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+	return resp.Body, nil
+}
+
+// Exists reports whether a blob is already stored
+func (s *HTTPStore) Exists(key string) (bool, error) {
+	url := fmt.Sprintf("%s/%s", s.baseURL, key)
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return false, err
+	}
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if s.project != "" {
+		req.Header.Set("X-Project", s.project)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+	return true, nil
+}
+
 // Put stores a blob and returns its key
 func (s *HTTPStore) Put(reader io.Reader) (string, error) {
 	// Read content to compute key and store
@@ -66,6 +127,10 @@ func (s *HTTPStore) Put(reader io.Reader) (string, error) {
 	key, err := ComputeKey(bytes.NewReader(content))
 	if err != nil {
 		return "", err
+	}
+
+	if skipUpload(s, key, len(content)) {
+		return key, nil
 	}
 
 	url := fmt.Sprintf("%s/%s", s.baseURL, key)

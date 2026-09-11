@@ -19,11 +19,11 @@ type ExecutionHandler interface {
 	// Select waits for the first of one or more handles (executions/inputs) to resolve
 	Select(ctx context.Context, params *adapter.SelectParams) (*adapter.SelectResult, error)
 	// PersistAsset persists files as an asset
-	PersistAsset(ctx context.Context, executionID string, paths []string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
+	PersistAsset(ctx context.Context, executionID string, paths map[string]string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
 	GetAsset(ctx context.Context, executionID string, assetID string) (map[string]any, error)
-	// DownloadBlob downloads a blob to a local file
-	DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string) error
+	// DownloadBlob downloads a blob, or a byte range of one, to a local file
+	DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string, offset, length *int64) error
 	// UploadBlob uploads a local file as a blob
 	UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error)
 	// Suspend suspends an execution
@@ -793,7 +793,7 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
 			break
 		}
-		if err := p.handler.DownloadBlob(ctx, req.ExecutionID, req.BlobKey, req.TargetPath); err != nil {
+		if err := p.handler.DownloadBlob(ctx, req.ExecutionID, req.BlobKey, req.TargetPath, req.Offset, req.Length); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "download_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}

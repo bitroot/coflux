@@ -26,6 +26,12 @@ threshold = 100
 
 To have all values stored as blobs, set the threshold to zero.
 
+## Deduplication
+
+Blobs are content-addressed — a blob's key is the SHA-256 of its contents — so storing the same data twice is redundant. Above a size threshold, the store is asked whether it already holds the content, and the upload is skipped if it does. Below that threshold the check isn't worth its round trip, and the data is simply written again.
+
+This matters when an asset is rebuilt from a previous one: the files that haven't changed cost nothing to persist again, in storage or in transfer.
+
 ## S3 blob store
 
 As an alternative to the built-in blob store, AWS S3 can be used. To enable this, update the configuration file:

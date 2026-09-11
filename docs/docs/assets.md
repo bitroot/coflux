@@ -59,5 +59,19 @@ path.read_text()
 By default an asset is restored to the task's temporary directory, at the same relative path that it was persisted from. To change this, the `at` argument can be specified (as a `pathlib.Path`, or string):
 
 ```python
-asset.restore(to="other/dir")
+asset.restore(at="other/dir")
 ```
+
+## Reading part of an entry
+
+An entry can be read without restoring the whole file, by giving an offset and a length in bytes:
+
+```python
+entry = asset["data.parquet"]
+footer = entry.read(entry.size - 8)   # to the end of the file
+header = entry.read(0, 4)             # the first four bytes
+```
+
+`read()` with no arguments returns the whole entry. Omitting the length reads to the end.
+
+This is for formats that seek rather than read straight through — a Parquet footer, say, where restoring a large file to read a few kilobytes of it would be wasteful. For anything you're going to read in full, `restore()` is simpler and puts the file on disk where other tools can reach it.

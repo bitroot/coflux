@@ -338,12 +338,21 @@ class ExecutorContext:
             entries.append(AssetEntry(path, blob_key, size, metadata or {}))
         return entries
 
-    def download_blob(self, blob_key: str, target_path: Path) -> None:
-        """Download a blob to a local file."""
+    def download_blob(
+        self,
+        blob_key: str,
+        target_path: Path,
+        *,
+        offset: int | None = None,
+        length: int | None = None,
+    ) -> None:
+        """Download a blob, or a byte range of one, to a local file."""
         request_id = protocol.request_download_blob(
             self.execution_id,
             blob_key,
             str(target_path),
+            offset,
+            length,
         )
         self._wait_response(request_id)
 
@@ -450,10 +459,10 @@ class ExecutorContext:
         if not paths_to_upload and not resolved_entries:
             raise ValueError("No files found to create asset")
 
-        abs_paths = [str(p) for _, p in paths_to_upload] if paths_to_upload else None
+        upload_paths = {rel: str(p) for rel, p in paths_to_upload} or None
         request_id = protocol.request_persist_asset(
             self.execution_id,
-            abs_paths,
+            upload_paths,
             {"name": name} if name else None,
             resolved_entries if resolved_entries else None,
         )
