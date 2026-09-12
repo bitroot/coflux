@@ -378,10 +378,14 @@ defmodule Coflux.Orchestration.Inputs do
       LEFT JOIN completions AS dc ON dc.execution_id = id.execution_id
       WHERE i.workspace_id = ?1
         AND ir.input_id IS NULL
-        -- An execution is still "active" if it hasn't completed yet, or if
-        -- its completion carries a successor (retry / suspended / deferred
-        -- chain that will resume somewhere).
-        AND (dc.execution_id IS NULL OR dc.successor_id IS NOT NULL)
+        -- An input is active while an execution that depends on it is still
+        -- in flight. A suspended execution's successor is created with a
+        -- copy of the dependency before the suspension is recorded, so the
+        -- input stays active across a suspend/resume cycle without needing
+        -- to follow the successor. A retry doesn't carry the dependency, so
+        -- the input reads inactive during backoff until the new attempt asks
+        -- for it again.
+        AND dc.execution_id IS NULL
       ORDER BY i.created_at DESC
       """,
       {workspace_id}
@@ -389,9 +393,8 @@ defmodule Coflux.Orchestration.Inputs do
   end
 
   def has_active_dependency?(db, input_id) do
-    # An execution is "active" if it has no completion yet, or if its
-    # completion carries a successor (suspended/retried/deferred — the
-    # chain is still alive).
+    # Same rule as `get_inputs_for_workspace`: some execution that depends on
+    # the input has no completion yet.
     case query_one(
            db,
            """
@@ -399,7 +402,7 @@ defmodule Coflux.Orchestration.Inputs do
            FROM input_dependencies AS id
            LEFT JOIN completions AS c ON c.execution_id = id.execution_id
            WHERE id.input_id = ?1
-             AND (c.execution_id IS NULL OR c.successor_id IS NOT NULL)
+             AND c.execution_id IS NULL
            LIMIT 1
            """,
            {input_id}
