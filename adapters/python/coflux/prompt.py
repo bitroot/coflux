@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import textwrap
 import typing as t
 
 from .models import Input
@@ -81,7 +82,12 @@ class Prompt(t.Generic[T]):
         _model_schema: str | None = None,
         _requires: dict[str, list[str]] | None = None,
     ):
-        self._template = template
+        # A template is usually a triple-quoted string indented to match the
+        # code around it. That indentation is the code's, not the prompt's
+        # — left in, Markdown reads every line as a code block — so the
+        # common margin comes off, along with the blank lines the quotes
+        # leave at either end.
+        self._template = textwrap.dedent(template).strip("\n")
         self._model = model
         self._title = title
         self._actions = actions
