@@ -2774,20 +2774,7 @@ defmodule Coflux.Orchestration.Server do
         # Get all active executions (both assigned and unassigned) with their root workflow
         {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
 
-        # Build active_runs: {root_module, root_target} -> %{run_ext_id -> MapSet of execution_ext_ids}
-        active_runs =
-          Enum.reduce(active_executions, %{}, fn {run_ext_id, root_module, root_target,
-                                                  step_number, attempt, _execution_id, _assigned},
-                                                 active_runs ->
-            ext_id = execution_external_id(run_ext_id, step_number, attempt)
-            key = {root_module, root_target}
-
-            active_runs
-            |> Map.put_new(key, %{})
-            |> Map.update!(key, fn runs ->
-              Map.update(runs, run_ext_id, MapSet.new([ext_id]), &MapSet.put(&1, ext_id))
-            end)
-          end)
+        active_runs = group_active_executions(active_executions)
 
         {:ok, ref, state} =
           add_listener(state, {:modules, workspace_external_id}, pid)
@@ -5276,6 +5263,34 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Groups rows from `Runs.get_active_run_workflows/2` by their root workflow,
+  # as `%{{module, target} => %{run_external_id => %{execution_external_id =>
+  # assigned?}}}` - what the workflow and modules topics need to report whether
+  # each run is queued or running.
+  defp group_active_executions(rows) do
+    Enum.reduce(rows, %{}, fn {run_ext_id, root_module, root_target, step_number, attempt,
+                               _execution_id, assigned},
+                              result ->
+      execution_ext_id = execution_external_id(run_ext_id, step_number, attempt)
+      key = {root_module, root_target}
+      assigned? = assigned == 1
+
+      Map.update(
+        result,
+        key,
+        %{run_ext_id => %{execution_ext_id => assigned?}},
+        fn runs ->
+          Map.update(
+            runs,
+            run_ext_id,
+            %{execution_ext_id => assigned?},
+            &Map.put(&1, execution_ext_id, assigned?)
+          )
+        end
+      )
+    end)
+  end
+
   # In-flight executions of this workflow's runs, as
   # `%{run_external_id => %{execution_external_id => assigned?}}` - what the
   # workflow topic needs to report whether each run is queued or running.
@@ -5285,20 +5300,8 @@ defmodule Coflux.Orchestration.Server do
     {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
 
     active_executions
-    |> Enum.filter(fn {_run_ext_id, root_module, root_target, _, _, _, _} ->
-      root_module == module and root_target == target_name
-    end)
-    |> Enum.reduce(%{}, fn {run_ext_id, _, _, step_number, attempt, _execution_id, assigned},
-                           active_runs ->
-      execution_ext_id = execution_external_id(run_ext_id, step_number, attempt)
-
-      Map.update(
-        active_runs,
-        run_ext_id,
-        %{execution_ext_id => assigned == 1},
-        &Map.put(&1, execution_ext_id, assigned == 1)
-      )
-    end)
+    |> group_active_executions()
+    |> Map.get({module, target_name}, %{})
   end
 
   defp get_target_runs_across_epochs(state, module, target_name, type, workspace_id, limit) do

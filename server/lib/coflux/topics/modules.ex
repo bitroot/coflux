@@ -17,19 +17,15 @@ defmodule Coflux.Topics.Modules do
           Map.new(manifests, fn {module, workflows} ->
             workflow_map =
               Map.new(Map.keys(workflows), fn target ->
-                runs =
-                  case Map.fetch(active_runs, {module, target}) do
-                    {:ok, runs_map} -> runs_map |> Map.keys() |> Enum.sort()
-                    :error -> []
-                  end
+                runs_map = Map.get(active_runs, {module, target}, %{})
 
-                {target, %{activeRuns: runs}}
+                {target, %{activeRuns: build_active_runs(runs_map)}}
               end)
 
             {module, %{workflows: workflow_map}}
           end)
 
-        # Internal state: {module, target} -> %{run_ext_id -> MapSet of execution_ext_ids}
+        # Internal state: {module, target} -> %{run_ext_id -> %{execution_ext_id -> assigned?}}
         {:ok, Topic.new(value, %{ref: ref, active_runs: active_runs})}
 
       {:error, :workspace_invalid} ->
@@ -60,8 +56,9 @@ defmodule Coflux.Topics.Modules do
       Map.update(
         runs_map,
         run_ext_id,
-        MapSet.new([execution_ext_id]),
-        &MapSet.put(&1, execution_ext_id)
+        %{execution_ext_id => false},
+        # Put new, so that a (late) `scheduled` can't undo an `assigned`
+        &Map.put_new(&1, execution_ext_id, false)
       )
     end)
   end
@@ -73,8 +70,8 @@ defmodule Coflux.Topics.Modules do
           Map.update(
             runs_map,
             run_ext_id,
-            MapSet.new([execution_ext_id]),
-            &MapSet.put(&1, execution_ext_id)
+            %{execution_ext_id => true},
+            &Map.put(&1, execution_ext_id, true)
           )
         end)
       end)
@@ -87,10 +84,10 @@ defmodule Coflux.Topics.Modules do
        ) do
     update_active_runs(topic, root_module, root_target, fn runs_map ->
       case Map.fetch(runs_map, run_ext_id) do
-        {:ok, execution_ids} ->
-          remaining = MapSet.delete(execution_ids, execution_ext_id)
+        {:ok, executions} ->
+          remaining = Map.delete(executions, execution_ext_id)
 
-          if MapSet.size(remaining) == 0 do
+          if Enum.empty?(remaining) do
             Map.delete(runs_map, run_ext_id)
           else
             Map.put(runs_map, run_ext_id, remaining)
@@ -121,7 +118,7 @@ defmodule Coflux.Topics.Modules do
       Topic.set(
         topic,
         [root_module, :workflows, root_target, :activeRuns],
-        runs_map |> Map.keys() |> Enum.sort()
+        build_active_runs(runs_map)
       )
     else
       topic
@@ -133,12 +130,25 @@ defmodule Coflux.Topics.Modules do
       workflow_map =
         Map.new(Map.keys(workflows), fn target ->
           runs_map = Map.get(topic.state.active_runs, {module, target}, %{})
-          {target, %{activeRuns: runs_map |> Map.keys() |> Enum.sort()}}
+          {target, %{activeRuns: build_active_runs(runs_map)}}
         end)
 
       Topic.set(topic, [module], %{workflows: workflow_map})
     else
       Topic.unset(topic, [], module)
     end
+  end
+
+  # A run is "running" once any of its in-flight executions has been assigned
+  # to a worker, and "queued" while they're all still waiting for one
+  defp build_active_runs(runs_map) do
+    Map.new(runs_map, fn {run_ext_id, executions} ->
+      activity =
+        if Enum.any?(executions, fn {_, assigned} -> assigned end),
+          do: "running",
+          else: "queued"
+
+      {run_ext_id, activity}
+    end)
   end
 end

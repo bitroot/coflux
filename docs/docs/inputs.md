@@ -26,7 +26,7 @@ A prompt with no `model` is an _approval_ prompt - it has no payload, just an ap
 
 ## Templates and placeholders
 
-Prompt templates are rendered as Markdown, with placeholder keys substituted with the values passed as submission. Three placeholder forms control how each value is rendered:
+Prompt templates are rendered as Markdown, with placeholder keys substituted with the values passed as submission. A template written as an indented triple-quoted string keeps the indentation of the code around it, which Markdown would take for a code block, so the common margin is removed, along with the blank lines the quotes leave at either end. Indentation beyond that margin is kept. Three placeholder forms control how each value is rendered:
 
 | Form | Rendering |
 |------|-----------|
