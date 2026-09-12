@@ -60,3 +60,7 @@ A _checkpoint_ is a named value scoped to a step, which survives retries, suspen
 ## Assets
 
 Executions can persist _assets_ (a collection of files) which can be passed between executions and restored as needed, or viewed in Studio.
+
+## Catalog
+
+Values — an asset, a data structure holding assets, a reference to data elsewhere — can be published under a _path_ in the project's catalog, which holds their versions. Tasks read the current version at a path, and can be re-run when a newer one is published. See [catalog](./catalog.md).

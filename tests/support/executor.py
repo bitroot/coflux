@@ -236,13 +236,19 @@ class ExecutorConnection:
         )
         return self._request(msg)
 
-    def suspend(self, execution_id, execute_after=None, stream_wait=None):
+    def suspend(
+        self, execution_id, execute_after=None, stream_wait=None, catalog_wait=None
+    ):
         """Suspend the current execution.
 
         ``stream_wait`` is a ``(stream_id, sequence)`` pair gating the
-        successor on that stream reaching the sequence, or closing.
+        successor on that stream reaching the sequence, or closing;
+        ``catalog_wait`` a path gating it on a version newer than this
+        execution could see.
         """
-        msg = protocol.suspend_request(None, execution_id, execute_after, stream_wait)
+        msg = protocol.suspend_request(
+            None, execution_id, execute_after, stream_wait, catalog_wait
+        )
         return self._request(msg)
 
     def checkpoint_set(self, execution_id, **values):
@@ -268,6 +274,53 @@ class ExecutorConnection:
         msg = protocol.get_asset_request(None, execution_id, asset_id)
         resp = self._request(msg)
         return resp.get("result", resp.get("error"))
+
+    def catalog_publish(self, execution_id, path, value, references=None):
+        """Publish a value at a catalog path.
+
+        ``value`` is encoded JSON data (a string, a number, ``{"type":
+        "ref", "index": 0}``...) and ``references`` the list it points
+        into. Returns the version's number, or an error dict.
+        """
+        msg = protocol.catalog_publish_request(
+            None, execution_id, path, protocol.inline_value(value, references)
+        )
+        resp = self._request(msg)
+        if "error" in resp:
+            return resp["error"]
+        return resp["result"]["number"]
+
+    def catalog_publish_asset(self, execution_id, path, asset_id):
+        """Publish an asset at a catalog path: a value that is one reference."""
+        return self.catalog_publish(
+            execution_id,
+            path,
+            {"type": "ref", "index": 0},
+            references=[["asset", asset_id]],
+        )
+
+    def catalog_get(self, execution_id, path, number=None):
+        """The latest version at ``path`` as of the execution's snapshot, or
+        the version numbered ``number``: ``{"number": n, "value": <wire
+        value>}``. ``None`` when there is nothing there; an error dict when
+        the server refuses."""
+        msg = protocol.catalog_get_request(None, execution_id, path, number)
+        resp = self._request(msg)
+        if "error" in resp:
+            return resp["error"]
+        return resp["result"]["version"]
+
+    def catalog_next(
+        self, execution_id, path, number=None, timeout_ms=None, suspend=True
+    ):
+        """Select on a catalog handle: the version after ``number``, or
+        after whatever the execution can see when ``number`` is None."""
+        return self.select(
+            execution_id,
+            [protocol.catalog_handle(path, number)],
+            timeout_ms=timeout_ms,
+            suspend=suspend,
+        )
 
     def submit_input(self, execution_id, template, **kwargs):
         """Submit an input request and return the input external ID.

@@ -44,6 +44,7 @@ Example:
 
 var inspectNoWait bool
 var rerunNoWait bool
+var rerunCatalog string
 
 var runsRerunCmd = &cobra.Command{
 	Use:   "rerun <step-id>",
@@ -66,6 +67,7 @@ Example:
 
 func init() {
 	runsRerunCmd.Flags().BoolVar(&rerunNoWait, "no-wait", false, "Re-run and exit immediately without waiting")
+	runsRerunCmd.Flags().StringVar(&rerunCatalog, "catalog", "", "Catalog snapshot for the new attempt: a version (path@n) or 'latest' (default: what the previous attempt saw)")
 }
 
 var runsResultCmd = &cobra.Command{
@@ -274,12 +276,33 @@ func loadBlobData(key string) (any, error) {
 	return parsed, nil
 }
 
-func printResult(result map[string]any) error {
+// printValue prints a value as the API reports it (`{type, data|key,
+// references}`), fetching the blob behind a blob-backed one.
+func printValue(value map[string]any) error {
 	color := term.IsTerminal(int(os.Stdout.Fd()))
 	fmtData := formatDataPlain
 	if color {
 		fmtData = formatData
 	}
+	valueType, _ := value["type"].(string)
+	references, _ := value["references"].([]any)
+	switch valueType {
+	case "raw":
+		fmt.Println(fmtData(value["data"], references))
+	case "blob":
+		key, _ := value["key"].(string)
+		blobData, err := loadBlobData(key)
+		if err != nil {
+			size, _ := value["size"].(float64)
+			fmt.Printf("<blob (%s)>\n", humanSize(int64(size)))
+		} else {
+			fmt.Println(fmtData(blobData, references))
+		}
+	}
+	return nil
+}
+
+func printResult(result map[string]any) error {
 	resultType, _ := result["type"].(string)
 	switch resultType {
 	case "value":
@@ -287,21 +310,7 @@ func printResult(result map[string]any) error {
 		if value == nil {
 			break
 		}
-		valueType, _ := value["type"].(string)
-		references, _ := value["references"].([]any)
-		switch valueType {
-		case "raw":
-			fmt.Println(fmtData(value["data"], references))
-		case "blob":
-			key, _ := value["key"].(string)
-			blobData, err := loadBlobData(key)
-			if err != nil {
-				size, _ := value["size"].(float64)
-				fmt.Printf("<blob (%s)>\n", humanSize(int64(size)))
-			} else {
-				fmt.Println(fmtData(blobData, references))
-			}
-		}
+		return printValue(value)
 	case "error":
 		errData, _ := result["error"].(map[string]any)
 		if errData != nil {
@@ -460,7 +469,7 @@ func runRunsRerun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.RerunStep(cmd.Context(), workspaceID, stepID)
+	result, err := client.RerunStep(cmd.Context(), workspaceID, stepID, rerunCatalog)
 	if err != nil {
 		return fmt.Errorf("failed to rerun step: %w", err)
 	}

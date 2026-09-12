@@ -51,6 +51,7 @@ const sidebars: SidebarsConfig = {
         "serialization",
         "blobs",
         "assets",
+        "catalog",
         "logging",
         "metrics",
       ],

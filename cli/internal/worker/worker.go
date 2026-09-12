@@ -1185,36 +1185,11 @@ func (w *Worker) Select(ctx context.Context, params *adapter.SelectParams) (*ada
 			}
 			return nil, fmt.Errorf("ok status missing value tuple: %v", resultMap)
 		}
-		value, err := api.ParseValue(valueArr)
+		value, err := w.serverValueToAdapter(valueArr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse value: %w", err)
+			return nil, err
 		}
-		adapterRefs, err := w.refsToAdapter(value.References)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert references: %w", err)
-		}
-		switch value.Type {
-		case api.ValueTypeRaw:
-			sel.Value = &adapter.Value{
-				Type:       "inline",
-				Format:     "json",
-				Value:      value.Content,
-				References: adapterRefs,
-			}
-		case api.ValueTypeBlob:
-			path, err := w.blobs.Download(value.Key)
-			if err != nil {
-				return nil, err
-			}
-			sel.Value = &adapter.Value{
-				Type:       "file",
-				Format:     "json",
-				Path:       path,
-				References: adapterRefs,
-			}
-		default:
-			return nil, fmt.Errorf("unknown value type: %s", value.Type)
-		}
+		sel.Value = value
 	case "error":
 		if errRaw, ok := resultMap["error"].(map[string]any); ok {
 			sel.Error = &adapter.ErrorDetail{
@@ -1230,6 +1205,42 @@ func (w *Worker) Select(ctx context.Context, params *adapter.SelectParams) (*ada
 	}
 
 	return sel, nil
+}
+
+// serverValueToAdapter converts a value tuple as the server sends it —
+// ["raw", data, refs] or ["blob", key, size, refs] — into the adapter's
+// form, downloading a blob-backed one so the adapter gets a local path.
+func (w *Worker) serverValueToAdapter(valueArr []any) (*adapter.Value, error) {
+	value, err := api.ParseValue(valueArr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse value: %w", err)
+	}
+	adapterRefs, err := w.refsToAdapter(value.References)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert references: %w", err)
+	}
+	switch value.Type {
+	case api.ValueTypeRaw:
+		return &adapter.Value{
+			Type:       "inline",
+			Format:     "json",
+			Value:      value.Content,
+			References: adapterRefs,
+		}, nil
+	case api.ValueTypeBlob:
+		path, err := w.blobs.Download(value.Key)
+		if err != nil {
+			return nil, err
+		}
+		return &adapter.Value{
+			Type:       "file",
+			Format:     "json",
+			Path:       path,
+			References: adapterRefs,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown value type: %s", value.Type)
+	}
 }
 
 func (w *Worker) SubmitInput(ctx context.Context, params *adapter.SubmitInputParams) (string, error) {
@@ -1362,18 +1373,96 @@ func (w *Worker) GetAsset(ctx context.Context, executionID string, assetID strin
 	return entriesMap, nil
 }
 
-func (w *Worker) Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait) error {
+// CatalogPublish publishes a value at a path. The value is prepared the
+// way a result is — blob threshold applied, fragments uploaded. The reply
+// is the resulting version's number: the existing version's when the head
+// already held that value.
+func (w *Worker) CatalogPublish(ctx context.Context, executionID, path string, value *adapter.Value) (int64, error) {
+	conn, err := w.requireConn()
+	if err != nil {
+		return 0, err
+	}
+	serverValue, err := w.convertValueToServerFormat(value)
+	if err != nil {
+		return 0, err
+	}
+	result, err := conn.Request(ctx, "catalog_publish", executionID, path, serverValue)
+	if err != nil {
+		return 0, catalogRequestError(err)
+	}
+	number, ok := result.(float64)
+	if !ok {
+		return 0, fmt.Errorf("unexpected catalog_publish result: %T (%v)", result, result)
+	}
+	return int64(number), nil
+}
+
+// CatalogGet resolves a path as of the execution's snapshot (number nil)
+// or a named version, downloading a blob-backed value so the adapter gets
+// a local path. A nil result with no error means nothing is there.
+func (w *Worker) CatalogGet(ctx context.Context, executionID, path string, number *int64) (*adapter.CatalogGetResult, error) {
+	conn, err := w.requireConn()
+	if err != nil {
+		return nil, err
+	}
+	var numberArg any
+	if number != nil {
+		numberArg = *number
+	}
+	result, err := conn.Request(ctx, "catalog_get", executionID, path, numberArg)
+	if err != nil {
+		return nil, catalogRequestError(err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected catalog_get result: %T (%v)", result, result)
+	}
+	got, _ := m["number"].(float64)
+	valueArr, ok := m["value"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected catalog_get value: %T (%v)", m["value"], m["value"])
+	}
+	value, err := w.serverValueToAdapter(valueArr)
+	if err != nil {
+		return nil, err
+	}
+	return &adapter.CatalogGetResult{Number: int64(got), Value: value}, nil
+}
+
+// The server answers a catalog request with a bare atom on refusal —
+// "invalid_path", "asset_not_found", "invisible" — which the connection
+// wraps as "server error: <atom>". Surface the atom as the code so the
+// adapter can raise the right thing.
+func catalogRequestError(err error) error {
+	message := err.Error()
+	for _, code := range []string{"invalid_path", "asset_not_found", "invisible"} {
+		if strings.HasSuffix(message, code) {
+			return &adapter.RequestError{Code: code, Message: message}
+		}
+	}
+	return err
+}
+
+func (w *Worker) Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait, catalogWait *adapter.CatalogWait) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Params: (execution_id, execute_after_ms[, stream_wait]). The third is
-	// only sent when there is one, so the message stays the shape older
-	// servers expect.
+	// Params: (execution_id, execute_after_ms[, wait]). The third is only
+	// sent when there is a wait — a stream position or a catalog path — so
+	// the message stays the shape older servers expect.
 	if streamWait != nil {
 		return conn.Notify("suspend", executionID, executeAfter, map[string]any{
 			"stream_id": streamWait.StreamID,
 			"sequence":  streamWait.Sequence,
+		})
+	}
+	if catalogWait != nil {
+		return conn.Notify("suspend", executionID, executeAfter, map[string]any{
+			"path": catalogWait.Path,
 		})
 	}
 	return conn.Notify("suspend", executionID, executeAfter)

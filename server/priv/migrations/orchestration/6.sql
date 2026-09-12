@@ -1,0 +1,94 @@
+-- Catalog — paths holding versioned values.
+--
+-- A version is one publish at a path: which value, who published it and
+-- when. Rows are append-only and never modified. The value
+-- is an ordinary `values_` row — an asset, a data structure holding assets,
+-- a reference to something external — content-hashed like any other, which
+-- is what makes the dedup below exact.
+--
+-- `id` is the catalog's clock. It is the rowid, allocated as max + 1, and
+-- since rows are never deleted it is monotonic; rotation copies rows with
+-- their ids, so it stays monotonic across epochs. Each execution is pinned
+-- to the clock at the moment it is assigned (`assignments.catalog_sequence`)
+-- and reads resolve against versions with `id <= pin`, plus anything its own
+-- run published since — so an execution sees one consistent catalog for its
+-- whole life.
+--
+-- `number` is the per-path ordinal humans use (`path@6`). It is allocated
+-- once per path across all workspaces, the way attempts are allocated once
+-- per step, so a number names exactly one version wherever you are. Within
+-- a path, number order and id order agree — both are allocated in the same
+-- insert — so waits can be stated in numbers.
+--
+-- Visibility follows the cache rule, not the checkpoint rule: a read from
+-- workspace W sees every version published in W or any of its bases, and
+-- the latest is the newest by id regardless of which workspace it came from.
+CREATE TABLE catalog_versions (
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL,
+  workspace_id INTEGER NOT NULL,
+  number INTEGER NOT NULL,
+  value_id INTEGER NOT NULL,
+  -- Publishing execution, as a stable ref (rotation-safe). NULL when the
+  -- version was published through the API rather than by an execution.
+  execution_ref_id INTEGER,
+  created_by INTEGER,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces ON DELETE RESTRICT,
+  FOREIGN KEY (value_id) REFERENCES values_ ON DELETE RESTRICT,
+  FOREIGN KEY (execution_ref_id) REFERENCES execution_refs ON DELETE RESTRICT,
+  FOREIGN KEY (created_by) REFERENCES principals ON DELETE SET NULL
+) STRICT;
+
+CREATE UNIQUE INDEX idx_catalog_versions_path_number ON catalog_versions(path, number);
+CREATE INDEX idx_catalog_versions_path_ws ON catalog_versions(path, workspace_id, id);
+
+-- Lineage: which versions an execution resolved — a `current()`, a
+-- `version(n)`, the version a `next()`/select handed back, or a version's
+-- value read by an execution it was passed to. Mirrors asset_dependencies
+-- (which records an asset itself when it is restored); this adds "via
+-- which path and version".
+CREATE TABLE catalog_reads (
+  execution_id INTEGER NOT NULL,
+  version_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (execution_id, version_id),
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE,
+  FOREIGN KEY (version_id) REFERENCES catalog_versions ON DELETE RESTRICT
+) STRICT;
+
+-- Gate for an execution that suspended waiting on a path: the successor is
+-- held until the path, as seen from its workspace chain, has a version with
+-- `number` greater than this. Read only by compute_pending_dependencies,
+-- like stream_dependencies.sequence, and it stays on the row afterwards as
+-- a record of what the attempt resumed from. One row per path the select
+-- was waiting on; together with the successor's other recorded
+-- dependencies they form an any-of group.
+CREATE TABLE catalog_waits (
+  execution_id INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (execution_id, path),
+  FOREIGN KEY (execution_id) REFERENCES executions ON DELETE CASCADE
+) STRICT;
+
+-- The execution's snapshot: a `catalog_versions.id`, fixed at the moment
+-- the execution is handed to a worker. Reads resolve against versions with
+-- an id at or below it. NULL for assignments made before the catalog
+-- existed, which read as "no pin" — the latest of everything.
+--
+-- How it is chosen (Catalog.resolve_pin): an override on the execution,
+-- else the clock if the execution is gated on a catalog wait (a `next()`
+-- successor has to see past its predecessor), else the pin of the attempt
+-- before it — so a retry, a re-run, or the execution that resumes a
+-- suspension sees what the previous attempt saw — unless that attempt
+-- recurred, else the run's override, else the clock.
+ALTER TABLE assignments ADD COLUMN catalog_sequence INTEGER;
+
+-- Snapshot overrides, as `catalog_versions.id`s. On a run, the snapshot
+-- every execution in the run starts from (`submit --catalog path@n`); on an
+-- execution, the snapshot that one attempt takes (`runs rerun --catalog`).
+-- NULL means "not chosen": resolve by the rule above.
+ALTER TABLE runs ADD COLUMN catalog_sequence INTEGER;
+ALTER TABLE executions ADD COLUMN catalog_sequence INTEGER;

@@ -98,14 +98,8 @@ defmodule Coflux.Topics.Run do
           completion: nil,
           groups: %{},
           assets: %{},
-          dependencies:
-            Map.new(dependencies, fn {dependency_id, dependency} ->
-              {dependency_id,
-               build_dependency(
-                 dependency,
-                 MapSet.member?(pending_dependencies, dependency_id)
-               )}
-            end),
+          published: %{},
+          dependencies: build_dependencies(dependencies, pending_dependencies),
           children: [],
           inputs: %{},
           result: nil,
@@ -184,7 +178,11 @@ defmodule Coflux.Topics.Run do
          topic,
          {:result_dependency, execution_external_id, dependency_id, dependency, pending}
        ) do
-    dependency = build_dependency(dependency, pending)
+    dependency = %{
+      type: "result",
+      execution: build_execution(dependency),
+      pending: pending
+    }
 
     update_execution(
       topic,
@@ -370,6 +368,43 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
+  defp process_notification(topic, {:catalog_publish, execution_external_id, version}) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(
+        topic,
+        base_path ++ [:published, "#{version.path}@#{version.number}"],
+        build_catalog_version(version)
+      )
+    end)
+  end
+
+  defp process_notification(topic, {:catalog_read, execution_external_id, version}) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:dependencies, "#{version.path}@#{version.number}"], %{
+        type: "catalog",
+        path: version.path,
+        number: version.number,
+        version: build_catalog_version(version),
+        pending: false
+      })
+    end)
+  end
+
+  defp process_notification(
+         topic,
+         {:catalog_wait, execution_external_id, path, number, pending}
+       ) do
+    update_execution(topic, execution_external_id, fn topic, base_path ->
+      Topic.set(topic, base_path ++ [:dependencies, "#{path}@#{number}+"], %{
+        type: "catalog",
+        path: path,
+        number: number,
+        version: nil,
+        pending: pending
+      })
+    end)
+  end
+
   defp process_notification(
          topic,
          {:asset_dependency, execution_external_id, asset_external_id, asset, pending}
@@ -511,6 +546,10 @@ defmodule Coflux.Topics.Run do
                       Map.new(execution.assets, fn {external_asset_id, asset} ->
                         {external_asset_id, build_asset(asset)}
                       end),
+                    published:
+                      Map.new(execution.published, fn {key, version} ->
+                        {key, build_catalog_version(version)}
+                      end),
                     dependencies:
                       build_dependencies(
                         execution.dependencies,
@@ -587,15 +626,28 @@ defmodule Coflux.Topics.Run do
            target: target,
            pending: MapSet.member?(pending, id)
          }}
-    end)
-  end
 
-  defp build_dependency(execution, pending) do
-    %{
-      type: "result",
-      execution: build_execution(execution),
-      pending: pending
-    }
+      {id, {:catalog, version}} ->
+        {id,
+         %{
+           type: "catalog",
+           path: version.path,
+           number: version.number,
+           version: build_catalog_version(version),
+           pending: false
+         }}
+
+      # A wait is for whatever comes after `number`: no version yet.
+      {id, {:catalog_wait, path, number}} ->
+        {id,
+         %{
+           type: "catalog",
+           path: path,
+           number: number,
+           version: nil,
+           pending: MapSet.member?(pending, id)
+         }}
+    end)
   end
 
   defp build_frames(frames) do

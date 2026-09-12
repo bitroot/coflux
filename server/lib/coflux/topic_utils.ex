@@ -70,6 +70,19 @@ defmodule Coflux.TopicUtils do
     }
   end
 
+  def build_catalog_version(version) do
+    %{
+      path: version.path,
+      number: version.number,
+      sequence: version.sequence,
+      value: build_value(version.value),
+      createdAt: version.created_at,
+      workspaceId: version.workspace_id,
+      publishedBy: version.published_by,
+      createdBy: build_principal(version.created_by)
+    }
+  end
+
   def build_execution({ext_id, module, target}) do
     %{
       executionId: ext_id,

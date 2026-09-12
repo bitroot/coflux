@@ -236,7 +236,7 @@ def request_submit_execution(
 
 def request_select(
     execution_id: str,
-    handles: list[dict[str, str]],
+    handles: list[dict[str, Any]],
     timeout_ms: int | None = None,
     suspend: bool = True,
     cancel_remaining: bool = False,
@@ -307,6 +307,28 @@ def request_get_asset(
     )
 
 
+def request_catalog_publish(execution_id: str, path: str, value: dict[str, Any]) -> int:
+    """Request to publish a value at a catalog path. ``value`` is already
+    serialised (see ``serialize_value``)."""
+    return get_protocol().send_request(
+        "catalog_publish",
+        {"execution_id": execution_id, "path": path, "value": value},
+    )
+
+
+def request_catalog_get(
+    execution_id: str,
+    path: str,
+    number: int | None = None,
+) -> int:
+    """Request the current version at a path (the newest as of the
+    execution's snapshot), or a named one: its number and its value."""
+    params: dict[str, Any] = {"execution_id": execution_id, "path": path}
+    if number is not None:
+        params["number"] = number
+    return get_protocol().send_request("catalog_get", params)
+
+
 def request_download_blob(
     execution_id: str,
     blob_key: str,
@@ -350,13 +372,16 @@ def request_suspend(
     execution_id: str,
     execute_after: int | None = None,
     stream_wait: tuple[str, int] | None = None,
+    catalog_wait: str | None = None,
 ) -> int:
     """Request to suspend execution.
 
     ``stream_wait`` is a ``(stream_id, sequence)`` pair for a consumer that
     suspended partway through iterating: the successor is held until the
-    stream reaches that sequence, or closes. Without it the successor is
-    scheduled on ``execute_after`` alone.
+    stream reaches that sequence, or closes. ``catalog_wait`` is a path:
+    the successor is held until it has a version newer than this execution
+    could see. Without either the successor is scheduled on
+    ``execute_after`` alone.
     """
     params: dict[str, Any] = {"execution_id": execution_id}
     if execute_after is not None:
@@ -364,6 +389,8 @@ def request_suspend(
     if stream_wait is not None:
         stream_id, sequence = stream_wait
         params["stream_wait"] = {"stream_id": stream_id, "sequence": sequence}
+    if catalog_wait is not None:
+        params["catalog_wait"] = {"path": catalog_wait}
     return get_protocol().send_request("suspend", params)
 
 

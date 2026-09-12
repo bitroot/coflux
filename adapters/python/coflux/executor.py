@@ -202,8 +202,8 @@ def execute_target(
         # — the handshake happens here, on the executor thread.
         pending = ctx.take_stream_suspension()
         if pending is not None:
-            execute_after, stream_wait = pending
-            ctx.finish_suspension(execute_after, stream_wait)
+            execute_after, stream_wait, catalog_wait = pending
+            ctx.finish_suspension(execute_after, stream_wait, catalog_wait)
 
     except Suspending as suspending:
         # Raised at the suspend point and allowed to unwind the whole body
@@ -211,7 +211,9 @@ def execute_target(
         # execution is still live and its checkpoint writes still land.
         if ctx is None:
             raise
-        ctx.finish_suspension(suspending.execute_after, suspending.stream_wait)
+        ctx.finish_suspension(
+            suspending.execute_after, suspending.stream_wait, suspending.catalog_wait
+        )
 
     except Exception as e:  # noqa: BLE001
         # Any failure in user code is reported back to the server as an

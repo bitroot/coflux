@@ -1,6 +1,6 @@
 # Select
 
-`cf.select` waits for the _first_ of multiple handles to resolve. The handles can be [executions](./executions.md), [inputs](./inputs.md), or a mix of both. It's the building block for first-wins coordination patterns: racing alternative implementations, prompting a user with a fallback timeout, multi-channel approvals, or any case where you want to react to whichever result arrives soonest.
+`cf.select` waits for the _first_ of multiple handles to resolve. The handles can be [executions](./executions.md), [inputs](./inputs.md), [catalog entries](./catalog.md) (which resolve when their path has a version the execution hasn't seen), or a mix. It's the building block for first-wins coordination patterns: racing alternative implementations, prompting a user with a fallback timeout, multi-channel approvals, re-running when data changes, or any case where you want to react to whichever result arrives soonest.
 
 ## Basic usage
 

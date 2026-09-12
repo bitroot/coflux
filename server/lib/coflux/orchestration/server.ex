@@ -21,7 +21,8 @@ defmodule Coflux.Orchestration.Server do
     Manifests,
     Principals,
     Errors,
-    Epoch
+    Epoch,
+    Catalog
   }
 
   @default_activation_timeout_ms 600_000
@@ -122,6 +123,17 @@ defmodule Coflux.Orchestration.Server do
 
               # execution_id -> MapSet of execution_ids that are waiting on this execution
               dependency_waiters: %{},
+
+              # execution_id -> MapSet of the dependency keys that were
+              # recorded on it by a suspended select (a result, input,
+              # stream or catalog wait). Select is first-wins, so these
+              # form an any-of group: when one clears, the execution is
+              # done waiting on all of them. Argument dependencies
+              # (`wait_for`) are never in a group — they must all resolve —
+              # but they are also always resolved by the time a step has
+              # run once, so the two never coexist in practice. Derived
+              # from pending_dependencies; rebuilt with it.
+              dependency_groups: %{},
 
               # Active stream subscriptions — in-memory, session-scoped.
               # A consumer adapter opens a subscription by sending stream_subscribe
@@ -1314,7 +1326,9 @@ defmodule Coflux.Orchestration.Server do
     workspace_external_id = Keyword.get(opts, :workspace)
 
     with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id, access),
-         :ok <- validate_values_assets(state.db, arguments) do
+         :ok <- validate_values_assets(state.db, arguments),
+         {:ok, catalog_sequence} <-
+           resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)) do
       client_key = Keyword.get(opts, :idempotency_key)
       ws_ext_id = workspace_external_id(state, workspace_id)
 
@@ -1324,6 +1338,11 @@ defmodule Coflux.Orchestration.Server do
           {:reply, {:ok, ext_run_id, step_number, execution_external_id}, state}
 
         :miss ->
+          opts =
+            opts
+            |> Keyword.delete(:catalog)
+            |> Keyword.put(:catalog_sequence, catalog_sequence)
+
           opts =
             if client_key do
               hashed = Runs.build_idempotency_key(ws_ext_id, client_key)
@@ -1406,11 +1425,10 @@ defmodule Coflux.Orchestration.Server do
           if step_id && !memo_hit do
             wait_for = Keyword.get(opts, :wait_for) || []
 
-            pending_dependencies =
-              compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
+            {pending_dependencies, _group} =
+              pending = compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
 
-            state =
-              register_pending_dependencies(state, execution_id, pending_dependencies)
+            state = register_pending_dependencies(state, execution_id, pending)
 
             {state, pending_dependencies,
              build_argument_dependencies(state.db, step_id, wait_for),
@@ -1581,10 +1599,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:rerun_step, step_id, workspace_external_id, access}, _from, state) do
+  def handle_call({:rerun_step, step_id, workspace_external_id, access, opts}, _from, state) do
     with {:ok, run_external_id, step_number} <- parse_step_id(step_id),
          {:ok, workspace_id, _} <-
            require_workspace(state, workspace_external_id, access),
+         {:ok, catalog_sequence} <-
+           resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)),
          {:ok, run} when not is_nil(run) <-
            ensure_run_in_active_epoch(state, run_external_id),
          {:ok, step} when not is_nil(step) <-
@@ -1610,7 +1630,10 @@ defmodule Coflux.Orchestration.Server do
         state = cancel_active_step_executions(state, step.id, workspace_id, streams: :registered)
 
         {:ok, _execution_id, attempt, state} =
-          rerun_step(state, step, workspace_id, created_by: access[:principal_id])
+          rerun_step(state, step, workspace_id,
+            created_by: access[:principal_id],
+            catalog_sequence: catalog_sequence
+          )
 
         execution_external_id = execution_external_id(run_external_id, step_number, attempt)
 
@@ -1623,6 +1646,9 @@ defmodule Coflux.Orchestration.Server do
       {:error, :invalid} -> {:reply, {:error, :invalid}, state}
       {:error, :forbidden} -> {:reply, {:error, :forbidden}, state}
       {:error, :workspace_invalid} -> {:reply, {:error, :workspace_invalid}, state}
+      {:error, :catalog_invalid} -> {:reply, {:error, :catalog_invalid}, state}
+      {:error, :catalog_not_found} -> {:reply, {:error, :catalog_not_found}, state}
+      {:error, :catalog_invisible} -> {:reply, {:error, :catalog_invisible}, state}
       {:ok, nil} -> {:reply, {:error, :not_found}, state}
     end
   end
@@ -2423,6 +2449,133 @@ defmodule Coflux.Orchestration.Server do
         }
 
         {:reply, {:ok, external_id, asset_metadata}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  # --- Catalog ---
+
+  def handle_call(
+        {:catalog_publish, execution_external_id, path, value},
+        _from,
+        state
+      ) do
+    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_external_id),
+         :ok <- Catalog.validate_path(path),
+         :ok <- validate_value_assets(state.db, value) do
+      {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+      chain = get_workspace_chain(state, workspace_id)
+      {:ok, ref_id} = Runs.create_execution_ref_for(state.db, execution_id)
+      {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+
+      {:ok, version, created?} =
+        Catalog.publish(state.db, path, workspace_id, chain, value_id, ref_id, nil)
+
+      state =
+        if created?,
+          do: notify_catalog_version(state, version, execution_external_id),
+          else: state
+
+      state = flush_notifications(state)
+      {:reply, {:ok, version.number}, state}
+    else
+      {:error, :not_found} -> {:reply, {:error, :execution_not_found}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:catalog_get, execution_external_id, path, number}, _from, state) do
+    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_external_id),
+         :ok <- Catalog.validate_path(path) do
+      case lookup_catalog_version(state, execution_id, path, number) do
+        {:ok, nil} ->
+          {:reply, {:ok, nil}, state}
+
+        {:ok, version} ->
+          state = record_catalog_read(state, execution_id, execution_external_id, version)
+          {:ok, value} = Values.get_value_by_id(state.db, version.value_id)
+          reply = %{number: version.number, value: build_value(value, state.db)}
+          {:reply, {:ok, reply}, flush_notifications(state)}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:error, :not_found} -> {:reply, {:error, :execution_not_found}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:catalog_list, workspace_external_id, prefix}, _from, state) do
+    case resolve_workspace_external_id(state, workspace_external_id) do
+      {:ok, workspace_id} ->
+        chain = get_workspace_chain(state, workspace_id)
+        {:ok, versions} = Catalog.list_heads(state.db, chain, prefix)
+        {:reply, {:ok, Enum.map(versions, &build_catalog_version(state.db, &1))}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call({:catalog_versions, workspace_external_id, path, limit, before}, _from, state) do
+    with {:ok, workspace_id} <- resolve_workspace_external_id(state, workspace_external_id),
+         :ok <- Catalog.validate_path(path) do
+      chain = get_workspace_chain(state, workspace_id)
+      {:ok, versions} = Catalog.list_versions(state.db, path, chain, limit, before)
+      {:reply, {:ok, Enum.map(versions, &build_catalog_version(state.db, &1))}, state}
+    else
+      {:error, error} -> {:reply, {:error, error}, state}
+    end
+  end
+
+  # A publish from outside a run — the API or CLI — attributed to a
+  # principal rather than an execution.
+  def handle_call(
+        {:publish_catalog, workspace_external_id, path, value, access},
+        _from,
+        state
+      ) do
+    with {:ok, workspace_id, _workspace} <-
+           require_workspace(state, workspace_external_id, access),
+         :ok <- Catalog.validate_path(path),
+         :ok <- validate_value_assets(state.db, value) do
+      chain = get_workspace_chain(state, workspace_id)
+
+      created_by =
+        case access do
+          %{principal_id: id} -> id
+          _ -> nil
+        end
+
+      {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+
+      {:ok, version, created?} =
+        Catalog.publish(state.db, path, workspace_id, chain, value_id, nil, created_by)
+
+      state = if created?, do: notify_catalog_version(state, version, nil), else: state
+      state = flush_notifications(state)
+      {:reply, {:ok, build_catalog_version(state.db, version), created?}, state}
+    else
+      {:error, error} -> {:reply, {:error, error}, state}
+    end
+  end
+
+  def handle_call({:subscribe_catalog, workspace_external_id, pid}, _from, state) do
+    case resolve_workspace_external_id(state, workspace_external_id) do
+      {:ok, workspace_id} ->
+        {:ok, ref, state} = add_listener(state, {:catalog, workspace_external_id}, pid)
+        chain = get_workspace_chain(state, workspace_id)
+        {:ok, versions} = Catalog.list_heads(state.db, chain, nil)
+
+        heads =
+          Map.new(versions, fn version ->
+            {version.path, build_catalog_version(state.db, version)}
+          end)
+
+        {:reply, {:ok, heads, ref}, state}
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -4079,6 +4232,9 @@ defmodule Coflux.Orchestration.Server do
                 {:ok, id} -> [{:execution, id}]
                 {:error, :not_found} -> []
               end
+
+            {:catalog, _workspace_id, path, number} ->
+              [{:catalog, path, number}]
           end)
 
         {:ok, state} =
@@ -4662,11 +4818,10 @@ defmodule Coflux.Orchestration.Server do
 
         {state, pending_dependencies} =
           if step_id do
-            pending_dependencies =
-              compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
+            {pending_dependencies, _group} =
+              pending = compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
 
-            state =
-              register_pending_dependencies(state, execution_id, pending_dependencies)
+            state = register_pending_dependencies(state, execution_id, pending)
 
             {state, pending_dependencies}
           else
@@ -4709,6 +4864,7 @@ defmodule Coflux.Orchestration.Server do
     execute_after = Keyword.get(opts, :execute_after, nil)
     dependency_keys = Keyword.get(opts, :dependency_keys, [])
     created_by = Keyword.get(opts, :created_by)
+    catalog_sequence = Keyword.get(opts, :catalog_sequence)
 
     # Separate execution, input and stream dependencies.
     #
@@ -4717,25 +4873,28 @@ defmodule Coflux.Orchestration.Server do
     # uses, so the edge survives epoch rotation. A stream that can't be
     # resolved is dropped rather than recorded: gating on it would strand
     # the successor forever.
-    {exec_deps, input_deps, stream_waits} =
-      Enum.reduce(dependency_keys, {[], [], []}, fn
-        {:execution, id}, {execs, inputs, streams} ->
-          {[id | execs], inputs, streams}
+    {exec_deps, input_deps, stream_waits, catalog_waits} =
+      Enum.reduce(dependency_keys, {[], [], [], []}, fn
+        {:execution, id}, {execs, inputs, streams, catalog} ->
+          {[id | execs], inputs, streams, catalog}
 
-        {:input, id}, {execs, inputs, streams} ->
-          {execs, [id | inputs], streams}
+        {:input, id}, {execs, inputs, streams, catalog} ->
+          {execs, [id | inputs], streams, catalog}
 
-        {:stream, external_id, sequence}, {execs, inputs, streams} ->
+        {:stream, external_id, sequence}, {execs, inputs, streams, catalog} ->
           case resolve_stream_id(state, external_id) do
             {:ok, stream_id} ->
               case Streams.create_stream_ref_for(state.db, stream_id) do
-                {:ok, ref_id} -> {execs, inputs, [{ref_id, sequence} | streams]}
-                {:error, :not_found} -> {execs, inputs, streams}
+                {:ok, ref_id} -> {execs, inputs, [{ref_id, sequence} | streams], catalog}
+                {:error, :not_found} -> {execs, inputs, streams, catalog}
               end
 
             {:error, :not_found} ->
-              {execs, inputs, streams}
+              {execs, inputs, streams, catalog}
           end
+
+        {:catalog, path, number}, {execs, inputs, streams, catalog} ->
+          {execs, inputs, streams, [{path, number} | catalog]}
       end)
 
     # Convert internal dependency execution IDs to execution_ref IDs
@@ -4754,11 +4913,19 @@ defmodule Coflux.Orchestration.Server do
            workspace_id,
            execute_after,
            dependency_ref_ids,
-           input_deps,
-           stream_waits,
-           created_by
+           input_dependency_ids: input_deps,
+           stream_waits: stream_waits,
+           created_by: created_by,
+           catalog_sequence: catalog_sequence
          ) do
       {:ok, execution_id, attempt, created_at} ->
+        # A catalog wait is keyed by path rather than by a ref, so it is
+        # written directly. Before the gate is computed, since it reads
+        # these rows.
+        Enum.each(catalog_waits, fn {path, number} ->
+          :ok = Catalog.record_wait(state.db, execution_id, path, number)
+        end)
+
         {run_module, run_target} =
           case get_run_workflow(state, run.external_id) do
             {_, _} = workflow ->
@@ -4782,15 +4949,15 @@ defmodule Coflux.Orchestration.Server do
         dependencies =
           Map.new(dependency_ref_ids, fn ref_id ->
             {ext_id, _module, _target} = execution = resolve_execution_ref(state.db, ref_id)
-            {ext_id, execution}
+            {ext_id, {:result, execution}}
           end)
 
         # Compute and register pending dependencies
-        pending_dependencies =
+        {pending_dependencies, _group} =
+          pending =
           compute_pending_dependencies(state.db, execution_id, step.wait_for || [], step.id)
 
-        state =
-          register_pending_dependencies(state, execution_id, pending_dependencies)
+        state = register_pending_dependencies(state, execution_id, pending)
 
         dependencies =
           Map.merge(
@@ -4881,6 +5048,16 @@ defmodule Coflux.Orchestration.Server do
                  unresolved_dependencies,
                  stream_external_id(stream_run_ext_id, stream_step_number, index)
                )}
+            )
+          end)
+
+        state =
+          Enum.reduce(catalog_waits, state, fn {path, number}, state ->
+            notify_listeners(
+              state,
+              {:run, run.external_id},
+              {:catalog_wait, execution_external_id, path, number,
+               MapSet.member?(unresolved_dependencies, catalog_wait_key(path, number))}
             )
           end)
 
@@ -5075,6 +5252,7 @@ defmodule Coflux.Orchestration.Server do
     |> Map.put(:pending_dependencies, %{})
     |> Map.put(:stream_dependency_keys, %{})
     |> Map.put(:dependency_waiters, %{})
+    |> Map.put(:dependency_groups, %{})
     |> initialize_pending_dependencies()
     |> maybe_start_index_build()
   end
@@ -5611,6 +5789,9 @@ defmodule Coflux.Orchestration.Server do
     {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
     {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
     {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
+    {:ok, run_catalog_reads} = Catalog.get_reads_for_run(db, run.id)
+    {:ok, run_catalog_waits} = Catalog.get_waits_for_run(db, run.id)
+    {:ok, run_catalog_publishes} = Catalog.get_publishes_for_run(db, run.external_id)
 
     # Resolving a checkpoint needs the workspace chain of the execution
     # reading it. Resolved from `db` rather than `state` because this also
@@ -5665,6 +5846,37 @@ defmodule Coflux.Orchestration.Server do
         end
       )
       |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+    catalog_reads_by_execution =
+      run_catalog_reads
+      |> Enum.group_by(
+        fn {execution_id, _version} -> execution_id end,
+        fn {_execution_id, version} ->
+          {catalog_version_key(version.path, version.number),
+           {:catalog, build_catalog_version(db, version)}}
+        end
+      )
+      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+    catalog_waits_by_execution =
+      run_catalog_waits
+      |> Enum.group_by(
+        fn {execution_id, _path, _number} -> execution_id end,
+        fn {_execution_id, path, number} ->
+          {catalog_wait_key(path, number), {:catalog_wait, path, number}}
+        end
+      )
+      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+    catalog_publishes_by_attempt =
+      run_catalog_publishes
+      |> Enum.group_by(
+        fn {key, _version} -> key end,
+        fn {_key, version} ->
+          {catalog_version_key(version.path, version.number), build_catalog_version(db, version)}
+        end
+      )
+      |> Map.new(fn {key, versions} -> {key, Map.new(versions)} end)
 
     metric_definitions_by_execution =
       Enum.group_by(
@@ -5832,19 +6044,16 @@ defmodule Coflux.Orchestration.Server do
                  end)
 
                dependencies =
-                 Map.merge(
+                 [
                    build_argument_dependencies(db, step.id, step.wait_for),
-                   Map.merge(
-                     result_deps,
-                     Map.merge(
-                       stream_deps,
-                       Map.merge(
-                         Map.get(input_deps_by_execution, execution_id, %{}),
-                         Map.get(asset_deps_by_execution, execution_id, %{})
-                       )
-                     )
-                   )
-                 )
+                   result_deps,
+                   stream_deps,
+                   Map.get(input_deps_by_execution, execution_id, %{}),
+                   Map.get(asset_deps_by_execution, execution_id, %{}),
+                   Map.get(catalog_reads_by_execution, execution_id, %{}),
+                   Map.get(catalog_waits_by_execution, execution_id, %{})
+                 ]
+                 |> Enum.reduce(%{}, &Map.merge(&2, &1))
 
                # Nothing is outstanding for an execution that has finished:
                # it isn't waiting on anything any more, whatever state its
@@ -5877,6 +6086,7 @@ defmodule Coflux.Orchestration.Server do
                   completion: completion,
                   groups: execution_groups,
                   assets: assets,
+                  published: Map.get(catalog_publishes_by_attempt, {step.number, attempt}, %{}),
                   dependencies: dependencies,
                   pending_dependencies: pending_dependencies,
                   inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
@@ -6509,6 +6719,205 @@ defmodule Coflux.Orchestration.Server do
 
       _reference, :ok ->
         {:cont, :ok}
+    end)
+  end
+
+  # --- Catalog helpers ---
+
+  # Resolves a version for an execution: by number, or the head as of the
+  # execution's snapshot when `number` is nil.
+  # The `catalog` option of `start_run` and `rerun_step`, as a snapshot:
+  # `"latest"` is the clock now; `"path@n"` is that version's place in the
+  # clock, so a run or attempt started from it sees the catalog as it was
+  # when that version was published. It has to exist and be visible from
+  # the workspace the run is in.
+  defp resolve_catalog_option(_state, _workspace_id, nil), do: {:ok, nil}
+
+  defp resolve_catalog_option(state, _workspace_id, "latest"),
+    do: Catalog.current_sequence(state.db)
+
+  defp resolve_catalog_option(state, workspace_id, ref) when is_binary(ref) do
+    with {:ok, path, number} <- parse_catalog_ref(ref),
+         {:ok, %{} = version} <- Catalog.get_version(state.db, path, number) do
+      if Catalog.visible?(version, get_workspace_chain(state, workspace_id)),
+        do: {:ok, version.id},
+        else: {:error, :catalog_invisible}
+    else
+      {:ok, nil} -> {:error, :catalog_not_found}
+      {:error, _} -> {:error, :catalog_invalid}
+    end
+  end
+
+  defp resolve_catalog_option(_state, _workspace_id, _other), do: {:error, :catalog_invalid}
+
+  # `path@n`. A path can't contain `@`, so the split is unambiguous.
+  defp parse_catalog_ref(ref) do
+    with [path, number] <- String.split(ref, "@"),
+         :ok <- Catalog.validate_path(path),
+         {n, ""} when n > 0 <- Integer.parse(number) do
+      {:ok, path, n}
+    else
+      _ -> {:error, :invalid}
+    end
+  end
+
+  defp lookup_catalog_version(state, execution_id, path, number) do
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+    chain = get_workspace_chain(state, workspace_id)
+
+    if number do
+      # A named version is an immutable reference, so the pin doesn't
+      # apply. A number is allocated once per path, so one published
+      # outside the caller's chain can never become visible.
+      case Catalog.get_version(state.db, path, number) do
+        {:ok, nil} ->
+          {:ok, nil}
+
+        {:ok, version} ->
+          if Catalog.visible?(version, chain),
+            do: {:ok, version},
+            else: {:error, :invisible}
+      end
+    else
+      {:ok, pin} = Catalog.get_pin(state.db, execution_id)
+
+      {:ok, {run_external_id}} =
+        Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+      Catalog.get_head(state.db, path, chain, pin, run_external_id)
+    end
+  end
+
+  # A version as topics and the API see it, with its value resolved for
+  # rendering.
+  defp build_catalog_version(db, version) do
+    {:ok, value} = Values.get_value_by_id(db, version.value_id)
+
+    published_by =
+      if version.execution_ref_id do
+        {ext_id, _module, _target} = resolve_execution_ref(db, version.execution_ref_id)
+        ext_id
+      end
+
+    created_by =
+      case Principals.get_principal(db, version.created_by) do
+        {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+        {:ok, nil} -> nil
+      end
+
+    {:ok, workspace_external_id} =
+      Workspaces.get_workspace_external_id(db, version.workspace_id)
+
+    %{
+      path: version.path,
+      number: version.number,
+      sequence: version.id,
+      value: build_value(value, db),
+      created_at: version.created_at,
+      workspace_id: workspace_external_id,
+      published_by: published_by,
+      created_by: created_by
+    }
+  end
+
+  defp catalog_version_key(path, number), do: "#{path}@#{number}"
+
+  # A wait is for whatever comes after `number`, so it is keyed apart from a
+  # read of that version.
+  defp catalog_wait_key(path, number), do: "#{path}@#{number}+"
+
+  defp record_catalog_read(state, execution_id, execution_external_id, version) do
+    case Catalog.record_read(state.db, execution_id, version.id) do
+      {:ok, true} ->
+        {:ok, {run_external_id}} =
+          Runs.get_external_run_id_for_execution(state.db, execution_id)
+
+        notify_listeners(
+          state,
+          {:run, run_external_id},
+          {:catalog_read, execution_external_id, build_catalog_version(state.db, version)}
+        )
+
+      {:ok, false} ->
+        state
+    end
+  end
+
+  # A new version landed. Tell the publishing run, every workspace that can
+  # see it (its own and every descendant), and anything waiting on the path.
+  defp notify_catalog_version(state, version, publisher_execution_external_id) do
+    info = build_catalog_version(state.db, version)
+
+    state =
+      if publisher_execution_external_id do
+        {:ok, run_ext_id, _step, _attempt} =
+          parse_execution_external_id(publisher_execution_external_id)
+
+        notify_listeners(
+          state,
+          {:run, run_ext_id},
+          {:catalog_publish, publisher_execution_external_id, info}
+        )
+      else
+        state
+      end
+
+    state =
+      state.workspaces
+      |> Enum.filter(fn {workspace_id, _workspace} ->
+        version.workspace_id in get_workspace_chain(state, workspace_id)
+      end)
+      |> Enum.reduce(state, fn {_workspace_id, workspace}, state ->
+        notify_listeners(state, {:catalog, workspace.external_id}, {:catalog_version, info})
+      end)
+
+    wake_catalog_waiters(state, version)
+  end
+
+  # A version landed at `version.path`. Release every gated successor and
+  # serve every running select that was waiting on the path from a
+  # workspace that can see it. Both sets are keyed
+  # `{:catalog, workspace_id, path, number}`; publishes are rare enough
+  # that scanning the keys beats keeping an index.
+  defp wake_catalog_waiters(state, version) do
+    woken? = fn
+      {:catalog, workspace_id, path, number} ->
+        path == version.path and number < version.number and
+          version.workspace_id in get_workspace_chain(state, workspace_id)
+
+      _key ->
+        false
+    end
+
+    state =
+      state.dependency_waiters
+      |> Map.keys()
+      |> Enum.filter(woken?)
+      |> Enum.reduce(state, &clear_dependency_key(&2, &1))
+
+    state.waiting
+    |> Map.keys()
+    |> Enum.filter(woken?)
+    |> Enum.reduce(state, fn {:catalog, workspace_id, path, number} = key, state ->
+      chain = get_workspace_chain(state, workspace_id)
+      # Whatever is next from here — this version, unless one landed in
+      # between — is what the waiter gets, and is recorded as its read.
+      {:ok, next} = Catalog.get_next(state.db, path, chain, number)
+
+      state =
+        state.waiting
+        |> Map.get(key, [])
+        |> Enum.reduce(state, fn entry, state ->
+          case resolve_internal_execution_id(state, entry.from_ext_id) do
+            {:ok, execution_id} ->
+              record_catalog_read(state, execution_id, entry.from_ext_id, next)
+
+            {:error, :not_found} ->
+              state
+          end
+        end)
+
+      notify_select_waiters(state, key, {:value, {:raw, next.number, []}})
     end)
   end
 
@@ -7491,6 +7900,34 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # A catalog wait from a suspend request names only the path. Its position
+  # is the suspending execution's own view of that path — the head as of
+  # its pin, plus its run's writes — so "newer" means newer than anything
+  # it could see, and its own publish can never wake it. (A wait from a
+  # suspended select already carries its position.) An invalid path is
+  # dropped rather than gated on forever.
+  defp resolve_catalog_waits(state, execution_id, dependency_keys) do
+    Enum.flat_map(dependency_keys, fn
+      {:catalog, path} ->
+        case Catalog.validate_path(path) do
+          :ok ->
+            number =
+              case lookup_catalog_version(state, execution_id, path, nil) do
+                {:ok, nil} -> 0
+                {:ok, version} -> version.number
+              end
+
+            [{:catalog, path, number}]
+
+          {:error, :invalid_path} ->
+            []
+        end
+
+      other ->
+        [other]
+    end)
+  end
+
   defp decide_and_create_successor(state, execution_id, step, workspace_id, result) do
     execution_ext_id =
       case Runs.get_execution_key(state.db, execution_id) do
@@ -7501,6 +7938,7 @@ defmodule Coflux.Orchestration.Server do
     cond do
       match?({:suspended, _, _}, result) ->
         {:suspended, execute_after, dependency_keys} = result
+        dependency_keys = resolve_catalog_waits(state, execution_id, dependency_keys)
 
         # TODO: limit the number of times a step can suspend? (or rate?)
 
@@ -7902,6 +8340,9 @@ defmodule Coflux.Orchestration.Server do
               sequence: sequence
             }
         end
+
+      {:catalog, _workspace_id, path, number} ->
+        %{type: "catalog", path: path, number: number}
     end)
   end
 
@@ -7963,7 +8404,7 @@ defmodule Coflux.Orchestration.Server do
     {:ok, executions} = Runs.get_unassigned_executions(state.db)
 
     Enum.reduce(executions, state, fn execution, state ->
-      pending_dependencies =
+      pending =
         compute_pending_dependencies(
           state.db,
           execution.execution_id,
@@ -7971,7 +8412,7 @@ defmodule Coflux.Orchestration.Server do
           execution.step_id
         )
 
-      register_pending_dependencies(state, execution.execution_id, pending_dependencies)
+      register_pending_dependencies(state, execution.execution_id, pending)
     end)
   end
 
@@ -8037,21 +8478,16 @@ defmodule Coflux.Orchestration.Server do
   # dependencies clear, whereas this is re-derived per dependency for
   # display. A completed execution reports nothing - it isn't waiting on
   # anything any more, whatever state its dependencies are in.
+  #
+  # Same two classes as the gate: argument references are outstanding
+  # individually, and the recorded dependencies form an any-of group, so a
+  # single met member means none of them is outstanding.
   defp unresolved_dependency_ids(db, execution_id) do
     {:ok, step} = Runs.get_step_for_execution(db, execution_id)
 
-    recorded_keys =
-      case Runs.get_result_dependencies(db, execution_id) do
-        {:ok, dependencies} ->
-          Enum.map(dependencies, fn {ref_id} ->
-            {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
-            {run_ext, step_num, attempt}
-          end)
-      end
-
-    execution_ids =
-      (recorded_keys ++ argument_reference_keys(db, step.id, step.wait_for))
-      |> Enum.uniq()
+    argument_ids =
+      db
+      |> argument_reference_keys(step.id, step.wait_for)
       |> Enum.filter(fn {run_ext, step_num, attempt} ->
         execution_result_pending?(db, run_ext, step_num, attempt)
       end)
@@ -8059,40 +8495,83 @@ defmodule Coflux.Orchestration.Server do
         execution_external_id(run_ext, step_num, attempt)
       end)
 
-    input_ids =
-      case Runs.get_input_dependencies(db, execution_id) do
-        {:ok, deps} ->
-          deps
-          |> Enum.reject(fn {input_id} -> Inputs.is_input_responded?(db, input_id) end)
-          |> MapSet.new(fn {input_id} ->
-            {:ok, run_ext, number} = Inputs.get_input_run_and_number(db, input_id)
-            input_external_id(run_ext, number)
+    result_members =
+      case Runs.get_result_dependencies(db, execution_id) do
+        {:ok, dependencies} ->
+          Enum.map(dependencies, fn {ref_id} ->
+            {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
+
+            {execution_external_id(run_ext, step_num, attempt),
+             execution_result_pending?(db, run_ext, step_num, attempt)}
           end)
       end
 
-    stream_ids =
+    input_members =
+      case Runs.get_input_dependencies(db, execution_id) do
+        {:ok, deps} ->
+          Enum.map(deps, fn {input_id} ->
+            {:ok, run_ext, number} = Inputs.get_input_run_and_number(db, input_id)
+            {input_external_id(run_ext, number), !Inputs.is_input_responded?(db, input_id)}
+          end)
+      end
+
+    stream_members =
       case Streams.get_wait_dependencies(db, execution_id) do
         {:ok, waits} ->
-          waits
-          |> Enum.filter(fn {stream_ref_id, sequence} ->
-            case resolve_stream_ref_id(db, stream_ref_id) do
-              {:ok, stream_id} -> !stream_reached?(db, stream_id, sequence)
-              {:error, :not_found} -> false
-            end
-          end)
-          |> MapSet.new(fn {stream_ref_id, _sequence} ->
+          Enum.map(waits, fn {stream_ref_id, sequence} ->
             {:ok, {run_ext, step_number, index, _module, _target}} =
               Streams.get_stream_ref(db, stream_ref_id)
 
-            stream_external_id(run_ext, step_number, index)
+            pending? =
+              case resolve_stream_ref_id(db, stream_ref_id) do
+                {:ok, stream_id} -> !stream_reached?(db, stream_id, sequence)
+                {:error, :not_found} -> false
+              end
+
+            {stream_external_id(run_ext, step_number, index), pending?}
           end)
       end
 
-    execution_ids |> MapSet.union(input_ids) |> MapSet.union(stream_ids)
+    catalog_members =
+      case Catalog.get_waits(db, execution_id) do
+        {:ok, []} ->
+          []
+
+        {:ok, waits} ->
+          {:ok, workspace_id} = Runs.get_workspace_id_for_execution(db, execution_id)
+          {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
+
+          Enum.map(waits, fn {path, number} ->
+            {catalog_wait_key(path, number),
+             match?({:ok, nil}, Catalog.get_next(db, path, chain, number))}
+          end)
+      end
+
+    members = result_members ++ input_members ++ stream_members ++ catalog_members
+
+    group_ids =
+      if Enum.any?(members, fn {_id, pending?} -> !pending? end),
+        do: MapSet.new(),
+        else: MapSet.new(members, fn {id, _pending?} -> id end)
+
+    MapSet.union(argument_ids, group_ids)
   end
 
-  # Compute the set of execution IDs that the given execution is waiting on.
-  # This covers both argument references (when wait_for is set) and result_dependencies.
+  # Compute the set of dependency keys the given execution is waiting on.
+  #
+  # Two classes, combined as `all arguments AND any of the recorded group`:
+  #
+  #   * Argument references (`wait_for`) — every one must resolve before the
+  #     step's arguments make sense.
+  #   * Dependencies recorded on the execution row — result, input, stream
+  #     and catalog waits, which only a suspended select (or a suspended
+  #     stream consumer) writes. Select is first-wins, so the successor
+  #     wakes when ANY of them is met: if one already is, the whole group
+  #     is dropped here; otherwise every unmet one is registered and
+  #     `dependency_groups` remembers they go together.
+  #
+  # Returns `{pending, group}`: the keys to gate on, and the subset of them
+  # that form the any-of group.
   defp compute_pending_dependencies(db, execution_id, wait_for, step_id) do
     # Collect pending execution IDs from argument references
     argument_dependencies =
@@ -8112,69 +8591,88 @@ defmodule Coflux.Orchestration.Server do
         MapSet.new()
       end
 
-    # Collect pending execution IDs from result_dependencies
+    # Each recorded dependency, as {:met | key}. A key is one still to wait
+    # for; :met is one that has already resolved, which is enough on its
+    # own to release the group.
     result_dependencies =
       case Runs.get_result_dependencies(db, execution_id) do
         {:ok, dependencies} ->
-          Enum.reduce(dependencies, MapSet.new(), fn {dependency_ref_id}, acc ->
+          Enum.map(dependencies, fn {dependency_ref_id} ->
             {:ok, {run_ext, step_num, attempt, _, _}} =
               Runs.get_execution_ref(db, dependency_ref_id)
 
             case Runs.get_execution_id(db, run_ext, step_num, attempt) do
               {:ok, {dependency_execution_id}} when not is_nil(dependency_execution_id) ->
                 case resolve_result(db, dependency_execution_id) do
-                  {:ok, _} -> acc
-                  {:pending, pending_id} -> MapSet.put(acc, {:execution, pending_id})
+                  {:ok, _} -> :met
+                  {:pending, pending_id} -> {:execution, pending_id}
                 end
 
               _ ->
-                acc
+                # Gone (a pruned epoch, say). Treated as met rather than
+                # stranding the execution.
+                :met
             end
           end)
       end
 
-    # Collect pending input dependencies
     input_dependencies =
       case Runs.get_input_dependencies(db, execution_id) do
         {:ok, deps} ->
-          Enum.reduce(deps, MapSet.new(), fn {input_id}, acc ->
-            if Inputs.is_input_responded?(db, input_id) do
-              acc
-            else
-              MapSet.put(acc, {:input, input_id})
-            end
+          Enum.map(deps, fn {input_id} ->
+            if Inputs.is_input_responded?(db, input_id), do: :met, else: {:input, input_id}
           end)
       end
 
-    # Collect unmet stream waits. Only rows with a sequence are waits;
-    # the rest of the table is subscription lineage. This runs solely for
-    # executions that have not been assigned yet, which is what makes it
-    # safe for the sequence to stay on the row after the gate clears — a
-    # completed execution's row is never read back here.
+    # Only rows with a sequence are waits; the rest of the table is
+    # subscription lineage. This runs solely for executions that have not
+    # been assigned yet, which is what makes it safe for the sequence to
+    # stay on the row after the gate clears — a completed execution's row
+    # is never read back here.
     stream_dependencies =
       case Streams.get_wait_dependencies(db, execution_id) do
         {:ok, waits} ->
-          Enum.reduce(waits, MapSet.new(), fn {stream_ref_id, sequence}, acc ->
+          Enum.map(waits, fn {stream_ref_id, sequence} ->
             case resolve_stream_ref_id(db, stream_ref_id) do
               {:ok, stream_id} ->
-                if stream_reached?(db, stream_id, sequence) do
-                  acc
-                else
-                  MapSet.put(acc, {:stream, stream_id, sequence})
-                end
+                if stream_reached?(db, stream_id, sequence),
+                  do: :met,
+                  else: {:stream, stream_id, sequence}
 
               {:error, :not_found} ->
-                # The stream is gone (a pruned epoch, say). Waiting on it
-                # forever would strand the execution, so treat it as met.
-                acc
+                :met
             end
           end)
       end
 
-    argument_dependencies
-    |> MapSet.union(result_dependencies)
-    |> MapSet.union(input_dependencies)
-    |> MapSet.union(stream_dependencies)
+    # A catalog wait is met once the path, as seen from the execution's
+    # workspace chain, holds a version numbered above the one recorded.
+    catalog_dependencies =
+      case Catalog.get_waits(db, execution_id) do
+        {:ok, []} ->
+          []
+
+        {:ok, waits} ->
+          {:ok, workspace_id} = Runs.get_workspace_id_for_execution(db, execution_id)
+          {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
+
+          Enum.map(waits, fn {path, number} ->
+            case Catalog.get_next(db, path, chain, number) do
+              {:ok, nil} -> {:catalog, workspace_id, path, number}
+              {:ok, _version} -> :met
+            end
+          end)
+      end
+
+    recorded =
+      result_dependencies ++ input_dependencies ++ stream_dependencies ++ catalog_dependencies
+
+    group =
+      if Enum.any?(recorded, &(&1 == :met)),
+        do: MapSet.new(),
+        else: MapSet.new(recorded)
+
+    {MapSet.union(argument_dependencies, group), group}
   end
 
   # A stream wait is met once the stream holds the sequence, or can never
@@ -8247,12 +8745,18 @@ defmodule Coflux.Orchestration.Server do
 
   # Register an execution's pending dependencies in state.
   # Only adds entries if there are actual pending dependencies.
-  defp register_pending_dependencies(state, execution_id, dependencies) do
+  defp register_pending_dependencies(state, execution_id, {dependencies, group}) do
     if MapSet.size(dependencies) == 0 do
       state
     else
       state =
-        put_in(state, [Access.key(:pending_dependencies), execution_id], dependencies)
+        state
+        |> put_in([Access.key(:pending_dependencies), execution_id], dependencies)
+        |> then(fn state ->
+          if MapSet.size(group) > 0,
+            do: put_in(state, [Access.key(:dependency_groups), execution_id], group),
+            else: state
+        end)
 
       Enum.reduce(dependencies, state, fn dependency_id, state ->
         state
@@ -8365,7 +8869,94 @@ defmodule Coflux.Orchestration.Server do
             end
           end)
 
-        update_in(state, [Access.key(:pending_dependencies)], &Map.delete(&1, execution_id))
+        state
+        |> update_in([Access.key(:pending_dependencies)], &Map.delete(&1, execution_id))
+        |> update_in([Access.key(:dependency_groups)], &Map.delete(&1, execution_id))
+
+      :error ->
+        state
+    end
+  end
+
+  # Apply the removal of `dependency_key` from `waiter_id`'s pending set,
+  # with `new_pending` (a redirect's replacement keys, usually empty) taking
+  # its place. If the key belonged to the waiter's any-of group and nothing
+  # replaces it, the group is met: every other member is dropped too, and
+  # the execution is scheduled. A redirected member stays in the group under
+  # its new key.
+  defp remove_pending_dependency(state, waiter_id, dependency_key, new_pending) do
+    case Map.fetch(state.pending_dependencies, waiter_id) do
+      {:ok, current} ->
+        group = Map.get(state.dependency_groups, waiter_id, MapSet.new())
+        in_group? = MapSet.member?(group, dependency_key)
+
+        {updated, group} =
+          cond do
+            in_group? and MapSet.size(new_pending) == 0 ->
+              {MapSet.difference(MapSet.delete(current, dependency_key), group), MapSet.new()}
+
+            in_group? ->
+              {current |> MapSet.delete(dependency_key) |> MapSet.union(new_pending),
+               group |> MapSet.delete(dependency_key) |> MapSet.union(new_pending)}
+
+            true ->
+              {current |> MapSet.delete(dependency_key) |> MapSet.union(new_pending), group}
+          end
+
+        # Keys released along with the one that cleared no longer have this
+        # waiter behind them.
+        released = MapSet.difference(current, MapSet.put(updated, dependency_key))
+
+        state =
+          Enum.reduce(released, state, fn key, state ->
+            state
+            |> update_in(
+              [Access.key(:dependency_waiters), Access.key(key, MapSet.new())],
+              &MapSet.delete(&1, waiter_id)
+            )
+            |> then(fn state ->
+              if MapSet.size(state.dependency_waiters[key] || MapSet.new()) == 0 do
+                state
+                |> update_in([Access.key(:dependency_waiters)], &Map.delete(&1, key))
+                |> unindex_stream_dependency(key)
+              else
+                state
+              end
+            end)
+          end)
+
+        state =
+          Enum.reduce(new_pending, state, fn new_dep_key, state ->
+            state
+            |> update_in(
+              [Access.key(:dependency_waiters), Access.key(new_dep_key, MapSet.new())],
+              &MapSet.put(&1, waiter_id)
+            )
+            |> index_stream_dependency(new_dep_key)
+          end)
+
+        if MapSet.size(updated) == 0 do
+          send(self(), :tick)
+        end
+
+        state
+        |> then(fn state ->
+          if MapSet.size(updated) == 0 do
+            state
+            |> update_in([Access.key(:pending_dependencies)], &Map.delete(&1, waiter_id))
+            |> update_in([Access.key(:dependency_groups)], &Map.delete(&1, waiter_id))
+          else
+            state
+            |> put_in([Access.key(:pending_dependencies), waiter_id], updated)
+            |> then(fn state ->
+              if MapSet.size(group) > 0,
+                do: put_in(state, [Access.key(:dependency_groups), waiter_id], group),
+                else:
+                  update_in(state, [Access.key(:dependency_groups)], &Map.delete(&1, waiter_id))
+            end)
+          end
+        end)
+        |> notify_pending_dependencies(waiter_id, updated)
 
       :error ->
         state
@@ -8419,43 +9010,7 @@ defmodule Coflux.Orchestration.Server do
           end
 
         Enum.reduce(waiters, state, fn waiter_id, state ->
-          case Map.fetch(state.pending_dependencies, waiter_id) do
-            {:ok, current} ->
-              updated =
-                current
-                |> MapSet.delete(dependency_key)
-                |> MapSet.union(new_pending)
-
-              # Register waiter with new dependency_waiters entries
-              state
-              |> then(fn state ->
-                Enum.reduce(new_pending, state, fn new_dep_key, state ->
-                  update_in(
-                    state,
-                    [
-                      Access.key(:dependency_waiters),
-                      Access.key(new_dep_key, MapSet.new())
-                    ],
-                    &MapSet.put(&1, waiter_id)
-                  )
-                end)
-              end)
-              |> then(fn state ->
-                if MapSet.size(updated) == 0 do
-                  update_in(
-                    state,
-                    [Access.key(:pending_dependencies)],
-                    &Map.delete(&1, waiter_id)
-                  )
-                else
-                  put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
-                end
-              end)
-              |> notify_pending_dependencies(waiter_id, updated)
-
-            :error ->
-              state
-          end
+          remove_pending_dependency(state, waiter_id, dependency_key, new_pending)
         end)
 
       :error ->
@@ -8505,31 +9060,7 @@ defmodule Coflux.Orchestration.Server do
           |> unindex_stream_dependency(dependency_key)
 
         Enum.reduce(waiters, state, fn waiter_id, state ->
-          case Map.fetch(state.pending_dependencies, waiter_id) do
-            {:ok, current} ->
-              updated = MapSet.delete(current, dependency_key)
-
-              if MapSet.size(updated) == 0 do
-                send(self(), :tick)
-              end
-
-              state
-              |> then(fn state ->
-                if MapSet.size(updated) == 0 do
-                  update_in(
-                    state,
-                    [Access.key(:pending_dependencies)],
-                    &Map.delete(&1, waiter_id)
-                  )
-                else
-                  put_in(state, [Access.key(:pending_dependencies), waiter_id], updated)
-                end
-              end)
-              |> notify_pending_dependencies(waiter_id, updated)
-
-            :error ->
-              state
-          end
+          remove_pending_dependency(state, waiter_id, dependency_key, MapSet.new())
         end)
 
       :error ->
@@ -8739,6 +9270,58 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # A catalog handle asks for the first version at `path` numbered above a
+  # position, as seen from the caller's workspace, and resolves with that
+  # version's number (recorded as a read). Without an explicit `number`
+  # the position is the caller's own view of the path — the head as of its
+  # snapshot, plus its run's writes — so the wait means "anything newer
+  # than what `current()` gives me", and an execution's own publish never
+  # wakes it. Either way what comes *after* the position ignores the pin:
+  # this is the wait side, and seeing past the snapshot is the point.
+  #
+  # The waiting key carries the caller's workspace so a publish can check
+  # visibility per key; the dependency key recorded on a suspended
+  # successor doesn't need it, since the successor's workspace is known.
+  defp process_select_handle(
+         state,
+         %{"type" => "catalog", "path" => path} = handle,
+         from_execution_id,
+         from_execution_external_id
+       ) do
+    case Catalog.validate_path(path) do
+      :ok ->
+        number =
+          case Map.get(handle, "number") do
+            nil ->
+              case lookup_catalog_version(state, from_execution_id, path, nil) do
+                {:ok, nil} -> 0
+                {:ok, version} -> version.number
+              end
+
+            number ->
+              number
+          end
+
+        {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, from_execution_id)
+        chain = get_workspace_chain(state, workspace_id)
+
+        case Catalog.get_next(state.db, path, chain, number) do
+          {:ok, nil} ->
+            {{:ok, {:pending, {:catalog, workspace_id, path, number}, {:catalog, path, number}}},
+             state}
+
+          {:ok, version} ->
+            state =
+              record_catalog_read(state, from_execution_id, from_execution_external_id, version)
+
+            {{:ok, {:resolved, {:value, {:raw, version.number, []}}}}, state}
+        end
+
+      {:error, :invalid_path} ->
+        {{:error, :invalid_path}, state}
+    end
+  end
+
   defp process_select_handle(
          state,
          %{"type" => "input", "id" => input_external_id},
@@ -8931,6 +9514,9 @@ defmodule Coflux.Orchestration.Server do
         end
 
       {:input, _}, state ->
+        state
+
+      {:catalog, _, _, _}, state ->
         state
     end)
   end

@@ -35,6 +35,8 @@ type refFormatter func(ref any) string
 type valueFormatter struct {
 	fmtRef  refFormatter
 	colored bool
+	// compact renders dicts on one line, for table cells.
+	compact bool
 }
 
 func (f *valueFormatter) color(color, s string) string {
@@ -77,9 +79,18 @@ func (f *valueFormatter) format(data any, references []any, depth int) string {
 			if len(items) == 0 {
 				return "{}"
 			}
+			arrow := f.color(colorDim, " ↦ ")
+			if f.compact {
+				var pairs []string
+				for i := 0; i+1 < len(items); i += 2 {
+					key := f.format(items[i], references, depth+1)
+					val := f.format(items[i+1], references, depth+1)
+					pairs = append(pairs, key+arrow+val)
+				}
+				return "{" + strings.Join(pairs, ", ") + "}"
+			}
 			indent := strings.Repeat("  ", depth+1)
 			outdent := strings.Repeat("  ", depth)
-			arrow := f.color(colorDim, " ↦ ")
 			var lines []string
 			for i := 0; i+1 < len(items); i += 2 {
 				key := f.format(items[i], references, depth+1)
@@ -137,6 +148,12 @@ func formatData(data any, references []any) string {
 // formatDataPlain formats a Data value as plain text (no colors).
 func formatDataPlain(data any, references []any) string {
 	f := &valueFormatter{fmtRef: formatReference, colored: false}
+	return f.format(data, references, 0)
+}
+
+// formatDataCompact formats a Data value as plain text on one line.
+func formatDataCompact(data any, references []any) string {
+	f := &valueFormatter{fmtRef: formatReference, colored: false, compact: true}
 	return f.format(data, references, 0)
 }
 

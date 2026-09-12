@@ -494,6 +494,28 @@ cf.log_error(template=None, **kwargs)
 
 Creates and persists a collection of files as an asset, which can be inspected and downloaded from Studio or the CLI. See [assets](./assets.md).
 
+### `catalog(path) -> CatalogEntry`
+
+A handle to a path in the [catalog](./catalog.md). Nothing round-trips until it's used.
+
+### `publish(path, value) -> int`
+
+Publishes a value at a catalog path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing.
+
+## Catalog
+
+### `CatalogEntry`
+
+A handle to a path, for reading and waiting; publishing is `cf.publish`. Also a handle for `cf.select`, resolving when the path has a version this execution hasn't seen, which on an empty path is the first. Not a value: pass the path or the value it holds to a task, not the entry.
+
+#### `entry.current() -> Any`
+
+The value at the path as of the execution's snapshot. Waits for a first publish if there is none — blocking outside a `cf.suspense` scope, suspending inside one.
+
+#### `entry.next() -> NoReturn`
+
+Suspends the execution until the path has a version newer than the execution can see, whether or not inside a `cf.suspense` scope. The execution that resumes the step sees it with `current()`. Never returns.
+
 ## Exceptions
 
 | Exception | Description |

@@ -10,6 +10,7 @@ import (
 
 var submitNoWait bool
 var submitIdempotencyKey string
+var submitCatalog string
 var submitRequires []string
 var submitNoRequires bool
 var submitMemo bool
@@ -49,6 +50,7 @@ Example:
 func init() {
 	submitCmd.Flags().BoolVar(&submitNoWait, "no-wait", false, "Submit and exit immediately without waiting")
 	submitCmd.Flags().StringVar(&submitIdempotencyKey, "idempotency-key", "", "Idempotency key for deduplication")
+	submitCmd.Flags().StringVar(&submitCatalog, "catalog", "", "Run against the catalog as of a version (path@n), or 'latest' to pin the run to the catalog as of now")
 	submitCmd.Flags().StringSliceVar(&submitRequires, "requires", nil, "Override the workflow's requires (e.g., --requires gpu:A100,gpu:H100 --requires region:eu). Replaces the workflow's requires entirely.")
 	submitCmd.Flags().BoolVar(&submitNoRequires, "no-requires", false, "Override the workflow's requires with an empty set")
 	submitCmd.Flags().BoolVar(&submitMemo, "memo", false, "Override the workflow to enable memoisation")
@@ -187,6 +189,9 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 
 	if submitIdempotencyKey != "" {
 		options["idempotencyKey"] = submitIdempotencyKey
+	}
+	if submitCatalog != "" {
+		options["catalog"] = submitCatalog
 	}
 
 	result, err := client.SubmitWorkflow(cmd.Context(), workspaceID, module, targetName, submitArgs, options)

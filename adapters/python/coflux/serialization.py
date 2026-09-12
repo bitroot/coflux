@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoint import Checkpoint
-from .models import Asset, AssetMetadata, Execution, Input, Stream
+from .models import Asset, AssetMetadata, CatalogEntry, Execution, Input, Stream
 
 # Try to import pydantic
 try:
@@ -123,6 +123,14 @@ def _encode_value(
                 ]
             )
             return {"type": "ref", "index": len(references) - 1}
+        elif isinstance(v, CatalogEntry):
+            # A path handle is local: pass the path, or the value it
+            # holds, rather than the handle. (Falling through to pickle
+            # would produce an opaque blob that isn't a handle anywhere.)
+            raise TypeError(
+                f"A catalog entry can't be passed as a value; pass "
+                f"{v.path!r} or the entry's current() value instead"
+            )
         elif isinstance(v, Stream):
             # Pass-through: a Stream handle received from another execution
             # (possibly with slice/partition/stride layered on top) is

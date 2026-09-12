@@ -30,6 +30,7 @@ from .models import (
     AssetEntry,
     AssetMetadata,
     AsyncStreamIterator,
+    CatalogEntry,
     Execution,
     Input,
     Stream,
@@ -71,6 +72,7 @@ __all__ = [  # noqa: RUF022
     "Asset",
     "AssetEntry",
     "AssetMetadata",
+    "CatalogEntry",
     "Stream",
     "StreamIterator",
     "AsyncStreamIterator",
@@ -88,6 +90,8 @@ __all__ = [  # noqa: RUF022
     "log_error",
     "progress",
     "asset",
+    "catalog",
+    "publish",
     "flush",
 ]
 
@@ -122,7 +126,7 @@ def suspense(timeout: float | None = None):
     return get_context().suspense(timeout)
 
 
-_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any]")
+_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any] | CatalogEntry")
 
 
 def select(
@@ -130,12 +134,17 @@ def select(
     *,
     cancel_remaining: bool = False,
 ) -> tuple[_H, list[_H]]:
-    """Wait for the first of one or more handles (executions/inputs) to resolve.
+    """Wait for the first of one or more handles to resolve.
 
     Args:
-        handles: Sequence of Execution and/or Input objects. Must be non-empty.
+        handles: Sequence of Execution, Input and/or CatalogEntry objects.
+            Must be non-empty. A CatalogEntry resolves when its path has a
+            version this execution hasn't seen — the first, on an empty
+            path — and the thing to do when it wins is call ``next()`` on
+            it.
         cancel_remaining: If True, cancel non-winner execution handles
-            atomically once a handle resolves. Input handles are left pending.
+            atomically once a handle resolves. Input handles are left
+            pending; a catalog handle has nothing to cancel.
 
     Returns:
         Tuple of ``(winner, remaining)`` where ``winner`` is the first handle
@@ -288,3 +297,35 @@ def asset(
         asset({f"{i}.jpg": e.result()["photo.jpg"] for i, e in enumerate(photos)})
     """
     return get_context().create_asset(entries, at=at, match=match, name=name)
+
+
+def catalog(path: str) -> CatalogEntry:
+    """A handle to a path in the catalog, which holds versioned values.
+
+    Nothing round-trips until the handle is used:
+
+        entry = cf.catalog("models/churn")
+        entry.current()          # the value, as of this execution's snapshot
+        entry.next()             # suspend until there's a newer one; never returns
+
+    Publishing is ``cf.publish(path, value)``. See ``CatalogEntry``.
+    """
+    return CatalogEntry(path)
+
+
+def publish(path: str, value: t.Any) -> int:
+    """Publish ``value`` at a catalog path and return the version's number.
+
+    ``value`` is anything that can be passed to a task: an asset, a data
+    structure holding assets, a reference to something external, a plain
+    number. Facts about a publish — a metric, what it was built from — go
+    in the value too, alongside the thing itself. Publishing what is
+    already the visible head — the same value — writes nothing and returns
+    the existing version's number, which is what makes a publish safe to
+    re-run.
+
+    The catalog pins the value, not what the value points at: a handle (an
+    execution, an input) resolves to whatever it resolves to when read, and
+    a locator for external data is only as stable as that data.
+    """
+    return get_context().catalog_publish(path, value)
