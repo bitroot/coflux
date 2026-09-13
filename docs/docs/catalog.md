@@ -147,4 +147,4 @@ coflux submit --catalog <path>@<number> ...         # run as of a version
 coflux runs rerun --catalog <path>@<number>|latest <step-id>
 ```
 
-`download` restores the assets a value holds. A value that is a single asset restores flat into the directory. One holding several assets restores each into a subdirectory named by the keys (or indices) leading to it, so `{"train": a, "test": b}` restores into `train/` and `test/`. One holding no assets is an error; `get` shows it instead.
+`download` restores the assets a value holds. A value holding a single asset — the asset itself, or a structure with one asset somewhere in it — restores flat into the directory. One holding several assets restores each into a subdirectory named by the keys (or indices) leading to it, so `{"train": a, "test": b}` restores into `train/` and `test/`. One holding no assets is an error; `get` shows it instead.

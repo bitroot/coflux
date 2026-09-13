@@ -274,7 +274,7 @@ func runCatalogDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	var assets []assetLocation
-	collectAssets(data, references, nil, &assets)
+	collectAssets(data, references, nil, nil, &assets)
 	if len(assets) == 0 {
 		return fmt.Errorf("nothing to download: %s@%d holds no assets (see 'coflux catalog get %s')",
 			getString(version, "path"), getInt64(version, "number"), args[0])
@@ -288,6 +288,10 @@ func runCatalogDownload(cmd *cobra.Command, args []string) error {
 		dest     string
 	}
 	var planned []plannedAsset
+	// Directory names come from keys with path separators replaced, so two
+	// keys can name one directory ("a/b" and "a_b"). Restoring both there
+	// would silently overwrite one asset with the other; refuse instead.
+	claimed := map[string]assetLocation{}
 	for _, location := range assets {
 		asset, err := client.GetAssetByID(cmd.Context(), location.assetID)
 		if err != nil {
@@ -297,6 +301,11 @@ func runCatalogDownload(cmd *cobra.Command, args []string) error {
 		dest := catalogDownloadTo
 		if len(assets) > 1 {
 			dest = filepath.Join(append([]string{catalogDownloadTo}, location.trail...)...)
+			if other, taken := claimed[dest]; taken {
+				return fmt.Errorf("assets at %s and %s would both restore into %s",
+					describeKeys(other.keys), describeKeys(location.keys), dest)
+			}
+			claimed[dest] = location
 		}
 		for key := range entries {
 			destPath := filepath.Join(dest, key)
@@ -464,31 +473,36 @@ func loadValueData(value map[string]any) (any, []any, error) {
 }
 
 // assetLocation is an asset reference found inside a value, with the keys
-// and indices leading to it.
+// and indices leading to it: as written, for naming it, and as the
+// directory names they become, for restoring it.
 type assetLocation struct {
+	keys    []string
 	trail   []string
 	assetID string
 }
 
 // collectAssets walks encoded data (the JSON value format: lists, typed
 // dicts/sets/tuples, refs) and appends every asset reference it holds.
-func collectAssets(data any, references []any, trail []string, out *[]assetLocation) {
+func collectAssets(data any, references []any, keys, trail []string, out *[]assetLocation) {
+	descend := func(item any, key string, segment string) {
+		collectAssets(item, references, append(keys, key), append(trail, segment), out)
+	}
 	switch v := data.(type) {
 	case []any:
 		for i, item := range v {
-			collectAssets(item, references, append(trail, strconv.Itoa(i)), out)
+			descend(item, strconv.Itoa(i), strconv.Itoa(i))
 		}
 	case map[string]any:
 		switch v["type"] {
 		case "dict":
 			items, _ := v["items"].([]any)
 			for i := 0; i+1 < len(items); i += 2 {
-				collectAssets(items[i+1], references, append(trail, pathSegment(items[i])), out)
+				descend(items[i+1], keyText(items[i]), pathSegment(items[i]))
 			}
 		case "set", "tuple":
 			items, _ := v["items"].([]any)
 			for i, item := range items {
-				collectAssets(item, references, append(trail, strconv.Itoa(i)), out)
+				descend(item, strconv.Itoa(i), strconv.Itoa(i))
 			}
 		case "ref":
 			index, _ := v["index"].(float64)
@@ -499,6 +513,7 @@ func collectAssets(data any, references []any, trail []string, out *[]assetLocat
 			ref, _ := references[idx].(map[string]any)
 			if ref != nil && ref["type"] == "asset" {
 				*out = append(*out, assetLocation{
+					keys:    append([]string(nil), keys...),
 					trail:   append([]string(nil), trail...),
 					assetID: getString(ref, "assetId"),
 				})
@@ -507,27 +522,39 @@ func collectAssets(data any, references []any, trail []string, out *[]assetLocat
 	}
 }
 
+// keyText is a dict key's string form.
+func keyText(key any) string {
+	switch k := key.(type) {
+	case string:
+		return k
+	case float64:
+		if k == float64(int64(k)) {
+			return strconv.FormatInt(int64(k), 10)
+		}
+		return strconv.FormatFloat(k, 'g', -1, 64)
+	default:
+		return fmt.Sprint(k)
+	}
+}
+
 // pathSegment turns a dict key into a directory name: its string form,
 // with anything that could escape the directory replaced.
 func pathSegment(key any) string {
-	var text string
-	switch k := key.(type) {
-	case string:
-		text = k
-	case float64:
-		if k == float64(int64(k)) {
-			text = strconv.FormatInt(int64(k), 10)
-		} else {
-			text = strconv.FormatFloat(k, 'g', -1, 64)
-		}
-	default:
-		text = fmt.Sprint(k)
-	}
-	text = strings.NewReplacer("/", "_", "\\", "_").Replace(text)
+	text := strings.NewReplacer("/", "_", "\\", "_").Replace(keyText(key))
 	if text == "" || text == "." || text == ".." {
 		text = "_"
 	}
 	return text
+}
+
+// describeKeys names a location by the keys leading to it, each quoted so a
+// key holding a separator reads unambiguously.
+func describeKeys(keys []string) string {
+	quoted := make([]string, len(keys))
+	for i, key := range keys {
+		quoted[i] = strconv.Quote(key)
+	}
+	return strings.Join(quoted, "/")
 }
 
 // filterAssetEntries returns an asset's entries as a map of path to entry,

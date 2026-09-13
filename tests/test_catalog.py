@@ -907,6 +907,69 @@ def test_cli_download_lays_out_several_assets_by_key(worker, tmp_path):
         assert (download_dir / "test" / "test.txt").read_text() == "test rows"
 
 
+def test_cli_download_restores_a_lone_nested_asset_flat(worker, tmp_path):
+    """The rule is how many assets the value holds, not whether the value
+    *is* one: a structure with a single asset somewhere in it restores
+    that asset flat, as a bare asset would."""
+    targets = [workflow("test", "main")]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "main")
+        ex = ctx.executor.next_execute()
+        weights = _persist(ex, tmp_path, "weights", "w")
+        assert (
+            ex.conn.catalog_publish(
+                ex.execution_id,
+                "models/churn",
+                _dict(weights={"type": "ref", "index": 0}, auc=0.9),
+                references=[["asset", weights]],
+            )
+            == 1
+        )
+        ex.conn.complete(ex.execution_id, value="done")
+        ctx.result(resp["runId"])
+
+        download_dir = tmp_path / "downloaded"
+        os.makedirs(download_dir)
+        ctx.catalog_download("models/churn", str(download_dir))
+        assert (download_dir / "weights.txt").read_text() == "w"
+
+
+def test_cli_download_refuses_keys_that_name_one_directory(worker, tmp_path):
+    """Directory names come from keys with separators replaced, so two keys
+    can collide. Nothing is written; the refusal names both."""
+    targets = [workflow("test", "main")]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "main")
+        ex = ctx.executor.next_execute()
+        first = _persist(ex, tmp_path, "first", "1")
+        second = _persist(ex, tmp_path, "second", "2")
+        ex.conn.catalog_publish(
+            ex.execution_id,
+            "datasets/clash",
+            {
+                "type": "dict",
+                "items": [
+                    "a/b",
+                    {"type": "ref", "index": 0},
+                    "a_b",
+                    {"type": "ref", "index": 1},
+                ],
+            },
+            references=[["asset", first], ["asset", second]],
+        )
+        ex.conn.complete(ex.execution_id, value="done")
+        ctx.result(resp["runId"])
+
+        download_dir = tmp_path / "downloaded"
+        os.makedirs(download_dir)
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            ctx.catalog_download("datasets/clash", str(download_dir))
+        assert '"a/b" and "a_b" would both restore into' in raised.value.stderr
+        assert os.listdir(download_dir) == []
+
+
 def test_cli_publish_of_unknown_asset_fails(worker):
     targets = [workflow("test", "main")]
 
