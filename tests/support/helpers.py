@@ -1,5 +1,6 @@
 """Shared helpers for tests that manage workers directly."""
 
+import hashlib
 import json
 import os
 import signal
@@ -34,21 +35,39 @@ def poll_result(
     )
 
 
-def api_post(port, project_id, path, token=None):
-    """POST to a server management API endpoint."""
+def api_post(port, project_id, path, token=None, body=None):
+    """POST to a server management API endpoint, returning the decoded reply."""
     if token is None:
         token = SUPER_TOKEN
     url = f"http://{project_id}.localhost:{port}/api/{path}"
     req = urllib.request.Request(
         url,
         method="POST",
-        data=b"{}",
+        data=json.dumps(body if body is not None else {}).encode(),
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
         },
     )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        content = resp.read()
+    return json.loads(content) if content else {}
+
+
+def put_blob(port, project_id, content, token=None):
+    """Store a blob the way a browser would: PUT to its own content hash."""
+    if token is None:
+        token = SUPER_TOKEN
+    key = hashlib.sha256(content).hexdigest()
+    url = f"http://{project_id}.localhost:{port}/blobs/{key}"
+    req = urllib.request.Request(
+        url,
+        method="PUT",
+        data=content,
+        headers={"Authorization": f"Bearer {token}"},
+    )
     urllib.request.urlopen(req, timeout=10)
+    return key
 
 
 @contextmanager

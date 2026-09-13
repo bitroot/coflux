@@ -75,3 +75,9 @@ header = entry.read(0, 4)             # the first four bytes
 `read()` with no arguments returns the whole entry. Omitting the length reads to the end.
 
 This is for formats that seek rather than read straight through — a Parquet footer, say, where restoring a large file to read a few kilobytes of it would be wasteful. For anything you're going to read in full, `restore()` is simpler and puts the file on disk where other tools can reach it.
+
+## Uploading from Studio
+
+An asset doesn't have to come from a run. Studio uploads files as an asset in the run dialog, where a parameter annotated `cf.Asset` gets a file field instead of a value field, so a workflow can be started against a file you have to hand.
+
+The files are stored in the blob store first and the server is given their keys — the bytes never pass through it. Assets are content-addressed, so uploading the same files twice gives the same asset rather than a duplicate.

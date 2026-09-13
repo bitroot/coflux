@@ -273,6 +273,13 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:put_asset, execution_id, name, entries})
   end
 
+  # An asset created from outside a run — the API or Studio — with no
+  # execution to attribute it to. The workspace is the authorisation
+  # context only: assets themselves are project-scoped.
+  def create_asset(project_id, workspace_id, name, entries, access \\ nil) do
+    call_server(project_id, {:create_asset, workspace_id, name, entries, access})
+  end
+
   def get_asset(project_id, asset_id, from_execution_id \\ nil) do
     call_server(project_id, {:get_asset, asset_id, from_execution_id})
   end
