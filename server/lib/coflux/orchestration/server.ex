@@ -94,8 +94,13 @@ defmodule Coflux.Orchestration.Server do
               # Key is a tagged tuple:
               #   {:execution, execution_external_id} — woken by notify_waiting
               #   {:input, input_external_id}         — woken by respond_input / dismiss_input
+              #   {:catalog, workspace_external_id, path, number}
+              #                                       — woken by wake_catalog_waiters
+              # Keys name things by external id only: this map is carried across
+              # an epoch rotation as it is, and rotation reassigns internal ids.
               # A new kind MUST be handled in: notify_waiting, respond_input /
-              # dismiss_input, expire_waiters, and cleanup_execution.
+              # dismiss_input, expire_waiters, cleanup_execution, and
+              # cancel_other_execution_keys.
               # Value is a list of {from_execution_external_id, request_id, expire_at, suspend?}.
               waiting: %{},
 
@@ -4238,7 +4243,7 @@ defmodule Coflux.Orchestration.Server do
                 {:error, :not_found} -> []
               end
 
-            {:catalog, _workspace_id, path, number} ->
+            {:catalog, _workspace_external_id, path, number} ->
               [{:catalog, path, number}]
           end)
 
@@ -6891,29 +6896,43 @@ defmodule Coflux.Orchestration.Server do
 
   # A version landed at `version.path`. Release every gated successor and
   # serve every running select that was waiting on the path from a
-  # workspace that can see it. Both sets are keyed
-  # `{:catalog, workspace_id, path, number}`; publishes are rare enough
-  # that scanning the keys beats keeping an index.
+  # workspace that can see it. Both sets are keyed by path and position;
+  # the gates carry the waiter's workspace by internal id (they are rebuilt
+  # on rotation), the selects by external id (they are carried across it).
+  # Publishes are rare enough that scanning the keys beats keeping an index.
   defp wake_catalog_waiters(state, version) do
-    woken? = fn
-      {:catalog, workspace_id, path, number} ->
-        path == version.path and number < version.number and
-          version.workspace_id in get_workspace_chain(state, workspace_id)
-
-      _key ->
-        false
+    woken? = fn path, number, workspace_id ->
+      path == version.path and number < version.number and
+        version.workspace_id in get_workspace_chain(state, workspace_id)
     end
 
     state =
       state.dependency_waiters
       |> Map.keys()
-      |> Enum.filter(woken?)
+      |> Enum.filter(fn
+        {:catalog, workspace_id, path, number} -> woken?.(path, number, workspace_id)
+        _key -> false
+      end)
       |> Enum.reduce(state, &clear_dependency_key(&2, &1))
 
     state.waiting
     |> Map.keys()
-    |> Enum.filter(woken?)
-    |> Enum.reduce(state, fn {:catalog, workspace_id, path, number} = key, state ->
+    |> Enum.flat_map(fn
+      {:catalog, workspace_external_id, path, number} = key ->
+        # A workspace is never removed, so the id resolves; the check is
+        # against the shape of the key, not its age.
+        case Map.fetch(state.workspace_external_ids, workspace_external_id) do
+          {:ok, workspace_id} ->
+            if woken?.(path, number, workspace_id), do: [{key, workspace_id}], else: []
+
+          :error ->
+            []
+        end
+
+      _key ->
+        []
+    end)
+    |> Enum.reduce(state, fn {{:catalog, _, path, number} = key, workspace_id}, state ->
       chain = get_workspace_chain(state, workspace_id)
       # Whatever is next from here — this version, unless one landed in
       # between — is what the waiter gets, and is recorded as its read.
@@ -9295,8 +9314,10 @@ defmodule Coflux.Orchestration.Server do
   # this is the wait side, and seeing past the snapshot is the point.
   #
   # The waiting key carries the caller's workspace so a publish can check
-  # visibility per key; the dependency key recorded on a suspended
-  # successor doesn't need it, since the successor's workspace is known.
+  # visibility per key — by external id, like every waiting key, since the
+  # map outlives an epoch rotation and internal ids don't. The dependency
+  # key recorded on a suspended successor doesn't need it, since the
+  # successor's workspace is known.
   defp process_select_handle(
          state,
          %{"type" => "catalog", "path" => path} = handle,
@@ -9322,8 +9343,8 @@ defmodule Coflux.Orchestration.Server do
 
         case Catalog.get_next(state.db, path, chain, number) do
           {:ok, nil} ->
-            {{:ok, {:pending, {:catalog, workspace_id, path, number}, {:catalog, path, number}}},
-             state}
+            waiting_key = {:catalog, workspace_external_id(state, workspace_id), path, number}
+            {{:ok, {:pending, waiting_key, {:catalog, path, number}}}, state}
 
           {:ok, version} ->
             state =

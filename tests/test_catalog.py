@@ -752,6 +752,41 @@ def test_catalog_survives_epoch_rotation(isolated_server, tmp_path):
         assert (download_dir / "a1.txt").read_text() == "one"
 
 
+def test_a_blocking_catalog_wait_survives_epoch_rotation(worker, server, project_id):
+    """A select blocked on a catalog handle is held in memory across a
+    rotation, which reassigns the workspace ids the server otherwise
+    keys by. The wait is keyed by external id, so the publish after the
+    rotation still finds and wakes it."""
+    targets = [workflow("test", "watcher"), workflow("test", "writer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "watcher")
+        watcher = ctx.executor.next_execute()
+        msg = protocol.select_request(
+            None,
+            watcher.execution_id,
+            [protocol.catalog_handle("models/m")],
+            timeout_ms=None,
+            suspend=False,
+        )
+        msg["id"] = 999
+        watcher.conn.send(msg)
+        time.sleep(0.5)
+
+        api_post(server.port, project_id, "rotate_epoch")
+
+        ctx.submit("test", "writer")
+        writer = ctx.executor.next_execute()
+        assert writer.conn.catalog_publish(writer.execution_id, "models/m", "v1") == 1
+        writer.conn.complete(writer.execution_id, value="done")
+
+        reply = watcher.conn.recv(timeout=10)
+        assert reply["id"] == 999
+        assert reply["result"]["winner"] == 0
+        assert reply["result"]["value"]["value"] == 1
+        watcher.conn.complete(watcher.execution_id, value="done")
+
+
 # --- CLI ------------------------------------------------------------------------
 
 
