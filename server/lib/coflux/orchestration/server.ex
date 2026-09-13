@@ -1919,8 +1919,15 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:record_result, execution_external_id, result}, _from, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
+        {result, abort?} = refuse_invalid_catalog_wait(result)
+
         case process_result(state, execution_id, result) do
           {:ok, state} ->
+            state =
+              if abort?,
+                do: abort_execution(state, execution_external_id),
+                else: state
+
             state = flush_notifications(state)
             {:reply, :ok, state}
         end
@@ -7934,12 +7941,41 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # A suspend request can name a catalog path for the successor to be gated
+  # on. One that isn't a valid path can't gate anything, and an ungated
+  # successor would run at once and ask again, so the execution fails
+  # instead — as it would for any other request the server can't honour.
+  # Checked as the result arrives, so the rest of the pipeline sees an
+  # ordinary error. Returns the result to record, and whether the worker
+  # has to be told to stop the execution: one that has asked to suspend is
+  # waiting to be aborted, which a suspension does and an error wouldn't.
+  # The official adapter validates paths up front, so this is for others.
+  defp refuse_invalid_catalog_wait({:suspended, _execute_after, dependency_keys} = result) do
+    case Enum.find(dependency_keys, &match?({:catalog, _path}, &1)) do
+      {:catalog, path} ->
+        case Catalog.validate_path(path) do
+          :ok ->
+            {result, false}
+
+          {:error, :invalid_path} ->
+            message = "invalid catalog path: #{inspect(path)}"
+            {{:error, "InvalidCatalogPath", message, [], false}, true}
+        end
+
+      nil ->
+        {result, false}
+    end
+  end
+
+  defp refuse_invalid_catalog_wait(result), do: {result, false}
+
   # A catalog wait from a suspend request names only the path. Its position
   # is the suspending execution's own view of that path — the head as of
   # its pin, plus its run's writes — so "newer" means newer than anything
   # it could see, and its own publish can never wake it. (A wait from a
-  # suspended select already carries its position.) An invalid path is
-  # dropped rather than gated on forever.
+  # suspended select already carries its position.) An invalid path was
+  # refused before the result was recorded; dropping one here rather than
+  # gating on it forever is only a backstop.
   defp resolve_catalog_waits(state, execution_id, dependency_keys) do
     Enum.flat_map(dependency_keys, fn
       {:catalog, path} ->

@@ -587,6 +587,26 @@ def test_suspending_with_a_catalog_wait_gates_the_successor(worker):
         assert third["dependencies"]["models/m@1+"]["pending"] is True
 
 
+def test_a_suspension_on_an_invalid_path_fails_the_execution(worker):
+    """The adapter checks paths up front, so this is for a wait that gets
+    past it from some other adapter: it can't gate anything, and an ungated
+    successor would only run at once and ask again. The execution errors
+    instead, and nothing else is created."""
+    targets = [workflow("test", "main")]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "main")
+        ex = ctx.executor.next_execute()
+        ex.conn.suspend(ex.execution_id, catalog_wait="bad path")
+
+        result = ctx.result(resp["runId"])
+        assert result["type"] == "error"
+        assert result["error"]["type"] == "InvalidCatalogPath"
+        assert "bad path" in result["error"]["message"]
+        run = ctx.inspect(resp["runId"])
+        assert list(run["steps"][resp["stepId"]]["executions"]) == ["1"]
+
+
 def test_a_catalog_wait_is_reported_on_the_queue(worker):
     """The queue has to name the gate itself, not just the executions being
     waited on. A successor held by a catalog wait is otherwise unassigned
