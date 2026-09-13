@@ -79,8 +79,9 @@ def _cacheable(key: tuple[str, str]) -> bool:
     """Whether a resolved select response can be reused for the handle.
 
     An execution or input resolves once and for all. A catalog wait
-    resolves against what has been published so far, which moves, so each
-    ``next()`` or ``poll()`` asks again.
+    resolves against what has been published so far, which moves: the
+    handle stands for "a version this execution hasn't seen", so every
+    wait on it has to ask again.
     """
     return key[0] != "catalog"
 
@@ -154,9 +155,6 @@ class ExecutorContext:
         # poll_handle to avoid a round-trip for handles that have already
         # been seen in this context's lifetime.
         self._resolved: dict[tuple[str, str], dict[str, Any]] = {}
-        # The response of the latest select whose winner isn't cacheable
-        # (a catalog wait), for the resolve that issued it to read back.
-        self._last_uncached: dict[str, Any] = {}
         # Guards the mutable collections above. Stream driver threads, the
         # main task thread, and any user-spawned threads may call methods
         # on this context concurrently; the lock protects check-then-set
@@ -289,7 +287,8 @@ class ExecutorContext:
 
         On success, the winner's response is stored in this context's
         resolve cache so subsequent ``.result()`` / ``.poll()`` calls on the
-        handle can return without a round-trip.
+        handle can return without a round-trip — unless the winner is a
+        catalog entry, whose resolution isn't reusable (``_cacheable``).
 
         Args:
             handles: List of Execution or Input objects.
@@ -301,6 +300,29 @@ class ExecutorContext:
         Returns:
             The index in ``handles`` of the handle that resolved, or
             ``None`` on timeout.
+        """
+        winner, _response = self._select(
+            handles,
+            suspend=suspend,
+            cancel_remaining=cancel_remaining,
+            timeout_ms=timeout_ms,
+        )
+        return winner
+
+    def _select(
+        self,
+        handles: list[Any],
+        *,
+        suspend: bool,
+        cancel_remaining: bool,
+        timeout_ms: int | None,
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """``select``, also handing back the winner's response.
+
+        A caller waiting on a single handle reads the value from what is
+        returned here rather than from the context, so a response that
+        isn't cached — a catalog wait's — never sits anywhere another
+        thread's wait could pick it up. ``(None, None)`` on timeout.
         """
         if not handles:
             raise ValueError("select requires at least one handle")
@@ -321,7 +343,7 @@ class ExecutorContext:
         if response is None:
             # Server signals a wait timeout (nothing resolved before the
             # timeout expired) by returning a null result.
-            return None
+            return None, None
 
         winner = response.get("winner")
         if winner is None:
@@ -331,9 +353,7 @@ class ExecutorContext:
         if _cacheable(key):
             with self._lock:
                 self._resolved[key] = response
-        else:
-            self._last_uncached = response
-        return winner
+        return winner, response
 
     def resolve_handle(self, handle: Any) -> Any:
         """Block until ``handle`` resolves and return its value (or raise).
@@ -347,21 +367,15 @@ class ExecutorContext:
         with self._lock:
             cached = self._resolved.get(key)
         if cached is None:
-            if self.select([handle]) is None:
+            _winner, cached = self._select(
+                [handle], suspend=True, cancel_remaining=False, timeout_ms=None
+            )
+            if cached is None:
                 # The wait expired before the handle resolved. Only reachable
                 # from inside a `cf.suspense(timeout=...)` scope; otherwise the
                 # server either resolves or kills the process.
                 raise TimeoutError("timed out waiting for handle to resolve")
-            cached = self._resolved_response(key)
         return _unwrap_response(cached, getattr(handle, "_parser", None))
-
-    def _resolved_response(self, key: tuple[str, str]) -> dict[str, Any]:
-        """The response a `select` just stored for ``key`` — or, for a
-        handle whose resolution isn't reusable, the one it just got."""
-        if _cacheable(key):
-            with self._lock:
-                return self._resolved[key]
-        return self._last_uncached
 
     def poll_handle(
         self,
@@ -380,9 +394,11 @@ class ExecutorContext:
             cached = self._resolved.get(key)
         if cached is None:
             timeout_ms = int(timeout * 1000) if timeout else 0
-            if self.select([handle], suspend=False, timeout_ms=timeout_ms) is None:
+            _winner, cached = self._select(
+                [handle], suspend=False, cancel_remaining=False, timeout_ms=timeout_ms
+            )
+            if cached is None:
                 return default
-            cached = self._resolved_response(key)
         return _unwrap_response(cached, getattr(handle, "_parser", None))
 
     # --- Catalog ---

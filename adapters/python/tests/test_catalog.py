@@ -155,6 +155,62 @@ def test_current_on_an_empty_path_waits_on_position_zero_then_reads_by_number(wi
     assert fake.requests[2][1]["number"] == 1
 
 
+def test_concurrent_waits_on_empty_paths_each_read_their_own_version(monkeypatch):
+    """Two threads waiting on different empty paths each read back the
+    version that woke their own select. The response travels back to the
+    waiter that asked rather than being parked on the shared context, so
+    one thread's wait can't hand its answer to another's."""
+    import threading
+
+    selected_a = threading.Event()
+    release_a = threading.Event()
+
+    class _Wire:
+        def __init__(self):
+            self.requests = {}
+            self._next_id = 0
+            self._lock = threading.Lock()
+
+        def _send(self, method, params):
+            with self._lock:
+                self._next_id += 1
+                self.requests[self._next_id] = (method, params)
+                return self._next_id
+
+        def wait_for_response(self, request_id):
+            method, params = self.requests[request_id]
+            if method == "catalog_get":
+                number = params.get("number")
+                if number is None:
+                    reply = _NOTHING
+                else:
+                    reply = _found(number, f"{params['path']}@{number}")
+            elif params["handles"][0]["path"] == "a":
+                # Hold the first wait open until the other has been answered.
+                selected_a.set()
+                assert release_a.wait(5)
+                reply = _select_ok(1)
+            else:
+                reply = _select_ok(2)
+            return {"id": request_id, **reply}
+
+    fake = _Wire()
+    monkeypatch.setattr(protocol, "get_protocol", lambda: _Proto(fake))
+    monkeypatch.setattr(context_module, "get_dispatcher", lambda: fake)
+    ctx = ExecutorContext("E1")
+
+    results = {}
+    waiter = threading.Thread(target=lambda: results.update(a=ctx.catalog_current("a")))
+    waiter.start()
+    assert selected_a.wait(5)
+    results["b"] = ctx.catalog_current("b")
+    release_a.set()
+    waiter.join(5)
+    assert results == {"a": "a@1", "b": "b@2"}
+    # Neither wait left anything behind to be reused.
+    assert ctx._resolved == {}
+
+
 # --- publish -------------------------------------------------------------------
 
 
