@@ -1,3 +1,7 @@
+## 0.12.1
+
+No changes.
+
 ## 0.12.0
 
 Enhancements:
