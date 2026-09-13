@@ -33,13 +33,14 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import datetime as dt
 import inspect
 import queue
 import threading
 import traceback
 import weakref
-from collections.abc import Iterator
-from typing import Any, final
+from collections.abc import AsyncGenerator, Generator, Iterator
+from typing import Any, TypeVar, final, overload
 
 from . import protocol
 from .dispatcher import get_dispatcher
@@ -54,13 +55,33 @@ from .target import Streams, _validate_buffer, _validate_timeout
 
 _STREAM_OPT_UNSET: Any = object()
 
+T = TypeVar("T")
+
+
+@overload
+def stream(
+    generator: Generator[T, Any, Any],
+    *,
+    buffer: int | None = ...,
+    timeout: float | dt.timedelta | None = ...,
+) -> Stream[T]: ...
+
+
+@overload
+def stream(
+    generator: AsyncGenerator[T, Any],
+    *,
+    buffer: int | None = ...,
+    timeout: float | dt.timedelta | None = ...,
+) -> Stream[T]: ...
+
 
 def stream(
     generator: Any,
     *,
     buffer: Any = _STREAM_OPT_UNSET,
     timeout: Any = _STREAM_OPT_UNSET,
-) -> Any:
+) -> Stream[Any]:
     """Register a generator as a Coflux stream and return a handle.
 
     Use this when a task returns multiple streams or needs to override
@@ -1115,6 +1136,8 @@ class StreamRegistry:
 
     def _on_items(self, params: dict[str, Any]) -> None:
         subscription_id = params.get("subscription_id")
+        if subscription_id is None:
+            return
         items = params.get("items") or []
         with self._lock:
             it = self._iterators.get(subscription_id)
@@ -1123,6 +1146,8 @@ class StreamRegistry:
 
     def _on_closed(self, params: dict[str, Any]) -> None:
         subscription_id = params.get("subscription_id")
+        if subscription_id is None:
+            return
         reason = params.get("reason") or "complete"
         error = params.get("error")
         with self._lock:
