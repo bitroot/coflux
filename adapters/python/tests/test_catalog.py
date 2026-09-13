@@ -40,7 +40,28 @@ def test_entry_validates_the_path_up_front():
     for bad in ["", "/abs", "a//b", "a/../b", "a@1", "a:b", "a b", 1]:
         with pytest.raises(ValueError):
             CatalogEntry(bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="too long"):
+        CatalogEntry("a" * 513)
     assert CatalogEntry("a-b_c.d/e").path == "a-b_c.d/e"
+
+
+def test_publish_validates_the_path_up_front(wire, monkeypatch):
+    """The same rule as ``cf.catalog``, before anything goes out."""
+    import coflux as cf
+
+    fake = wire()
+    _install_context(monkeypatch, ExecutorContext("E1"))
+    with pytest.raises(ValueError, match="invalid catalog path"):
+        cf.publish("bad path", 1)
+    assert fake.requests == []
+
+
+def test_request_error_is_part_of_the_public_api():
+    import coflux as cf
+
+    error = cf.RequestError("invisible", "server error: invisible")
+    assert error.code == "invisible"
+    assert isinstance(error, RuntimeError)
 
 
 # --- select handles ----------------------------------------------------------

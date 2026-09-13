@@ -20,7 +20,7 @@ def search(query: str):
 
 `select` returns a tuple `(winner, remaining)` where:
 
-- `winner` is the handle that resolved first. Call `.result()` on it to get the value (or to raise the exception that caused it to resolve).
+- `winner` is the handle that resolved first. Call `.result()` on it to get the value (or to raise the exception that caused it to resolve). A winning catalog entry has no result to read: call `next()` on it to re-run on the version it saw.
 - `remaining` is the list of handles that did _not_ win, in the order they were passed in. They keep running and can be awaited later.
 
 ## Cancelling the losers
@@ -32,7 +32,7 @@ winner, _ = cf.select([fast.submit(), slow.submit()], cancel_remaining=True)
 return winner.result()
 ```
 
-`Input` handles in the list are left pending — only `Execution` handles are cancelled.
+`Input` handles in the list are left pending, and a catalog entry has nothing to cancel — only `Execution` handles are cancelled.
 
 ## Mixing executions and inputs
 
@@ -71,3 +71,5 @@ Note that `TimeoutError` here means the _wait_ expired — distinct from `Execut
 ## Resolving the same handle later
 
 When a handle wins a `select`, its result is cached in the execution context. Calling `.result()` (or `.poll()`) on the winner afterwards returns immediately without another round-trip. Handles in `remaining` are unaffected — they can be awaited normally as they resolve.
+
+A catalog entry is the exception: it resolves with a version the execution hadn't seen, which the next wait on it may well have, so nothing is cached and every wait asks again.

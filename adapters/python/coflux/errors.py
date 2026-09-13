@@ -42,7 +42,11 @@ class Suspending(BaseException):
 
 
 class RequestError(RuntimeError):
-    """A request to the CLI was refused, with the server's code attached."""
+    """A request the execution made was refused — a catalog read of a
+    version it can't see, say — rather than failing to reach the server.
+    The refusal's code (``invalid_path``, ``invisible``, ...) is ``.code``;
+    the message carries it too.
+    """
 
     def __init__(self, code: str, message: str):
         self.code = code

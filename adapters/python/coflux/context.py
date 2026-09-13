@@ -32,6 +32,7 @@ from .models import (
     CatalogEntry,
     Execution,
     Input,
+    validate_catalog_path,
 )
 from .serialization import deserialize_value, serialize_value
 from .streams import StreamDriver
@@ -405,7 +406,9 @@ class ExecutorContext:
 
     def catalog_publish(self, path: str, value: Any) -> int:
         """Publish ``value`` at ``path``, serialised the way a result is,
-        and return the version's number."""
+        and return the version's number. An invalid path is refused here,
+        the way ``cf.catalog`` refuses one, rather than by the server."""
+        path = validate_catalog_path(path)
         request_id = protocol.request_catalog_publish(
             self.execution_id, path, serialize_value(value)
         )

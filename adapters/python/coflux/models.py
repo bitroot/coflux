@@ -132,15 +132,22 @@ class Asset:
 # --- Catalog ---
 
 # Mirrors the server's rule (`Catalog.validate_path`): slash-separated
-# segments of `[A-Za-z0-9_.-]`, none empty, none `.` or `..`. Checked here
-# so a typo fails at `cf.catalog(...)` rather than as a wait that never
+# segments of `[A-Za-z0-9_.-]`, none empty, none `.` or `..`, at most 512
+# characters. Checked here so a typo fails at `cf.catalog(...)` or
+# `cf.publish(...)` rather than as a refused request or a wait that never
 # ends.
 _PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PATH_MAX_LENGTH = 512
 
 
-def _validate_path(path: t.Any) -> str:
-    if not isinstance(path, str) or not path or len(path) > 512:
+def validate_catalog_path(path: t.Any) -> str:
+    """The path, if it is one the catalog accepts; ``ValueError`` if not."""
+    if not isinstance(path, str) or not path:
         raise ValueError("catalog path must be a non-empty string")
+    if len(path) > _PATH_MAX_LENGTH:
+        raise ValueError(
+            f"catalog path is too long ({len(path)} > {_PATH_MAX_LENGTH} characters)"
+        )
     for segment in path.split("/"):
         if segment in ("", ".", "..") or not _PATH_SEGMENT.match(segment):
             raise ValueError(f"invalid catalog path: {path!r}")
@@ -163,7 +170,7 @@ class CatalogEntry:
     """
 
     def __init__(self, path: str):
-        self._path = _validate_path(path)
+        self._path = validate_catalog_path(path)
 
     @property
     def path(self) -> str:

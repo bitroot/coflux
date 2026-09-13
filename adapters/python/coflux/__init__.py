@@ -22,6 +22,7 @@ from .errors import (
     ExecutionTerminated,
     ExecutionTimeout,
     InputDismissed,
+    RequestError,
     StreamSuperseded,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
@@ -59,6 +60,7 @@ __all__ = [  # noqa: RUF022
     "ExecutionCrashed",
     "StreamSuperseded",
     "InputDismissed",
+    "RequestError",
     "Input",
     "Metric",
     "MetricGroup",
@@ -148,9 +150,10 @@ def select(
 
     Returns:
         Tuple of ``(winner, remaining)`` where ``winner`` is the first handle
-        to resolve (call ``.result()`` to get its value or raise its error),
-        and ``remaining`` is the list of handles that did not win, in input
-        order.
+        to resolve — call ``.result()`` on an execution or input to get its
+        value or raise its error, or ``next()`` on a catalog entry to re-run
+        on the version it saw — and ``remaining`` is the list of handles
+        that did not win, in input order.
 
     Example:
         winner, remaining = cf.select([a.submit(), b.submit(), c.submit()])
@@ -315,6 +318,7 @@ def catalog(path: str) -> CatalogEntry:
 
 def publish(path: str, value: t.Any) -> int:
     """Publish ``value`` at a catalog path and return the version's number.
+    An invalid path is a ``ValueError``, as it is for ``cf.catalog``.
 
     ``value`` is anything that can be passed to a task: an asset, a data
     structure holding assets, a reference to something external, a plain

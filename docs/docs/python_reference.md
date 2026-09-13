@@ -496,11 +496,11 @@ Creates and persists a collection of files as an asset, which can be inspected a
 
 ### `catalog(path) -> CatalogEntry`
 
-A handle to a path in the [catalog](./catalog.md). Nothing round-trips until it's used.
+A handle to a path in the [catalog](./catalog.md). Nothing round-trips until it's used. An invalid path raises `ValueError` here rather than on use.
 
 ### `publish(path, value) -> int`
 
-Publishes a value at a catalog path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing.
+Publishes a value at a catalog path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing. An invalid path raises `ValueError`.
 
 ## Catalog
 
@@ -528,4 +528,5 @@ Suspends the execution until the path has a version newer than the execution can
 | `ExecutionCrashed` | The child execution's process ended without reporting a result. |
 | `StreamSuperseded` | A stream ended because its recurrent producer finished an iteration. Not a failure: the next iteration produces its own stream. |
 | `InputDismissed` | A requested input was dismissed by the responder. |
+| `RequestError` | The server refused a request the execution made — reading a catalog version it can't see, say. The refusal's code is `.code`. |
 | `TimeoutError` (built-in) | A `cf.suspense(timeout=...)` wait expired before a handle resolved. |
