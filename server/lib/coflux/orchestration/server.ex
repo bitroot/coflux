@@ -5027,6 +5027,11 @@ defmodule Coflux.Orchestration.Server do
     epoch_index = Index.add_epoch(state.epoch_index, epoch_id, System.os_time(:millisecond))
     :ok = Index.save(epoch_index)
 
+    # Live stream state (subscriptions, producers) is keyed by internal
+    # ids, which the copy below reassigns. Capture it by external id from
+    # the old database first, and rebuild it once the runs are copied.
+    stream_state = capture_stream_state(state)
+
     # Now rotate
     {:ok, new_epochs, old_db} = Epochs.rotate(state.epochs, epoch_id)
     new_db = Epochs.active_db(new_epochs)
@@ -5040,11 +5045,78 @@ defmodule Coflux.Orchestration.Server do
     |> Map.update!(:index_queue, &(&1 ++ [epoch_id]))
     |> remap_config_ids(id_mappings)
     |> copy_in_flight_runs()
+    |> restore_stream_state(stream_state)
     |> Map.put(:pending_dependencies, %{})
     |> Map.put(:stream_dependency_keys, %{})
     |> Map.put(:dependency_waiters, %{})
     |> initialize_pending_dependencies()
     |> maybe_start_index_build()
+  end
+
+  # Everything in `stream_subscriptions` / `stream_subscribers` /
+  # `stream_producers` that names a stream or an execution by internal id,
+  # re-expressed by external id so it can be re-resolved after the copy.
+  defp capture_stream_state(state) do
+    subscriptions =
+      Enum.flat_map(state.stream_subscriptions, fn {{_consumer_id, subscription_id}, sub} ->
+        case stream_external_id_for(state.db, sub.stream_id) do
+          {:ok, stream_ext_id} ->
+            [{sub.consumer_execution_external_id, subscription_id, stream_ext_id, sub}]
+
+          _ ->
+            []
+        end
+      end)
+
+    producers =
+      Enum.flat_map(state.stream_producers, fn {stream_id, producer} ->
+        case stream_external_id_for(state.db, stream_id) do
+          {:ok, stream_ext_id} -> [{stream_ext_id, producer}]
+          _ -> []
+        end
+      end)
+
+    {subscriptions, producers}
+  end
+
+  # The inverse of capture_stream_state, against the new active database.
+  # Consumer executions are resolved through the rebuilt `execution_ids`;
+  # streams through resolve_stream_id, which copies a producer's run
+  # forward if it wasn't in flight (a finished producer whose consumer is
+  # still reading). Anything that can't be resolved is dropped, as it
+  # would have been before.
+  defp restore_stream_state(state, {subscriptions, producers}) do
+    state = %{
+      state
+      | stream_subscriptions: %{},
+        stream_subscribers: %{},
+        stream_producers: %{}
+    }
+
+    state =
+      Enum.reduce(subscriptions, state, fn {consumer_ext_id, subscription_id, stream_ext_id, sub},
+                                           state ->
+        with {:ok, consumer_id} <- Map.fetch(state.execution_ids, consumer_ext_id),
+             {:ok, stream_id} <- resolve_stream_id(state, stream_ext_id) do
+          key = {consumer_id, subscription_id}
+
+          state
+          |> put_in([Access.key(:stream_subscriptions), key], %{sub | stream_id: stream_id})
+          |> update_in(
+            [Access.key(:stream_subscribers), Access.key(stream_id, MapSet.new())],
+            &MapSet.put(&1, key)
+          )
+        else
+          _ -> state
+        end
+      end)
+
+    Enum.reduce(producers, state, fn {stream_ext_id, producer}, state ->
+      case resolve_stream_id(state, stream_ext_id) do
+        {:ok, stream_id} -> put_in(state.stream_producers[stream_id], producer)
+        _ -> state
+      end
+    end)
   end
 
   defp copy_in_flight_runs(state) do

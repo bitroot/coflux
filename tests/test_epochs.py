@@ -471,6 +471,54 @@ def test_stream_readable_across_epoch_boundary(isolated_server, tmp_path):
         cons.conn.complete(cons.execution_id)
 
 
+def test_live_subscription_survives_epoch_rotation(isolated_server, tmp_path):
+    """A consumer mid-iteration keeps receiving after the epoch rotates.
+
+    Rotation gives every in-flight run new internal ids; the live
+    subscription and producer state have to follow them, or the producer's
+    next append finds nobody to push to and the consumer waits forever.
+    """
+    server, host, project_id = isolated_server
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with managed_worker(targets, host, tmp_path, concurrency=2) as executor:
+        # A finished run first, so the in-flight run below doesn't sit at
+        # the start of every table: only in-flight runs are copied forward,
+        # so its rows get different ids in the new epoch — the case the
+        # in-memory state has to survive.
+        filler = cli.submit("test/producer", host=host)
+        fill = executor.next_execute()
+        fill.conn.stream_register(fill.execution_id, 0)
+        fill.conn.stream_close(fill.execution_id, 0)
+        fill.conn.complete(fill.execution_id, value="filler")
+        assert poll_result(filler["runId"], host)["value"]["data"] == "filler"
+
+        cli.submit("test/producer", host=host)
+        prod = executor.next_execute()
+        stream = prod.conn.stream_register(prod.execution_id, 0, buffer=None)
+        prod.conn.stream_append(prod.execution_id, 0, 0, "a")
+
+        cli.submit("test/consumer", host=host)
+        cons = executor.next_execute()
+        cons.conn.stream_subscribe(
+            cons.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        items = cons.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [item[1]["value"] for item in items["items"]] == ["a"]
+
+        _rotate_epoch(server.port, project_id)
+
+        prod.conn.stream_append(prod.execution_id, 0, 1, "b")
+        items = cons.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+        assert [item[1]["value"] for item in items["items"]] == ["b"]
+
+        prod.conn.stream_close(prod.execution_id, 0)
+        closed = cons.conn.recv_push("stream_closed", subscription_id=1, timeout=2)
+        assert closed["reason"] == "complete"
+        prod.conn.complete(prod.execution_id, value="done")
+        cons.conn.complete(cons.execution_id)
+
+
 def test_paused_stream_continued_across_epoch_boundary(isolated_server, tmp_path):
     """A stream left paused by a suspend survives rotation as paused.
 
