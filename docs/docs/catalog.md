@@ -134,6 +134,8 @@ To make two steps agree on the same data, read it once and pass the value. A val
 
 Studio's Catalog page lists every path visible from the workspace with its latest version and its value, and the versions behind each path. A run shows what each execution published and read.
 
+It can also publish: **Publish** takes a path and either a JSON value or files to upload. Uploaded files become an [asset](./assets.md) — one file, several, or a folder, which becomes one entry per file keyed by its path within the folder. Archives are not expanded, so a zip you upload is a zip in the asset. The files go to the configured [blob store](./blobs.md) and the server is given their keys, so this works the same whichever store is configured — though a worker only sees the blobs if its own `coflux.toml` lists that store too.
+
 ```bash
 coflux catalog list [prefix]                        # paths and their latest versions
 coflux catalog inspect <path>                       # the versions at a path

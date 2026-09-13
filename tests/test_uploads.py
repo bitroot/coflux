@@ -139,6 +139,28 @@ def test_create_asset_rejects_bad_entries(server, project_id, workspace_id):
 # --- Using ----------------------------------------------------------------
 
 
+def test_publish_uploaded_asset_to_catalog(server, project_id, workspace_id, host):
+    """The catalog publish already took an asset id, so an upload reaches
+    the catalog with nothing new behind it."""
+    entries = [_entry(server, project_id, "customers.parquet", b"parquet-ish")]
+    asset = _create_asset(server, project_id, workspace_id, entries, name="customers")
+
+    api_post(
+        server.port,
+        project_id,
+        "publish_catalog",
+        body={
+            "workspaceId": workspace_id,
+            "path": "datasets/customers",
+            "argument": ["asset", asset["assetId"]],
+        },
+    )
+
+    versions = cli.catalog_inspect("datasets/customers", host=host)
+    assert [v["number"] for v in versions] == [1]
+    assert versions[0]["value"]["references"][0]["assetId"] == asset["assetId"]
+
+
 def test_submit_with_asset_argument(server, project_id, workspace_id, host, tmp_path):
     """An uploaded asset can be a run argument: the value is a single
     reference, and the worker is given the asset with its entries."""
@@ -202,3 +224,39 @@ def test_submit_rejects_malformed_argument(server, project_id, workspace_id):
         },
     )
     assert status == 400
+
+
+def test_publish_null_value(server, project_id, workspace_id, host):
+    """`null` is a value, not an omission — which the separate `value` and
+    `assetId` fields couldn't express, since a null `value` read as "not
+    given"."""
+    api_post(
+        server.port,
+        project_id,
+        "publish_catalog",
+        body={
+            "workspaceId": workspace_id,
+            "path": "configs/nothing",
+            "argument": ["json", "null"],
+        },
+    )
+
+    versions = cli.catalog_inspect("configs/nothing", host=host)
+    assert [v["number"] for v in versions] == [1]
+    assert versions[0]["value"]["data"] is None
+
+
+def test_publish_rejects_malformed_argument(server, project_id, workspace_id):
+    """The same validation submitted arguments get."""
+    for argument in [["json", "not json"], ["nonsense", "x"], "json", []]:
+        status, _ = _post_error(
+            server,
+            project_id,
+            "publish_catalog",
+            {
+                "workspaceId": workspace_id,
+                "path": "configs/bad",
+                "argument": argument,
+            },
+        )
+        assert status == 400

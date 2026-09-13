@@ -78,6 +78,6 @@ This is for formats that seek rather than read straight through — a Parquet fo
 
 ## Uploading from Studio
 
-An asset doesn't have to come from a run. Studio uploads files as an asset in the run dialog, where a parameter annotated `cf.Asset` gets a file field instead of a value field, so a workflow can be started against a file you have to hand.
+An asset doesn't have to come from a run. Studio uploads files as an asset in two places: the Catalog page's **Publish**, which publishes it at a path, and the run dialog, where a parameter annotated `cf.Asset` gets a file field instead of a value field, so a workflow can be started against a file you have to hand.
 
-The files are stored in the blob store first and the server is given their keys — the bytes never pass through it. Assets are content-addressed, so uploading the same files twice gives the same asset rather than a duplicate.
+Either way the files are stored in the blob store first and the server is given their keys — the bytes never pass through it. Assets are content-addressed, so uploading the same files twice gives the same asset rather than a duplicate.

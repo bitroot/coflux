@@ -807,5 +807,15 @@ def test_cli_publish_of_unknown_asset_fails(worker):
     with worker(targets) as ctx:
         with pytest.raises(subprocess.CalledProcessError):
             ctx.catalog_publish("reports/daily", asset_id="Anope")
-        with pytest.raises(subprocess.CalledProcessError):
-            ctx.catalog_publish("reports/daily")
+
+
+def test_cli_publish_null(worker):
+    """`null` is a value like any other. It takes the same argument shape a
+    submitted argument takes, so the value travels as a JSON string and an
+    omission is a missing argument rather than a null one."""
+    targets = [workflow("test", "main")]
+
+    with worker(targets) as ctx:
+        result = ctx.catalog_publish("configs/none", value=None)
+        assert result["created"] is True
+        assert result["version"]["value"]["data"] is None

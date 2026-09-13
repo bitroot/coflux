@@ -184,18 +184,19 @@ func init() {
 }
 
 func runCatalogPublish(cmd *cobra.Command, args []string) error {
-	var value any
+	var argument []string
 	switch {
 	case len(args) == 2 && catalogPublishAsset != "":
 		return fmt.Errorf("specify either a value or --asset, not both")
 	case len(args) == 2:
+		var value any
 		if err := json.Unmarshal([]byte(args[1]), &value); err != nil {
 			return fmt.Errorf("invalid value: expected JSON: %w", err)
 		}
-		if value == nil {
-			return fmt.Errorf("invalid value: null cannot be published from the CLI")
-		}
-	case catalogPublishAsset == "":
+		argument = []string{"json", args[1]}
+	case catalogPublishAsset != "":
+		argument = []string{"asset", catalogPublishAsset}
+	default:
 		return fmt.Errorf("specify a value (JSON) or --asset <asset-id>")
 	}
 
@@ -204,7 +205,7 @@ func runCatalogPublish(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.PublishCatalog(cmd.Context(), wsID, args[0], value, catalogPublishAsset)
+	result, err := client.PublishCatalog(cmd.Context(), wsID, args[0], argument)
 	if err != nil {
 		return err
 	}

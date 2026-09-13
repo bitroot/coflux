@@ -2435,7 +2435,8 @@ defmodule Coflux.Orchestration.Server do
   # An asset assembled from outside a run: the caller has already stored the
   # blobs and passes their keys, exactly as `put_asset` does. There is no
   # execution to record it against, so nothing is notified — the asset only
-  # becomes visible once something references it (a run argument).
+  # becomes visible once something references it (a catalog publish, a run
+  # argument).
   def handle_call({:create_asset, workspace_external_id, name, entries, access}, _from, state) do
     case require_workspace(state, workspace_external_id, access) do
       {:ok, _workspace_id, _workspace} ->

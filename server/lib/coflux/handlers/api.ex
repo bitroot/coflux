@@ -846,51 +846,42 @@ defmodule Coflux.Handlers.Api do
 
   # Publishes either a JSON document (`value`, encoded the way a submitted
   # argument is) or an existing asset (`assetId`) — exactly one of the two.
+  # Takes the same argument shape as `submit_workflow`, so one value editor
+  # feeds both.
   defp handle(req, "POST", ["publish_catalog"], project_id, access) do
-    case read_arguments(
-           req,
-           %{workspace_id: "workspaceId", path: "path"},
-           %{
-             value: {"value", &parse_json_value/1},
-             asset_id: {"assetId", &parse_string(&1, optional: true)}
-           }
-         ) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           path: "path",
+           argument: {"argument", &parse_argument/1}
+         }) do
       {:ok, arguments, req} ->
-        case catalog_publish_value(arguments[:value], arguments[:asset_id]) do
-          {:ok, value} ->
-            case Orchestration.publish_catalog(
-                   project_id,
-                   arguments.workspace_id,
-                   arguments.path,
-                   value,
-                   access
-                 ) do
-              {:ok, version, created?} ->
-                json_response(req, %{
-                  "version" => Coflux.TopicUtils.build_catalog_version(version),
-                  "created" => created?
-                })
+        case Orchestration.publish_catalog(
+               project_id,
+               arguments.workspace_id,
+               arguments.path,
+               arguments.argument,
+               access
+             ) do
+          {:ok, version, created?} ->
+            json_response(req, %{
+              "version" => Coflux.TopicUtils.build_catalog_version(version),
+              "created" => created?
+            })
 
-              {:error, :invalid_path} ->
-                json_error_response(req, "bad_request", details: %{"path" => "invalid"})
+          {:error, :invalid_path} ->
+            json_error_response(req, "bad_request", details: %{"path" => "invalid"})
 
-              {:error, :asset_not_found} ->
-                json_error_response(req, "not_found",
-                  status: 404,
-                  details: %{"assetId" => "unknown"}
-                )
-
-              {:error, :forbidden} ->
-                json_error_response(req, "forbidden", status: 403)
-
-              {:error, :workspace_invalid} ->
-                json_error_response(req, "not_found", status: 404)
-            end
-
-          :error ->
-            json_error_response(req, "bad_request",
-              details: %{"value" => "expected exactly one of value or assetId"}
+          {:error, :asset_not_found} ->
+            json_error_response(req, "not_found",
+              status: 404,
+              details: %{"argument" => "asset_unknown"}
             )
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
         end
 
       {:error, errors, req} ->
@@ -1823,7 +1814,8 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # One value given from outside a run: a JSON document, encoded as a
+  # One value given from outside a run — an argument to a workflow, or
+  # something published to the catalog. A JSON document, encoded as a
   # string so that `null` is a value rather than an omission, or a
   # reference to an existing asset.
   defp parse_argument(["json", json]) do
@@ -1948,20 +1940,6 @@ defmodule Coflux.Handlers.Api do
       opts[:optional] && is_nil(value) -> {:ok, nil}
       is_valid_string?(value, opts) -> {:ok, value}
       true -> {:error, :invalid}
-    end
-  end
-
-  # Any JSON document is a value; `null` reads as "not given".
-  defp parse_json_value(value), do: {:ok, value}
-
-  # The value to publish at a catalog path: a JSON document, encoded the
-  # way a submitted argument is, or a reference to an existing asset.
-  defp catalog_publish_value(json, asset_id) do
-    case {json, asset_id} do
-      {nil, nil} -> :error
-      {json, nil} -> {:ok, {:raw, transform_json(json), []}}
-      {nil, asset_id} -> {:ok, {:raw, %{"type" => "ref", "index" => 0}, [{:asset, asset_id}]}}
-      {_json, _asset_id} -> :error
     end
   end
 

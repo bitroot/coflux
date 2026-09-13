@@ -440,17 +440,14 @@ type PublishCatalogResult struct {
 	Created bool           `json:"created"`
 }
 
-// PublishCatalog publishes a value at a catalog path: a JSON document
-// (`value`) or an existing asset (`assetID`), exactly one of the two.
-func (c *Client) PublishCatalog(ctx context.Context, workspaceID, path string, value any, assetID string) (*PublishCatalogResult, error) {
+// PublishCatalog publishes a value at a catalog path. The argument takes
+// the same shape a submitted argument does: ["json", <document>] or
+// ["asset", <id>].
+func (c *Client) PublishCatalog(ctx context.Context, workspaceID, path string, argument []string) (*PublishCatalogResult, error) {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 		"path":        path,
-	}
-	if assetID != "" {
-		body["assetId"] = assetID
-	} else {
-		body["value"] = value
+		"argument":    argument,
 	}
 	var result PublishCatalogResult
 	if _, err := c.post(ctx, "/api/publish_catalog", body, &result); err != nil {
