@@ -88,6 +88,22 @@ defmodule Coflux.Handlers.Worker do
   def websocket_handle({:text, text}, state) do
     message = Jason.decode!(text)
 
+    # Shapes the orchestration server relies on are checked before
+    # dispatch. It's per-project, so a malformed message from one worker
+    # reaching a failing match there would take down every run in the
+    # project — better to drop the one connection.
+    if valid_params?(message["request"], message["params"]) do
+      handle_request(message, state)
+    else
+      {[{:close, 4000, "protocol_error"}], nil}
+    end
+  end
+
+  def websocket_handle(_data, state) do
+    {[], state}
+  end
+
+  defp handle_request(message, state) do
     case message["request"] do
       "declare_targets" ->
         [targets, concurrency] = message["params"]
@@ -762,10 +778,6 @@ defmodule Coflux.Handlers.Worker do
     end
   end
 
-  def websocket_handle(_data, state) do
-    {[], state}
-  end
-
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
          workspace_external_id, timeout, streams, checkpoints},
@@ -864,6 +876,74 @@ defmodule Coflux.Handlers.Worker do
   defp success_message(id, result) do
     {:text, Jason.encode!([2, id, result])}
   end
+
+  defp valid_params?("checkpoint_update", [_execution_id, set, reset]),
+    do: is_map(set) and is_list(reset) and Enum.all?(reset, &is_binary/1)
+
+  defp valid_params?("stream_register", [_execution_id, position | rest]) do
+    is_integer(position) and position >= 0 and
+      case rest do
+        [] -> true
+        [buffer] -> valid_buffer?(buffer)
+        [buffer, timeout_ms] -> valid_buffer?(buffer) and valid_timeout_ms?(timeout_ms)
+        _ -> false
+      end
+  end
+
+  defp valid_params?("stream_append", [_execution_id, index, sequence, _value]),
+    do: is_integer(index) and index >= 0 and is_integer(sequence) and sequence >= 0
+
+  defp valid_params?("stream_close", [_execution_id, index, _error | _rest]),
+    do: is_integer(index) and index >= 0
+
+  defp valid_params?("stream_subscribe", [
+         _subscription_id,
+         _consumer_execution_id,
+         _stream_id,
+         from_sequence,
+         stride | _rest
+       ]),
+       do: is_integer(from_sequence) and from_sequence >= 0 and valid_stride?(stride)
+
+  defp valid_params?("suspend", [_execution_id, execute_after | rest]) do
+    (is_nil(execute_after) or is_integer(execute_after)) and
+      case rest do
+        [%{"stream_id" => stream_id, "sequence" => sequence}] ->
+          is_binary(stream_id) and is_integer(sequence) and sequence >= 0
+
+        _ ->
+          true
+      end
+  end
+
+  defp valid_params?("select", [handles | _rest]) when is_list(handles) do
+    Enum.all?(handles, fn
+      %{"type" => "stream"} = handle ->
+        case Map.get(handle, "sequence", 0) do
+          sequence when is_integer(sequence) and sequence >= 0 -> true
+          _ -> false
+        end
+
+      _ ->
+        true
+    end)
+  end
+
+  defp valid_params?(_request, _params), do: true
+
+  defp valid_buffer?(buffer), do: is_nil(buffer) or (is_integer(buffer) and buffer >= 0)
+
+  defp valid_timeout_ms?(timeout_ms),
+    do: is_nil(timeout_ms) or (is_integer(timeout_ms) and timeout_ms > 0)
+
+  defp valid_stride?(nil), do: true
+
+  defp valid_stride?(%{"start" => start, "stop" => stop, "step" => step}),
+    do:
+      is_integer(start) and start >= 0 and (is_nil(stop) or is_integer(stop)) and
+        is_integer(step) and step >= 1
+
+  defp valid_stride?(_stride), do: false
 
   defp error_message(id, error) do
     {:text, Jason.encode!([3, id, error])}

@@ -54,6 +54,7 @@ coflux worker --dev myapp.workflows myapp.tasks
 Or in `coflux.toml`:
 
 ```toml
+[worker]
 modules = ["myapp.workflows", "myapp.tasks"]
 ```
 

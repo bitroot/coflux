@@ -87,7 +87,7 @@ send_notification()
 
 A step's checkpoints are one snapshot of its progress rather than a set of independent cells: whatever has been written is delivered as a single delta and applied at once. Deltas are only cut where the execution could resume from — never part-way through consuming something a replay can't re-read.
 
-That's what keeps state derived from a [stream](./streams.md) honest. A checkpoint written in the loop body is published in the same delta as the cursor advance that consumes the item, so a running total never counts an item the cursor says was never read. If the iteration doesn't finish — a `break`, an exception, a lost worker — the item stays unconsumed and the writes derived from it are dropped, because the next attempt reads that item again.
+That's what keeps state derived from a [stream](./streams.md) honest. A checkpoint written in the loop body is published in the same delta as the cursor advance that consumes the item, so a running total never counts an item the cursor says was never read. If the iteration doesn't finish — a `break` or `return`, an exception, a lost worker — the item stays unconsumed and the writes derived from it are dropped, because the next attempt reads that item again.
 
 A replay therefore repeats whole items rather than fractions of one. That isn't exactly-once: the item *is* delivered again, so anything else the loop body did happens again too. [Memoize](./memoizing.md) what it calls.
 

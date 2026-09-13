@@ -1,6 +1,13 @@
 ## 0.12.0
 
-No changes.
+Enhancements:
+
+- Supports streams: runs producer generators against server-granted demand (with idle timers), and routes stream items to consumers.
+- Supports checkpoints: throttles and orders checkpoint writes, flushing them before an execution suspends or exits.
+- Supports partial blob reads (byte ranges) from HTTP and S3 stores.
+- `submit` fills in omitted trailing arguments from the workflow's declared defaults, so the cache, memo and defer keys match a call that spells them out.
+- `queue` shows the inputs and stream items that queued executions are waiting on.
+- In `--dev`/`--watch` mode, a module that fails to import on reload is logged and the worker keeps running (serving whatever loaded) rather than exiting. The first run is still strict.
 
 ## 0.11.0
 

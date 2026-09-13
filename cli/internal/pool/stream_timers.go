@@ -76,16 +76,19 @@ func (s *streamTimers) Register(key streamKey, timeoutMs int) {
 // entry in place so a later append or close still finds it; resuming
 // starts a fresh full-length window rather than resuming a partial one,
 // which is the same thing a resumed producer gets.
+//
+// The timer is stopped and reset under the lock, as it is in Reset, so a
+// pause can't interleave with an append's reset and leave a paused stream
+// counting down. Stop and Reset never wait on the callback, so holding
+// the lock across them can't deadlock with fire.
 func (s *streamTimers) SetPaused(key streamKey, paused bool) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, ok := s.timers[key]
-	if ok {
-		st.paused = paused
-	}
-	s.mu.Unlock()
 	if !ok {
 		return
 	}
+	st.paused = paused
 	st.timer.Stop()
 	if !paused {
 		st.timer.Reset(st.timeout)
@@ -97,10 +100,9 @@ func (s *streamTimers) SetPaused(key streamKey, paused bool) {
 // cleared), or while it is paused.
 func (s *streamTimers) Reset(key streamKey) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, ok := s.timers[key]
-	paused := ok && st.paused
-	s.mu.Unlock()
-	if !ok || paused {
+	if !ok || st.paused {
 		return
 	}
 	// time.Timer.Reset is safe to call on a timer that has already

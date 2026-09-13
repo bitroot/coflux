@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .checkpoint import Checkpoint
 from .models import Asset, AssetMetadata, Execution, Input, Stream
 
 # Try to import pydantic
@@ -157,6 +158,14 @@ def _encode_value(
             )
             return {"type": "ref", "index": len(references) - 1}
         else:
+            # A checkpoint handle names storage belonging to the current
+            # step; it refuses to pickle, and the fallback below must not
+            # turn that refusal into a string.
+            if isinstance(v, Checkpoint):
+                raise TypeError(
+                    "Checkpoint handles can't be passed between executions — "
+                    "declare cf.Checkpoint(...) in the target that uses it"
+                )
             # Serialize with pickle and write to temp file as fragment
             try:
                 buffer = io.BytesIO()
@@ -273,7 +282,7 @@ def _decode_value(data: Any, references: list[list[Any]] | None = None) -> Any:
                     )
                 else:
                     stride = (0, None, 1)
-                return Stream(v["id"], stride)
+                return Stream(v["id"], stride=stride)
             else:
                 return v
         else:

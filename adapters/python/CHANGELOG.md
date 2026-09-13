@@ -2,8 +2,20 @@
 
 Enhancements:
 
-- Adds `cf.Checkpoint` for state that survives across executions of a step — retries, suspensions, recurrences and re-runs. Supports `get`, `set` and `reset`, with a declared default.
+- Adds streams. A task whose body is a generator (`def`/`async def` with `yield`) produces a stream, and its result is a `cf.Stream` handle that other tasks iterate with `for` or `async for`. `cf.stream(generator, buffer=..., timeout=...)` registers a generator explicitly, for returning several streams or a stream alongside other values.
+- Adds `cf.Streams(buffer=, timeout=)` for a target's default stream configuration (`streams=` on `@task`/`@workflow`, or `target.with_streams(...)` per call site), and `Stream.slice`/`partition`/`stride` views for splitting a stream across consumers.
+- A producer can `cf.suspend()` from inside its generator: the stream pauses, and the resumed execution continues it.
+- Iterating a stream inside `cf.suspense(...)` suspends the consumer when the stream goes quiet, and resumes it from where it left off. The position is kept in an adapter-managed checkpoint, published together with any checkpoint writes made in the loop body.
+- Adds `cf.Checkpoint` for state that survives across executions of a step — retries, suspensions, recurrences and re-runs. Supports `get`, `set`, `update` and `reset`, with a declared default.
 - Adds `cf.flush` for synchronously flushing buffered state to the server.
+- Adds `AssetEntry.read(offset, length)` for reading part of an asset entry without restoring the whole file.
+- Adds `ExecutionTerminated` as the base class of `ExecutionCancelled` and `ExecutionTimeout`, with new `ExecutionAbandoned`, `ExecutionCrashed` and `StreamSuperseded` subclasses, raised when waiting on an execution (or iterating a stream) that ended that way.
+
+Changes:
+
+- Removes `ModelSchema` from the public API.
+- `Prompt` templates are dedented, and leading/trailing blank lines stripped, before rendering — so a triple-quoted template indented to match its code renders as Markdown rather than as a code block.
+- Discovery exits non-zero when a module fails to import, reporting the traceback on stderr.
 
 ## 0.11.0
 

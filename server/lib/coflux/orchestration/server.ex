@@ -3048,6 +3048,7 @@ defmodule Coflux.Orchestration.Server do
     put_in(state.stream_producers[stream.id], %{
       buffer: buffer,
       demand_granted: head + 1,
+      base: head,
       session_id: session_id,
       execution_external_id: execution_external_id,
       index: stream.index
@@ -3107,10 +3108,28 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp refresh_stream_demand_for(state, stream_id, producer) do
-    has_subscribers = has_stream_subscribers?(state, stream_id)
-    watermark = slowest_ack_watermark(state, stream_id)
-    bump = if has_subscribers, do: 1, else: 0
-    target = watermark + producer.buffer + bump
+    target =
+      if has_stream_subscribers?(state, stream_id) do
+        slowest_ack_watermark(state, stream_id) + producer.buffer + 1
+      else
+        # Nobody attached: pre-warm `buffer` items past where the stream
+        # stood when this producer registered. A fresh stream warms from
+        # the start; one resumed after a suspend warms from its head,
+        # rather than being held to a budget its predecessor already used.
+        Map.get(producer, :base, -1) + 1 + producer.buffer
+      end
+
+    # A consumer suspended waiting on a sequence has no subscription to
+    # ack through, and only comes back once that item exists. Its wait is
+    # demand for it — otherwise a lockstep producer is never granted the
+    # credit that would wake its own consumer, and the two wait on each
+    # other forever.
+    target =
+      case highest_waited_sequence(state, stream_id) do
+        nil -> target
+        sequence -> max(target, sequence + 1)
+      end
+
     delta = target - producer.demand_granted
 
     if delta > 0 do
@@ -3123,6 +3142,13 @@ defmodule Coflux.Orchestration.Server do
     else
       state
     end
+  end
+
+  defp highest_waited_sequence(state, stream_id) do
+    state.stream_dependency_keys
+    |> Map.get(stream_id, MapSet.new())
+    |> Enum.map(fn {:stream, _stream_id, sequence} -> sequence end)
+    |> Enum.max(fn -> nil end)
   end
 
   defp has_stream_subscribers?(state, stream_id) do
@@ -5027,6 +5053,11 @@ defmodule Coflux.Orchestration.Server do
     epoch_index = Index.add_epoch(state.epoch_index, epoch_id, System.os_time(:millisecond))
     :ok = Index.save(epoch_index)
 
+    # Live stream state (subscriptions, producers) is keyed by internal
+    # ids, which the copy below reassigns. Capture it by external id from
+    # the old database first, and rebuild it once the runs are copied.
+    stream_state = capture_stream_state(state)
+
     # Now rotate
     {:ok, new_epochs, old_db} = Epochs.rotate(state.epochs, epoch_id)
     new_db = Epochs.active_db(new_epochs)
@@ -5040,11 +5071,78 @@ defmodule Coflux.Orchestration.Server do
     |> Map.update!(:index_queue, &(&1 ++ [epoch_id]))
     |> remap_config_ids(id_mappings)
     |> copy_in_flight_runs()
+    |> restore_stream_state(stream_state)
     |> Map.put(:pending_dependencies, %{})
     |> Map.put(:stream_dependency_keys, %{})
     |> Map.put(:dependency_waiters, %{})
     |> initialize_pending_dependencies()
     |> maybe_start_index_build()
+  end
+
+  # Everything in `stream_subscriptions` / `stream_subscribers` /
+  # `stream_producers` that names a stream or an execution by internal id,
+  # re-expressed by external id so it can be re-resolved after the copy.
+  defp capture_stream_state(state) do
+    subscriptions =
+      Enum.flat_map(state.stream_subscriptions, fn {{_consumer_id, subscription_id}, sub} ->
+        case stream_external_id_for(state.db, sub.stream_id) do
+          {:ok, stream_ext_id} ->
+            [{sub.consumer_execution_external_id, subscription_id, stream_ext_id, sub}]
+
+          _ ->
+            []
+        end
+      end)
+
+    producers =
+      Enum.flat_map(state.stream_producers, fn {stream_id, producer} ->
+        case stream_external_id_for(state.db, stream_id) do
+          {:ok, stream_ext_id} -> [{stream_ext_id, producer}]
+          _ -> []
+        end
+      end)
+
+    {subscriptions, producers}
+  end
+
+  # The inverse of capture_stream_state, against the new active database.
+  # Consumer executions are resolved through the rebuilt `execution_ids`;
+  # streams through resolve_stream_id, which copies a producer's run
+  # forward if it wasn't in flight (a finished producer whose consumer is
+  # still reading). Anything that can't be resolved is dropped, as it
+  # would have been before.
+  defp restore_stream_state(state, {subscriptions, producers}) do
+    state = %{
+      state
+      | stream_subscriptions: %{},
+        stream_subscribers: %{},
+        stream_producers: %{}
+    }
+
+    state =
+      Enum.reduce(subscriptions, state, fn {consumer_ext_id, subscription_id, stream_ext_id, sub},
+                                           state ->
+        with {:ok, consumer_id} <- Map.fetch(state.execution_ids, consumer_ext_id),
+             {:ok, stream_id} <- resolve_stream_id(state, stream_ext_id) do
+          key = {consumer_id, subscription_id}
+
+          state
+          |> put_in([Access.key(:stream_subscriptions), key], %{sub | stream_id: stream_id})
+          |> update_in(
+            [Access.key(:stream_subscribers), Access.key(stream_id, MapSet.new())],
+            &MapSet.put(&1, key)
+          )
+        else
+          _ -> state
+        end
+      end)
+
+    Enum.reduce(producers, state, fn {stream_ext_id, producer}, state ->
+      case resolve_stream_id(state, stream_ext_id) do
+        {:ok, stream_id} -> put_in(state.stream_producers[stream_id], producer)
+        _ -> state
+      end
+    end)
   end
 
   defp copy_in_flight_runs(state) do
@@ -6817,6 +6915,43 @@ defmodule Coflux.Orchestration.Server do
   # doesn't influence the dispatch; only the explicit `:errored` /
   # `:timeout` reasons do.
   defp finalize_success_completion(state, execution_id) do
+    # The adapter exits only once every stream it produces has closed, and
+    # its stream_close messages precede notify_terminated on the wire. So a
+    # stream this execution registered that is still open now means the
+    # process died mid-drain: a crash with a truncated stream, not a
+    # success with leftovers. (Paused streams from an earlier attempt are
+    # not this execution's registrations, and are closed below as usual.)
+    {:ok, still_producing} = Streams.get_open_stream_ids_for_execution(state.db, execution_id)
+
+    if still_producing == [] do
+      finalize_drained_completion(state, execution_id)
+    else
+      finalize_crashed_mid_drain(state, execution_id)
+    end
+  end
+
+  # Like handle_crashed, but the value result was already recorded and
+  # notified — only the completion (with the step's retry decision) and the
+  # stream closures are outstanding. Closing after the completion row is
+  # written lets derive_lifecycle_info report :crashed to consumers.
+  defp finalize_crashed_mid_drain(state, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
+
+    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
+      {:ok, completion_at} ->
+        state = close_open_streams(state, execution_id)
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  defp finalize_drained_completion(state, execution_id) do
     state = close_open_streams(state, execution_id, :complete)
 
     {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
@@ -7258,6 +7393,31 @@ defmodule Coflux.Orchestration.Server do
           # streams.
           result == :timeout ->
             {:ok, close_open_streams(state, execution_id, :timeout)}
+
+          # The worker's session went away mid-drain. The value stands, but
+          # whatever it was still producing into is truncated, so this is an
+          # abandonment, not a success: write the completion as :abandoned
+          # (with the step's retry decision, as for any abandoned execution)
+          # and close what it left open, so consumers see :abandoned rather
+          # than a clean "complete" — and the truncated run isn't cached.
+          result == :abandoned ->
+            {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+            {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+            {retry_id, _recurred?, state} =
+              decide_and_create_successor(state, execution_id, step, workspace_id, :abandoned)
+
+            case Results.record_completion(state.db, execution_id, :abandoned,
+                   successor_id: retry_id,
+                   created_by: created_by
+                 ) do
+              {:ok, completion_at} ->
+                state = close_open_streams(state, execution_id)
+                {:ok, fire_completion_notification(state, execution_id, completion_at)}
+
+              {:error, :already_completed} ->
+                {:ok, state}
+            end
 
           # A generator-bodied producer suspends from inside its body,
           # after its value (the stream handle) was recorded. Write the
@@ -8122,7 +8282,11 @@ defmodule Coflux.Orchestration.Server do
     # First waiter: the producer's idle countdown stops. A consumer's nap
     # is not the producer being idle — the mirror of the existing rule
     # that a suspended producer's own pause doesn't count against it.
-    if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
+    state = if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
+
+    # The wait counts as demand (see refresh_stream_demand_for), and the
+    # producer may be blocked on exactly that.
+    refresh_stream_demand(state, stream_id)
   end
 
   defp index_stream_dependency(state, _key), do: state

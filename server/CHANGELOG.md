@@ -2,7 +2,20 @@
 
 Enhancements:
 
+- Adds streams — ordered sequences of values that one execution produces and others consume as they're produced. Items are stored as they arrive, so a stream can be read by several consumers, more than once, and after the producer has finished. Supports credit-based backpressure (`buffer`), idle timeouts, and strided views (`slice`/`partition`).
+- Streams belong to the step that produces them: a producer that suspends leaves its streams paused, and the execution that resumes the step continues them.
+- Supports consumers suspending while iterating a stream, holding the successor until the stream reaches the awaited item (or closes). The producer's idle countdown is paused while every consumer is waiting on it.
 - Adds checkpoints — named values scoped to a step within a workspace, carried across retries, suspensions, recurrences and re-runs. Reads fall back through the workspace's bases; writes stay in the writing workspace. History is compacted to the effective state at epoch rotation.
+- Exposes the dependencies that a queued or suspended execution is waiting on (executions, inputs, stream items) from the run and queue topics.
+- Supports HTTP range requests on the blob endpoint.
+- Adds an API endpoint for creating an asset from uploaded blobs (used by Studio's run dialog).
+- Validates the shape of worker messages before they reach the orchestration process.
+
+Fixes:
+
+- Fixes a path traversal issue in the built-in blob store.
+- Fixes request body handling for large bodies and malformed JSON in the API, logs and metrics endpoints.
+- Fixes inputs staying active after their execution was retried, and the modules topic's active-run tracking.
 
 ## 0.11.0
 

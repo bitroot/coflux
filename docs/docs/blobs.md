@@ -17,7 +17,7 @@ protocol = "http"
 
 ## Blob threshold
 
-To determine when to store data in the blob store, a blob 'threshold' is used. If the serialized data takes more than this number of bytes, the blob store will be used, and a reference to the blob is substituted - otherwise the raw data is sent to the Coflux server. The default threshold is 200 bytes. This can be specified in the configuration file:
+To determine when to store data in the blob store, a blob 'threshold' is used. If the serialized data takes more than this number of bytes, the blob store will be used, and a reference to the blob is substituted - otherwise the raw data is sent to the Coflux server. The default threshold is 100 bytes. This can be specified in the configuration file:
 
 ```toml
 [blobs]

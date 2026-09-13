@@ -173,8 +173,23 @@ func (m *Manager) DownloadTo(key, targetPath string) error {
 // DownloadRangeTo downloads a byte range of a blob to a specific path. A
 // negative length reads to the end of the blob.
 func (m *Manager) DownloadRangeTo(key, targetPath string, offset, length int64) error {
+	if offset < 0 {
+		return fmt.Errorf("offset must be non-negative, got %d", offset)
+	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return err
+	}
+
+	// Fetch before creating the target, so a missing blob or an
+	// unsatisfiable range doesn't leave an empty file behind.
+	var reader io.ReadCloser
+	if length != 0 {
+		r, err := m.GetRange(key, offset, length)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = r.Close() }()
+		reader = r
 	}
 
 	f, err := os.Create(targetPath)
@@ -183,16 +198,9 @@ func (m *Manager) DownloadRangeTo(key, targetPath string, offset, length int64) 
 	}
 	defer func() { _ = f.Close() }()
 
-	if length == 0 {
+	if reader == nil {
 		return nil
 	}
-
-	reader, err := m.GetRange(key, offset, length)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = reader.Close() }()
-
 	_, err = io.Copy(f, reader)
 	return err
 }
