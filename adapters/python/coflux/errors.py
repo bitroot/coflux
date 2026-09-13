@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 
 class Suspending(BaseException):
@@ -47,9 +48,12 @@ class ExecutionError(Exception):
         except ExecutionError:      # catches any execution failure
     """
 
+    frames: list[Any]
+
     def __init__(self, message: str, error_type: str = "", error_message: str = ""):
         self.error_type = error_type
         self.error_message = error_message
+        self.frames = []
         super().__init__(message)
 
 

@@ -123,6 +123,7 @@ def execute_target(
     # racing on stdin directly.
     start_dispatcher(protocol.get_protocol())
     ctx: ExecutorContext | None = None
+    target_obj: Any = None
     try:
         if working_dir:
             os.chdir(working_dir)
@@ -219,8 +220,9 @@ def execute_target(
         # None = no callback configured, True/False = callback result
         # If the callback raises, report that exception instead (makes bugs visible)
         retryable = None
-        if hasattr(target_obj, "definition"):
-            retries = target_obj.definition.retries
+        definition = getattr(target_obj, "definition", None)
+        if definition is not None:
+            retries = definition.retries
             if retries and retries.when is not None:
                 try:
                     retryable = bool(retries.when(e))
