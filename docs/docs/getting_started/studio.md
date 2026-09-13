@@ -31,4 +31,7 @@ Now that you have a workflow running, here are some areas to explore:
 - [Caching](/caching) — avoid re-computing results that haven't changed.
 - [Automatic retries](/retries) — handle transient failures gracefully.
 - [Assets](/assets) — persist and share files between tasks.
+- [Streams](/streams) — produce values that other tasks consume as they're generated.
+- [Checkpoints](/checkpoints) — keep state across retries and suspensions.
+- [Inputs](/inputs) — request approval or structured input from a user mid-workflow.
 - [Concepts](/concepts) — a deeper look at projects, workspaces, and workspace inheritance.

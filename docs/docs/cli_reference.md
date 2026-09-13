@@ -99,7 +99,7 @@ Start a worker.
 | `--dev` | Development mode (implies `--watch` and `--register`) |
 | `--watch` | Watch for file changes and reload |
 | `--register` | Register modules with server |
-| `--concurrency` | Max concurrent executions (default: CPU count + 4) |
+| `--concurrency` | Max concurrent executions (default: CPU count + 4, max 32) |
 | `--provides` | Features worker provides (e.g., `gpu:A100`) |
 | `--accepts` | Tags executions must have |
 | `--adapter` | Adapter command |
@@ -112,12 +112,12 @@ On `SIGINT`/`SIGTERM` the worker stops accepting new executions and drains the i
 
 Interactive configuration wizard. Creates `coflux.toml`.
 
-| Flag | Description |
-|------|-------------|
-| `--host` | Server host |
-| `--workspace` | Workspace name |
-| `--adapter` | Adapter command |
-| `--detect` | Auto-detect adapter |
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--host` | `-H` | Server host |
+| `--workspace` | `-w` | Workspace name |
+| `--adapter` | | Adapter command |
+| `--detect` | | Auto-detect adapter |
 
 ## `coflux server`
 
@@ -136,8 +136,6 @@ Start a local server using Docker.
 | `--secret` | | | Server secret for signing service tokens |
 | `--team` | | | Allowed team IDs for Studio auth |
 | `--launcher` | | | Allowed launcher types (`docker`, `process`, `kubernetes`) |
-| `--studio-url` | | | Studio URL |
-| `--allow-origin` | | | Allowed CORS origins |
 
 ## `coflux login` / `coflux logout`
 
@@ -180,9 +178,9 @@ All manifest commands accept `--adapter` to specify the adapter command.
 | `pools delete <name>` | Delete a pool |
 | `pools disable <name>` | Disable a pool (drain workers) |
 | `pools enable <name>` | Re-enable a pool |
-| `pools launches <pool>` | View launched workers (`--watch`) |
+| `pools launches <pool> [worker-id]` | View launched workers (`--watch`) |
 | `pools export` | Export pool configs as TOML (`-o`, `--only`) |
-| `pools import <file>` | Import pool configs from TOML |
+| `pools import [file]` | Import pool configs from TOML or stdin. Declarative: pools absent from the file are deleted. Flags: `--dry-run`, `--yes`, `--only` |
 
 ### Pool creation flags
 
@@ -246,4 +244,4 @@ List active sessions (`--watch` to watch for changes).
 
 ## `coflux queue`
 
-Show the execution queue (`--no-watch` for a snapshot).
+Show the execution queue. The dependencies column lists what each queued or suspended execution is waiting on: other executions, inputs, or stream items. Use `--no-watch` for a snapshot, and `-o json` to dump the raw topic.

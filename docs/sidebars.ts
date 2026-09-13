@@ -16,6 +16,7 @@ const sidebars: SidebarsConfig = {
       ],
     },
     "concepts",
+    "examples",
     {
       type: "category",
       label: "Workflows",

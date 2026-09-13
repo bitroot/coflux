@@ -99,7 +99,7 @@ Only a suspend keeps a stream open across executions. Every other way an executi
 - The generator finishing closes its stream normally, and a task completing normally closes anything it left open.
 - An exception in the generator closes the stream with that error. A [retry](./retries.md) opens a fresh stream.
 - Cancellation, a crash, or a lost worker closes it with that reason. Cancelling a suspended step, which cancels its pending resumption, closes its paused streams too.
-- A [recurrent](./recurring.md) task finishing an iteration closes its streams, and the next iteration opens its own. A recurrent task can't have a generator body for this reason: its result would be a stream, so it could never return `None` to recur. Use the suspend form above for a continuous stream.
+- A [recurrent](./recurring.md) task finishing an iteration closes its streams, and the next iteration opens its own. A consumer still iterating the old one gets `StreamSuperseded`: nothing went wrong, the producer moved on. A recurrent task can't have a generator body for this reason: its result would be a stream, so it could never return `None` to recur. Use the suspend form above for a continuous stream.
 - Re-running a step from Studio cancels the running attempt, closing its streams, and the new attempt starts fresh. Re-running a *suspended* step instead continues its paused streams, since nothing was producing into them.
 
 Once closed, a stream is never reopened. A later attempt of the step produces a new stream.
@@ -131,7 +131,7 @@ def handle_events(events: cf.Stream[dict]):
             store.submit(event)
 ```
 
-If thirty seconds pass with nothing arriving, the execution suspends. It is resumed when the stream next holds the item it was waiting for — or when the stream closes, since it will never hold it then. The resumed execution runs the body from the top, as always — but it doesn't re-read the stream. The adapter keeps the consumed position in a checkpoint of its own, named after the stream and the view being read, and re-subscribes there, so each item is delivered to exactly one attempt.
+If thirty seconds pass with nothing arriving, the execution suspends. It is resumed when the stream next holds the item it was waiting for — or when the stream closes, since it will never hold it then. The resumed execution runs the body from the top, as always — but it doesn't re-read the stream. The adapter keeps the consumed position in a checkpoint of its own, named after the stream and the view being read, and re-subscribes there, so an attempt never re-reads what its predecessor consumed.
 
 Two things follow from the body restarting:
 
@@ -142,7 +142,7 @@ A bare `cf.suspense()` means what it means for a result: don't wait at all. The 
 
 Pick the threshold with `buffer` in mind. Under the default lockstep budget the producer is never more than one item ahead, so a short threshold makes the consumer suspend on nearly every item; give the producer a `buffer` (or `buffer=None`) when the consumer is going to nap.
 
-The cursor is never cleared. Re-running a consumer that already drained its stream therefore does nothing — it resumes at the end. Clear the step's checkpoints to make it read again.
+The cursor is never cleared, so re-running a consumer that already drained its stream does nothing — it resumes at the end.
 
 ### An idle pipeline
 

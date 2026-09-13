@@ -49,6 +49,14 @@ When a workflow is submitted, this initiates a _run_. A run is made up of _steps
 
 Tasks can request _input_ from a user mid-execution - for example, an approval before a deployment, or a structured form to fill in. Prompts are responded to from Studio (or the CLI), and the execution resumes once a response is provided. See [inputs](./inputs.md).
 
+## Streams
+
+A task can produce a _stream_ - an ordered sequence of values that other tasks consume as it's produced, rather than a single result at the end. A stream belongs to the step that produces it, so it survives the producer suspending. See [streams](./streams.md).
+
+## Checkpoints
+
+A _checkpoint_ is a named value scoped to a step, which survives retries, suspensions, recurrences and re-runs - for state that isn't naturally a task result, such as a cursor. See [checkpoints](./checkpoints.md).
+
 ## Assets
 
 Executions can persist _assets_ (a collection of files) which can be passed between executions and restored as needed, or viewed in Studio.

@@ -19,9 +19,9 @@ A typical configuration file:
 ```toml
 host = "localhost:7777"
 workspace = "default"
-modules = ["myapp.workflows", "myapp.tasks"]
 
 [worker]
+modules = ["myapp.workflows", "myapp.tasks"]
 concurrency = 8
 adapter = ["python", "-m", "coflux"]
 
@@ -40,7 +40,6 @@ url = "http://localhost:7777/blobs"
 | `host` | `localhost:7777` | Server host |
 | `token` | _(none)_ | Authentication token |
 | `workspace` | `default` | Workspace name |
-| `modules` | `[]` | Modules to load |
 | `secure` | _(auto)_ | Use TLS (defaults to `true` for non-localhost hosts) |
 | `team` | _(none)_ | Team ID for Studio authentication |
 | `output` | _(none)_ | Output format (`json` for machine-readable output) |
@@ -50,6 +49,7 @@ url = "http://localhost:7777/blobs"
 
 ```toml
 [worker]
+modules = ["myapp.workflows", "myapp.tasks"]
 concurrency = 8
 adapter = ["python", "-m", "coflux"]
 provides = ["gpu:A100", "region:eu"]
@@ -57,9 +57,11 @@ provides = ["gpu:A100", "region:eu"]
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| `worker.modules` | `[]` | Modules to load targets from (overridden by modules passed on the command line) |
 | `worker.concurrency` | _(CPU count + 4, max 32)_ | Maximum concurrent executions |
 | `worker.adapter` | `[]` | Adapter command for executing Python code |
 | `worker.provides` | `[]` | Features this worker provides (for pool matching) |
+| `worker.accepts` | `[]` | Tags an execution must carry for this worker to accept it |
 
 ### Blob storage
 

@@ -26,6 +26,7 @@ Defines a workflow — the entry point for a run.
     memo: bool = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | timedelta = 0,
+    streams: Streams | None = None,
 )
 ```
 
@@ -41,6 +42,7 @@ Defines a workflow — the entry point for a run.
 | `memo` | `bool` | `False` | Enable [memoisation](./memoizing.md) as default for all tasks in the run |
 | `requires` | `dict \| None` | `None` | [Tag requirements](./pools.md#provides-accepts-and-requires) for worker routing (applied to entire run) |
 | `timeout` | `float \| timedelta` | `0` | Execution [timeout](./timeouts.md) in seconds (0 = no timeout) |
+| `streams` | `Streams \| None` | `None` | Default [stream](./streams.md) configuration (`buffer`, `timeout`) for streams the target produces: a generator body's stream, or any registered with `cf.stream()` |
 
 ### `@task`
 
@@ -58,6 +60,7 @@ Defines a task — an operation that can be called from a workflow or another ta
     memo: bool | Iterable[str] = False,
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | timedelta = 0,
+    streams: Streams | None = None,
 )
 ```
 
@@ -128,6 +131,7 @@ cached.submit(b)
 | `with_delay(delay)` | Override submission delay (seconds or `timedelta`). |
 | `with_timeout(timeout)` | Override execution [timeout](./timeouts.md). |
 | `with_requires(requires)` | Override worker routing tags. |
+| `with_streams(streams)` | Override the default [stream](./streams.md) configuration for streams the target produces. |
 
 ## Execution
 
@@ -145,7 +149,7 @@ Returned by `target.submit()`. Represents a running or completed execution, and 
 
 Blocks (suspends) until the execution completes and returns the result. If the execution failed, raises the corresponding exception.
 
-**Raises:** `ExecutionError`, `ExecutionCancelled`, or `ExecutionTimeout`. If called inside a `cf.suspense(timeout=...)` scope and the timeout expires before the handle resolves, raises `TimeoutError`.
+**Raises:** `ExecutionError` if the execution failed, or an `ExecutionTerminated` subclass (`ExecutionCancelled`, `ExecutionTimeout`, `ExecutionAbandoned`, `ExecutionCrashed`) if it ended without completing. If called inside a `cf.suspense(timeout=...)` scope and the timeout expires before the handle resolves, raises `TimeoutError`.
 
 ### `execution.poll(timeout=None, *, default=None) -> T | D`
 
@@ -320,7 +324,9 @@ A handle to a stream, typed by its items (`Stream[T]`).
 | `stream.stride(start=0, stop=None, step=1)` | The general form of the above |
 | `stream.id` | An opaque identifier for the stream, as shown in Studio |
 
-Views compose, and can be passed to other tasks. If the producer raised, iterating raises the same error.
+Views compose, and can be passed to other tasks. If the producer raised, iterating raises the same error; if it was cancelled, abandoned, crashed or timed out, iterating raises the corresponding `ExecutionTerminated` subclass; if it was a recurrent target that finished its iteration, `StreamSuperseded`.
+
+`iter(stream)` returns a `StreamIterator` and `aiter(stream)` an `AsyncStreamIterator`. Both can be released early with `close()` / `aclose()`, or by using them as a context manager (`with` / `async with`). An open subscription holds a bounded producer's backpressure, so release one you stop reading before the stream ends; dropping the last reference releases it too.
 
 ## Checkpoints
 
@@ -493,7 +499,11 @@ Creates and persists a collection of files as an asset, which can be inspected a
 | Exception | Description |
 |-----------|-------------|
 | `ExecutionError` | Child execution failed. When the original exception type can be resolved, the raised exception subclasses both `ExecutionError` and the original type, so you can catch either. |
+| `ExecutionTerminated` | Base class for the reasons below: the execution (or stream producer) ended without completing. Catch it to handle them all. |
 | `ExecutionCancelled` | Child execution (or input) was cancelled. |
 | `ExecutionTimeout` | Child execution exceeded its configured `timeout`. |
+| `ExecutionAbandoned` | The worker running the child execution went away without reporting a result. |
+| `ExecutionCrashed` | The child execution's process ended without reporting a result. |
+| `StreamSuperseded` | A stream ended because its recurrent producer finished an iteration. Not a failure: the next iteration produces its own stream. |
 | `InputDismissed` | A requested input was dismissed by the responder. |
 | `TimeoutError` (built-in) | A `cf.suspense(timeout=...)` wait expired before a handle resolved. |
