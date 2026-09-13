@@ -5,6 +5,13 @@ defmodule Coflux.Handlers.Api do
 
   @max_parameters 20
 
+  # A directory upload arrives as one entry per file, so this bounds an
+  # accidental drop of a very large tree. Unlike the sizes, which the
+  # client asserts, the count is something the server can see for itself.
+  @max_asset_entries 1000
+  @max_asset_entry_path_length 1000
+  @blob_key_regex ~r/\A[0-9a-f]{64}\z/
+
   def init(req, opts) do
     req = set_cors_headers(req)
 
@@ -546,6 +553,12 @@ defmodule Coflux.Handlers.Api do
 
           {:error, :workspace_invalid} ->
             json_error_response(req, "not_found", status: 404)
+
+          {:error, :asset_not_found} ->
+            json_error_response(req, "not_found",
+              status: 404,
+              details: %{"arguments" => "asset_unknown"}
+            )
         end
 
       {:error, errors, req} ->
@@ -708,6 +721,48 @@ defmodule Coflux.Handlers.Api do
             })
 
           {:error, :not_found} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  # --- Assets ---
+
+  # Assembles an asset from blobs the client has already stored. The server
+  # never sees the bytes — only keys, sizes and paths — which is what keeps
+  # uploads that go straight to an S3 blob store working.
+  defp handle(req, "POST", ["create_asset"], project_id, access) do
+    case read_arguments(
+           req,
+           %{
+             workspace_id: "workspaceId",
+             entries: {"entries", &parse_asset_entries/1}
+           },
+           %{name: {"name", &parse_string(&1, optional: true, max_length: 200)}}
+         ) do
+      {:ok, arguments, req} ->
+        case Orchestration.create_asset(
+               project_id,
+               arguments.workspace_id,
+               arguments[:name],
+               arguments.entries,
+               access
+             ) do
+          {:ok, external_id, metadata} ->
+            json_response(req, %{
+              "assetId" => external_id,
+              "name" => metadata.name,
+              "totalCount" => metadata.total_count,
+              "totalSize" => metadata.total_size
+            })
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :workspace_invalid} ->
             json_error_response(req, "not_found", status: 404)
         end
 
@@ -1566,39 +1621,119 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # The entries of an asset built from outside a run: a path, the key of a
+  # blob the client has already stored, its size, and any metadata. The
+  # shape mirrors the worker's `put_asset`, which is likewise handed keys
+  # rather than bytes.
+  defp parse_asset_entries(value) do
+    if is_list(value) && value != [] && length(value) <= @max_asset_entries do
+      result =
+        Enum.reduce_while(value, {:ok, []}, fn entry, {:ok, entries} ->
+          case parse_asset_entry(entry) do
+            {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+            {:error, error} -> {:halt, {:error, error}}
+          end
+        end)
+
+      with {:ok, entries} <- result do
+        entries = Enum.reverse(entries)
+        paths = Enum.map(entries, fn {path, _, _, _} -> path end)
+
+        if length(Enum.uniq(paths)) == length(paths) do
+          {:ok, entries}
+        else
+          {:error, :duplicate_path}
+        end
+      end
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_asset_entry(value) do
+    if is_map(value) do
+      with {:ok, path} <- parse_asset_entry_path(Map.get(value, "path")),
+           {:ok, blob_key} <- parse_blob_key(Map.get(value, "blobKey")),
+           {:ok, size} <- parse_size(Map.get(value, "size")),
+           {:ok, metadata} <- parse_asset_entry_metadata(Map.get(value, "metadata")) do
+        {:ok, {path, blob_key, size, metadata}}
+      end
+    else
+      {:error, :invalid}
+    end
+  end
+
+  # An entry path is restored to disk relative to a directory the reader
+  # chooses, so it has to stay inside it: relative, no empty, `.` or `..`
+  # segment, and no backslash to be mistaken for a separator elsewhere.
+  defp parse_asset_entry_path(value) do
+    if is_binary(value) && value != "" && byte_size(value) <= @max_asset_entry_path_length &&
+         String.valid?(value) && !String.contains?(value, ["\\", <<0>>]) &&
+         !Enum.any?(String.split(value, "/"), &(&1 in ["", ".", ".."])) do
+      {:ok, value}
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_blob_key(value) do
+    if is_binary(value) && Regex.match?(@blob_key_regex, value) do
+      {:ok, value}
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_size(value) do
+    if is_integer(value) && value >= 0, do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp parse_asset_entry_metadata(value) do
+    cond do
+      is_nil(value) -> {:ok, %{}}
+      is_map(value) -> {:ok, value}
+      true -> {:error, :invalid}
+    end
+  end
+
+  # One value given from outside a run: a JSON document, encoded as a
+  # string so that `null` is a value rather than an omission, or a
+  # reference to an existing asset.
+  defp parse_argument(["json", json]) do
+    if is_valid_json?(json) do
+      {:ok, {:raw, json |> Jason.decode!() |> transform_json(), []}}
+    else
+      {:error, :not_json}
+    end
+  end
+
+  # A bare asset: a value that is a single reference.
+  defp parse_argument(["asset", asset_id]) do
+    if is_valid_string?(asset_id, max_length: 100) do
+      {:ok, {:raw, %{"type" => "ref", "index" => 0}, [{:asset, asset_id}]}}
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp parse_argument(_other), do: {:error, :invalid}
+
   defp parse_arguments(arguments) do
     if arguments do
-      errors =
+      {values, errors} =
         arguments
         |> Enum.with_index()
-        |> Enum.reduce(%{}, fn {argument, index}, errors ->
-          case argument do
-            ["json", value] ->
-              if is_valid_json?(value) do
-                errors
-              else
-                Map.put(errors, index, :not_json)
-              end
+        |> Enum.reduce({[], %{}}, fn {argument, index}, {values, errors} ->
+          case parse_argument(argument) do
+            {:ok, value} -> {[value | values], errors}
+            {:error, error} -> {values, Map.put(errors, index, error)}
           end
         end)
 
       if Enum.any?(errors) do
         {:error, errors}
       else
-        result =
-          Enum.map(arguments, fn argument ->
-            case argument do
-              ["json", json] ->
-                value =
-                  json
-                  |> Jason.decode!()
-                  |> transform_json()
-
-                {:raw, value, []}
-            end
-          end)
-
-        {:ok, result}
+        {:ok, Enum.reverse(values)}
       end
     else
       {:ok, []}

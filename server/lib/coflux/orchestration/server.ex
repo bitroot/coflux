@@ -1313,44 +1313,44 @@ defmodule Coflux.Orchestration.Server do
   def handle_call({:start_run, module, target_name, type, arguments, access, opts}, _from, state) do
     workspace_external_id = Keyword.get(opts, :workspace)
 
-    case require_workspace(state, workspace_external_id, access) do
-      {:ok, workspace_id, _} ->
-        client_key = Keyword.get(opts, :idempotency_key)
-        ws_ext_id = workspace_external_id(state, workspace_id)
+    with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id, access),
+         :ok <- validate_values_assets(state.db, arguments) do
+      client_key = Keyword.get(opts, :idempotency_key)
+      ws_ext_id = workspace_external_id(state, workspace_id)
 
-        case maybe_find_idempotent_run(state, client_key, ws_ext_id) do
-          {:hit, ext_run_id, step_number, attempt} ->
-            execution_external_id = execution_external_id(ext_run_id, step_number, attempt)
-            {:reply, {:ok, ext_run_id, step_number, execution_external_id}, state}
+      case maybe_find_idempotent_run(state, client_key, ws_ext_id) do
+        {:hit, ext_run_id, step_number, attempt} ->
+          execution_external_id = execution_external_id(ext_run_id, step_number, attempt)
+          {:reply, {:ok, ext_run_id, step_number, execution_external_id}, state}
 
-          :miss ->
-            opts =
-              if client_key do
-                hashed = Runs.build_idempotency_key(ws_ext_id, client_key)
-                Keyword.put(opts, :idempotency_key, hashed)
-              else
-                opts
-              end
+        :miss ->
+          opts =
+            if client_key do
+              hashed = Runs.build_idempotency_key(ws_ext_id, client_key)
+              Keyword.put(opts, :idempotency_key, hashed)
+            else
+              opts
+            end
 
-            {:ok, external_run_id, step_number, _execution_id, state} =
-              schedule_run(
-                state,
-                module,
-                target_name,
-                type,
-                arguments,
-                workspace_id,
-                Keyword.put(opts, :created_by, access[:principal_id])
-              )
+          {:ok, external_run_id, step_number, _execution_id, state} =
+            schedule_run(
+              state,
+              module,
+              target_name,
+              type,
+              arguments,
+              workspace_id,
+              Keyword.put(opts, :created_by, access[:principal_id])
+            )
 
-            execution_external_id = execution_external_id(external_run_id, step_number, 1)
+          execution_external_id = execution_external_id(external_run_id, step_number, 1)
 
-            send(self(), :tick)
-            state = flush_notifications(state)
+          send(self(), :tick)
+          state = flush_notifications(state)
 
-            {:reply, {:ok, external_run_id, step_number, execution_external_id}, state}
-        end
-
+          {:reply, {:ok, external_run_id, step_number, execution_external_id}, state}
+      end
+    else
       {:error, error} ->
         {:reply, {:error, error}, state}
     end
@@ -2404,6 +2404,29 @@ defmodule Coflux.Orchestration.Server do
     }
 
     {:reply, {:ok, external_id, asset_metadata}, state}
+  end
+
+  # An asset assembled from outside a run: the caller has already stored the
+  # blobs and passes their keys, exactly as `put_asset` does. There is no
+  # execution to record it against, so nothing is notified — the asset only
+  # becomes visible once something references it (a run argument).
+  def handle_call({:create_asset, workspace_external_id, name, entries, access}, _from, state) do
+    case require_workspace(state, workspace_external_id, access) do
+      {:ok, _workspace_id, _workspace} ->
+        {:ok, _asset_id, external_id, asset_name, total_count, total_size, _entry} =
+          Assets.get_or_create_asset(state.db, name, entries)
+
+        asset_metadata = %{
+          name: asset_name,
+          total_count: total_count,
+          total_size: total_size
+        }
+
+        {:reply, {:ok, external_id, asset_metadata}, state}
+
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
   end
 
   def handle_call({:get_asset, asset_external_id, from_execution_external_id}, _from, state) do
@@ -6358,6 +6381,38 @@ defmodule Coflux.Orchestration.Server do
   defp resolve_execution_ref(db, ref_id) do
     {:ok, {run_ext, step_num, attempt, module, target}} = Runs.get_execution_ref(db, ref_id)
     {execution_external_id(run_ext, step_num, attempt), module, target}
+  end
+
+  # --- Value helpers ---
+
+  defp validate_values_assets(db, values) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case validate_value_assets(db, value) do
+        :ok -> {:cont, :ok}
+        {:error, error} -> {:halt, {:error, error}}
+      end
+    end)
+  end
+
+  # A value can point at assets; make sure they exist before a `values_`
+  # row is written against them.
+  defp validate_value_assets(db, value) do
+    references =
+      case value do
+        {:raw, _data, references} -> references
+        {:blob, _key, _size, references} -> references
+      end
+
+    Enum.reduce_while(references, :ok, fn
+      {:asset, external_id}, :ok ->
+        case Assets.get_asset_id(db, external_id) do
+          {:ok, _asset_id} -> {:cont, :ok}
+          {:error, :not_found} -> {:halt, {:error, :asset_not_found}}
+        end
+
+      _reference, :ok ->
+        {:cont, :ok}
+    end)
   end
 
   defp resolve_asset(db, asset_id) do
