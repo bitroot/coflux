@@ -74,6 +74,11 @@ def runs_cancel(execution_id, host=None, workspace="default"):
     )
 
 
+def queue(host=None, workspace="default"):
+    result = _coflux("queue", host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
 def workspaces_create(name, base=None, host=None, workspace="default"):
     args = ["workspaces", "create", name]
     if base is not None:

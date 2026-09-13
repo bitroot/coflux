@@ -50,8 +50,8 @@ func parseQueueEntries(data map[string]any) []queueEntry {
 		}
 		if deps, ok := e["dependencies"].([]any); ok {
 			for _, d := range deps {
-				if s, ok := d.(string); ok {
-					entry.dependencies = append(entry.dependencies, s)
+				if label, ok := parseQueueDependency(d); ok {
+					entry.dependencies = append(entry.dependencies, label)
 				}
 			}
 		}
@@ -75,6 +75,46 @@ func parseQueueEntries(data map[string]any) []queueEntry {
 	return entries
 }
 
+// parseQueueDependency renders one gate holding an execution back. Not every
+// gate names an execution — a suspend can wait on a catalog path, an input or
+// a stream — and an unrecognised kind still has to count, otherwise the status
+// falls through to "unknown" for an execution that is plainly waiting.
+func parseQueueDependency(raw any) (string, bool) {
+	// Pre-0.12 servers send bare execution IDs.
+	if s, ok := raw.(string); ok {
+		return s, true
+	}
+	d, ok := raw.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	kind, _ := d["type"].(string)
+	switch kind {
+	case "execution":
+		if id, ok := d["executionId"].(string); ok {
+			return id, true
+		}
+	case "input":
+		if id, ok := d["inputId"].(string); ok {
+			return "input " + id, true
+		}
+	case "stream":
+		sequence, _ := d["sequence"].(float64)
+		if stepID, ok := d["stepId"].(string); ok {
+			index, _ := d["index"].(float64)
+			return fmt.Sprintf("stream %s:%d@%d", stepID, int(index), int(sequence)), true
+		}
+		return fmt.Sprintf("stream @%d", int(sequence)), true
+	case "catalog":
+		// Trailing '+' for "whatever comes after this version", matching how
+		// the run topic keys a catalog wait.
+		path, _ := d["path"].(string)
+		number, _ := d["number"].(float64)
+		return fmt.Sprintf("catalog %s@%d+", path, int(number)), true
+	}
+	return kind, kind != ""
+}
+
 type queueStatus string
 
 const (
@@ -93,11 +133,14 @@ func getQueueEntryStatus(e queueEntry, sessions []sessionEntry, workspaceState s
 	if e.executeAfter > 0 && e.executeAfter > float64(time.Now().UnixMilli()) {
 		return queueStatusScheduled
 	}
-	if workspaceState == "paused" {
-		return queueStatusPaused
-	}
+	// Ahead of the workspace pause: resuming the workspace wouldn't release an
+	// execution that's still waiting on something, so the gate is the more
+	// useful answer to "why isn't this running?".
 	if len(e.dependencies) > 0 {
 		return queueStatusDependencies
+	}
+	if workspaceState == "paused" {
+		return queueStatusPaused
 	}
 	if !hasCompatibleSessionForEntry(e, sessions) {
 		return queueStatusNoSession
