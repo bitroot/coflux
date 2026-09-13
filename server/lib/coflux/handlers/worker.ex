@@ -601,6 +601,9 @@ defmodule Coflux.Handlers.Worker do
             :ok ->
               {[success_message(message["id"], nil)], state}
 
+            {:error, :invalid_handle} ->
+              {[error_message(message["id"], "invalid_handle")], state}
+
             {:error, :workspace_not_found} ->
               {[{:close, 4000, "workspace_mismatch"}], nil}
           end

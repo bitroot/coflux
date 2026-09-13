@@ -61,6 +61,15 @@ def test_a_position_pins_the_number_to_wait_past():
     assert _handle_wire(position) == {"type": "catalog", "path": "p/q", "number": 0}
 
 
+def test_an_entry_cannot_be_cancelled(wire):
+    """A select handle, but not a cancellable one: nothing is pending
+    behind a path. Refused locally, before anything goes out."""
+    fake = wire()
+    with pytest.raises(TypeError, match="cannot cancel CatalogEntry"):
+        ExecutorContext("E1").cancel([Execution("E2", "m", "t"), CatalogEntry("p/q")])
+    assert fake.requests == []
+
+
 # --- the wire ------------------------------------------------------------------
 
 

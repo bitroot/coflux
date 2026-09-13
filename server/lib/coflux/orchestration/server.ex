@@ -1697,13 +1697,17 @@ defmodule Coflux.Orchestration.Server do
         {:reply, {:error, :workspace_not_found}, state}
 
       {:ok, workspace_id} ->
-        state =
-          Enum.reduce(handles, state, fn handle, state ->
-            cancel_handle(state, handle, workspace_id)
-          end)
+        if Enum.all?(handles, &cancellable_handle?/1) do
+          state =
+            Enum.reduce(handles, state, fn handle, state ->
+              cancel_handle(state, handle, workspace_id)
+            end)
 
-        state = flush_notifications(state)
-        {:reply, :ok, state}
+          state = flush_notifications(state)
+          {:reply, :ok, state}
+        else
+          {:reply, {:error, :invalid_handle}, state}
+        end
     end
   end
 
@@ -4407,6 +4411,16 @@ defmodule Coflux.Orchestration.Server do
 
     cancel_descendants(state, execution_id, workspace_id)
   end
+
+  # Only an execution or an input can be cancelled. A catalog entry is a
+  # select handle with nothing pending behind it, and anything else is
+  # malformed; a request naming either is refused before any handle in it
+  # is acted on, since cancellation is meant to be all-or-nothing.
+  defp cancellable_handle?(%{"type" => type, "id" => id})
+       when type in ["execution", "input"] and is_binary(id),
+       do: true
+
+  defp cancellable_handle?(_handle), do: false
 
   # Dispatch a single handle cancellation. Used by the unified cancel RPC
   # and by maybe_cancel_remaining on select.

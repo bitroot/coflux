@@ -236,6 +236,12 @@ class ExecutorConnection:
         )
         return self._request(msg)
 
+    def cancel_handles(self, execution_id, handles):
+        """Cancel arbitrary wire handles. The raw response, so a refusal
+        can be inspected."""
+        msg = protocol.cancel_request(None, execution_id, handles)
+        return self._request(msg)
+
     def suspend(
         self, execution_id, execute_after=None, stream_wait=None, catalog_wait=None
     ):

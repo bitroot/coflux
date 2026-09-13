@@ -163,6 +163,32 @@ def test_invalid_path_or_asset_is_refused(worker):
         ex.conn.complete(ex.execution_id, value="done")
 
 
+def test_cancelling_a_catalog_handle_is_refused(worker):
+    """Only executions and inputs can be cancelled. A catalog entry is a
+    select handle with nothing pending behind it, so a cancel naming one
+    is refused as a whole — and the orchestrator carries on serving."""
+    targets = [workflow("test", "main"), task("test", "child")]
+
+    with worker(targets, concurrency=2) as ctx:
+        ctx.submit("test", "main")
+        ex = ctx.executor.next_execute()
+        child = ex.conn.submit_task(ex.execution_id, "test", "child", [])
+
+        resp = ex.conn.cancel_handles(
+            ex.execution_id,
+            [protocol.execution_handle(child), protocol.catalog_handle("models/m")],
+        )
+        assert "invalid_handle" in resp["error"]["message"]
+
+        # All-or-nothing: the execution named alongside it is still running.
+        child_ex = ctx.executor.next_execute()
+        assert child_ex.target == "child"
+        child_ex.conn.complete(child_ex.execution_id, value="child done")
+        assert ex.conn.resolve(ex.execution_id, child)["value"] == "child done"
+        assert ex.conn.catalog_get(ex.execution_id, "models/m") is None
+        ex.conn.complete(ex.execution_id, value="done")
+
+
 # --- Snapshots ------------------------------------------------------------------
 
 

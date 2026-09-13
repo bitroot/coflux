@@ -588,10 +588,17 @@ class ExecutorContext:
         input handle, it transitions to a terminal ``cancelled`` state
         (distinct from ``dismissed``) and any select waiters are notified.
 
-        Handles that are already resolved are silently skipped.
+        Handles that are already resolved are silently skipped. A catalog
+        entry is a select handle but not a cancellable one — nothing is
+        pending behind it — so passing one is a ``TypeError``.
         """
         if not handles:
             return
+        for handle in handles:
+            if isinstance(handle, (CatalogEntry, _CatalogPosition)):
+                raise TypeError(
+                    f"cannot cancel {handle!r}: a catalog entry has nothing to cancel"
+                )
         request_id = protocol.request_cancel(
             self.execution_id,
             [{"type": k, "id": i} for k, i in map(_handle_key, handles)],
