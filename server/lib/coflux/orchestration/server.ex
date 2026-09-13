@@ -6889,6 +6889,43 @@ defmodule Coflux.Orchestration.Server do
   # doesn't influence the dispatch; only the explicit `:errored` /
   # `:timeout` reasons do.
   defp finalize_success_completion(state, execution_id) do
+    # The adapter exits only once every stream it produces has closed, and
+    # its stream_close messages precede notify_terminated on the wire. So a
+    # stream this execution registered that is still open now means the
+    # process died mid-drain: a crash with a truncated stream, not a
+    # success with leftovers. (Paused streams from an earlier attempt are
+    # not this execution's registrations, and are closed below as usual.)
+    {:ok, still_producing} = Streams.get_open_stream_ids_for_execution(state.db, execution_id)
+
+    if still_producing == [] do
+      finalize_drained_completion(state, execution_id)
+    else
+      finalize_crashed_mid_drain(state, execution_id)
+    end
+  end
+
+  # Like handle_crashed, but the value result was already recorded and
+  # notified — only the completion (with the step's retry decision) and the
+  # stream closures are outstanding. Closing after the completion row is
+  # written lets derive_lifecycle_info report :crashed to consumers.
+  defp finalize_crashed_mid_drain(state, execution_id) do
+    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+    {retry_id, _recurred?, state} =
+      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
+
+    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
+      {:ok, completion_at} ->
+        state = close_open_streams(state, execution_id)
+        fire_completion_notification(state, execution_id, completion_at)
+
+      {:error, :already_completed} ->
+        state
+    end
+  end
+
+  defp finalize_drained_completion(state, execution_id) do
     state = close_open_streams(state, execution_id, :complete)
 
     {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
@@ -7330,6 +7367,31 @@ defmodule Coflux.Orchestration.Server do
           # streams.
           result == :timeout ->
             {:ok, close_open_streams(state, execution_id, :timeout)}
+
+          # The worker's session went away mid-drain. The value stands, but
+          # whatever it was still producing into is truncated, so this is an
+          # abandonment, not a success: write the completion as :abandoned
+          # (with the step's retry decision, as for any abandoned execution)
+          # and close what it left open, so consumers see :abandoned rather
+          # than a clean "complete" — and the truncated run isn't cached.
+          result == :abandoned ->
+            {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
+            {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
+
+            {retry_id, _recurred?, state} =
+              decide_and_create_successor(state, execution_id, step, workspace_id, :abandoned)
+
+            case Results.record_completion(state.db, execution_id, :abandoned,
+                   successor_id: retry_id,
+                   created_by: created_by
+                 ) do
+              {:ok, completion_at} ->
+                state = close_open_streams(state, execution_id)
+                {:ok, fire_completion_notification(state, execution_id, completion_at)}
+
+              {:error, :already_completed} ->
+                {:ok, state}
+            end
 
           # A generator-bodied producer suspends from inside its body,
           # after its value (the stream handle) was recorded. Write the
