@@ -561,6 +561,25 @@ def test_suspending_with_a_catalog_wait_gates_the_successor(worker):
         assert third["dependencies"]["models/m@1+"]["pending"] is True
 
 
+def test_a_catalog_wait_is_reported_on_the_queue(worker):
+    """The queue has to name the gate itself, not just the executions being
+    waited on. A successor held by a catalog wait is otherwise unassigned
+    for no visible reason."""
+    targets = [workflow("test", "watcher")]
+
+    with worker(targets, concurrency=3) as ctx:
+        resp = ctx.submit("test", "watcher")
+        watcher = ctx.executor.next_execute()
+        watcher.conn.suspend(watcher.execution_id, catalog_wait="models/m")
+        time.sleep(0.5)
+
+        entry = ctx.queue()[f"{resp['stepId']}:2"]
+        assert entry["assignedAt"] is None
+        assert entry["dependencies"] == [
+            {"type": "catalog", "path": "models/m", "number": 0}
+        ]
+
+
 def test_republish_of_the_head_does_not_wake_a_waiter(worker):
     targets = [workflow("test", "watcher"), workflow("test", "writer")]
 
