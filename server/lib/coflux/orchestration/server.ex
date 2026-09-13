@@ -3048,6 +3048,7 @@ defmodule Coflux.Orchestration.Server do
     put_in(state.stream_producers[stream.id], %{
       buffer: buffer,
       demand_granted: head + 1,
+      base: head,
       session_id: session_id,
       execution_external_id: execution_external_id,
       index: stream.index
@@ -3107,10 +3108,28 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp refresh_stream_demand_for(state, stream_id, producer) do
-    has_subscribers = has_stream_subscribers?(state, stream_id)
-    watermark = slowest_ack_watermark(state, stream_id)
-    bump = if has_subscribers, do: 1, else: 0
-    target = watermark + producer.buffer + bump
+    target =
+      if has_stream_subscribers?(state, stream_id) do
+        slowest_ack_watermark(state, stream_id) + producer.buffer + 1
+      else
+        # Nobody attached: pre-warm `buffer` items past where the stream
+        # stood when this producer registered. A fresh stream warms from
+        # the start; one resumed after a suspend warms from its head,
+        # rather than being held to a budget its predecessor already used.
+        Map.get(producer, :base, -1) + 1 + producer.buffer
+      end
+
+    # A consumer suspended waiting on a sequence has no subscription to
+    # ack through, and only comes back once that item exists. Its wait is
+    # demand for it — otherwise a lockstep producer is never granted the
+    # credit that would wake its own consumer, and the two wait on each
+    # other forever.
+    target =
+      case highest_waited_sequence(state, stream_id) do
+        nil -> target
+        sequence -> max(target, sequence + 1)
+      end
+
     delta = target - producer.demand_granted
 
     if delta > 0 do
@@ -3123,6 +3142,13 @@ defmodule Coflux.Orchestration.Server do
     else
       state
     end
+  end
+
+  defp highest_waited_sequence(state, stream_id) do
+    state.stream_dependency_keys
+    |> Map.get(stream_id, MapSet.new())
+    |> Enum.map(fn {:stream, _stream_id, sequence} -> sequence end)
+    |> Enum.max(fn -> nil end)
   end
 
   defp has_stream_subscribers?(state, stream_id) do
@@ -8256,7 +8282,11 @@ defmodule Coflux.Orchestration.Server do
     # First waiter: the producer's idle countdown stops. A consumer's nap
     # is not the producer being idle — the mirror of the existing rule
     # that a suspended producer's own pause doesn't count against it.
-    if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
+    state = if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
+
+    # The wait counts as demand (see refresh_stream_demand_for), and the
+    # producer may be blocked on exactly that.
+    refresh_stream_demand(state, stream_id)
   end
 
   defp index_stream_dependency(state, _key), do: state

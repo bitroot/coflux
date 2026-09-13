@@ -1962,6 +1962,89 @@ def _suspended_consumer(ctx, stream_id, sequence):
     return cons_ex
 
 
+def test_lockstep_producer_is_released_when_its_consumer_suspends(worker):
+    """A consumer that suspends waiting on the next item drops its
+    subscription without acking the last one. With no subscriber left, the
+    lockstep budget alone would grant nothing more — but the consumer is
+    still there, waiting on a sequence, and that wait is the demand."""
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        assert prod_ex.conn.recv_push("stream_demand", timeout=2)["n"] == 1
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # Took item 0 and wants item 1; nothing arrives, so it suspends.
+        cons_ex.conn.suspend(cons_ex.execution_id, stream_wait=(stream["id"], 1))
+
+        # The producer has to be granted the credit for sequence 1.
+        assert prod_ex.conn.recv_push("stream_demand", timeout=2)["n"] >= 1
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
+
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+        prod_ex.conn.stream_close(prod_ex.execution_id, 0)
+        prod_ex.conn.complete(prod_ex.execution_id, value="done")
+
+
+def test_resumed_lockstep_producer_is_released_for_a_suspended_consumer(worker):
+    """A lockstep producer that resumes while its only consumer is suspended
+    on the stream has to be granted the credit for the item that consumer
+    is waiting for. Otherwise neither side can move: the producer waits for
+    demand, and demand waits for a subscriber that only comes back once the
+    item exists."""
+    targets = [workflow("test", "producer"), workflow("test", "consumer")]
+
+    with worker(targets, concurrency=3) as ctx:
+        ctx.submit("test", "producer")
+        prod_ex = ctx.executor.next_execute()
+        stream = prod_ex.conn.stream_register(prod_ex.execution_id, 0, buffer=0)
+
+        ctx.submit("test", "consumer")
+        cons_ex = ctx.executor.next_execute()
+        cons_ex.conn.stream_subscribe(
+            cons_ex.execution_id, subscription_id=1, stream_id=stream["id"]
+        )
+        assert prod_ex.conn.recv_push("stream_demand", timeout=2)["n"] == 1
+        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
+        cons_ex.conn.recv_push("stream_items", subscription_id=1, timeout=2)
+
+        # Item 0 consumed; the ack grants the live producer its next credit,
+        # which it never uses. Nothing more arrives, so the consumer suspends
+        # waiting for sequence 1.
+        cons_ex.conn.stream_ack(cons_ex.execution_id, 1, 1, 0)
+        prod_ex.conn.recv_push("stream_demand", timeout=2)
+        cons_ex.conn.suspend(cons_ex.execution_id, stream_wait=(stream["id"], 1))
+
+        # The producer suspends too, and resumes as a new execution.
+        prod_ex.conn.suspend(prod_ex.execution_id)
+        prod2 = ctx.executor.next_execute()
+        assert prod2.target == "producer"
+        resumed = prod2.conn.stream_register(prod2.execution_id, 0, buffer=0)
+        assert resumed == {"id": stream["id"], "index": 0, "head": 0}
+
+        # It must be allowed to produce sequence 1...
+        assert prod2.conn.recv_push("stream_demand", timeout=2)["n"] >= 1
+        prod2.conn.stream_append(prod2.execution_id, 0, 1, "v1")
+
+        # ...which is what releases the consumer.
+        cons2 = ctx.executor.next_execute()
+        assert cons2.target == "consumer"
+        cons2.conn.complete(cons2.execution_id)
+        prod2.conn.stream_close(prod2.execution_id, 0)
+        prod2.conn.complete(prod2.execution_id, value="done")
+
+
 def test_stream_wait_holds_successor_until_the_item_lands(worker):
     """The successor is held with no delay set, and appending the sequence
     it was waiting for is what dispatches it."""
