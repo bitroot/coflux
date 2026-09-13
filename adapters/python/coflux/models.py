@@ -52,6 +52,10 @@ class AssetEntry(t.NamedTuple):
         Parquet footer, say — where restoring a large file to read a few
         kilobytes of it would be wasteful.
         """
+        if offset < 0:
+            raise ValueError(f"offset must be non-negative, got {offset}")
+        if length is not None and length < 0:
+            raise ValueError(f"length must be non-negative, got {length}")
         ctx = get_context()
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "range"
@@ -335,6 +339,7 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
     def __init__(
         self,
         id: str,
+        *,
         stride: Stride = (0, None, 1),
     ):
         # Opaque identifier of the form ``<run>:<step>_<index>``. Users may
@@ -360,7 +365,9 @@ class Stream(t.Iterable[T], t.AsyncIterable[T]):
             raise ValueError(
                 f"invalid stride args: start={start}, stop={stop}, step={step}"
             )
-        return Stream(self._id, _compose_stride(self._stride, (start, stop, step)))
+        return Stream(
+            self._id, stride=_compose_stride(self._stride, (start, stop, step))
+        )
 
     def slice(self, start: int, stop: int | None = None) -> Stream[T]:
         """Return a view restricted to sequences ``[start, stop)`` —
