@@ -165,6 +165,9 @@ cf.log_info("Processing {count} items for {user}", count=42, user="alice")
 
 ### More features
 
+- **Streams**: `yield` from a task and have consumers process items as they're produced
+- **Checkpoints**: keep state across retries, suspensions and recurrences (`cf.Checkpoint(...)`)
+- **Inputs**: request approval or structured input from a user mid-workflow (`cf.Prompt(...)`)
 - **Debouncing**: defer execution until a task stops being called (`defer=True`)
 - **Recurrence**: automatically re-execute workflows for polling (`recurrent=True`)
 - **Suspense**: pause a task and free resources while waiting (`cf.suspend()`)
