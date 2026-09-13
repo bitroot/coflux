@@ -88,7 +88,7 @@ var catalogInspectCmd = &cobra.Command{
 }
 
 func init() {
-	catalogInspectCmd.Flags().IntVar(&catalogInspectLimit, "limit", 20, "Maximum number of versions to show")
+	catalogInspectCmd.Flags().IntVar(&catalogInspectLimit, "limit", 20, "Maximum number of versions to show (at most 500)")
 }
 
 func runCatalogInspect(cmd *cobra.Command, args []string) error {
@@ -97,7 +97,11 @@ func runCatalogInspect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	versions, err := client.GetCatalogVersions(cmd.Context(), wsID, args[0], catalogInspectLimit)
+	if catalogInspectLimit < 1 {
+		return fmt.Errorf("--limit must be at least 1")
+	}
+
+	versions, err := client.GetCatalogVersions(cmd.Context(), wsID, args[0], catalogInspectLimit, 0)
 	if err != nil {
 		return err
 	}
@@ -390,35 +394,33 @@ func parseCatalogRef(ref string) (string, int64, error) {
 }
 
 // findCatalogVersion resolves "path" to the head visible from the
-// workspace, or "path@n" to that version.
+// workspace, or "path@n" to that version. Either is one row of the
+// versions listing: the newest, or the newest numbered below n+1 — which
+// is n itself if n exists and is visible from the workspace.
 func findCatalogVersion(ctx context.Context, client *api.Client, wsID, ref string) (map[string]any, error) {
 	path, number, err := parseCatalogRef(ref)
 	if err != nil {
 		return nil, err
 	}
-	if number == 0 {
-		entries, err := client.GetCatalog(ctx, wsID, path)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if getString(entry, "path") == path {
-				return entry, nil
-			}
-		}
-	} else {
-		// Versions are listed newest first; walk until the one asked for.
-		versions, err := client.GetCatalogVersions(ctx, wsID, path, 500)
-		if err != nil {
-			return nil, err
-		}
-		for _, candidate := range versions {
-			if getInt64(candidate, "number") == number {
-				return candidate, nil
-			}
-		}
+	var before int64
+	if number > 0 {
+		before = number + 1
 	}
-	return nil, fmt.Errorf("no such catalog version: %s", ref)
+	versions, err := client.GetCatalogVersions(ctx, wsID, path, 1, before)
+	if err != nil {
+		return nil, err
+	}
+	if len(versions) == 0 {
+		if number == 0 {
+			return nil, fmt.Errorf("no such catalog path: %s", path)
+		}
+		return nil, fmt.Errorf("no such catalog version: %s", ref)
+	}
+	version := versions[0]
+	if number > 0 && getInt64(version, "number") != number {
+		return nil, fmt.Errorf("no such catalog version: %s", ref)
+	}
+	return version, nil
 }
 
 // catalogValueSummary renders a version's value on one line, for a table

@@ -237,7 +237,7 @@ See [inputs](./inputs.md) for the workflow side of the API.
 | Command | Description |
 |---------|-------------|
 | `catalog list [prefix]` | Paths and their latest versions, optionally under a prefix |
-| `catalog inspect <path>` | The versions at a path, newest first (`--limit`) |
+| `catalog inspect <path>` | The versions at a path, newest first (`--limit`, default 20, at most 500) |
 | `catalog get <path>[@<number>]` | Print the value at a path, or of a specific version |
 | `catalog publish <path> <json>` | Publish a JSON value at a path |
 | `catalog publish <path> --asset <asset-id>` | Publish an existing asset at a path |

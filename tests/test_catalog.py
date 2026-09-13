@@ -845,6 +845,12 @@ def test_cli_publish_and_get_a_json_value(worker):
         assert version["value"]["data"] == _dict(threshold=0.7)
         assert ctx.catalog_get("configs/training@1")["number"] == 1
 
+        # A version that doesn't exist, and a path that doesn't, are errors
+        # rather than the nearest thing.
+        for ref in ["configs/training@2", "configs/other"]:
+            with pytest.raises(subprocess.CalledProcessError):
+                ctx.catalog_get(ref)
+
         # Nothing to download from a value that holds no assets.
         with pytest.raises(subprocess.CalledProcessError):
             ctx.catalog_download("configs/training", "unused")

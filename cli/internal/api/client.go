@@ -419,11 +419,17 @@ func (c *Client) GetCatalog(ctx context.Context, workspaceID, prefix string) ([]
 	return result.Entries, nil
 }
 
-// GetCatalogVersions lists the versions at a path, newest first.
-func (c *Client) GetCatalogVersions(ctx context.Context, workspaceID, path string, limit int) ([]map[string]any, error) {
+// GetCatalogVersions lists the versions at a path visible from the
+// workspace, newest first. A positive `before` bounds the listing to
+// numbers strictly below it, which is how a single version is looked up
+// (before = n+1, limit = 1) without paging through the newer ones.
+func (c *Client) GetCatalogVersions(ctx context.Context, workspaceID, path string, limit int, before int64) ([]map[string]any, error) {
 	body := map[string]any{"workspaceId": workspaceID, "path": path}
 	if limit > 0 {
 		body["limit"] = limit
+	}
+	if before > 0 {
+		body["before"] = before
 	}
 	var result struct {
 		Versions []map[string]any `json:"versions"`
