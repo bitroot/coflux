@@ -175,6 +175,42 @@ def test_suspend_stops_sibling_generators(harness):
     assert h.closes == []
 
 
+def test_sibling_generators_are_closed_on_their_own_thread(harness):
+    """Generators aren't thread-safe, so a sibling is wound down by the
+    thread that runs it — never by the thread that suspended. Its
+    ``finally`` sees that thread, and the close can't race a ``next()``
+    in progress (which segfaults on CPython 3.13+)."""
+    h = harness({"id": "run1:2_0", "index": 0, "head": -1})
+    driver = StreamDriver("run1:2:1")
+
+    started = threading.Event()
+    ran_on = []
+    closed_on = []
+
+    def sibling():
+        ran_on.append(threading.current_thread())
+        try:
+            yield "sibling"
+            started.set()
+            while True:
+                yield "more"
+        finally:
+            closed_on.append(threading.current_thread())
+
+    def suspending():
+        started.wait(timeout=5)
+        raise Suspending(None)
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    driver.register(sibling(), buffer=None)
+    driver.register(suspending(), buffer=None)
+    driver.wait_all()
+
+    assert closed_on == ran_on
+    assert closed_on[0] is not threading.current_thread()
+    assert h.closes == []
+
+
 def test_generator_error_closes_with_the_error(harness):
     h = harness({"id": "run1:2_0", "index": 0, "head": -1})
     driver = StreamDriver("run1:2:1")

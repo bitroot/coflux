@@ -126,6 +126,16 @@ def stream(
     return Stream(stream_id)
 
 
+def _close_generator(generator: Any) -> None:
+    """Close a sync generator, best-effort. Must be called on the thread
+    that runs it — see ``StreamDriver.close_all``."""
+    try:
+        generator.close()
+    except Exception:  # noqa: BLE001, S110
+        # A body that swallows GeneratorExit, or raises from its finally.
+        pass
+
+
 class StreamDriver:
     """Manages streams produced by a single execution."""
 
@@ -245,7 +255,7 @@ class StreamDriver:
             name=f"stream-{self._execution_id}-{index}",
             daemon=False,
         )
-        entry = {"generator": generator, "is_async": is_async, "loop": None}
+        entry = {"generator": generator, "is_async": is_async}
         with self._lock:
             self._generators.append(entry)
             self._threads.append(thread)
@@ -295,12 +305,14 @@ class StreamDriver:
 
         Fires when the worker's stream-timer has elapsed and it has
         already informed the server. We mark the stream force-closed so
-        ``_acquire_demand`` returns False and the producer thread exits
-        without sending its own ``stream_close`` (that would race the
-        closure the server already recorded).
+        ``_acquire_demand`` returns False and the producer thread winds
+        the generator down and exits without sending its own
+        ``stream_close`` (that would race the closure the server already
+        recorded).
 
-        Also closes the generator so any work it's doing (e.g., a long
-        ``next()``) is interrupted at the next yield point.
+        Only the flag is set here. The generator itself is closed by the
+        thread running it, once its current ``next()`` returns — see
+        ``close_all`` for why it can't be closed from this one.
         """
         index = params.get("index")
         reason = params.get("reason") or "timeout"
@@ -309,31 +321,6 @@ class StreamDriver:
         with self._demand_cv:
             self._force_closed[index] = reason
             self._demand_cv.notify_all()
-        # Close the generator off the dispatcher thread to avoid blocking
-        # on a long-running next() call there.
-        with self._lock:
-            entry = self._by_index.get(index)
-        if entry is None:
-            return
-        try:
-            if entry["is_async"]:
-                loop = entry["loop"]
-                if loop is not None and not loop.is_closed():
-                    gen = entry["generator"]
-
-                    async def _close(g=gen) -> None:
-                        try:
-                            await g.aclose()
-                        except Exception:  # noqa: BLE001, S110
-                            # Best-effort close of a user generator.
-                            pass
-
-                    asyncio.run_coroutine_threadsafe(_close(), loop)
-            else:
-                entry["generator"].close()
-        except Exception:  # noqa: BLE001, S110
-            # Best-effort close of a user generator.
-            pass
 
     def _acquire_demand(self, index: int) -> bool:
         """Wait for a credit and consume it. Returns False if closed mid-wait."""
@@ -372,6 +359,12 @@ class StreamDriver:
                 # asked to close). For unbounded streams this returns
                 # immediately without consuming any credit.
                 if not self._acquire_demand(index):
+                    # Told to stop. Close the generator here, on the thread
+                    # that has been running it — the only one that safely
+                    # can (see ``close_all``). GeneratorExit is raised at
+                    # its current yield, so a ``finally`` in the body runs
+                    # on the same thread the body ran on.
+                    _close_generator(generator)
                     return
                 try:
                     item = next(iterator)
@@ -386,11 +379,10 @@ class StreamDriver:
                 )
                 sequence += 1
         except GeneratorExit:
-            # Generator explicitly closed (via close_all on error path, or
-            # by the force-close handler for a worker-initiated timeout).
-            # Skip send_stream_close — the server either records a
-            # lifecycle closure on execution-end, or has already recorded
-            # the force-close reason (e.g. "timeout").
+            # The body re-raised the GeneratorExit from its own close
+            # (above). Skip send_stream_close — the server either records
+            # a lifecycle closure on execution-end, or has already
+            # recorded the force-close reason (e.g. "timeout").
             return
         except Suspending as suspending:
             # The generator body suspended (``cf.suspend()`` / implicit
@@ -432,11 +424,11 @@ class StreamDriver:
     def _run_async(self, index: int, generator: Any, start_sequence: int) -> None:
         """Run one async generator in a fresh event loop on this thread.
 
-        The loop handle is recorded so ``close_all`` can schedule aclose()
-        from another thread via ``run_coroutine_threadsafe``.
+        The loop, like the generator, is only ever touched from this
+        thread: ``close_all`` sets a flag, ``iterate`` returns when it next
+        asks for demand, and the ``finally`` below closes the generator.
         """
         loop = asyncio.new_event_loop()
-        self._record_loop(generator, loop)
         asyncio.set_event_loop(loop)
 
         async def iterate() -> None:
@@ -507,13 +499,6 @@ class StreamDriver:
                 # Best-effort teardown; the close was already reported.
                 pass
 
-    def _record_loop(self, generator: Any, loop: asyncio.AbstractEventLoop) -> None:
-        with self._lock:
-            for entry in self._generators:
-                if entry["generator"] is generator:
-                    entry["loop"] = loop
-                    return
-
     def _record_suspension(
         self,
         execute_after: int | None,
@@ -551,45 +536,26 @@ class StreamDriver:
             t.join()
 
     def close_all(self) -> None:
-        """Close every registered generator so worker threads exit promptly.
+        """Ask every driver thread to wind its generator down and exit.
 
-        Used on the error path: when the task body raises, we want in-flight
-        streams to stop producing rather than racing the execution_error
-        notification. For sync generators, ``generator.close()`` raises
-        ``GeneratorExit`` at the current yield point. For async generators,
-        we schedule ``aclose()`` onto the generator's own event loop so the
-        awaiting coroutine is cancelled cleanly.
+        Used when the task body raises (so in-flight streams stop
+        producing rather than racing the execution_error notification)
+        and when one generator suspends (so ``wait_all`` returns).
 
-        We also flip a closing flag and broadcast on the demand condition
-        so drivers parked in ``_acquire_demand`` (blocked for credits that
-        will never arrive) wake and exit.
+        This only flips the closing flag and broadcasts on the demand
+        condition. Each driver thread notices when it next asks for a
+        credit — immediately, if it was parked waiting for one — and
+        closes its own generator on the way out. The generator is never
+        closed from here: generators aren't thread-safe, and closing one
+        while another thread is inside its ``next()`` raises at best
+        (``ValueError: generator already executing``) and corrupts the
+        running frame at worst (a segfault on CPython 3.13+). A body
+        that's blocked in a long ``next()`` therefore finishes that call
+        before it's stopped; nothing could interrupt it anyway.
         """
         with self._demand_cv:
             self._closing = True
             self._demand_cv.notify_all()
-
-        with self._lock:
-            entries = list(self._generators)
-        for entry in entries:
-            try:
-                if entry["is_async"]:
-                    loop = entry["loop"]
-                    if loop is not None and not loop.is_closed():
-                        gen = entry["generator"]
-
-                        async def _close(g=gen) -> None:
-                            try:
-                                await g.aclose()
-                            except Exception:  # noqa: BLE001, S110
-                                # Best-effort close of a user generator.
-                                pass
-
-                        asyncio.run_coroutine_threadsafe(_close(), loop)
-                else:
-                    entry["generator"].close()
-            except Exception:  # noqa: BLE001, S110
-                # Best-effort close of a user generator.
-                pass
 
 
 # --- Consumer side ---
