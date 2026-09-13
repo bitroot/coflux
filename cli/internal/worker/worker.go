@@ -29,6 +29,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ErrNoTargets is returned by Run when discovery produced no targets to
+// serve. Under AllowPartialDiscovery the watch loop treats it as
+// recoverable: the next reload may bring the targets back.
+var ErrNoTargets = errors.New("no targets found")
+
 const (
 	heartbeatInterval    = 5 * time.Second
 	initialReconnectWait = 1 * time.Second
@@ -251,7 +256,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
 	if len(manifest.Targets) == 0 {
-		return fmt.Errorf("no targets found in modules %v", modules)
+		return fmt.Errorf("%w in modules %v", ErrNoTargets, modules)
 	}
 
 	// Register manifests if requested (before connecting)

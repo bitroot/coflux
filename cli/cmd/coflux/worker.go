@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -272,9 +273,10 @@ func runWorkerWithWatch(
 		workerDone := make(chan error, 1)
 
 		// Start worker in goroutine
-		w := worker.New(cfg, cmdAdapter, session, logger)
-		w.AllowPartialDiscovery = !firstRun
+		strict := firstRun
 		firstRun = false
+		w := worker.New(cfg, cmdAdapter, session, logger)
+		w.AllowPartialDiscovery = !strict
 		go func() {
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,
@@ -286,6 +288,7 @@ func runWorkerWithWatch(
 		}()
 
 		// Wait for a file change, shutdown, or worker exit.
+		running := true
 		reason := ""
 		for reason == "" {
 			select {
@@ -294,10 +297,22 @@ func runWorkerWithWatch(
 
 			case err := <-workerDone:
 				runCancel()
-				if err != nil {
+				running = false
+				if err == nil {
+					return nil
+				}
+				// A reload that left nothing to serve — every module failed
+				// to import, or the one being edited lost its targets — is
+				// what the lenient discovery exists for: stay up and wait
+				// for the next change rather than exiting. The first run is
+				// strict, so a broken start is still an error.
+				var discoveryErr *adapter.DiscoveryError
+				recoverable := errors.As(err, &discoveryErr) || errors.Is(err, worker.ErrNoTargets)
+				if strict || !recoverable {
 					return fmt.Errorf("worker error: %w", err)
 				}
-				return nil
+				logger.Error("worker stopped; waiting for the next change", "error", err)
+				workerDone = nil
 
 			case event := <-watcher.Events:
 				if isPythonFileChange(event) {
@@ -313,9 +328,13 @@ func runWorkerWithWatch(
 
 		// Drain in-flight executions (keeps the WebSocket open so results
 		// can still be reported), then tear down.
-		drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
-		runCancel()
-		<-workerDone
+		if running {
+			drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
+			runCancel()
+			<-workerDone
+		} else {
+			runCancel()
+		}
 
 		if reason == "shutdown" {
 			logger.Info("worker stopped")
