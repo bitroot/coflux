@@ -278,19 +278,15 @@ def _resolve_streams(
 ) -> Streams | None:
     """Validate the decorator's ``streams=`` and return the resolved value.
 
-    A non-generator task gets ``None`` (no stream config makes sense).
     A generator-bodied task with no explicit ``streams=`` gets a default
-    ``Streams()`` (buffer=0 strict lockstep, no timeout). Passing
-    ``streams=`` on a non-generator task raises.
+    ``Streams()`` (buffer=0 strict lockstep, no timeout). A non-generator
+    task gets ``None`` unless it says otherwise: ``streams=`` is also the
+    default for any ``cf.stream(...)`` the body registers, so it's
+    accepted on every target.
     """
     is_generator = inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn)
     if streams is _STREAMS_UNSET:
         return Streams() if is_generator else None
-    if not is_generator:
-        raise TypeError(
-            f"@cf.task/@cf.workflow(streams=...) only applies to generator functions "
-            f"(def + yield or async def + yield); {fn.__name__} is not."
-        )
     if streams is None:
         return None
     if not isinstance(streams, Streams):
@@ -526,7 +522,7 @@ class Target(t.Generic[P, T]):
         """Return a new Target with routing tags overridden for this call site."""
         return self._copy(requires=_parse_requires(requires))
 
-    def with_streams(self, streams: Streams | None) -> Target[P, T]:
+    def with_streams(self, streams: Streams) -> Target[P, T]:
         """Return a new Target with stream config overridden for this call site.
 
         Only meaningful for targets that produce streams (generator
@@ -535,14 +531,9 @@ class Target(t.Generic[P, T]):
         task; per-call ``cf.stream(buffer=..., timeout=...)`` overrides
         still win.
         """
-        if self._definition.streams is None:
+        if not isinstance(streams, Streams):
             raise TypeError(
-                f"with_streams is only applicable to stream-producing targets; "
-                f"{self._name} was declared without a streams config."
-            )
-        if streams is not None and not isinstance(streams, Streams):
-            raise TypeError(
-                f"with_streams expects a cf.Streams instance or None, got "
+                f"with_streams expects a cf.Streams instance, got "
                 f"{type(streams).__name__}"
             )
         resolved = (
