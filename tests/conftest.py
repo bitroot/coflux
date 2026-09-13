@@ -51,6 +51,10 @@ class WorkerContext:
         """Get the full run topic snapshot."""
         return cli.runs_inspect(run_id, host=self.host, workspace=self.workspace)
 
+    def queue(self):
+        """Get the queue topic snapshot for the workspace."""
+        return cli.queue(host=self.host, workspace=self.workspace)
+
     def rerun(self, step_id):
         """Re-run a step and return the parsed JSON response."""
         return cli.runs_rerun(step_id, host=self.host, workspace=self.workspace)

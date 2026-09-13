@@ -196,6 +196,33 @@ def test_input_suspends_execution(worker):
         assert run_result["value"]["data"] == "resumed"
 
 
+def test_an_input_wait_is_reported_on_the_queue(worker):
+    """The queue has to name the gate itself, not just the executions being
+    waited on. A successor held by an input wait is otherwise unassigned for
+    no visible reason."""
+    targets = [workflow("test", "suspend")]
+
+    with worker(targets) as ctx:
+        resp = ctx.submit("test", "suspend")
+        ex = ctx.executor.next_execute()
+        input_id = ex.conn.submit_input(ex.execution_id, "Waiting...")
+
+        msg = protocol.select_request(
+            None,
+            ex.execution_id,
+            [protocol.input_handle(input_id)],
+            timeout_ms=0,
+            suspend=True,
+        )
+        msg["id"] = 999
+        ex.conn.send(msg)
+        time.sleep(0.5)
+
+        entry = ctx.queue()[f"{resp['stepId']}:2"]
+        assert entry["assignedAt"] is None
+        assert entry["dependencies"] == [{"type": "input", "inputId": input_id}]
+
+
 def test_input_poll_no_response_yet(worker):
     """Polling with timeout_ms=0 and suspend=false returns null when pending."""
     targets = [workflow("test", "poll")]
