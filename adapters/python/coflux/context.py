@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from . import protocol
+from .catalog import Catalog
 from .dispatcher import get_dispatcher
 from .errors import (
     ExecutionAbandoned,
@@ -29,10 +30,8 @@ from .models import (
     Asset,
     AssetEntry,
     AssetMetadata,
-    CatalogEntry,
     Execution,
     Input,
-    validate_catalog_path,
 )
 from .serialization import deserialize_value, serialize_value
 from .streams import StreamDriver
@@ -42,7 +41,7 @@ from .target import Streams
 class _CatalogPosition:
     """A wait for whatever comes after ``number`` at ``path``.
 
-    A ``CatalogEntry`` as a select handle waits past whatever the execution
+    A ``Catalog`` handle in a select waits past whatever the execution
     can see; this pins the position explicitly instead, for ``current()``
     on an empty path, which waits on position 0.
     """
@@ -58,7 +57,7 @@ def _handle_key(handle: Any) -> tuple[str, str]:
         return ("execution", handle.id)
     if isinstance(handle, Input):
         return ("input", handle.id)
-    if isinstance(handle, CatalogEntry):
+    if isinstance(handle, Catalog):
         return ("catalog", handle.path)
     if isinstance(handle, _CatalogPosition):
         return ("catalog", f"{handle.path}@{handle.number}")
@@ -67,7 +66,7 @@ def _handle_key(handle: Any) -> tuple[str, str]:
 
 def _handle_wire(handle: Any) -> dict[str, Any]:
     """A select handle as the CLI expects it."""
-    if isinstance(handle, CatalogEntry):
+    if isinstance(handle, Catalog):
         # No position: the server waits past what this execution can see.
         return {"type": "catalog", "path": handle.path}
     if isinstance(handle, _CatalogPosition):
@@ -406,9 +405,8 @@ class ExecutorContext:
 
     def catalog_publish(self, path: str, value: Any) -> int:
         """Publish ``value`` at ``path``, serialised the way a result is,
-        and return the version's number. An invalid path is refused here,
-        the way ``cf.catalog`` refuses one, rather than by the server."""
-        path = validate_catalog_path(path)
+        and return the version's number. The path was validated by the
+        ``Catalog`` handle that holds it."""
         request_id = protocol.request_catalog_publish(
             self.execution_id, path, serialize_value(value)
         )
@@ -614,7 +612,7 @@ class ExecutorContext:
         if not handles:
             return
         for handle in handles:
-            if isinstance(handle, (CatalogEntry, _CatalogPosition)):
+            if isinstance(handle, (Catalog, _CatalogPosition)):
                 raise TypeError(
                     f"cannot cancel {handle!r}: a catalog entry has nothing to cancel"
                 )

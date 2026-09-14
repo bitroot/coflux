@@ -56,7 +56,7 @@ It's important that any tasks called within the suspense block _or before it_ ar
 
 ## Suspense and the catalog
 
-Reading a [catalog](./catalog.md) path that has nothing published yet suspends inside a suspense scope, and `entry.next()` suspends whether or not it's inside one. The execution that resumes the step reads the new value with `current()` — nothing is carried across; a fresh execution simply sees a newer catalog.
+Reading a [catalog](./catalog.md) path that has nothing published yet suspends inside a suspense scope, and a handle's `next()` suspends whether or not it's inside one. The execution that resumes the step reads the new value with `current()` — nothing is carried across; a fresh execution simply sees a newer catalog.
 
 ## Suspense and streams
 

@@ -494,25 +494,27 @@ cf.log_error(template=None, **kwargs)
 
 Creates and persists a collection of files as an asset, which can be inspected and downloaded from Studio or the CLI. See [assets](./assets.md).
 
-### `catalog(path) -> CatalogEntry`
-
-A handle to a path in the [catalog](./catalog.md). Nothing round-trips until it's used. An invalid path raises `ValueError` here rather than on use.
-
-### `publish(path, value) -> int`
-
-Publishes a value at a catalog path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing. An invalid path raises `ValueError`.
-
 ## Catalog
 
-### `CatalogEntry`
+### `Catalog[T](path)`
 
-A handle to a path, for reading and waiting; publishing is `cf.publish`. Also a handle for `cf.select`, resolving when the path has a version this execution hasn't seen, which on an empty path is the first. Not a value: pass the path or the value it holds to a task, not the entry.
+A handle to a path in the [catalog](./catalog.md), declared once (usually at module level) and used from any target. A `{placeholder}` in the path is filled in with `at()`. Nothing round-trips until the handle is used. An invalid path raises `ValueError` here rather than on use. `T` is the type of the values at the path. With Pydantic installed, any type it can validate — a model, a dataclass, a plain annotation like `dict[str, int]` — is validated on publish and on read; without it, `T` only informs type checkers. Also a handle for `cf.select`, resolving when the path has a version this execution hasn't seen, which on an empty path is the first. Not a value: pass the path or the value it holds to a task, not the handle.
 
-#### `entry.current() -> Any`
+`handle.template` is the path as declared, placeholders included; `handle.path` is the path once every placeholder is bound, and a `ValueError` before.
 
-The value at the path as of the execution's snapshot. Waits for a first publish if there is none — blocking outside a `cf.suspense` scope, suspending inside one.
+#### `handle.at(**placeholders) -> Catalog[T]`
 
-#### `entry.next() -> NoReturn`
+A handle to the path with the given placeholders filled in, of the same type. Values are substituted as strings and the result has to be a valid path. Placeholders left out stay unbound; a handle with any unbound refuses `publish()`, `current()` and `next()` with `ValueError`.
+
+#### `handle.publish(value) -> int`
+
+Publishes a value at the path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing. With Pydantic, the value is validated as a `T` first and stored as plain data (a model as its fields).
+
+#### `handle.current() -> T`
+
+The value at the path as of the execution's snapshot. Waits for a first publish if there is none — blocking outside a `cf.suspense` scope, suspending inside one. With Pydantic, validated as a `T` and returned as one (a model as an instance).
+
+#### `handle.next() -> NoReturn`
 
 Suspends the execution until the path has a version newer than the execution can see, whether or not inside a `cf.suspense` scope. The execution that resumes the step sees it with `current()`. Never returns.
 

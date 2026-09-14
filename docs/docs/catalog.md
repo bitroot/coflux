@@ -8,28 +8,45 @@ A value is anything that can be passed to a task: an [asset](./assets.md), a dat
 import coflux as cf
 from pathlib import Path
 
+datasets = cf.Catalog("datasets/{name}")
+models = cf.Catalog("models/{name}")
+
 
 @cf.task()
 def build_dataset() -> int:
     Path("customers.parquet").write_bytes(fetch_customers())
-    return cf.publish("datasets/customers", cf.asset("customers.parquet"))
+    return datasets.at(name="customers").publish(cf.asset("customers.parquet"))
 
 
 @cf.task(memo=True)
 def train(dataset: cf.Asset) -> int:
     paths = dataset.restore()
     model = fit(paths["customers.parquet"])
-    return cf.publish("models/churn", {"weights": cf.asset(model), "auc": model.auc})
+    return models.at(name="churn").publish({"weights": cf.asset(model), "auc": model.auc})
 ```
 
 A path is a slash-separated name like `datasets/customers`. Each publish appends a *version*: which value, who published it, and when. Versions are never modified or deleted.
 
-## Publishing
+## Handles
 
-`cf.publish(path, value)` publishes a value and returns the new version's number.
+`cf.Catalog(path)` is a handle to a path: declared once, usually at module level, and used from any target. A `{placeholder}` in the path stands for a part to be filled in later. `at()` returns another handle with the placeholder bound, and the same type, so one declaration covers a family of paths:
 
 ```python
-number = cf.publish("configs/training", {"threshold": 0.7, "epochs": 20})  # 6
+models = cf.Catalog("models/{name}")
+churn = models.at(name="churn")     # Catalog('models/churn')
+```
+
+Nothing round-trips until a handle is used, and a handle with a placeholder still unbound refuses to be: `publish()`, `current()` and `next()` all raise. An invalid path, or a value that wouldn't make one, is a `ValueError` where the handle is declared or bound rather than a request the server refuses.
+
+A handle isn't a value: pass the path, or the value it holds, to a task, not the handle.
+
+## Publishing
+
+`handle.publish(value)` publishes a value at the handle's path and returns the new version's number.
+
+```python
+configs = cf.Catalog("configs/{name}")
+number = configs.at(name="training").publish({"threshold": 0.7, "epochs": 20})  # 6
 ```
 
 Facts about a publish — a metric, what it was built from — go in the value, alongside the thing itself. There is no separate metadata: a dict holding an asset and its scores is one value, rendered as such in Studio, and a reader gets both from `current()`.
@@ -43,7 +60,8 @@ Versions are numbered per path, once, across every workspace: `models/churn@6` n
 The catalog pins the value, not what the value points at. A data structure or an asset is immutable by construction. A handle — an execution, an input — resolves to whatever it resolves to when it's read, which can change as the execution is retried or the input answered. A locator for external data (a table name, a URI) is only as stable as the data behind it, so publish a snapshot identifier or a content hash alongside it when lineage needs to be exact:
 
 ```python
-cf.publish("tables/customers", {"table": "analytics.customers", "snapshot": 4182})
+tables = cf.Catalog("tables/{name}")
+tables.at(name="customers").publish({"table": "analytics.customers", "snapshot": 4182})
 ```
 
 A value can also be published from outside a run, with the CLI — a JSON document, or an existing asset:
@@ -55,11 +73,11 @@ coflux catalog publish models/churn --asset <asset-id>
 
 ## Reading
 
-`cf.catalog(path)` is a handle to a path. Nothing round-trips until it's used.
+`handle.current()` reads the value at the handle's path.
 
 ```python
-entry = cf.catalog("models/churn")
-entry.current()    # the current value
+churn = models.at(name="churn")
+churn.current()    # the current value
 ```
 
 **An execution sees the catalog as it was when it started.** Every execution is pinned to the catalog at the moment it's assigned to a worker, and `current()` answers from that snapshot, so repeated reads agree with each other and with reads of other paths. There are two exceptions. Anything the execution's own run has published since is visible: a parent that waits on a child which publishes sees the child's version. And a path that had nothing when the execution started shows its first version once one lands, since the alternative is never answering.
@@ -84,6 +102,46 @@ coflux runs rerun --catalog latest R1a2b3:1
 
 A run submitted as of a version gives every execution in it that snapshot, including steps it schedules. A version has to exist and be visible from the workspace the run is in.
 
+## Typed values
+
+A handle can declare the type of the values at its path. With [Pydantic](https://docs.pydantic.dev/) installed, `publish()` validates the value against it and stores plain data, and `current()` validates what it reads and returns it as that type. Any type Pydantic can validate works: a model, a dataclass, a `TypedDict`, or a plain annotation.
+
+```python
+from pydantic import BaseModel
+
+
+class TrainingConfig(BaseModel):
+    threshold: float
+    epochs: int
+
+
+configs = cf.Catalog[TrainingConfig]("configs/{name}")
+counts = cf.Catalog[dict[str, int]]("counts/{name}")
+
+training = configs.at(name="training")
+training.publish(TrainingConfig(threshold=0.7, epochs=20))
+training.current().epochs   # 20
+
+counts.at(name="words").publish({"the": 412})
+```
+
+A model is stored as its fields, so what's in the catalog doesn't depend on the class: Studio and the CLI show the fields, an untyped handle to the same path reads them as a dict, and a `dict` handle reads a version a model published. The type that validates a read is the reader's, the one declared in the code doing the reading, whatever the publisher used and wherever its class lives. So a reader declares the shape it expects, and a version that doesn't fit is an error at the read rather than somewhere downstream. A reader that only needs some of the fields can declare only those.
+
+An asset, or another of Coflux's own types, is checked by instance: `cf.Catalog[dict[str, cf.Asset]]` needs nothing more. A model that holds one needs Pydantic told that an arbitrary type is fine there:
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+
+class Churn(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    weights: cf.Asset
+    auc: float
+```
+
+Without Pydantic, the type only informs type checkers, as with task arguments and results: the value is stored and returned as it is.
+
 ## Re-running on a new version
 
 `current()` is a read: what is the value, as of my snapshot? `next()` is a request to re-run: run me again when this path has something I haven't seen. It suspends the execution — always, whether or not it's inside a `cf.suspense` scope — until the path has a version newer than the snapshot, and it returns nothing. The execution that resumes the step runs from the top with a fresh snapshot (the one case a resumed step doesn't keep the snapshot it had), so its `current()` returns the new value:
@@ -91,9 +149,9 @@ A run submitted as of a version gives every execution in it that snapshot, inclu
 ```python
 @cf.workflow()
 def retrain_on_publish():
-    datasets = cf.catalog("datasets/customers")
-    train(datasets.current())   # memoised, so a re-run with the same data is a hit
-    datasets.next()             # suspends until a newer version lands
+    customers = datasets.at(name="customers")
+    train(customers.current())   # memoised, so a re-run with the same data is a hit
+    customers.next()             # suspends until a newer version lands
 ```
 
 Nothing is carried between attempts. The only thing the server holds for the suspended execution is what it's waiting for.
@@ -104,16 +162,16 @@ As with any suspension, the code before the wait runs again on resumption, so wh
 
 Because the wait is relative to what the execution can see, an execution's own publish never wakes it. If a newer version already exists when `next()` is called, the execution suspends and resumes straight away.
 
-A `CatalogEntry` is also a handle for [`cf.select`](./select.md). It resolves when the path has a version this execution hasn't seen — on an empty path, the first — so it is `next()` in select form, and the thing to do when an entry wins is call `next()` on it. What makes the combination useful is the other handles:
+A catalog handle is also a handle for [`cf.select`](./select.md). It resolves when the path has a version this execution hasn't seen — on an empty path, the first — so it is `next()` in select form, and the thing to do when a handle wins is call `next()` on it. What makes the combination useful is the other handles:
 
 ```python
 with cf.suspense():
-    datasets = cf.catalog("datasets/customers")
-    configs = cf.catalog("configs/training")
+    customers = datasets.at(name="customers")
+    training = configs.at(name="training")
     retrain_now = cf.Prompt("Retrain now?").submit()
     ...
-    winner, _ = cf.select([datasets, configs, retrain_now])   # whichever comes first
-    if isinstance(winner, cf.CatalogEntry):
+    winner, _ = cf.select([customers, training, retrain_now])   # whichever comes first
+    if isinstance(winner, cf.Catalog):
         winner.next()   # re-run on the new data or config
 ```
 

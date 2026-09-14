@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import functools
-import re
 import tempfile
 import typing as t
 from pathlib import Path
@@ -127,86 +126,6 @@ class Asset:
         if match:
             entries = [e for e in entries if fnmatch.fnmatch(e.path, match)]
         return {e.path: e.restore(at=at) for e in entries}
-
-
-# --- Catalog ---
-
-# Mirrors the server's rule (`Catalog.validate_path`): slash-separated
-# segments of `[A-Za-z0-9_.-]`, none empty, none `.` or `..`, at most 512
-# characters. Checked here so a typo fails at `cf.catalog(...)` or
-# `cf.publish(...)` rather than as a refused request or a wait that never
-# ends.
-_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
-_PATH_MAX_LENGTH = 512
-
-
-def validate_catalog_path(path: t.Any) -> str:
-    """The path, if it is one the catalog accepts; ``ValueError`` if not."""
-    if not isinstance(path, str) or not path:
-        raise ValueError("catalog path must be a non-empty string")
-    if len(path) > _PATH_MAX_LENGTH:
-        raise ValueError(
-            f"catalog path is too long ({len(path)} > {_PATH_MAX_LENGTH} characters)"
-        )
-    for segment in path.split("/"):
-        if segment in ("", ".", "..") or not _PATH_SEGMENT.match(segment):
-            raise ValueError(f"invalid catalog path: {path!r}")
-    return path
-
-
-class CatalogEntry:
-    """A handle to a path in the catalog, which holds versioned values.
-
-    Nothing round-trips until it is used. ``current()`` is a read: the
-    value, as of this execution's snapshot. ``next()`` is a request to
-    re-run: it suspends the execution until the path has a version the
-    execution hasn't seen, and never returns. Writing is
-    ``cf.publish(path, value)``: a handle reads and waits, it doesn't
-    mutate.
-
-    The entry is also a handle for ``cf.select``: it resolves when the path
-    has a version this execution hasn't seen — on an empty path, the first
-    — so it is ``next()`` in select form.
-    """
-
-    def __init__(self, path: str):
-        self._path = validate_catalog_path(path)
-
-    @property
-    def path(self) -> str:
-        return self._path
-
-    def current(self) -> t.Any:
-        """The value at this path as of the execution's snapshot.
-
-        An execution sees the catalog as it was when it was assigned, plus
-        anything its own run has published since, so repeated calls agree,
-        and a version published after that is not current here — ``next()``
-        is how to get an execution that sees it. With nothing published
-        yet this waits for the first publish — blocking outside a
-        ``cf.suspense`` scope, suspending inside one.
-        """
-        return get_context().catalog_current(self._path)
-
-    def next(self) -> t.NoReturn:
-        """Suspend until this path has a version newer than the execution
-        can see, then re-run.
-
-        Always suspends, inside a ``cf.suspense`` scope or not: what comes
-        next is by definition outside this execution's snapshot, so only
-        a new execution can see it. If a newer version already exists the
-        execution resumes straight away. Never returns.
-        """
-        get_context().catalog_next(self._path)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, CatalogEntry) and other._path == self._path
-
-    def __hash__(self) -> int:
-        return hash(("catalog", self._path))
-
-    def __repr__(self) -> str:
-        return f"CatalogEntry({self._path!r})"
 
 
 # --- Handles (resolve via cf.select) ---
