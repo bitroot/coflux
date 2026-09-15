@@ -57,15 +57,47 @@ Reads are served locally: the effective state arrives with the execution, and an
 
 `set(None)` and `reset()` are different. `set(None)` stores `None`, and `get()` returns `None`. `reset()` removes the checkpoint, so `get()` falls back to the declared default.
 
+A checkpoint handle can't be passed to another execution — it names storage belonging to a particular step, so declare it in the target that uses it.
+
+## Typed values
+
 A checkpoint is typed by what `get()` returns. That's inferred from the default when there is one, so `cursor` above is a `Checkpoint[int]`. Without a default, `get()` can return `None`, so declare that:
 
 ```python
 cursor = cf.Checkpoint[int | None]("cursor")
 ```
 
-Like argument and result types, this only informs type checkers — nothing is enforced at runtime.
+Spelling the type out does more than inform type checkers. With [Pydantic](https://docs.pydantic.dev/) installed, `set()` validates the value against it and stores plain data, and `get()` validates what it reads and returns it as that type. Any type Pydantic can validate works: a model, a dataclass, a `TypedDict`, or a plain annotation.
 
-A checkpoint handle can't be passed to another execution — it names storage belonging to a particular step, so declare it in the target that uses it.
+```python
+from pydantic import BaseModel
+
+
+class Position(BaseModel):
+    since: int
+    page: int
+
+
+cursor = cf.Checkpoint[Position]("cursor", default=Position(since=0, page=0))
+seen = cf.Checkpoint[set[str]]("seen", default=set())
+
+
+@cf.workflow(recurrent=True, delay=60)
+def poll_orders():
+    position = cursor.get()                       # a Position
+    orders, since, page = fetch_orders(position)
+    for order in orders:
+        process_order.submit(order)
+    cursor.set(Position(since=since, page=page))  # stored as its fields
+```
+
+A model is stored as its fields, so what's in the checkpoint doesn't depend on the class: an attempt reads what an earlier attempt wrote whether or not the class has moved, and Studio shows the fields. The type that validates a read is the one declared in the code doing the reading, so an attempt running new code finds out at the read that what an older attempt stored doesn't fit — rather than somewhere downstream.
+
+The declared default is validated where it's declared, and a checkpoint with no default reads as `None` until it's set, so the type has to admit that (`Checkpoint[int | None]`) or a default has to be given.
+
+An asset, or another of Coflux's own types, is checked by instance: `cf.Checkpoint[cf.Asset | None]("weights")` needs nothing more. A model that holds one needs Pydantic told that an arbitrary type is fine there, with `model_config = ConfigDict(arbitrary_types_allowed=True)`.
+
+Without Pydantic, the type only informs type checkers, as with task arguments and results: the value is stored and returned as it is.
 
 ## Durability
 

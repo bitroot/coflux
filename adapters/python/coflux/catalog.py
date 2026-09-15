@@ -7,11 +7,7 @@ import string
 import typing as t
 
 from .state import get_context
-
-try:
-    import pydantic
-except ImportError:  # pragma: no cover - exercised by monkeypatching
-    pydantic = None  # type: ignore[assignment]
+from .validation import type_adapter, type_name
 
 T = t.TypeVar("T")
 
@@ -59,32 +55,6 @@ class _Partial(dict):
 
     def __missing__(self, key: str) -> str:
         return "{" + key + "}"
-
-
-def _type_name(item: t.Any) -> str:
-    """``item`` as it was written: ``Churn``, ``dict[int, str]``, ``Any``."""
-    if isinstance(item, type) and t.get_origin(item) is None:
-        return item.__name__
-    return repr(item).replace("typing.", "")
-
-
-def _adapter(item: t.Any) -> t.Any:
-    """A validator for values of type ``item``, or ``None`` without pydantic.
-
-    Any type pydantic can validate is accepted. A class it doesn't know —
-    an asset, an execution handle — is checked by ``isinstance``, which is
-    what a bare annotation holding one needs. A model, dataclass or
-    TypedDict carries its own config, and pydantic refuses another.
-    """
-    if pydantic is None:
-        return None
-    config = pydantic.ConfigDict(arbitrary_types_allowed=True)
-    try:
-        return pydantic.TypeAdapter(item, config=config)
-    except pydantic.errors.PydanticUserError as error:
-        if error.code != "type-adapter-config-unused":
-            raise
-        return pydantic.TypeAdapter(item)
 
 
 class Catalog(t.Generic[T]):
@@ -141,8 +111,8 @@ class Catalog(t.Generic[T]):
         # A subclass that remembers the type argument and what validates
         # it, built here so a type pydantic can't handle fails where the
         # handle is declared. Mirrors ``Input[T]``.
-        attrs = {"_type": item, "_adapter": _adapter(item)}
-        return type(f"Catalog[{_type_name(item)}]", (cls,), attrs)
+        attrs = {"_type": item, "_adapter": type_adapter(item)}
+        return type(f"Catalog[{type_name(item)}]", (cls,), attrs)
 
     def __init__(self, path: str):
         if not isinstance(path, str) or not path:

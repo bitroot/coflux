@@ -348,17 +348,17 @@ cf.Checkpoint[T | None](
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `name` | `str` | required | Checkpoint name, unique within the step. Can't start with `_`, which is reserved for adapter-managed state |
-| `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None` |
+| `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None`. With a declared type, validated as one here |
 
-`T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. Types only inform type checkers — nothing is enforced at runtime.
+`T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. With Pydantic installed, a spelled-out type — any type it can validate, from a model to a plain annotation like `dict[str, int]` — is validated on write and on read; without it, `T` only informs type checkers.
 
 #### `checkpoint.get() -> T`
 
-The current value, or the declared default if it isn't set. A checkpoint explicitly set to `None` reads back as `None`.
+The current value, or the declared default if it isn't set. A checkpoint explicitly set to `None` reads back as `None`. With Pydantic, the stored value is validated as a `T` and returned as one (a model as an instance).
 
 #### `checkpoint.set(value) -> None`
 
-Sets the value, replacing anything already there.
+Sets the value, replacing anything already there. With Pydantic, the value is validated as a `T` first and stored as plain data (a model as its fields).
 
 #### `checkpoint.update(fn: Callable[[T], T]) -> T`
 

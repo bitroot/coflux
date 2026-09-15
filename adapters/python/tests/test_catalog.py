@@ -14,9 +14,9 @@ import typing as t
 
 import pytest
 
-from coflux import catalog as catalog_module
 from coflux import context as context_module
 from coflux import protocol
+from coflux import validation as validation_module
 from coflux.catalog import Catalog
 from coflux.context import ExecutorContext, _CatalogPosition, _handle_key, _handle_wire
 from coflux.errors import Suspending
@@ -435,7 +435,7 @@ def test_any_passes_a_value_through_untouched(wire, monkeypatch):
 def test_without_pydantic_the_type_only_informs_type_checkers(wire, monkeypatch):
     """With nothing to validate with, the value is published and read as
     it is."""
-    monkeypatch.setattr(catalog_module, "pydantic", None)
+    monkeypatch.setattr(validation_module, "pydantic", None)
     _install_context(monkeypatch, ExecutorContext("E1"))
     counts = Catalog[dict[int, str]]("counts/x")
     assert counts._adapter is None
