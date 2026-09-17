@@ -134,7 +134,7 @@ defmodule Coflux.Orchestration.Epoch do
                     wait_for, cache_config_id, cache_key, defer_key, memo_key,
                     retry_limit, retry_backoff_min, retry_backoff_max, recurrent, delay,
                     timeout, requires_tag_set_id, streams_buffer, streams_timeout_ms,
-                    created_at
+                    concurrency_key, concurrency_limit, created_at
                   FROM steps
                   WHERE run_id = ?1
                   ORDER BY number
@@ -149,7 +149,8 @@ defmodule Coflux.Orchestration.Epoch do
                                                    memo_key, retry_limit, retry_backoff_min,
                                                    retry_backoff_max, recurrent, delay, timeout,
                                                    requires_tag_set_id, streams_buffer,
-                                                   streams_timeout_ms, step_created_at},
+                                                   streams_timeout_ms, concurrency_key,
+                                                   concurrency_limit, step_created_at},
                                                   {step_acc, exec_acc} ->
                   # steps.parent_id is same-run internal — strict remap
                   new_parent_id =
@@ -179,6 +180,8 @@ defmodule Coflux.Orchestration.Epoch do
                         ensure_tag_set(source_db, target_db, requires_tag_set_id),
                       streams_buffer: streams_buffer,
                       streams_timeout_ms: streams_timeout_ms,
+                      concurrency_key: if(concurrency_key, do: {:blob, concurrency_key}),
+                      concurrency_limit: concurrency_limit,
                       created_at: step_created_at
                     })
 

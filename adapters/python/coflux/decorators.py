@@ -5,7 +5,15 @@ from __future__ import annotations
 import datetime as dt
 import typing as t
 
-from .target import _STREAMS_UNSET, Cache, Defer, Retries, Streams, Target
+from .target import (
+    _STREAMS_UNSET,
+    Cache,
+    Concurrency,
+    Defer,
+    Retries,
+    Streams,
+    Target,
+)
 
 if t.TYPE_CHECKING:
     from .models import Stream
@@ -64,6 +72,7 @@ def task(
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
     streams: Streams | None = _STREAMS_UNSET,  # type: ignore[assignment]
+    concurrency: int | Concurrency = 0,
 ) -> _TargetDecorator:
     """Decorator for defining a task.
 
@@ -95,6 +104,7 @@ def task(
             requires=requires,
             timeout=timeout,
             streams=streams,
+            concurrency=concurrency,
         )
 
     return decorator  # type: ignore[return-value]
@@ -113,6 +123,7 @@ def workflow(
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | dt.timedelta = 0,
     streams: Streams | None = _STREAMS_UNSET,  # type: ignore[assignment]
+    concurrency: int | Concurrency = 0,
 ) -> _TargetDecorator:
     """Decorator for defining a workflow.
 
@@ -138,6 +149,7 @@ def workflow(
             requires=requires,
             timeout=timeout,
             streams=streams,
+            concurrency=concurrency,
         )
 
     return decorator  # type: ignore[return-value]
@@ -155,6 +167,7 @@ def stub(
     defer: bool | Defer = False,
     delay: float | dt.timedelta = 0,
     memo: bool | t.Iterable[str] = False,
+    concurrency: int | Concurrency = 0,
 ) -> _TargetDecorator:
     """Decorator for defining a stub (external reference)."""
 
@@ -171,6 +184,7 @@ def stub(
             defer=defer,
             delay=delay,
             memo=memo,
+            concurrency=concurrency,
             is_stub=True,
         )
 

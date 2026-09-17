@@ -38,7 +38,7 @@ from .models import (
 from .prompt import Prompt
 from .state import get_context
 from .streams import stream
-from .target import Cache, Defer, Retries, Streams
+from .target import Cache, Concurrency, Defer, Retries, Streams
 
 # Grouped by category rather than sorted alphabetically.
 __all__ = [  # noqa: RUF022
@@ -65,6 +65,7 @@ __all__ = [  # noqa: RUF022
     "Prompt",
     "Cache",
     "Checkpoint",
+    "Concurrency",
     "Defer",
     "Retries",
     "Streams",

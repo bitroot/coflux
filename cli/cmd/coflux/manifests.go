@@ -377,6 +377,21 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			}
 		}
 
+		// Build concurrency (nil if not set)
+		var concurrency any
+		if t.Concurrency != nil {
+			concurrencyMap := map[string]any{
+				"limit":  t.Concurrency.Limit,
+				"params": t.Concurrency.Params,
+			}
+			if t.Concurrency.Namespace != nil {
+				concurrencyMap["namespace"] = *t.Concurrency.Namespace
+			} else {
+				concurrencyMap["namespace"] = nil
+			}
+			concurrency = concurrencyMap
+		}
+
 		// Delay is already in milliseconds from the adapter (0 if not set - server requires integer, not nil)
 		delay := 0
 		if t.Delay != nil {
@@ -427,6 +442,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,
+			"concurrency": concurrency,
 		}
 
 		manifests[t.Module][t.Name] = def

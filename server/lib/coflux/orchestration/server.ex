@@ -123,6 +123,23 @@ defmodule Coflux.Orchestration.Server do
               # execution_id -> MapSet of execution_ids that are waiting on this execution
               dependency_waiters: %{},
 
+              # Concurrency permits currently held: execution_id ->
+              # %{workspace_id, key}. An execution holds a permit from the
+              # moment its assignment is written until its completion is. The
+              # same set is derivable from the database (assignment without
+              # completion), so this is rebuilt at boot and after an epoch
+              # rotation rather than being authoritative — a permit can't be
+              # leaked by a restart.
+              concurrency_permits: %{},
+
+              # Executions the last tick left gated on a permit:
+              # execution_id -> the queue-topic dependency map that was
+              # emitted for it. Keeping the map (rather than just the id)
+              # means a queue subscriber joining mid-gate is shown the same
+              # entry existing subscribers already have, without recomputing
+              # holders that may since have changed.
+              concurrency_gated: %{},
+
               # Active stream subscriptions — in-memory, session-scoped.
               # A consumer adapter opens a subscription by sending stream_subscribe
               # with a subscription_id unique within that consumer's adapter
@@ -430,6 +447,10 @@ defmodule Coflux.Orchestration.Server do
 
     # Initialize pending dependency tracking for existing unassigned executions
     state = initialize_pending_dependencies(state)
+
+    # Rebuild the concurrency ledger from the executions that are assigned
+    # but not yet completed
+    state = load_concurrency_permits(state)
 
     # Schedule periodic epoch rotation check
     Process.send_after(self(), :check_rotation, @rotation_check_interval_ms)
@@ -1397,6 +1418,7 @@ defmodule Coflux.Orchestration.Server do
          attempt: attempt,
          created_at: created_at,
          cache_key: cache_key,
+         concurrency_key: concurrency_key,
          memo_key: memo_key,
          memo_hit: memo_hit,
          child_added: child_added
@@ -1421,6 +1443,8 @@ defmodule Coflux.Orchestration.Server do
 
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
+        concurrency = Keyword.get(opts, :concurrency)
+        concurrency_limit = if concurrency, do: concurrency.limit, else: 0
         retries = Keyword.get(opts, :retries)
         timeout = Keyword.get(opts, :timeout, 0)
         delay = Keyword.get(opts, :delay, 0)
@@ -1477,6 +1501,8 @@ defmodule Coflux.Orchestration.Server do
                  cache_config: cache,
                  cache_key: cache_key,
                  memo_key: memo_key,
+                 concurrency_key: concurrency_key,
+                 concurrency_limit: concurrency_limit,
                  retries: retries,
                  recurrent: recurrent,
                  timeout: timeout,
@@ -3399,12 +3425,12 @@ defmodule Coflux.Orchestration.Server do
         end
       end)
 
-    {state, assigned, unassigned} =
+    {state, assigned, unassigned, _counts, gated_now} =
       Enum.reduce(
         executions_due,
-        {state, [], []},
+        {state, [], [], concurrency_held_counts(state), %{}},
         fn
-          execution, {state, assigned, unassigned} ->
+          execution, {state, assigned, unassigned, counts, gated} ->
             # TODO: support caching for other attempts?
             cached_result =
               if execution.attempt == 1 && execution.cache_config_id do
@@ -3436,13 +3462,13 @@ defmodule Coflux.Orchestration.Server do
               {:ok, state} = process_result(state, execution.execution_id, result)
               state = complete_execution(state, execution.execution_id)
 
-              {state, assigned, unassigned}
+              {state, assigned, unassigned, counts, gated}
             else
               # Skip executions whose dependencies haven't resolved yet
               has_pending = Map.has_key?(state.pending_dependencies, execution.execution_id)
 
               if has_pending do
-                {state, assigned, unassigned}
+                {state, assigned, unassigned, counts, gated}
               else
                 requires =
                   effective_requires(
@@ -3452,97 +3478,113 @@ defmodule Coflux.Orchestration.Server do
                   )
 
                 if execution.type == :task || !execution.parent_id do
-                  case choose_session(state, execution, requires) do
+                  # Checked before a session is chosen, so a gated execution
+                  # never occupies a worker slot — and, by staying out of
+                  # `unassigned`, never triggers a pool launch either.
+                  case concurrency_gate(state, counts, execution) do
+                    gate when not is_nil(gate) ->
+                      {state, assigned, unassigned, counts,
+                       Map.put(gated, execution.execution_id, gate)}
+
                     nil ->
-                      {state, assigned, [execution | unassigned]}
+                      case choose_session(state, execution, requires) do
+                        nil ->
+                          {state, assigned, [execution | unassigned], counts, gated}
 
-                    session_id ->
-                      {:ok, assigned_at} =
-                        Runs.assign_execution(state.db, execution.execution_id, session_id)
+                        session_id ->
+                          {:ok, assigned_at} =
+                            Runs.assign_execution(state.db, execution.execution_id, session_id)
 
-                      {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
+                          {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
 
-                      # Enrich arguments with resolved references (asset/execution metadata)
-                      enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
+                          # Enrich arguments with resolved references (asset/execution metadata)
+                          enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
 
-                      # Checkpoints travel with the execute message in the same
-                      # wire form as arguments, and are handled the same way
-                      # end-to-end — including the worker downloading any
-                      # blob-backed value before the adapter starts. Bounded by
-                      # this execution's own attempt, so it sees what it started
-                      # with rather than anything a stale writer lands later.
-                      {:ok, checkpoints} =
-                        Checkpoints.get_effective(
-                          state.db,
-                          execution.step_id,
-                          get_workspace_chain(state, execution.workspace_id),
-                          execution.attempt
-                        )
+                          # Checkpoints travel with the execute message in the same
+                          # wire form as arguments, and are handled the same way
+                          # end-to-end — including the worker downloading any
+                          # blob-backed value before the adapter starts. Bounded by
+                          # this execution's own attempt, so it sees what it started
+                          # with rather than anything a stale writer lands later.
+                          {:ok, checkpoints} =
+                            Checkpoints.get_effective(
+                              state.db,
+                              execution.step_id,
+                              get_workspace_chain(state, execution.workspace_id),
+                              execution.attempt
+                            )
 
-                      enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
+                          enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
 
-                      workspace_external_id = state.workspaces[execution.workspace_id].external_id
+                          workspace_external_id =
+                            state.workspaces[execution.workspace_id].external_id
 
-                      execution_external_id =
-                        execution_external_id(
-                          execution.run_external_id,
-                          execution.step_number,
-                          execution.attempt
-                        )
+                          execution_external_id =
+                            execution_external_id(
+                              execution.run_external_id,
+                              execution.step_number,
+                              execution.attempt
+                            )
 
-                      state =
-                        state
-                        |> put_in(
-                          [Access.key(:execution_ids), execution_external_id],
-                          execution.execution_id
-                        )
-                        |> update_in(
-                          [Access.key(:sessions), session_id, :starting],
-                          &MapSet.put(&1, execution_external_id)
-                        )
-                        |> update_in(
-                          [Access.key(:sessions), session_id, :total_executions],
-                          &(&1 + 1)
-                        )
-                        |> send_session(
-                          session_id,
-                          {:execute, execution_external_id, execution.module, execution.target,
-                           enriched_arguments, execution.run_external_id, workspace_external_id,
-                           execution.timeout,
-                           build_streams_config(
-                             execution.streams_buffer,
-                             execution.streams_timeout_ms
-                           ), enriched_checkpoints}
-                        )
+                          state =
+                            state
+                            |> put_in(
+                              [Access.key(:execution_ids), execution_external_id],
+                              execution.execution_id
+                            )
+                            |> update_in(
+                              [Access.key(:sessions), session_id, :starting],
+                              &MapSet.put(&1, execution_external_id)
+                            )
+                            |> update_in(
+                              [Access.key(:sessions), session_id, :total_executions],
+                              &(&1 + 1)
+                            )
+                            |> send_session(
+                              session_id,
+                              {:execute, execution_external_id, execution.module,
+                               execution.target, enriched_arguments, execution.run_external_id,
+                               workspace_external_id, execution.timeout,
+                               build_streams_config(
+                                 execution.streams_buffer,
+                                 execution.streams_timeout_ms
+                               ), enriched_checkpoints}
+                            )
 
-                      # Notify sessions topic of updated total
-                      session = Map.fetch!(state.sessions, session_id)
+                          # Notify sessions topic of updated total
+                          session = Map.fetch!(state.sessions, session_id)
 
-                      state =
-                        notify_listeners(
-                          state,
-                          {:sessions, workspace_external_id},
-                          {:executions, session.external_id, session.total_executions}
-                        )
-
-                      state =
-                        if session.worker_id do
-                          worker = Map.get(state.workers, session.worker_id)
-
-                          if worker do
+                          state =
                             notify_listeners(
                               state,
-                              {:pool, workspace_external_id, worker.pool_name},
-                              {:worker_executions, worker.external_id, session.total_executions}
+                              {:sessions, workspace_external_id},
+                              {:executions, session.external_id, session.total_executions}
                             )
-                          else
-                            state
-                          end
-                        else
-                          state
-                        end
 
-                      {state, [{execution, assigned_at} | assigned], unassigned}
+                          state =
+                            if session.worker_id do
+                              worker = Map.get(state.workers, session.worker_id)
+
+                              if worker do
+                                notify_listeners(
+                                  state,
+                                  {:pool, workspace_external_id, worker.pool_name},
+                                  {:worker_executions, worker.external_id,
+                                   session.total_executions}
+                                )
+                              else
+                                state
+                              end
+                            else
+                              state
+                            end
+
+                          state = grant_concurrency_permit(state, execution)
+                          counts = increment_concurrency_count(state, counts, execution)
+
+                          {state, [{execution, assigned_at} | assigned], unassigned, counts,
+                           gated}
+                      end
                   end
                 else
                   {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
@@ -3572,7 +3614,15 @@ defmodule Coflux.Orchestration.Server do
                                  backoff_max: execution.retry_backoff_max
                                }
                              ),
-                           requires: requires
+                           requires: requires,
+                           # The spawning execution never takes a permit (no
+                           # worker runs it); the gate moves to the spawned
+                           # run's own initial step. Passed as the already-
+                           # built key because the step stores the key, not
+                           # the params it was derived from — the arguments
+                           # are the same, so it's the same key either way.
+                           concurrency_key: execution.concurrency_key,
+                           concurrency_limit: execution.concurrency_limit
                          ) do
                       {:ok, _external_run_id, _external_step_id, spawned_execution_id, state} ->
                         {:ok, state} =
@@ -3585,12 +3635,14 @@ defmodule Coflux.Orchestration.Server do
                         state
                     end
 
-                  {state, assigned, unassigned}
+                  {state, assigned, unassigned, counts, gated}
                 end
               end
             end
         end
       )
+
+    state = update_concurrency_gates(state, gated_now)
 
     state =
       assigned
@@ -5076,6 +5128,10 @@ defmodule Coflux.Orchestration.Server do
     |> Map.put(:stream_dependency_keys, %{})
     |> Map.put(:dependency_waiters, %{})
     |> initialize_pending_dependencies()
+    # Execution ids are reassigned by the copy, so the ledger is rebuilt
+    # against the new database rather than remapped.
+    |> Map.put(:concurrency_gated, %{})
+    |> load_concurrency_permits()
     |> maybe_start_index_build()
   end
 
@@ -5762,6 +5818,8 @@ defmodule Coflux.Orchestration.Server do
              if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
            cache_key: step.cache_key,
            memo_key: step.memo_key,
+           concurrency_key: step.concurrency_key,
+           concurrency_limit: step.concurrency_limit,
            retry_limit: step.retry_limit,
            retry_backoff_min: step.retry_backoff_min,
            retry_backoff_max: step.retry_backoff_max,
@@ -7272,6 +7330,13 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp fire_completion_notification(state, execution_id, completion_at) do
+    # Every completion funnels through here, whoever wrote it, so this is
+    # the one place a permit needs releasing. Suspension, retry backoff,
+    # recurrence, cancellation and abandonment all write a completion, so
+    # all of them release; the successor re-acquires when it's next
+    # admitted.
+    state = release_concurrency_permit(state, execution_id)
+
     {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
     execution_external_id = execution_external_id(r, s, a)
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
@@ -7938,15 +8003,19 @@ defmodule Coflux.Orchestration.Server do
   # Build a map of execution_external_id -> [dependency] for all pending
   # executions in the given workspace, for the Queue topic snapshot.
   defp build_queue_dependencies(state, workspace_id) do
-    state.pending_dependencies
-    |> Enum.reduce(%{}, fn {execution_id, dependency_ids}, acc ->
+    # Gated executions belong here as much as blocked ones do — both are
+    # executions the queue is showing as not running for a reason.
+    execution_ids =
+      Enum.uniq(Map.keys(state.pending_dependencies) ++ Map.keys(state.concurrency_gated))
+
+    Enum.reduce(execution_ids, %{}, fn execution_id, acc ->
       case Runs.get_workspace_id_for_execution(state.db, execution_id) do
         {:ok, ^workspace_id} ->
           case Runs.get_execution_key(state.db, execution_id) do
             {:ok, {r, s, a}} ->
               ext_id = execution_external_id(r, s, a)
 
-              Map.put(acc, ext_id, queue_dependencies(state.db, dependency_ids))
+              Map.put(acc, ext_id, build_execution_queue_dependencies(state, execution_id))
 
             {:error, _} ->
               acc
@@ -7956,6 +8025,168 @@ defmodule Coflux.Orchestration.Server do
           acc
       end
     end)
+  end
+
+  # Rebuild the concurrency ledger from the database: every execution with
+  # an assignment and no completion holds a permit.
+  defp load_concurrency_permits(state) do
+    {:ok, permits} = Runs.get_held_concurrency_permits(state.db)
+
+    Map.put(
+      state,
+      :concurrency_permits,
+      Map.new(permits, fn {execution_id, workspace_id, key} ->
+        {execution_id, %{workspace_id: workspace_id, key: key}}
+      end)
+    )
+  end
+
+  # Permits are counted per {root workspace, key}. The limit spans the whole
+  # workspace inheritance tree: a derived workspace re-running a step reaches
+  # the same external resource as the base it inherits from, so counting them
+  # separately would break the promise the limit makes.
+  defp root_workspace_id(state, workspace_id) do
+    List.last(get_workspace_chain(state, workspace_id))
+  end
+
+  # %{{root_workspace_id, key} => count}, computed once per tick.
+  defp concurrency_held_counts(state) do
+    Enum.reduce(state.concurrency_permits, %{}, fn {_execution_id, permit}, counts ->
+      Map.update(
+        counts,
+        {root_workspace_id(state, permit.workspace_id), permit.key},
+        1,
+        &(&1 + 1)
+      )
+    end)
+  end
+
+  defp concurrency_scope(state, workspace_id, key) do
+    {root_workspace_id(state, workspace_id), key}
+  end
+
+  # nil when the execution declares no limit, or when there's room for it.
+  # Otherwise the queue-topic dependency map naming the current holders.
+  #
+  # The limit compared against is the execution's own, not the holders' —
+  # targets sharing a namespace may each declare a different one, and each
+  # is judged by what it asked for.
+  defp concurrency_gate(state, counts, execution) do
+    key = execution.concurrency_key
+
+    if key && execution.concurrency_limit > 0 do
+      scope = concurrency_scope(state, execution.workspace_id, key)
+
+      if Map.get(counts, scope, 0) < execution.concurrency_limit do
+        nil
+      else
+        holders =
+          state.concurrency_permits
+          |> Enum.filter(fn {_execution_id, permit} ->
+            concurrency_scope(state, permit.workspace_id, permit.key) == scope
+          end)
+          |> Enum.map(fn {holder_id, _permit} ->
+            case Runs.get_execution_key(state.db, holder_id) do
+              {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+              {:error, _} -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        %{
+          type: "concurrency",
+          key: build_concurrency_key(key),
+          limit: execution.concurrency_limit,
+          holders: holders
+        }
+      end
+    end
+  end
+
+  # Rendered like the run topic's cacheKey — a short hex prefix, enough to
+  # tell two pools apart at a glance.
+  defp build_concurrency_key(key) do
+    key |> Base.encode16(case: :lower) |> String.slice(0, 10)
+  end
+
+  defp grant_concurrency_permit(state, execution) do
+    if execution.concurrency_key do
+      put_in(state, [Access.key(:concurrency_permits), execution.execution_id], %{
+        workspace_id: execution.workspace_id,
+        key: execution.concurrency_key
+      })
+    else
+      state
+    end
+  end
+
+  # A no-op for an execution that never held one (never assigned, or
+  # declaring no limit), which is every completion but a holder's.
+  defp release_concurrency_permit(state, execution_id) do
+    if Map.has_key?(state.concurrency_permits, execution_id) do
+      # A completion that only frees a permit doesn't necessarily tick —
+      # the result-time tick has already happened by the time a draining
+      # execution completes — so whatever was gated on it would otherwise
+      # wait for the next unrelated tick.
+      send(self(), :tick)
+
+      state
+      |> Map.put(:concurrency_permits, Map.delete(state.concurrency_permits, execution_id))
+      |> Map.put(:concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
+    else
+      Map.put(state, :concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
+    end
+  end
+
+  defp increment_concurrency_count(state, counts, execution) do
+    if execution.concurrency_key do
+      Map.update(
+        counts,
+        concurrency_scope(state, execution.workspace_id, execution.concurrency_key),
+        1,
+        &(&1 + 1)
+      )
+    else
+      counts
+    end
+  end
+
+  # Emit queue-topic dependency updates for executions that have just become
+  # gated, or have just stopped being. Transitions only — re-sending an
+  # unchanged gate every tick would be pure noise on a busy queue.
+  defp update_concurrency_gates(state, gated_now) do
+    changed =
+      Enum.uniq(Map.keys(gated_now) ++ Map.keys(state.concurrency_gated))
+      |> Enum.reject(&(Map.get(gated_now, &1) == Map.get(state.concurrency_gated, &1)))
+
+    state = Map.put(state, :concurrency_gated, gated_now)
+
+    Enum.reduce(changed, state, fn execution_id, state ->
+      notify_queue_dependencies(state, execution_id)
+    end)
+  end
+
+  # The queue's answer to "why isn't this running?": whatever the execution
+  # is waiting on, plus the concurrency gate when it's holding it back.
+  defp notify_queue_dependencies(state, execution_id) do
+    with {:ok, {r, s, a}} <- Runs.get_execution_key(state.db, execution_id),
+         {:ok, workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id) do
+      notify_listeners(
+        state,
+        {:queue, workspace_external_id(state, workspace_id)},
+        {:dependencies, execution_external_id(r, s, a),
+         build_execution_queue_dependencies(state, execution_id)}
+      )
+    else
+      _ -> state
+    end
+  end
+
+  defp build_execution_queue_dependencies(state, execution_id) do
+    pending = Map.get(state.pending_dependencies, execution_id, MapSet.new())
+
+    queue_dependencies(state.db, pending) ++
+      List.wrap(Map.get(state.concurrency_gated, execution_id))
   end
 
   # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.

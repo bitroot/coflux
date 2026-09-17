@@ -14,6 +14,7 @@ from .target import (
     Target,
     _to_ms,
     serialize_cache,
+    serialize_concurrency,
     serialize_defer,
     serialize_retries,
     serialize_streams,
@@ -168,6 +169,11 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
 
     if definition.streams is not None:
         result["streams"] = serialize_streams(definition.streams)
+
+    if definition.concurrency:
+        result["concurrency"] = serialize_concurrency(
+            definition.concurrency, definition.parameters
+        )
 
     return result
 

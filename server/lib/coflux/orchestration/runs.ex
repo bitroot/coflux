@@ -21,6 +21,8 @@ defmodule Coflux.Orchestration.Runs do
         cache_key,
         defer_key,
         memo_key,
+        concurrency_key,
+        concurrency_limit,
         retry_limit,
         retry_backoff_min,
         retry_backoff_max,
@@ -55,6 +57,8 @@ defmodule Coflux.Orchestration.Runs do
         s.cache_key,
         s.defer_key,
         s.memo_key,
+        s.concurrency_key,
+        s.concurrency_limit,
         s.retry_limit,
         s.retry_backoff_min,
         s.retry_backoff_max,
@@ -389,6 +393,8 @@ defmodule Coflux.Orchestration.Runs do
     delay = Keyword.get(opts, :delay, 0)
     timeout = Keyword.get(opts, :timeout, 0)
     streams = Keyword.get(opts, :streams)
+    concurrency = Keyword.get(opts, :concurrency)
+    given_key = Keyword.get(opts, :concurrency_key)
     requires = Keyword.get(opts, :requires) || %{}
 
     # Calculate execute_after from delay
@@ -403,10 +409,10 @@ defmodule Coflux.Orchestration.Runs do
         end
       end
 
-    {step_id, step_number, execution_id, attempt, now, memo_hit, cache_key} =
+    {step_id, step_number, execution_id, attempt, now, memo_hit, cache_key, concurrency_key} =
       case memoised_execution do
         {step_number, execution_id, attempt, now} ->
-          {nil, step_number, execution_id, attempt, now, true, nil}
+          {nil, step_number, execution_id, attempt, now, true, nil, nil}
 
         nil ->
           cache_key =
@@ -438,6 +444,30 @@ defmodule Coflux.Orchestration.Runs do
             if defer,
               do: build_key(defer.params, arguments, "#{module}:#{target}")
 
+          # The limit is stored alongside the key rather than folded into
+          # it, so targets sharing a namespace are each admitted against
+          # their own declaration. `params: false` keys on the namespace
+          # alone, so the whole target is one pool.
+          #
+          # `:concurrency_key` is the already-built form, passed when a
+          # step inherits a gate rather than declaring one (spawning a
+          # workflow as a child run).
+          {concurrency_key, concurrency_limit} =
+            cond do
+              given_key ->
+                {given_key, Keyword.get(opts, :concurrency_limit, 0)}
+
+              concurrency ->
+                {build_key(
+                   concurrency.params || [],
+                   arguments,
+                   concurrency.namespace || "#{module}:#{target}"
+                 ), concurrency.limit}
+
+              true ->
+                {nil, 0}
+            end
+
           # streams_buffer column: NULL = unset (no streams config),
           # -1 = unbounded (nil buffer in a set config), N >= 0 = bounded.
           streams_buffer = if streams, do: streams[:buffer] || -1
@@ -467,6 +497,8 @@ defmodule Coflux.Orchestration.Runs do
               requires_tag_set_id,
               streams_buffer,
               streams_timeout_ms,
+              concurrency_key,
+              concurrency_limit,
               now
             )
 
@@ -488,7 +520,7 @@ defmodule Coflux.Orchestration.Runs do
           {:ok, execution_id} =
             insert_execution(db, step_id, attempt, workspace_id, execute_after, now)
 
-          {step_id, step_number, execution_id, attempt, now, false, cache_key}
+          {step_id, step_number, execution_id, attempt, now, false, cache_key, concurrency_key}
       end
 
     child_added =
@@ -507,6 +539,7 @@ defmodule Coflux.Orchestration.Runs do
        attempt: attempt,
        created_at: now,
        cache_key: cache_key,
+       concurrency_key: concurrency_key,
        memo_key: memo_key,
        memo_hit: memo_hit,
        child_added: child_added
@@ -667,6 +700,8 @@ defmodule Coflux.Orchestration.Runs do
         s.cache_key,
         s.cache_config_id,
         s.defer_key,
+        s.concurrency_key,
+        s.concurrency_limit,
         s.parent_id,
         s.requires_tag_set_id,
         run.requires_tag_set_id AS run_requires_tag_set_id,
@@ -973,6 +1008,8 @@ defmodule Coflux.Orchestration.Runs do
         cache_key,
         defer_key,
         memo_key,
+        concurrency_key,
+        concurrency_limit,
         retry_limit,
         retry_backoff_min,
         retry_backoff_max,
@@ -1386,6 +1423,8 @@ defmodule Coflux.Orchestration.Runs do
          requires_tag_set_id,
          streams_buffer,
          streams_timeout_ms,
+         concurrency_key,
+         concurrency_limit,
          now
        ) do
     {:ok, step_number} = get_next_step_number(db, run_id)
@@ -1412,6 +1451,8 @@ defmodule Coflux.Orchestration.Runs do
            requires_tag_set_id: requires_tag_set_id,
            streams_buffer: streams_buffer,
            streams_timeout_ms: streams_timeout_ms,
+           concurrency_key: if(concurrency_key, do: {:blob, concurrency_key}),
+           concurrency_limit: concurrency_limit,
            created_at: now
          }) do
       {:ok, step_id} ->
@@ -1601,6 +1642,25 @@ defmodule Coflux.Orchestration.Runs do
     case query(db, "SELECT external_id FROM runs") do
       {:ok, rows} -> {:ok, Enum.map(rows, fn {ext_id} -> ext_id end)}
     end
+  end
+
+  # Executions that hold a concurrency permit: assigned to a worker, not
+  # yet completed, and declaring a key. This is the source of truth the
+  # scheduler's in-memory ledger is rebuilt from at boot, so a permit can
+  # never be leaked by a restart.
+  def get_held_concurrency_permits(db) do
+    query(
+      db,
+      """
+      SELECT e.id, e.workspace_id, s.concurrency_key
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN assignments AS a ON a.execution_id = e.id
+      LEFT JOIN completions AS c ON c.execution_id = e.id
+      WHERE s.concurrency_key IS NOT NULL AND c.created_at IS NULL
+      """,
+      {}
+    )
   end
 
   def get_all_cache_keys(db) do

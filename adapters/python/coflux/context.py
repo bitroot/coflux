@@ -200,6 +200,7 @@ class ExecutorContext:
         requires: dict[str, list[str]] | None = None,
         timeout: int = 0,
         streams: dict[str, Any] | None = None,
+        concurrency: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 
@@ -225,6 +226,7 @@ class ExecutorContext:
             requires=requires,
             timeout=timeout,
             streams=streams,
+            concurrency=concurrency,
         )
         return self._wait_response(request_id)
 

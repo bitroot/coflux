@@ -517,6 +517,7 @@ defmodule Coflux.Handlers.Api do
              requires: {"requires", &parse_tag_set/1},
              memo: {"memo", &parse_boolean(&1, optional: true)},
              streams: {"streams", &parse_streams_config/1},
+             concurrency: {"concurrency", &parse_concurrency/1},
              idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)}
            }
          ) do
@@ -539,6 +540,7 @@ defmodule Coflux.Handlers.Api do
                requires: arguments[:requires],
                memo: arguments[:memo],
                streams: arguments[:streams],
+               concurrency: arguments[:concurrency],
                idempotency_key: arguments[:idempotency_key]
              ) do
           {:ok, run_id, step_number, execution_external_id} ->
@@ -1862,6 +1864,33 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # A concurrency limit: how many executions sharing the key may run at
+  # once. ``params`` selects the argument values the key is built from
+  # (false = none, true = all, or a list of indexes); ``namespace``
+  # defaults server-side to "module:target".
+  defp parse_concurrency(value) do
+    cond do
+      is_nil(value) ->
+        {:ok, nil}
+
+      is_map(value) ->
+        with {:ok, limit} <- parse_integer(Map.get(value, "limit")),
+             {:ok, params} <- parse_indexes(Map.get(value, "params"), allow_boolean: true),
+             # TODO: regex
+             {:ok, namespace} <-
+               parse_string(Map.get(value, "namespace"), optional: true, max_length: 200) do
+          if limit >= 1 do
+            {:ok, %{limit: limit, params: params, namespace: namespace}}
+          else
+            {:error, :invalid}
+          end
+        end
+
+      true ->
+        {:error, :invalid}
+    end
+  end
+
   defp parse_retries(value) do
     cond do
       is_nil(value) ->
@@ -1919,6 +1948,7 @@ defmodule Coflux.Handlers.Api do
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, memo} <- parse_boolean(Map.get(value, "memo"), optional: true),
            {:ok, streams} <- parse_manifest_streams(Map.get(value, "streams")),
+           {:ok, concurrency} <- parse_concurrency(Map.get(value, "concurrency")),
            {:ok, instruction} <-
              parse_string(
                Map.get(value, "instruction"),
@@ -1938,6 +1968,7 @@ defmodule Coflux.Handlers.Api do
            requires: requires,
            memo: memo == true,
            streams: streams,
+           concurrency: concurrency,
            instruction: instruction
          }}
       else

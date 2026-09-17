@@ -193,9 +193,20 @@ defmodule Coflux.Topics.Workflow do
         timeout: workflow.timeout,
         requires: workflow.requires,
         memo: workflow.memo,
-        streams: build_streams_configuration(workflow[:streams])
+        streams: build_streams_configuration(workflow[:streams]),
+        concurrency: build_concurrency_configuration(workflow[:concurrency])
       }
     end
+  end
+
+  defp build_concurrency_configuration(nil), do: nil
+
+  defp build_concurrency_configuration(concurrency) do
+    %{
+      limit: concurrency.limit,
+      params: concurrency.params,
+      namespace: concurrency.namespace
+    }
   end
 
   defp build_streams_configuration(nil), do: nil

@@ -296,7 +296,11 @@ def test_submit_fills_in_omitted_defaults(worker):
         workflow(
             "test",
             "main",
-            parameters=["x", {"name": "y", "default": "1"}, {"name": "z", "default": "2"}],
+            parameters=[
+                "x",
+                {"name": "y", "default": "1"},
+                {"name": "z", "default": "2"},
+            ],
         ),
     ]
 
@@ -316,7 +320,11 @@ def test_submit_keeps_explicit_values(worker):
         workflow(
             "test",
             "main",
-            parameters=["x", {"name": "y", "default": "1"}, {"name": "z", "default": "2"}],
+            parameters=[
+                "x",
+                {"name": "y", "default": "1"},
+                {"name": "z", "default": "2"},
+            ],
         ),
     ]
 

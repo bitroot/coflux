@@ -151,8 +151,8 @@ The two halves compose. Have the workflow *submit* the consumer rather than wait
 ```python
 @cf.workflow()
 def events_pipeline():
-    events = tail_events()                 # returns once the stream is registered
-    return handle_events.submit(events)    # a handle, not a result
+    events = tail_events()  # returns once the stream is registered
+    return handle_events.submit(events)  # a handle, not a result
 ```
 
 Calling the producer doesn't block — a generator task's result *is* the stream reference, recorded before the first item — and submitting the consumer doesn't either, so the workflow step finishes immediately. Between bursts the producer is suspended, the consumer is suspended, and the workflow is done: nothing is running, and the consumer is only scheduled again once there is something for it to read.

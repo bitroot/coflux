@@ -199,6 +199,7 @@ def request_submit_execution(
     requires: dict[str, list[str]] | None = None,
     timeout: int = 0,
     streams: dict[str, Any] | None = None,
+    concurrency: dict[str, Any] | None = None,
 ) -> int:
     """Request to submit a child execution."""
     params: dict[str, Any] = {
@@ -231,6 +232,8 @@ def request_submit_execution(
         params["timeout"] = timeout
     if streams is not None:
         params["streams"] = streams
+    if concurrency is not None:
+        params["concurrency"] = concurrency
     return get_protocol().send_request("submit_execution", params)
 
 

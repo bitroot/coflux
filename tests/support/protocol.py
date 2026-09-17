@@ -68,6 +68,7 @@ def submit_execution_request(
     retries=None,
     requires=None,
     defer_config=None,
+    concurrency_config=None,
     recurrent=False,
     wait_for=None,
     timeout=0,
@@ -94,6 +95,8 @@ def submit_execution_request(
         params["requires"] = requires
     if defer_config is not None:
         params["defer"] = defer_config
+    if concurrency_config is not None:
+        params["concurrency"] = concurrency_config
     if recurrent:
         params["recurrent"] = True
     if wait_for is not None:

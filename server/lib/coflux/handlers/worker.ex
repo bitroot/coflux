@@ -161,6 +161,7 @@ defmodule Coflux.Handlers.Worker do
 
         timeout = Enum.at(rest, 0) || 0
         streams = parse_streams(Enum.at(rest, 1))
+        concurrency = parse_concurrency(Enum.at(rest, 2))
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
@@ -180,7 +181,8 @@ defmodule Coflux.Handlers.Worker do
                  recurrent: recurrent == true,
                  requires: requires,
                  timeout: timeout,
-                 streams: streams
+                 streams: streams,
+                 concurrency: concurrency
                ) do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
@@ -1027,6 +1029,17 @@ defmodule Coflux.Handlers.Worker do
     if value do
       # TODO: validate
       %{params: Map.fetch!(value, "params")}
+    end
+  end
+
+  def parse_concurrency(value) do
+    if value do
+      # TODO: validate
+      %{
+        limit: Map.fetch!(value, "limit"),
+        params: Map.get(value, "params") || false,
+        namespace: Map.get(value, "namespace")
+      }
     end
   end
 

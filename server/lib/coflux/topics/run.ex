@@ -59,6 +59,7 @@ defmodule Coflux.Topics.Run do
         cacheConfig: build_cache_config(step.cache_config),
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
+        concurrency: build_concurrency(step),
         retries: build_retries(step.retries),
         recurrent: step.recurrent,
         timeout: step.timeout,
@@ -482,6 +483,7 @@ defmodule Coflux.Topics.Run do
              cacheConfig: build_cache_config(step.cache_config),
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
+             concurrency: build_concurrency(step),
              retries: build_retries(step),
              recurrent: step.recurrent == 1,
              timeout: step.timeout,
@@ -788,6 +790,12 @@ defmodule Coflux.Topics.Run do
         namespace: cache_config.namespace,
         version: cache_config.version
       }
+    end
+  end
+
+  defp build_concurrency(step) do
+    if step.concurrency_key do
+      %{limit: step.concurrency_limit, key: build_key(step.concurrency_key)}
     end
   end
 

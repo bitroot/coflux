@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "caching",
         "memoizing",
         "deferring",
+        "limits",
         "suspense",
         "checkpoints",
         "streams",
