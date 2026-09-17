@@ -96,18 +96,20 @@ __all__ = [  # noqa: RUF022
 # User-facing context functions
 
 
-def group(name: str | None = None):
+def group(name: str | None = None, *, concurrency: int = 0):
     """Context manager for grouping child executions.
 
     All child executions submitted within this context will be grouped
-    together in the UI.
+    together in the UI. Passing ``concurrency`` caps how many of the
+    children submitted in the group may run at once (``0``, the default,
+    means no limit); the rest wait in the queue without occupying a worker.
 
     Example:
-        with group("data processing"):
+        with group("data processing", concurrency=2):
             process_chunk.submit(chunk1)
             process_chunk.submit(chunk2)
     """
-    return get_context().group(name)
+    return get_context().group(name, concurrency=concurrency)
 
 
 def suspense(timeout: float | None = None):

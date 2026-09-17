@@ -1497,13 +1497,13 @@ func (w *Worker) UploadBlob(ctx context.Context, executionID, sourcePath string)
 	return key, nil
 }
 
-func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error {
+func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID int, name *string, concurrency int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Python params: (parent_id, group_id, name)
-	return conn.Notify("register_group", executionID, groupID, name)
+	// Server params: (parent_id, group_id, name, concurrency)
+	return conn.Notify("register_group", executionID, groupID, name, concurrency)
 }
 
 // StreamRegister declares an execution's k-th stream to the server, which

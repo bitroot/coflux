@@ -1419,6 +1419,8 @@ defmodule Coflux.Orchestration.Server do
          created_at: created_at,
          cache_key: cache_key,
          concurrency_key: concurrency_key,
+         group_key: group_key,
+         group_limit: group_limit,
          memo_key: memo_key,
          memo_hit: memo_hit,
          child_added: child_added
@@ -1503,6 +1505,8 @@ defmodule Coflux.Orchestration.Server do
                  memo_key: memo_key,
                  concurrency_key: concurrency_key,
                  concurrency_limit: concurrency_limit,
+                 group_key: group_key,
+                 group_limit: group_limit,
                  retries: retries,
                  recurrent: recurrent,
                  timeout: timeout,
@@ -1589,17 +1593,21 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:register_group, parent_external_id, group_id, name}, _from, state) do
+  def handle_call(
+        {:register_group, parent_external_id, group_id, name, concurrency},
+        _from,
+        state
+      ) do
     parent_id = Map.fetch!(state.execution_ids, parent_external_id)
     {:ok, {run_external_id}} = Runs.get_external_run_id_for_execution(state.db, parent_id)
 
-    case Runs.create_group(state.db, parent_id, group_id, name) do
+    case Runs.create_group(state.db, parent_id, group_id, name, concurrency) do
       :ok ->
         state =
           state
           |> notify_listeners(
             {:run, run_external_id},
-            {:group, parent_external_id, group_id, name}
+            {:group, parent_external_id, group_id, name, concurrency}
           )
           |> flush_notifications()
 
@@ -3482,11 +3490,11 @@ defmodule Coflux.Orchestration.Server do
                   # never occupies a worker slot — and, by staying out of
                   # `unassigned`, never triggers a pool launch either.
                   case concurrency_gate(state, counts, execution) do
-                    gate when not is_nil(gate) ->
+                    gate when gate != [] ->
                       {state, assigned, unassigned, counts,
                        Map.put(gated, execution.execution_id, gate)}
 
-                    nil ->
+                    [] ->
                       case choose_session(state, execution, requires) do
                         nil ->
                           {state, assigned, [execution | unassigned], counts, gated}
@@ -3622,7 +3630,9 @@ defmodule Coflux.Orchestration.Server do
                            # the params it was derived from — the arguments
                            # are the same, so it's the same key either way.
                            concurrency_key: execution.concurrency_key,
-                           concurrency_limit: execution.concurrency_limit
+                           concurrency_limit: execution.concurrency_limit,
+                           group_key: execution.group_key,
+                           group_limit: execution.group_limit
                          ) do
                       {:ok, _external_run_id, _external_step_id, spawned_execution_id, state} ->
                         {:ok, state} =
@@ -5820,6 +5830,8 @@ defmodule Coflux.Orchestration.Server do
            memo_key: step.memo_key,
            concurrency_key: step.concurrency_key,
            concurrency_limit: step.concurrency_limit,
+           group_key: step.group_key,
+           group_limit: step.group_limit,
            retry_limit: step.retry_limit,
            retry_backoff_min: step.retry_backoff_min,
            retry_backoff_max: step.retry_backoff_max,
@@ -5853,8 +5865,10 @@ defmodule Coflux.Orchestration.Server do
 
                execution_groups =
                  groups
-                 |> Enum.filter(fn {e_id, _, _} -> e_id == execution_id end)
-                 |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
+                 |> Enum.filter(fn {e_id, _, _, _} -> e_id == execution_id end)
+                 |> Map.new(fn {_, group_id, name, concurrency} ->
+                   {group_id, %{name: name, concurrency: concurrency}}
+                 end)
 
                # TODO: load assets in one query
                {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
@@ -8028,17 +8042,41 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Rebuild the concurrency ledger from the database: every execution with
-  # an assignment and no completion holds a permit.
+  # an assignment and no completion holds a permit for each key it declares.
   defp load_concurrency_permits(state) do
     {:ok, permits} = Runs.get_held_concurrency_permits(state.db)
 
     Map.put(
       state,
       :concurrency_permits,
-      Map.new(permits, fn {execution_id, workspace_id, key} ->
-        {execution_id, %{workspace_id: workspace_id, key: key}}
+      Map.new(permits, fn {execution_id, workspace_id, concurrency_key, group_key} ->
+        {execution_id,
+         %{
+           workspace_id: workspace_id,
+           keys: Enum.reject([concurrency_key, group_key], &is_nil/1)
+         }}
       end)
     )
+  end
+
+  # An execution can be subject to two limits at once: its task's (a blob
+  # key hashed from namespace and arguments) and its group's (a string
+  # naming the parent execution), so the two never collide in the counts.
+  # Each is judged against its own limit; admission needs room in all.
+  defp execution_requirements(execution) do
+    [
+      {:concurrency, execution.concurrency_key, execution.concurrency_limit},
+      {:group, execution.group_key, execution.group_limit}
+    ]
+    |> Enum.reject(fn {_type, key, limit} -> is_nil(key) or limit == 0 end)
+    |> Enum.map(fn {type, key, limit} -> %{type: type, key: key, limit: limit} end)
+  end
+
+  # The keys an execution holds while it runs — whichever of the two it
+  # declares. Empty for an execution under no limit, which never enters
+  # the ledger.
+  defp permit_keys(execution) do
+    Enum.reject([execution.concurrency_key, execution.group_key], &is_nil/1)
   end
 
   # Permits are counted per {root workspace, key}. The limit spans the whole
@@ -8052,12 +8090,11 @@ defmodule Coflux.Orchestration.Server do
   # %{{root_workspace_id, key} => count}, computed once per tick.
   defp concurrency_held_counts(state) do
     Enum.reduce(state.concurrency_permits, %{}, fn {_execution_id, permit}, counts ->
-      Map.update(
-        counts,
-        {root_workspace_id(state, permit.workspace_id), permit.key},
-        1,
-        &(&1 + 1)
-      )
+      root_workspace_id = root_workspace_id(state, permit.workspace_id)
+
+      Enum.reduce(permit.keys, counts, fn key, counts ->
+        Map.update(counts, {root_workspace_id, key}, 1, &(&1 + 1))
+      end)
     end)
   end
 
@@ -8065,42 +8102,62 @@ defmodule Coflux.Orchestration.Server do
     {root_workspace_id(state, workspace_id), key}
   end
 
-  # nil when the execution declares no limit, or when there's room for it.
-  # Otherwise the queue-topic dependency map naming the current holders.
+  # Empty when the execution declares no limit, or when there's room under
+  # every limit it declares. Otherwise one queue-topic dependency map per
+  # limit that lacks room, each naming the current holders — so an
+  # execution gated on both its task and its group reports both, and
+  # neither is reserved while waiting on the other.
   #
   # The limit compared against is the execution's own, not the holders' —
   # targets sharing a namespace may each declare a different one, and each
   # is judged by what it asked for.
   defp concurrency_gate(state, counts, execution) do
-    key = execution.concurrency_key
+    execution
+    |> execution_requirements()
+    |> Enum.reject(fn requirement ->
+      scope = concurrency_scope(state, execution.workspace_id, requirement.key)
+      Map.get(counts, scope, 0) < requirement.limit
+    end)
+    |> Enum.map(fn requirement ->
+      scope = concurrency_scope(state, execution.workspace_id, requirement.key)
 
-    if key && execution.concurrency_limit > 0 do
-      scope = concurrency_scope(state, execution.workspace_id, key)
+      holders =
+        state.concurrency_permits
+        |> Enum.filter(fn {_execution_id, permit} ->
+          requirement.key in permit.keys and
+            concurrency_scope(state, permit.workspace_id, requirement.key) == scope
+        end)
+        |> Enum.map(fn {holder_id, _permit} ->
+          case Runs.get_execution_key(state.db, holder_id) do
+            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+            {:error, _} -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
 
-      if Map.get(counts, scope, 0) < execution.concurrency_limit do
-        nil
-      else
-        holders =
-          state.concurrency_permits
-          |> Enum.filter(fn {_execution_id, permit} ->
-            concurrency_scope(state, permit.workspace_id, permit.key) == scope
-          end)
-          |> Enum.map(fn {holder_id, _permit} ->
-            case Runs.get_execution_key(state.db, holder_id) do
-              {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-              {:error, _} -> nil
-            end
-          end)
-          |> Enum.reject(&is_nil/1)
+      build_gate(requirement, holders)
+    end)
+  end
 
-        %{
-          type: "concurrency",
-          key: build_concurrency_key(key),
-          limit: execution.concurrency_limit,
-          holders: holders
-        }
-      end
-    end
+  defp build_gate(%{type: :concurrency, key: key, limit: limit}, holders) do
+    %{type: "concurrency", key: build_concurrency_key(key), limit: limit, holders: holders}
+  end
+
+  # The group key is readable as it stands — "<parent execution>/<group>" —
+  # so it's sent verbatim, split into its parts for the queue's benefit.
+  # The group's name isn't carried: the run topic has it, and resolving it
+  # here would need a join the spawned-run case can't make.
+  defp build_gate(%{type: :group, key: key, limit: limit}, holders) do
+    [parent, group] = String.split(key, "/", parts: 2)
+
+    %{
+      type: "group",
+      key: key,
+      parent: parent,
+      group: String.to_integer(group),
+      limit: limit,
+      holders: holders
+    }
   end
 
   # Rendered like the run topic's cacheKey — a short hex prefix, enough to
@@ -8110,13 +8167,15 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp grant_concurrency_permit(state, execution) do
-    if execution.concurrency_key do
-      put_in(state, [Access.key(:concurrency_permits), execution.execution_id], %{
-        workspace_id: execution.workspace_id,
-        key: execution.concurrency_key
-      })
-    else
-      state
+    case permit_keys(execution) do
+      [] ->
+        state
+
+      keys ->
+        put_in(state, [Access.key(:concurrency_permits), execution.execution_id], %{
+          workspace_id: execution.workspace_id,
+          keys: keys
+        })
     end
   end
 
@@ -8139,16 +8198,9 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp increment_concurrency_count(state, counts, execution) do
-    if execution.concurrency_key do
-      Map.update(
-        counts,
-        concurrency_scope(state, execution.workspace_id, execution.concurrency_key),
-        1,
-        &(&1 + 1)
-      )
-    else
-      counts
-    end
+    Enum.reduce(permit_keys(execution), counts, fn key, counts ->
+      Map.update(counts, concurrency_scope(state, execution.workspace_id, key), 1, &(&1 + 1))
+    end)
   end
 
   # Emit queue-topic dependency updates for executions that have just become
@@ -8167,7 +8219,7 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # The queue's answer to "why isn't this running?": whatever the execution
-  # is waiting on, plus the concurrency gate when it's holding it back.
+  # is waiting on, plus each concurrency gate that's holding it back.
   defp notify_queue_dependencies(state, execution_id) do
     with {:ok, {r, s, a}} <- Runs.get_execution_key(state.db, execution_id),
          {:ok, workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id) do
@@ -8186,7 +8238,7 @@ defmodule Coflux.Orchestration.Server do
     pending = Map.get(state.pending_dependencies, execution_id, MapSet.new())
 
     queue_dependencies(state.db, pending) ++
-      List.wrap(Map.get(state.concurrency_gated, execution_id))
+      Map.get(state.concurrency_gated, execution_id, [])
   end
 
   # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.

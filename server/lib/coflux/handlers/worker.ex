@@ -123,7 +123,16 @@ defmodule Coflux.Handlers.Worker do
         {[], state}
 
       "register_group" ->
-        [parent_id, group_id, name] = message["params"]
+        [parent_id, group_id, name | rest] = message["params"]
+
+        # The group's limit on how many of its children run at once. Absent
+        # from an older CLI; anything that isn't a positive integer means
+        # no limit, validated here rather than trusted downstream.
+        concurrency =
+          case Enum.at(rest, 0) do
+            c when is_integer(c) and c > 0 -> c
+            _ -> 0
+          end
 
         if is_recognised_execution?(parent_id, state) do
           case(
@@ -131,7 +140,8 @@ defmodule Coflux.Handlers.Worker do
               state.project_id,
               parent_id,
               group_id,
-              name
+              name,
+              concurrency
             )
           ) do
             :ok -> {[], state}

@@ -60,6 +60,7 @@ defmodule Coflux.Topics.Run do
         cacheKey: build_key(step.cache_key),
         memoKey: build_key(step.memo_key),
         concurrency: build_concurrency(step),
+        group: build_group(step),
         retries: build_retries(step.retries),
         recurrent: step.recurrent,
         timeout: step.timeout,
@@ -137,9 +138,15 @@ defmodule Coflux.Topics.Run do
     end)
   end
 
-  defp process_notification(topic, {:group, execution_external_id, group_id, name}) do
+  defp process_notification(
+         topic,
+         {:group, execution_external_id, group_id, name, concurrency}
+       ) do
     update_execution(topic, execution_external_id, fn topic, base_path ->
-      Topic.set(topic, base_path ++ [:groups, Integer.to_string(group_id)], name)
+      Topic.set(topic, base_path ++ [:groups, Integer.to_string(group_id)], %{
+        name: name,
+        concurrency: concurrency
+      })
     end)
   end
 
@@ -484,6 +491,7 @@ defmodule Coflux.Topics.Run do
              cacheKey: build_key(step.cache_key),
              memoKey: build_key(step.memo_key),
              concurrency: build_concurrency(step),
+             group: build_group(step),
              retries: build_retries(step),
              recurrent: step.recurrent == 1,
              timeout: step.timeout,
@@ -796,6 +804,14 @@ defmodule Coflux.Topics.Run do
   defp build_concurrency(step) do
     if step.concurrency_key do
       %{limit: step.concurrency_limit, key: build_key(step.concurrency_key)}
+    end
+  end
+
+  # The group limit the step counts against, if any. The key is readable
+  # as it stands ("<parent execution>/<group id>"), so no hex prefix.
+  defp build_group(step) do
+    if step.group_key do
+      %{limit: step.group_limit, key: step.group_key}
     end
   end
 

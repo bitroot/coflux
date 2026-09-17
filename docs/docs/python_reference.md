@@ -459,15 +459,20 @@ Wraps a sized iterable and automatically records a progress metric as items are 
 
 ## Context functions
 
-### `group(name=None)`
+### `group(name=None, *, concurrency=0)`
 
-Context manager for visually grouping child executions in the graph view. Useful for organising steps in complex workflows.
+Context manager for grouping child executions in the graph view, and optionally capping how many of them run at once. See [groups](./groups.md).
 
 ```python
-with cf.group("batch processing"):
+with cf.group("batch processing", concurrency=4):
     for item in items:
         process.submit(item)
 ```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str \| None` | `None` | Label for the group in Studio. |
+| `concurrency` | `int` | `0` | At most this many of the group's children run at once. `0` means no limit. Direct children only; scoped to this execution of the caller. |
 
 ### `suspense(timeout=None)`
 

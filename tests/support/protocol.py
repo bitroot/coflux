@@ -259,10 +259,14 @@ def flush_request(request_id, execution_id):
     }
 
 
-def register_group_notification(execution_id, group_id, name=None):
+def register_group_notification(execution_id, group_id, name=None, concurrency=None):
+    """``concurrency`` caps how many of the group's children run at once;
+    omitted (or 0) means no limit."""
     params = {"execution_id": execution_id, "group_id": group_id}
     if name is not None:
         params["name"] = name
+    if concurrency is not None:
+        params["concurrency"] = concurrency
     return {"method": "register_group", "params": params}
 
 

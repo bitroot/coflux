@@ -435,16 +435,20 @@ def send_register_group(
     execution_id: str,
     group_id: int,
     name: str | None = None,
+    concurrency: int = 0,
 ) -> None:
-    """Register a group for organizing child executions."""
-    get_protocol().send_message(
-        "register_group",
-        {
-            "execution_id": execution_id,
-            "group_id": group_id,
-            "name": name,
-        },
-    )
+    """Register a group for organizing child executions.
+
+    ``concurrency`` is the group's limit on how many of its children run
+    at once; only sent when set, since zero means no limit."""
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "group_id": group_id,
+        "name": name,
+    }
+    if concurrency > 0:
+        params["concurrency"] = concurrency
+    get_protocol().send_message("register_group", params)
 
 
 def send_define_metric(

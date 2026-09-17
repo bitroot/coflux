@@ -309,11 +309,13 @@ type FlushParams struct {
 	ExecutionID string `json:"execution_id"`
 }
 
-// RegisterGroupParams for register_group notification
+// RegisterGroupParams for register_group notification. Concurrency caps how
+// many of the group's children run at once; 0 (or absent) means no limit.
 type RegisterGroupParams struct {
 	ExecutionID string  `json:"execution_id"`
 	GroupID     int     `json:"group_id"`
 	Name        *string `json:"name,omitempty"`
+	Concurrency int     `json:"concurrency,omitempty"`
 }
 
 // StreamRegisterParams for the stream_register request. Position is the
