@@ -25,6 +25,7 @@ type TargetDefinition struct {
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
 	Streams     *StreamsConfig      `json:"streams,omitempty"`
+	Concurrency *ConcurrencyConfig  `json:"concurrency,omitempty"`
 	IsStub      bool                `json:"is_stub,omitempty"`
 	Instruction *string             `json:"instruction,omitempty"`
 }
@@ -64,6 +65,15 @@ type RetriesConfig struct {
 // DeferConfig describes defer behavior
 type DeferConfig struct {
 	Params any `json:"params,omitempty"` // true or list of param indices
+}
+
+// ConcurrencyConfig describes how many executions may run at once. The key
+// the limit applies to is the namespace (defaulting server-side to
+// "module:target") plus the selected argument values.
+type ConcurrencyConfig struct {
+	Limit     int     `json:"limit"`
+	Params    any     `json:"params,omitempty"` // true or list of param indices
+	Namespace *string `json:"namespace,omitempty"`
 }
 
 // ExecuteRequest is sent from CLI to executor to run a target
@@ -216,6 +226,7 @@ type SubmitExecutionParams struct {
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
 	Streams     *StreamsConfig      `json:"streams,omitempty"`
+	Concurrency *ConcurrencyConfig  `json:"concurrency,omitempty"`
 }
 
 // SubmitExecutionResult is the response to submit_execution
@@ -298,11 +309,13 @@ type FlushParams struct {
 	ExecutionID string `json:"execution_id"`
 }
 
-// RegisterGroupParams for register_group notification
+// RegisterGroupParams for register_group notification. Concurrency caps how
+// many of the group's children run at once; 0 (or absent) means no limit.
 type RegisterGroupParams struct {
 	ExecutionID string  `json:"execution_id"`
 	GroupID     int     `json:"group_id"`
 	Name        *string `json:"name,omitempty"`
+	Concurrency int     `json:"concurrency,omitempty"`
 }
 
 // StreamRegisterParams for the stream_register request. Position is the

@@ -27,6 +27,7 @@ Defines a workflow — the entry point for a run.
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | timedelta = 0,
     streams: Streams | None = None,
+    concurrency: int | Concurrency = 0,
 )
 ```
 
@@ -43,6 +44,7 @@ Defines a workflow — the entry point for a run.
 | `requires` | `dict \| None` | `None` | [Tag requirements](./pools.md#provides-accepts-and-requires) for worker routing (applied to entire run) |
 | `timeout` | `float \| timedelta` | `0` | Execution [timeout](./timeouts.md) in seconds (0 = no timeout) |
 | `streams` | `Streams \| None` | `None` | Default [stream](./streams.md) configuration (`buffer`, `timeout`) for streams the target produces: a generator body's stream, or any registered with `cf.stream()` |
+| `concurrency` | `int \| Concurrency` | `0` | [Concurrency limit](./concurrency.md) — how many executions may run at once (`0` = no limit) |
 
 ### `@task`
 
@@ -61,6 +63,7 @@ Defines a task — an operation that can be called from a workflow or another ta
     requires: dict[str, str | bool | list[str]] | None = None,
     timeout: float | timedelta = 0,
     streams: Streams | None = None,
+    concurrency: int | Concurrency = 0,
 )
 ```
 
@@ -87,6 +90,7 @@ References a target defined in another module, without importing it. This allows
     defer: bool | Defer = False,
     delay: float | timedelta = 0,
     memo: bool | Iterable[str] = False,
+    concurrency: int | Concurrency = 0,
 )
 ```
 
@@ -127,6 +131,7 @@ cached.submit(b)
 | `with_cache(cache)` | Override [caching](./caching.md). Pass `False` to disable. |
 | `with_retries(retries)` | Override [retries](./retries.md). Pass `0` or `False` to disable. |
 | `with_defer(defer)` | Override [defer](./deferring.md) configuration. |
+| `with_concurrency(concurrency)` | Override the [concurrency limit](./concurrency.md). Pass `0` to disable. |
 | `with_memo(memo)` | Override [memoisation](./memoizing.md) configuration. |
 | `with_delay(delay)` | Override submission delay (seconds or `timedelta`). |
 | `with_timeout(timeout)` | Override execution [timeout](./timeouts.md). |
@@ -269,6 +274,24 @@ cf.Defer(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `params` | `Iterable[str] \| str \| None` | `None` | Parameters to defer on (`None` = all) |
+
+### `Concurrency`
+
+Advanced concurrency limit configuration. See [concurrency limits](./concurrency.md).
+
+```python
+cf.Concurrency(
+    limit: int,
+    params: bool | Iterable[str] | str = False,
+    namespace: str | None = None,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | `int` | required | Executions allowed at once (must be `>= 1`) |
+| `params` | `bool \| Iterable[str] \| str` | `False` | Parameters the limit is keyed on (`False` = the target as a whole, `True` = all) |
+| `namespace` | `str \| None` | `None` | Pool to draw the limit from (defaults to `"{module}:{target}"`) |
 
 ### `Retries`
 
@@ -436,15 +459,20 @@ Wraps a sized iterable and automatically records a progress metric as items are 
 
 ## Context functions
 
-### `group(name=None)`
+### `group(name=None, *, concurrency=0)`
 
-Context manager for visually grouping child executions in the graph view. Useful for organising steps in complex workflows.
+Context manager for grouping child executions in the graph view, and optionally capping how many of them run at once. See [groups](./groups.md).
 
 ```python
-with cf.group("batch processing"):
+with cf.group("batch processing", concurrency=4):
     for item in items:
         process.submit(item)
 ```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str \| None` | `None` | Label for the group in Studio. |
+| `concurrency` | `int` | `0` | At most this many of the group's children run at once. `0` means no limit. Direct children only; scoped to this execution of the caller. |
 
 ### `suspense(timeout=None)`
 

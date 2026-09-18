@@ -1045,7 +1045,23 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		streams = s
 	}
 
-	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams
+	// Concurrency config (limit + the key it applies to). nil when the
+	// target declares no limit.
+	var concurrencyConfig any
+	if params.Concurrency != nil {
+		c := map[string]any{
+			"limit":  params.Concurrency.Limit,
+			"params": params.Concurrency.Params,
+		}
+		if params.Concurrency.Namespace != nil {
+			c["namespace"] = *params.Concurrency.Namespace
+		} else {
+			c["namespace"] = nil
+		}
+		concurrencyConfig = c
+	}
+
+	// Server expects: module, target, type, arguments, parent_id, group_id, wait_for, cache, defer, memo, delay, retries, recurrent, requires, timeout, streams, concurrency
 	conn, err := w.requireConn()
 	if err != nil {
 		return nil, err
@@ -1067,6 +1083,7 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 		params.Requires,    // requires
 		timeout,            // timeout
 		streams,            // streams
+		concurrencyConfig,  // concurrency
 	)
 	if err != nil {
 		return nil, err
@@ -1480,13 +1497,13 @@ func (w *Worker) UploadBlob(ctx context.Context, executionID, sourcePath string)
 	return key, nil
 }
 
-func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error {
+func (w *Worker) RegisterGroup(ctx context.Context, executionID string, groupID int, name *string, concurrency int) error {
 	conn, err := w.requireConn()
 	if err != nil {
 		return err
 	}
-	// Python params: (parent_id, group_id, name)
-	return conn.Notify("register_group", executionID, groupID, name)
+	// Server params: (parent_id, group_id, name, concurrency)
+	return conn.Notify("register_group", executionID, groupID, name, concurrency)
 }
 
 // StreamRegister declares an execution's k-th stream to the server, which
@@ -2362,6 +2379,21 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			streams = m
 		}
 
+		// Build concurrency (nil if not set)
+		var concurrency any
+		if t.Concurrency != nil {
+			m := map[string]any{
+				"limit":  t.Concurrency.Limit,
+				"params": t.Concurrency.Params,
+			}
+			if t.Concurrency.Namespace != nil {
+				m["namespace"] = *t.Concurrency.Namespace
+			} else {
+				m["namespace"] = nil
+			}
+			concurrency = m
+		}
+
 		def := map[string]any{
 			"parameters":  buildParameters(t.Parameters),
 			"waitFor":     waitFor,
@@ -2375,6 +2407,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"instruction": instruction,
 			"memo":        t.Memo,
 			"streams":     streams,
+			"concurrency": concurrency,
 		}
 
 		manifests[t.Module][t.Name] = def

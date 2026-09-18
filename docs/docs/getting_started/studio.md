@@ -27,7 +27,7 @@ Studio can be used without creating an account. Creating an account allows you t
 
 Now that you have a workflow running, here are some areas to explore:
 
-- [Concurrency](/concurrency) — run tasks in parallel using `.submit()`.
+- [Parallelism](/parallelism) — run tasks in parallel using `.submit()`.
 - [Caching](/caching) — avoid re-computing results that haven't changed.
 - [Automatic retries](/retries) — handle transient failures gracefully.
 - [Assets](/assets) — persist and share files between tasks.

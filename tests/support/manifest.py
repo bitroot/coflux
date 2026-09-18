@@ -13,6 +13,7 @@ def _target(
     requires=None,
     timeout=None,
     streams=None,
+    concurrency=None,
 ):
     target = {
         "module": module,
@@ -42,6 +43,8 @@ def _target(
         target["timeout"] = timeout
     if streams is not None:
         target["streams"] = streams
+    if concurrency is not None:
+        target["concurrency"] = concurrency
     return target
 
 

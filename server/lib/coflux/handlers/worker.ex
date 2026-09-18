@@ -123,7 +123,16 @@ defmodule Coflux.Handlers.Worker do
         {[], state}
 
       "register_group" ->
-        [parent_id, group_id, name] = message["params"]
+        [parent_id, group_id, name | rest] = message["params"]
+
+        # The group's limit on how many of its children run at once. Absent
+        # from an older CLI; anything that isn't a positive integer means
+        # no limit, validated here rather than trusted downstream.
+        concurrency =
+          case Enum.at(rest, 0) do
+            c when is_integer(c) and c > 0 -> c
+            _ -> 0
+          end
 
         if is_recognised_execution?(parent_id, state) do
           case(
@@ -131,7 +140,8 @@ defmodule Coflux.Handlers.Worker do
               state.project_id,
               parent_id,
               group_id,
-              name
+              name,
+              concurrency
             )
           ) do
             :ok -> {[], state}
@@ -161,6 +171,7 @@ defmodule Coflux.Handlers.Worker do
 
         timeout = Enum.at(rest, 0) || 0
         streams = parse_streams(Enum.at(rest, 1))
+        concurrency = parse_concurrency(Enum.at(rest, 2))
 
         if is_recognised_execution?(parent_id, state) do
           case Orchestration.schedule_step(
@@ -180,7 +191,8 @@ defmodule Coflux.Handlers.Worker do
                  recurrent: recurrent == true,
                  requires: requires,
                  timeout: timeout,
-                 streams: streams
+                 streams: streams,
+                 concurrency: concurrency
                ) do
             {:ok, _run_id, _step_id, execution_external_id, metadata} ->
               result = [
@@ -1027,6 +1039,17 @@ defmodule Coflux.Handlers.Worker do
     if value do
       # TODO: validate
       %{params: Map.fetch!(value, "params")}
+    end
+  end
+
+  def parse_concurrency(value) do
+    if value do
+      # TODO: validate
+      %{
+        limit: Map.fetch!(value, "limit"),
+        params: Map.get(value, "params") || false,
+        namespace: Map.get(value, "namespace")
+      }
     end
   end
 

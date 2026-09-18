@@ -45,7 +45,7 @@ def my_workflow(n: int):
             my_task.submit(i)  # ←
 ```
 
-See the [concurrency](/concurrency) page for more details.
+See the [parallelism](/parallelism) page for more details.
 :::
 
 ## Map-reduce
@@ -90,3 +90,52 @@ def my_workflow():
         second_task()
     third_task()
 ```
+
+## Limiting concurrency within a group
+
+A group can also cap how many of the children submitted inside it run at once:
+
+```python
+@cf.workflow()
+def main(urls):
+    with cf.group("fetch", concurrency=2):
+        executions = [fetch.submit(url) for url in urls]
+    return [e.result() for e in executions]
+```
+
+At most two `fetch` executions run at a time. The rest stay in the queue without
+occupying a worker slot or causing a worker to be launched, exactly as with a
+[task-level limit](./concurrency.md). `concurrency=0` (the default) means no limit.
+
+The two kinds of limit are complementary. A task limit protects a *resource* (an
+API, an index) and applies to every execution of that task in the workspace,
+wherever it was submitted from. A group limit bounds *fan-out* from one caller,
+and applies only to that group. A child can be subject to both, in which case
+it's admitted only when both have room.
+
+Some details worth knowing:
+
+- **Direct children only.** Tasks that a child submits in turn aren't counted —
+  they belong to the child's own groups, if any. Siblings submitted outside the
+  group aren't counted either.
+- **One group of one parent execution.** Each execution of the parent registers
+  its own groups, so two runs of the same workflow don't share an allowance. If
+  the parent is retried or resumed after [suspending](./suspense.md), children
+  it submits afresh go in the new attempt's groups; re-submissions that are
+  [memo](./memoizing.md) hits keep the group they were first put in, so a limit
+  stays in force across a suspension.
+- **The limit outlives the parent.** Once the parent returns, its remaining
+  children are still admitted only as running siblings finish.
+- **Re-runs stay in the group.** A child re-run in the same workspace waits
+  behind its running siblings like any other. Re-run in a derived workspace, it
+  counts against the group only alongside other re-runs there — limits are
+  [per workspace](./concurrency.md#scope).
+- **Memo and cache hits don't count.** An execution that was started by some
+  other caller and merely linked into the group never took a place in it.
+- **Nested groups.** Only the innermost group applies to a child.
+- **Child workflows** submitted in the group are gated at the first step of the
+  run they spawn, so the limit means what it says for them too.
+
+As with a task limit, a child that holds a place in the group and then
+synchronously waits on a sibling that's gated behind it will wait forever. See
+[deadlocks](./concurrency.md#deadlocks).
