@@ -316,6 +316,13 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:subscribe_run, run_id, pid})
   end
 
+  # Per-execution detail (results, dependencies, checkpoints, assets...) and
+  # per-step arguments and streams, for the parts of a run a topic shows.
+  # `request` is `%{executions: [{step_number, attempt}], steps: [step_number]}`.
+  def get_run_details(project_id, run_id, request) do
+    call_server(project_id, {:get_run_details, run_id, request})
+  end
+
   def subscribe_stream_topic(project_id, stream_id, pid) do
     call_server(project_id, {:subscribe_stream_topic, stream_id, pid})
   end

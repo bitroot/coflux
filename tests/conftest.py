@@ -6,7 +6,13 @@ from contextlib import contextmanager
 
 import pytest
 from support import cli
-from support.helpers import ADAPTER_SCRIPT, managed_worker, poll_result
+from support.helpers import (
+    ADAPTER_SCRIPT,
+    get_topic,
+    managed_worker,
+    poll_result,
+    workspace_id,
+)
 from support.server import ManagedServer
 
 
@@ -48,8 +54,45 @@ class WorkerContext:
         )
 
     def inspect(self, run_id):
-        """Get the full run topic snapshot."""
+        """Get the run topic snapshot: the latest tree, with groups collapsed."""
         return cli.runs_inspect(run_id, host=self.host, workspace=self.workspace)
+
+    def inspect_execution(self, run_id, execution_id):
+        """Get the execution topic snapshot: what pinning the execution opens."""
+        return get_topic(
+            self.host,
+            "workspaces",
+            workspace_id(self.host, self.workspace),
+            "runs",
+            run_id,
+            "executions",
+            execution_id,
+        )
+
+    def inspect_steps(self, run_id):
+        """Get the steps topic snapshot: every step's structure, nothing collapsed."""
+        return get_topic(
+            self.host,
+            "workspaces",
+            workspace_id(self.host, self.workspace),
+            "runs",
+            run_id,
+            "steps",
+        )
+
+    def inspect_group(self, run_id, execution_id, group_id):
+        """Get the group topic snapshot: every member of the group."""
+        return get_topic(
+            self.host,
+            "workspaces",
+            workspace_id(self.host, self.workspace),
+            "runs",
+            run_id,
+            "executions",
+            execution_id,
+            "groups",
+            group_id,
+        )
 
     def queue(self):
         """Get the queue topic snapshot for the workspace."""

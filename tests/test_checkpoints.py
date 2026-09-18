@@ -513,20 +513,25 @@ def test_exposed_in_run_topic(worker):
         ex1.conn.complete(ex1.execution_id, value="done")
         ctx.result(run_id)
 
-        executions = next(iter(ctx.inspect(run_id)["steps"].values()))["executions"]
+        # The run topic expands the latest attempt; the first is opened by
+        # the execution topic.
+        step_id, step = next(iter(ctx.inspect(run_id)["steps"].items()))
+        second = step["executions"]["2"]
+        opened = ctx.inspect_execution(run_id, ex0.execution_id)
+        first = opened["steps"][step_id]["executions"]["1"]
 
         # Each attempt is reported as a transition: what it was handed when it
         # started, and what it ended up holding. The first attempt started from
         # nothing; the second inherited both names and reset one of them, so the
         # reset shows up as an absence on the "after" side only.
-        assert executions["1"]["checkpoints"]["before"] == {}
-        assert executions["1"]["checkpoints"]["after"]["cursor"]["data"] == 5
-        assert executions["1"]["checkpoints"]["after"]["batch"]["data"] == "a"
+        assert first["checkpoints"]["before"] == {}
+        assert first["checkpoints"]["after"]["cursor"]["data"] == 5
+        assert first["checkpoints"]["after"]["batch"]["data"] == "a"
 
-        assert executions["2"]["checkpoints"]["before"]["cursor"]["data"] == 5
-        assert executions["2"]["checkpoints"]["before"]["batch"]["data"] == "a"
-        assert executions["2"]["checkpoints"]["after"]["cursor"]["data"] == 5
-        assert "batch" not in executions["2"]["checkpoints"]["after"]
+        assert second["checkpoints"]["before"]["cursor"]["data"] == 5
+        assert second["checkpoints"]["before"]["batch"]["data"] == "a"
+        assert second["checkpoints"]["after"]["cursor"]["data"] == 5
+        assert "batch" not in second["checkpoints"]["after"]
 
 
 def test_run_topic_reports_untouched_state(worker):
