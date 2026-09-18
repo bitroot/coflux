@@ -340,8 +340,10 @@ def test_released_on_suspend_and_reacquired(worker):
         assert ctx.result(resp["runId"])["value"]["data"] == "done"
 
 
-def test_scope_spans_workspace_tree(worker):
-    """A holder in a base workspace gates a submission in a derived one."""
+def test_scope_is_per_workspace(worker):
+    """A limit is counted per workspace: a holder in a base workspace doesn't
+    gate a submission in a derived one, and a holder in the derived workspace
+    doesn't gate the base."""
     targets = [workflow("test", "limited", concurrency={"limit": 1})]
 
     with worker(targets, concurrency=4, workspace="base") as ctx_base:
@@ -351,16 +353,22 @@ def test_scope_spans_workspace_tree(worker):
 
         with worker(targets, concurrency=4, workspace="derived") as ctx_derived:
             base_resp = ctx_base.submit("test", "limited")
-            holder = ctx_base.executor.next_execute(timeout=5)
+            base_holder = ctx_base.executor.next_execute(timeout=5)
 
+            # The derived workspace isn't held up by the base's holder.
             derived_resp = ctx_derived.submit("test", "limited")
-            assert_nothing_dispatched(ctx_derived)
+            derived_holder = ctx_derived.executor.next_execute(timeout=5)
 
-            holder.conn.complete(holder.execution_id, value="base")
+            base_holder.conn.complete(base_holder.execution_id, value="base")
             assert ctx_base.result(base_resp["runId"])["value"]["data"] == "base"
 
-            waiter = ctx_derived.executor.next_execute(timeout=5)
-            waiter.conn.complete(waiter.execution_id, value="derived")
+            # And the base isn't held up by the derived workspace's holder.
+            base_resp2 = ctx_base.submit("test", "limited")
+            base_holder2 = ctx_base.executor.next_execute(timeout=5)
+            base_holder2.conn.complete(base_holder2.execution_id, value="base2")
+            assert ctx_base.result(base_resp2["runId"])["value"]["data"] == "base2"
+
+            derived_holder.conn.complete(derived_holder.execution_id, value="derived")
             assert (
                 ctx_derived.result(derived_resp["runId"])["value"]["data"] == "derived"
             )

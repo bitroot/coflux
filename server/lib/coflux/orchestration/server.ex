@@ -3588,7 +3588,7 @@ defmodule Coflux.Orchestration.Server do
                             end
 
                           state = grant_concurrency_permit(state, execution)
-                          counts = increment_concurrency_count(state, counts, execution)
+                          counts = increment_concurrency_count(counts, execution)
 
                           {state, [{execution, assigned_at} | assigned], unassigned, counts,
                            gated}
@@ -8079,28 +8079,21 @@ defmodule Coflux.Orchestration.Server do
     Enum.reject([execution.concurrency_key, execution.group_key], &is_nil/1)
   end
 
-  # Permits are counted per {root workspace, key}. The limit spans the whole
-  # workspace inheritance tree: a derived workspace re-running a step reaches
-  # the same external resource as the base it inherits from, so counting them
-  # separately would break the promise the limit makes.
-  defp root_workspace_id(state, workspace_id) do
-    List.last(get_workspace_chain(state, workspace_id))
-  end
-
-  # %{{root_workspace_id, key} => count}, computed once per tick.
+  # Permits are counted per {workspace, key}. Workspaces are scheduled
+  # independently — each has its own workers, pools and defer keys — and
+  # inheritance only shares results, so a limit is scoped the same way: a
+  # derived workspace neither waits behind its base nor holds it up.
+  #
+  # %{{workspace_id, key} => count}, computed once per tick.
   defp concurrency_held_counts(state) do
     Enum.reduce(state.concurrency_permits, %{}, fn {_execution_id, permit}, counts ->
-      root_workspace_id = root_workspace_id(state, permit.workspace_id)
-
       Enum.reduce(permit.keys, counts, fn key, counts ->
-        Map.update(counts, {root_workspace_id, key}, 1, &(&1 + 1))
+        Map.update(counts, concurrency_scope(permit.workspace_id, key), 1, &(&1 + 1))
       end)
     end)
   end
 
-  defp concurrency_scope(state, workspace_id, key) do
-    {root_workspace_id(state, workspace_id), key}
-  end
+  defp concurrency_scope(workspace_id, key), do: {workspace_id, key}
 
   # Empty when the execution declares no limit, or when there's room under
   # every limit it declares. Otherwise one queue-topic dependency map per
@@ -8115,17 +8108,17 @@ defmodule Coflux.Orchestration.Server do
     execution
     |> execution_requirements()
     |> Enum.reject(fn requirement ->
-      scope = concurrency_scope(state, execution.workspace_id, requirement.key)
+      scope = concurrency_scope(execution.workspace_id, requirement.key)
       Map.get(counts, scope, 0) < requirement.limit
     end)
     |> Enum.map(fn requirement ->
-      scope = concurrency_scope(state, execution.workspace_id, requirement.key)
+      scope = concurrency_scope(execution.workspace_id, requirement.key)
 
       holders =
         state.concurrency_permits
         |> Enum.filter(fn {_execution_id, permit} ->
           requirement.key in permit.keys and
-            concurrency_scope(state, permit.workspace_id, requirement.key) == scope
+            concurrency_scope(permit.workspace_id, requirement.key) == scope
         end)
         |> Enum.map(fn {holder_id, _permit} ->
           case Runs.get_execution_key(state.db, holder_id) do
@@ -8197,9 +8190,9 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp increment_concurrency_count(state, counts, execution) do
+  defp increment_concurrency_count(counts, execution) do
     Enum.reduce(permit_keys(execution), counts, fn key, counts ->
-      Map.update(counts, concurrency_scope(state, execution.workspace_id, key), 1, &(&1 + 1))
+      Map.update(counts, concurrency_scope(execution.workspace_id, key), 1, &(&1 + 1))
     end)
   end
 
