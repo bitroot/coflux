@@ -38,7 +38,7 @@ const sidebars: SidebarsConfig = {
         "caching",
         "memoizing",
         "deferring",
-        "limits",
+        "concurrency",
         "suspense",
         "checkpoints",
         "streams",

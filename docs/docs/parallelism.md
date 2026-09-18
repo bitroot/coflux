@@ -2,7 +2,7 @@
 
 :::info
 To cap how many executions of a task may run at once, see
-[concurrency limits](./limits.md).
+[concurrency limits](./concurrency.md).
 :::
 
 By default, when a task is called from another task (or workflow) - e.g., with `my_task()` - execution will block while waiting for the called task to complete. This is more intuitive for beginners, and also makes code more portable.

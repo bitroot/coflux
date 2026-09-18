@@ -44,7 +44,7 @@ Defines a workflow — the entry point for a run.
 | `requires` | `dict \| None` | `None` | [Tag requirements](./pools.md#provides-accepts-and-requires) for worker routing (applied to entire run) |
 | `timeout` | `float \| timedelta` | `0` | Execution [timeout](./timeouts.md) in seconds (0 = no timeout) |
 | `streams` | `Streams \| None` | `None` | Default [stream](./streams.md) configuration (`buffer`, `timeout`) for streams the target produces: a generator body's stream, or any registered with `cf.stream()` |
-| `concurrency` | `int \| Concurrency` | `0` | [Concurrency limit](./limits.md) — how many executions may run at once (`0` = no limit) |
+| `concurrency` | `int \| Concurrency` | `0` | [Concurrency limit](./concurrency.md) — how many executions may run at once (`0` = no limit) |
 
 ### `@task`
 
@@ -131,7 +131,7 @@ cached.submit(b)
 | `with_cache(cache)` | Override [caching](./caching.md). Pass `False` to disable. |
 | `with_retries(retries)` | Override [retries](./retries.md). Pass `0` or `False` to disable. |
 | `with_defer(defer)` | Override [defer](./deferring.md) configuration. |
-| `with_concurrency(concurrency)` | Override the [concurrency limit](./limits.md). Pass `0` to disable. |
+| `with_concurrency(concurrency)` | Override the [concurrency limit](./concurrency.md). Pass `0` to disable. |
 | `with_memo(memo)` | Override [memoisation](./memoizing.md) configuration. |
 | `with_delay(delay)` | Override submission delay (seconds or `timedelta`). |
 | `with_timeout(timeout)` | Override execution [timeout](./timeouts.md). |
@@ -277,7 +277,7 @@ cf.Defer(
 
 ### `Concurrency`
 
-Advanced concurrency limit configuration. See [concurrency limits](./limits.md).
+Advanced concurrency limit configuration. See [concurrency limits](./concurrency.md).
 
 ```python
 cf.Concurrency(
