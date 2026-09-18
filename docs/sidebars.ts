@@ -23,7 +23,7 @@ const sidebars: SidebarsConfig = {
       items: [
         "workflows",
         "executions",
-        "concurrency",
+        "parallelism",
         "groups",
         "inputs",
       ],

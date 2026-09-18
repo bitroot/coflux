@@ -45,7 +45,7 @@ def my_workflow(n: int):
             my_task.submit(i)  # ←
 ```
 
-See the [concurrency](/concurrency) page for more details.
+See the [parallelism](/parallelism) page for more details.
 :::
 
 ## Map-reduce

@@ -15,9 +15,8 @@ worker. An execution beyond the limit stays in the queue — it doesn't occupy a
 worker slot, and it doesn't cause a new worker to be launched.
 
 :::info
-This page is about limiting parallelism. For the mechanics of *achieving*
-parallelism — submitting tasks and collecting results later — see
-[concurrency](./concurrency.md).
+For the mechanics of *achieving* parallelism — submitting tasks and collecting
+results later — see [parallelism](./parallelism.md).
 :::
 
 ## What the limit applies to

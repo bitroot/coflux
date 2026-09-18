@@ -1,8 +1,7 @@
-# Concurrency
+# Parallelism
 
 :::info
-This page is about running tasks *in parallel*. To put a cap on how many
-executions of a task may run at once, see
+To cap how many executions of a task may run at once, see
 [concurrency limits](./limits.md).
 :::
 
