@@ -13,8 +13,13 @@ defmodule Coflux.RunViewTest do
 
   defp id(number, attempt), do: "R1:#{number}:#{attempt}"
 
+  # A snapshot step. With `detail: false` it carries structure only, as
+  # `subscribe_run` returns it: no arguments or streams, and executions
+  # without results, dependencies and the rest.
   defp step(number, opts \\ []) do
-    %{
+    detail? = Keyword.get(opts, :detail, true)
+
+    base = %{
       module: "m",
       target: "t#{number}",
       type: "task",
@@ -32,25 +37,24 @@ defmodule Coflux.RunViewTest do
       recurrent: 0,
       timeout: 0,
       created_at: number * 10,
-      arguments: [],
       requires: %{},
-      streams: %{},
       executions:
         Map.new(Keyword.get(opts, :executions, []), fn {attempt, execution_opts} ->
-          {attempt, execution(number, attempt, execution_opts)}
+          {attempt, execution(number, attempt, [{:detail, detail?} | execution_opts])}
         end)
     }
+
+    if detail?, do: Map.merge(base, %{arguments: [], streams: %{}}), else: base
   end
 
   defp execution(number, attempt, opts) do
-    %{
+    base = %{
       execution_id: id(number, attempt),
       workspace_id: Keyword.get(opts, :ws, @ws),
       created_at: Keyword.get(opts, :created_at, number * 10 + attempt),
       created_by: nil,
       execute_after: nil,
       assigned_at: Keyword.get(opts, :assigned_at),
-      result_at: nil,
       completed_at: Keyword.get(opts, :completed_at),
       completion:
         case Keyword.get(opts, :completion) do
@@ -58,13 +62,24 @@ defmodule Coflux.RunViewTest do
           kind -> %{kind: kind, successor: nil}
         end,
       groups: Keyword.get(opts, :groups, %{}),
+      children: Keyword.get(opts, :children, [])
+    }
+
+    if Keyword.get(opts, :detail, true),
+      do: Map.merge(base, detail(Keyword.get(opts, :dependencies, %{}))),
+      else: base
+  end
+
+  # Detail as `get_run_details` returns it.
+  defp detail(dependencies \\ %{}, result \\ nil) do
+    %{
       assets: %{},
-      dependencies: Keyword.get(opts, :dependencies, %{}),
+      dependencies: dependencies,
       pending_dependencies: MapSet.new(),
-      inputs: Keyword.get(opts, :inputs, %{}),
-      result: nil,
+      inputs: %{},
+      result: result,
+      result_at: nil,
       result_created_by: nil,
-      children: Keyword.get(opts, :children, []),
       metric_definitions: %{},
       checkpoints: %{before: %{}, after: %{}}
     }
@@ -75,10 +90,11 @@ defmodule Coflux.RunViewTest do
   # └─ group 1 "batch": 3 (running) ─ 6 (assigning)
   #                     4 (errored)
   #                     5 (assigning)
-  defp fixture do
+  defp fixture(detail? \\ true) do
     steps = %{
       1 =>
         step(1,
+          detail: detail?,
           executions: [
             {1,
              [
@@ -90,18 +106,24 @@ defmodule Coflux.RunViewTest do
         ),
       2 =>
         step(2,
+          detail: detail?,
           parent: id(1, 1),
           executions: [{1, [assigned_at: 1, completed_at: 2, completion: "succeeded"]}]
         ),
       3 =>
-        step(3, parent: id(1, 1), executions: [{1, [assigned_at: 1, children: [{6, 1, nil}]]}]),
+        step(3,
+          detail: detail?,
+          parent: id(1, 1),
+          executions: [{1, [assigned_at: 1, children: [{6, 1, nil}]]}]
+        ),
       4 =>
         step(4,
+          detail: detail?,
           parent: id(1, 1),
           executions: [{1, [assigned_at: 1, completed_at: 2, completion: "errored"]}]
         ),
-      5 => step(5, parent: id(1, 1), executions: [{1, []}]),
-      6 => step(6, parent: id(3, 1), executions: [{1, []}])
+      5 => step(5, detail: detail?, parent: id(1, 1), executions: [{1, []}]),
+      6 => step(6, detail: detail?, parent: id(3, 1), executions: [{1, []}])
     }
 
     RunView.new(@run, steps, [@ws])
@@ -148,8 +170,31 @@ defmodule Coflux.RunViewTest do
   # ---------------------------------------------------------------------------
   # A topic kept in sync, and oracles
 
-  defp topic(view) do
-    Topic.new(%{steps: RunView.project(view)}, %{view: view, visible: RunView.visible_steps(view)})
+  defp topic(view, fetch \\ fn request -> flunk("unexpected fetch: #{inspect(request)}") end) do
+    Topic.new(%{steps: RunView.project(view)}, %{
+      view: view,
+      visible: RunView.visible_steps(view),
+      fetch: fetch
+    })
+  end
+
+  # A fetch that answers with arguments naming the step and a value result,
+  # and records what it was asked for.
+  defp recording_fetch(log) do
+    fn request ->
+      Agent.update(log, &[request | &1])
+
+      %{
+        executions:
+          Map.new(request.executions, fn {number, attempt} ->
+            {id(number, attempt), detail(%{}, {:value, {:raw, "r#{number}", []}})}
+          end),
+        steps:
+          Map.new(request.steps, fn number ->
+            {number, %{arguments: [{:raw, "arg#{number}", []}], streams: %{}}}
+          end)
+      }
+    end
   end
 
   defp sync(topic, notifications) do
@@ -411,6 +456,83 @@ defmodule Coflux.RunViewTest do
       # A later submission of the same input starts with its status
       topic = sync(topic, [{:input_submitted, id(6, 1), "I1", "Pick"}])
       assert topic.value.steps["R1:6"].executions["1"].inputs["I1"].status == "value"
+      assert_in_sync(topic)
+    end
+  end
+
+  describe "loading detail on demand" do
+    test "a structure-only snapshot reports what the visible steps need" do
+      view = fixture(false)
+      assert RunView.visible_steps(view) == MapSet.new([1, 2, 3, 6])
+
+      request = RunView.missing_details(view, RunView.visible_steps(view))
+      assert Enum.sort(request.steps) == [1, 2, 3, 6]
+      assert Enum.sort(request.executions) == [{1, 1}, {2, 1}, {3, 1}, {6, 1}]
+
+      # Only arguments, when asked for members
+      assert RunView.missing_details(view, [4, 5], false) == %{executions: [], steps: [5, 4]}
+
+      # Status is structure, so it's known without any detail
+      assert_branches(view)
+      assert RunView.project(view)["R1:1"].executions["1"].groups["1"].members.total == 3
+    end
+
+    test "a topic loads detail for what it shows, and again for what comes into view" do
+      {:ok, log} = Agent.start_link(fn -> [] end)
+      fetch = recording_fetch(log)
+      view = fixture(false)
+      view = Sync.load(view, fetch, RunView.visible_steps(view))
+      topic = topic(view, fetch)
+
+      assert [%{steps: steps, executions: executions}] = Agent.get(log, & &1)
+      assert Enum.sort(steps) == [1, 2, 3, 6]
+      assert length(executions) == 4
+      assert topic.value.steps["R1:2"].arguments == [%{type: "raw", data: "arg2", references: []}]
+      assert topic.value.steps["R1:2"].executions["1"].result.value.data == "r2"
+      assert_in_sync(topic)
+
+      # A status change on a loaded step needs nothing more
+      topic = sync(topic, [n_completion(id(3, 1), :succeeded)])
+      assert length(Agent.get(log, & &1)) == 1
+      assert_in_sync(topic)
+
+      # A memo hit brings the unloaded member 4 into view under the leaf
+      topic = sync(topic, [n_child(id(2, 1), 4, 1, nil)])
+      assert [%{steps: [4], executions: [{4, 1}]} | _] = Agent.get(log, & &1)
+      assert topic.value.steps["R1:4"].arguments == [%{type: "raw", data: "arg4", references: []}]
+      assert_in_sync(topic)
+
+      # A new attempt arrives with its detail, so nothing is fetched for it
+      topic = sync(topic, [n_execution(2, 2)])
+      assert length(Agent.get(log, & &1)) == 2
+      assert Map.keys(topic.value.steps["R1:2"].executions) == ["2"]
+      assert_in_sync(topic)
+    end
+
+    test "a pinned view re-rooting loads the attempt it uncovers" do
+      {:ok, log} = Agent.start_link(fn -> [] end)
+      fetch = recording_fetch(log)
+      view = fixture(false)
+      selection = RunView.selection(view, id(4, 1))
+      view = RunView.with_selection(view, selection)
+      view = Sync.load(view, fetch, RunView.visible_steps(view))
+      topic = topic(view, fetch)
+      assert Map.keys(topic.value.steps) == ["R1:4"]
+
+      # The root is re-run: the view moves up to the root's old attempt,
+      # whose detail wasn't loaded
+      {view, _effects} = RunView.apply_all(topic.state.view, [n_execution(1, 2)])
+      selection = RunView.selection(view, id(4, 1))
+      assert selection.root == {:step, 1}
+      view = RunView.with_selection(view, selection)
+      topic = %{topic | state: %{topic.state | view: view}}
+      topic = Sync.reset(topic)
+
+      assert Map.keys(topic.value.steps) |> Enum.sort() == ["R1:1", "R1:2", "R1:4"]
+      assert [%{steps: steps, executions: executions} | _] = Agent.get(log, & &1)
+      assert Enum.sort(steps) == [1, 2]
+      assert Enum.sort(executions) == [{1, 1}, {2, 1}]
+      assert topic.value.steps["R1:1"].executions["1"].result.value.data == "r1"
       assert_in_sync(topic)
     end
   end

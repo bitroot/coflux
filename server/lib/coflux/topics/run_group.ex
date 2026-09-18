@@ -19,7 +19,7 @@ defmodule Coflux.Topics.RunGroup do
     ]
 
   alias Coflux.RunView
-  alias Coflux.RunView.Loader
+  alias Coflux.RunView.{Loader, Sync}
 
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}
@@ -32,8 +32,18 @@ defmodule Coflux.Topics.RunGroup do
     execution_id = Map.fetch!(params, :execution_id)
 
     with {group_id, ""} <- Integer.parse(Map.fetch!(params, :group_id)),
-         {:ok, view, _run, _parent} <- Loader.load(project_id, run_id, workspace_id, self()),
+         {:ok, view, _run, _parent, fetch} <-
+           Loader.load(project_id, run_id, workspace_id, self()),
          %{groups: %{^group_id => group}} <- Map.get(view.executions, execution_id) do
+      # Members are listed with their arguments, so those are loaded for
+      # every member step (and nothing else).
+      member_steps =
+        view.children
+        |> Map.get(execution_id, [])
+        |> Enum.filter(&(&1.group_id == group_id))
+        |> Enum.map(& &1.step)
+
+      view = Sync.load(view, fetch, member_steps, false)
       members = RunView.group_members(view, execution_id, group_id)
 
       value = %{
@@ -46,6 +56,7 @@ defmodule Coflux.Topics.RunGroup do
         view: view,
         execution_id: execution_id,
         group_id: group_id,
+        fetch: fetch,
         # Position of each member step in `children`, for updating in place.
         index: members |> Enum.with_index() |> Map.new(fn {member, i} -> {member.stepId, i} end)
       }
@@ -64,6 +75,8 @@ defmodule Coflux.Topics.RunGroup do
     topic =
       Enum.reduce(effects.events, topic, fn
         {:link, ^execution_id, step, ^group_id}, topic ->
+          topic = Sync.ensure(topic, [step], false)
+          view = topic.state.view
           link = Enum.find(view.children[execution_id], &(&1.step == step))
           member = RunView.group_member(view, link)
           position = map_size(topic.state.index)

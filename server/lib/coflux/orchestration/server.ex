@@ -2997,13 +2997,20 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:subscribe_run, external_run_id, pid}, _from, state) do
-    case find_and_build_run_data(state, external_run_id) do
-      {:ok, run, parent, steps} ->
+    case find_run(state, external_run_id, &build_run_structure/2) do
+      {:ok, {run, parent, steps}} ->
         {:ok, ref, state} = add_listener(state, {:run, run.external_id}, pid)
         {:reply, {:ok, run, parent, steps, ref}, state}
 
       :not_found ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:get_run_details, external_run_id, request}, _from, state) do
+    case find_run(state, external_run_id, &build_run_details(&1, &2, request)) do
+      {:ok, details} -> {:reply, {:ok, details}, state}
+      :not_found -> {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -5621,16 +5628,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp find_and_build_run_data(state, external_run_id) do
+  # Runs `fun.(db, run)` against the database the run lives in: the active
+  # epoch, or an archived one found through the epoch index.
+  defp find_run(state, external_run_id, fun) do
     case Runs.get_run_by_external_id(state.db, external_run_id) do
       {:ok, run} when not is_nil(run) ->
-        build_run_data(state.db, run)
+        {:ok, fun.(state.db, run)}
 
       {:ok, nil} ->
         query_fn = fn archive_db ->
           case Runs.get_run_by_external_id(archive_db, external_run_id) do
             {:ok, run} when not is_nil(run) ->
-              {:found, build_run_data(archive_db, run)}
+              {:found, fun.(archive_db, run)}
 
             {:ok, nil} ->
               :not_found
@@ -5642,181 +5651,95 @@ defmodule Coflux.Orchestration.Server do
         end
 
         case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> result
+          {:found, result} -> {:ok, result}
           :not_found -> :not_found
         end
     end
   end
 
-  defp build_run_data(db, run) do
+  # The run's structure: every step and attempt with its status, the links
+  # between them, and groups — but none of the per-execution detail
+  # (results, dependencies, checkpoints, assets, inputs, metrics) or the
+  # per-step arguments and streams. Those are loaded for the parts a topic
+  # shows, through `build_run_details/3`. Nothing here is resolved per
+  # execution: external ids come from the run, step number and attempt.
+  defp build_run_structure(db, run) do
     parent =
       if run.parent_ref_id do
         resolve_execution_ref(db, run.parent_ref_id)
       end
 
-    run_requires =
-      if run.requires_tag_set_id do
-        case TagSets.get_tag_set(db, run.requires_tag_set_id) do
-          {:ok, tag_set} -> tag_set
-        end
-      else
-        %{}
-      end
-
-    run = Map.put(run, :requires, run_requires)
+    run = Map.put(run, :requires, get_tag_set(db, run.requires_tag_set_id))
 
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
-    {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
-    {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
-    {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
-    streams_by_step = build_run_streams(db, run_streams)
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
-    {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
-    {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
-    {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
-    {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
+    {:ok, completions} = Results.get_run_completions(db, run.id)
+    {:ok, workspaces} = Workspaces.get_all_workspaces(db)
 
-    # Resolving a checkpoint needs the workspace chain of the execution
-    # reading it. Resolved from `db` rather than `state` because this also
-    # runs against archived epochs, which remap workspace ids.
-    workspace_chains =
-      run_executions
-      |> Enum.map(fn {_execution_id, _step_id, _attempt, workspace_id, _, _, _, _, _} ->
-        workspace_id
-      end)
-      |> Enum.uniq()
-      |> Map.new(fn workspace_id ->
-        {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
-        {workspace_id, chain}
+    steps_by_id = Map.new(steps, &{&1.id, &1})
+
+    external_ids =
+      Map.new(run_executions, fn {execution_id, step_id, attempt, _, _, _, _, _, _} ->
+        {execution_id,
+         execution_external_id(run.external_id, Map.fetch!(steps_by_id, step_id).number, attempt)}
       end)
 
-    submitted_inputs_by_execution =
-      run_submitted_inputs
-      |> Enum.group_by(
-        fn {execution_id, _run_ext_id, _input_number, _title, _response_type} -> execution_id end,
-        fn {_execution_id, run_ext_id, input_number, title, response_type} ->
-          {input_external_id(run_ext_id, input_number),
-           %{
-             title: title,
-             status: if(response_type, do: decode_input_response_type(response_type))
-           }}
-        end
-      )
-      |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
-
-    input_deps_by_execution =
-      run_input_deps
-      |> Enum.group_by(
-        fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
-            _response_type, _response_value, _responded_at, _created_by} ->
-          execution_id
-        end,
-        fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
-            response_type, _response_value, _responded_at, _response_created_by} ->
-          {input_external_id(run_ext_id, input_number),
-           {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    asset_deps_by_execution =
-      run_asset_deps
-      |> Enum.group_by(
-        fn {execution_id, _asset_id} -> execution_id end,
-        fn {_execution_id, asset_id} ->
-          {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
-          {external_id, {:asset, {name, total_count, total_size, entry}}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    metric_definitions_by_execution =
-      Enum.group_by(
-        run_metric_defs,
-        fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
-        fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress, lower,
-            upper} ->
-          {key,
-           %{
-             group: group,
-             group_units: group_units,
-             group_lower: group_lower,
-             group_upper: group_upper,
-             scale: scale,
-             units: units,
-             progress: progress == 1,
-             lower: lower,
-             upper: upper
-           }}
-        end
-      )
-      |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
-
-    cache_configs =
-      steps
-      |> Enum.map(& &1.cache_config_id)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.reduce(%{}, fn cache_config_id, cache_configs ->
-        case CacheConfigs.get_cache_config(db, cache_config_id) do
-          {:ok, cache_config} -> Map.put(cache_configs, cache_config_id, cache_config)
-        end
+    groups_by_execution =
+      groups
+      |> Enum.group_by(&elem(&1, 0))
+      |> Map.new(fn {execution_id, rows} ->
+        {execution_id,
+         Map.new(rows, fn {_, group_id, name, concurrency} ->
+           {group_id, %{name: name, concurrency: concurrency}}
+         end)}
       end)
 
-    results =
-      run_executions
-      |> Enum.map(&elem(&1, 0))
-      |> Enum.reduce(%{}, fn execution_id, results ->
-        {result, result_at, completed_at, result_created_by} =
-          case Results.get_result(db, execution_id) do
-            {:ok, {result, result_at, completion_at, created_by}} ->
-              result = build_result(result, db)
-              {result, result_at, completion_at, created_by}
-
-            {:ok, nil} ->
-              {nil, nil, nil, nil}
-          end
-
-        completion =
-          case Results.get_completion(db, execution_id) do
-            {:ok, {kind, successor_id, successor_ref_id, _, _}} ->
-              %{
-                kind: Atom.to_string(kind),
-                successor: build_completion_successor(db, successor_id, successor_ref_id)
-              }
-
-            {:ok, nil} ->
-              nil
-          end
-
-        Map.put(
-          results,
-          execution_id,
-          {result, result_at, completed_at, result_created_by, completion}
-        )
-      end)
+    executions_by_step = Enum.group_by(run_executions, &elem(&1, 1))
+    cache_configs = load_cache_configs(db, steps)
 
     steps =
       Map.new(steps, fn step ->
-        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
-        arguments = Enum.map(arguments, &build_value(&1, db))
-
-        requires =
-          if step.requires_tag_set_id do
-            case TagSets.get_tag_set(db, step.requires_tag_set_id) do
-              {:ok, requires} -> requires
-            end
-          else
-            %{}
-          end
-
+        # A step's parent is an execution of this run, except for a step
+        # copied in from an archive, which is looked up.
         parent_execution_external_id =
           if step.parent_id do
-            {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
-            execution_external_id(r, s, a)
+            Map.get_lazy(external_ids, step.parent_id, fn ->
+              {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
+              execution_external_id(r, s, a)
+            end)
           end
+
+        executions =
+          executions_by_step
+          |> Map.get(step.id, [])
+          |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after, created_at,
+                         assigned_at, created_by_user_ext_id, created_by_token_ext_id} ->
+            {completed_at, completion} =
+              case Map.get(completions, execution_id) do
+                nil ->
+                  {nil, nil}
+
+                {kind, successor, completion_at} ->
+                  {completion_at,
+                   %{kind: Atom.to_string(kind), successor: build_successor(successor)}}
+              end
+
+            {attempt,
+             %{
+               execution_id: Map.fetch!(external_ids, execution_id),
+               workspace_id: Map.fetch!(workspaces, workspace_id).external_id,
+               created_at: created_at,
+               created_by: build_created_by(created_by_user_ext_id, created_by_token_ext_id),
+               execute_after: execute_after,
+               assigned_at: assigned_at,
+               completed_at: completed_at,
+               completion: completion,
+               groups: Map.get(groups_by_execution, execution_id, %{}),
+               children: Map.get(run_children, execution_id, [])
+             }}
+          end)
 
         {step.number,
          %{
@@ -5838,135 +5761,282 @@ defmodule Coflux.Orchestration.Server do
            recurrent: step.recurrent,
            timeout: step.timeout,
            created_at: step.created_at,
-           arguments: arguments,
-           requires: requires,
-           streams: Map.get(streams_by_step, step.id, %{}),
-           executions:
-             run_executions
-             |> Enum.filter(&(elem(&1, 1) == step.id))
-             |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
-                            created_at, assigned_at, created_by_user_ext_id,
-                            created_by_token_ext_id} ->
-               execution_created_by =
-                 case {created_by_user_ext_id, created_by_token_ext_id} do
-                   {nil, nil} -> nil
-                   {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
-                   {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
-                 end
-
-               {:ok, {r, s, a}} = Runs.get_execution_key(db, execution_id)
-               exec_external_id = execution_external_id(r, s, a)
-
-               {:ok, workspace_external_id} =
-                 Workspaces.get_workspace_external_id(db, workspace_id)
-
-               {result, result_at, completed_at, result_created_by, completion} =
-                 Map.fetch!(results, execution_id)
-
-               execution_groups =
-                 groups
-                 |> Enum.filter(fn {e_id, _, _, _} -> e_id == execution_id end)
-                 |> Map.new(fn {_, group_id, name, concurrency} ->
-                   {group_id, %{name: name, concurrency: concurrency}}
-                 end)
-
-               # TODO: load assets in one query
-               {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
-
-               assets =
-                 asset_ids
-                 |> Enum.map(&resolve_asset(db, &1))
-                 |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
-                   {external_id, {name, total_count, total_size, entry}}
-                 end)
-
-               # TODO: batch? get `get_dependencies` to resolve?
-               result_deps =
-                 run_dependencies
-                 |> Map.get(execution_id, [])
-                 |> Map.new(fn dependency_ref_id ->
-                   {ext_id, _module, _target} =
-                     execution =
-                     resolve_execution_ref(db, dependency_ref_id)
-
-                   {ext_id, {:result, execution}}
-                 end)
-
-               stream_deps =
-                 run_stream_dependencies
-                 |> Map.get(execution_id, [])
-                 |> Map.new(fn stream_ref_id ->
-                   {:ok, {stream_run_ext_id, step_number, index, module, target}} =
-                     Streams.get_stream_ref(db, stream_ref_id)
-
-                   id = stream_external_id(stream_run_ext_id, step_number, index)
-                   {id, {:stream, id, module, target}}
-                 end)
-
-               dependencies =
-                 Map.merge(
-                   build_argument_dependencies(db, step.id, step.wait_for),
-                   Map.merge(
-                     result_deps,
-                     Map.merge(
-                       stream_deps,
-                       Map.merge(
-                         Map.get(input_deps_by_execution, execution_id, %{}),
-                         Map.get(asset_deps_by_execution, execution_id, %{})
-                       )
-                     )
-                   )
-                 )
-
-               # Nothing is outstanding for an execution that has finished:
-               # it isn't waiting on anything any more, whatever state its
-               # dependencies are in. Skipping those also keeps a large
-               # finished run's snapshot from re-deriving every dependency.
-               pending_dependencies =
-                 if completed_at,
-                   do: MapSet.new(),
-                   else: unresolved_dependency_ids(db, execution_id)
-
-               {:ok, {checkpoints_before, checkpoints_after}} =
-                 Checkpoints.get_execution_snapshots(
-                   db,
-                   execution_id,
-                   step.id,
-                   Map.fetch!(workspace_chains, workspace_id),
-                   attempt
-                 )
-
-               {attempt,
-                %{
-                  execution_id: exec_external_id,
-                  workspace_id: workspace_external_id,
-                  created_at: created_at,
-                  created_by: execution_created_by,
-                  execute_after: execute_after,
-                  assigned_at: assigned_at,
-                  result_at: result_at,
-                  completed_at: completed_at,
-                  completion: completion,
-                  groups: execution_groups,
-                  assets: assets,
-                  dependencies: dependencies,
-                  pending_dependencies: pending_dependencies,
-                  inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
-                  result: result,
-                  result_created_by: result_created_by,
-                  children: Map.get(run_children, execution_id, []),
-                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
-                  checkpoints: %{
-                    before: enrich_checkpoints(checkpoints_before, db),
-                    after: enrich_checkpoints(checkpoints_after, db)
-                  }
-                }}
-             end)
+           requires: get_tag_set(db, step.requires_tag_set_id),
+           executions: executions
          }}
       end)
 
-    {:ok, run, parent, steps}
+    {run, parent, steps}
   end
+
+  # The detail of the executions named by `{step number, attempt}`, and the
+  # arguments and streams of the named steps. The row scans are over the
+  # whole run (they're indexed by it and cheap); everything that resolves a
+  # value, ref or asset is done only for what was asked for.
+  defp build_run_details(db, run, %{executions: execution_keys, steps: step_numbers}) do
+    {:ok, steps} = Runs.get_run_steps(db, run.id)
+    {:ok, run_executions} = Runs.get_run_executions(db, run.id)
+    steps_by_id = Map.new(steps, &{&1.id, &1})
+    steps_by_number = Map.new(steps, &{&1.number, &1})
+
+    executions_by_key =
+      Map.new(run_executions, fn {execution_id, step_id, attempt, workspace_id, _, _, _, _, _} ->
+        {{Map.fetch!(steps_by_id, step_id).number, attempt}, {execution_id, workspace_id}}
+      end)
+
+    requested =
+      Enum.flat_map(execution_keys, fn {number, attempt} ->
+        case Map.fetch(executions_by_key, {number, attempt}) do
+          {:ok, {execution_id, workspace_id}} ->
+            [{execution_id, workspace_id, Map.fetch!(steps_by_number, number), attempt}]
+
+          :error ->
+            []
+        end
+      end)
+
+    requested_ids = MapSet.new(requested, &elem(&1, 0))
+    requested? = fn execution_id -> MapSet.member?(requested_ids, execution_id) end
+
+    executions =
+      if requested == [] do
+        %{}
+      else
+        {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
+        {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
+        {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
+        {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
+        {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
+        {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
+
+        # Resolving a checkpoint needs the workspace chain of the execution
+        # reading it. Resolved from `db` rather than `state` because this
+        # also runs against archived epochs, which remap workspace ids.
+        workspace_chains =
+          requested
+          |> Enum.map(&elem(&1, 1))
+          |> Enum.uniq()
+          |> Map.new(fn workspace_id ->
+            {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
+            {workspace_id, chain}
+          end)
+
+        submitted_inputs_by_execution =
+          run_submitted_inputs
+          |> Enum.filter(fn {execution_id, _, _, _, _} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _run_ext_id, _input_number, _title, _response_type} ->
+              execution_id
+            end,
+            fn {_execution_id, run_ext_id, input_number, title, response_type} ->
+              {input_external_id(run_ext_id, input_number),
+               %{
+                 title: title,
+                 status: if(response_type, do: decode_input_response_type(response_type))
+               }}
+            end
+          )
+          |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
+
+        input_deps_by_execution =
+          run_input_deps
+          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
+          |> Enum.group_by(
+            fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
+                _response_type, _response_value, _responded_at, _created_by} ->
+              execution_id
+            end,
+            fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
+                response_type, _response_value, _responded_at, _response_created_by} ->
+              {input_external_id(run_ext_id, input_number),
+               {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        asset_deps_by_execution =
+          run_asset_deps
+          |> Enum.filter(fn {execution_id, _asset_id} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _asset_id} -> execution_id end,
+            fn {_execution_id, asset_id} ->
+              {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+              {external_id, {:asset, {name, total_count, total_size, entry}}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        metric_definitions_by_execution =
+          run_metric_defs
+          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
+          |> Enum.group_by(
+            fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
+            fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress,
+                lower, upper} ->
+              {key,
+               %{
+                 group: group,
+                 group_units: group_units,
+                 group_lower: group_lower,
+                 group_upper: group_upper,
+                 scale: scale,
+                 units: units,
+                 progress: progress == 1,
+                 lower: lower,
+                 upper: upper
+               }}
+            end
+          )
+          |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
+
+        Map.new(requested, fn {execution_id, workspace_id, step, attempt} ->
+          {result, result_at, completed_at, result_created_by} =
+            case Results.get_result(db, execution_id) do
+              {:ok, {result, result_at, completion_at, created_by}} ->
+                {build_result(result, db), result_at, completion_at, created_by}
+
+              {:ok, nil} ->
+                {nil, nil, nil, nil}
+            end
+
+          {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
+
+          assets =
+            asset_ids
+            |> Enum.map(&resolve_asset(db, &1))
+            |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
+              {external_id, {name, total_count, total_size, entry}}
+            end)
+
+          result_deps =
+            run_dependencies
+            |> Map.get(execution_id, [])
+            |> Map.new(fn dependency_ref_id ->
+              {ext_id, _module, _target} =
+                execution = resolve_execution_ref(db, dependency_ref_id)
+
+              {ext_id, {:result, execution}}
+            end)
+
+          stream_deps =
+            run_stream_dependencies
+            |> Map.get(execution_id, [])
+            |> Map.new(fn stream_ref_id ->
+              {:ok, {stream_run_ext_id, step_number, index, module, target}} =
+                Streams.get_stream_ref(db, stream_ref_id)
+
+              id = stream_external_id(stream_run_ext_id, step_number, index)
+              {id, {:stream, id, module, target}}
+            end)
+
+          dependencies =
+            [
+              build_argument_dependencies(db, step.id, step.wait_for),
+              result_deps,
+              stream_deps,
+              Map.get(input_deps_by_execution, execution_id, %{}),
+              Map.get(asset_deps_by_execution, execution_id, %{})
+            ]
+            |> Enum.reduce(%{}, &Map.merge(&2, &1))
+
+          # Nothing is outstanding for an execution that has finished: it
+          # isn't waiting on anything any more, whatever state its
+          # dependencies are in.
+          pending_dependencies =
+            if completed_at,
+              do: MapSet.new(),
+              else: unresolved_dependency_ids(db, execution_id)
+
+          {:ok, {checkpoints_before, checkpoints_after}} =
+            Checkpoints.get_execution_snapshots(
+              db,
+              execution_id,
+              step.id,
+              Map.fetch!(workspace_chains, workspace_id),
+              attempt
+            )
+
+          {execution_external_id(run.external_id, step.number, attempt),
+           %{
+             assets: assets,
+             dependencies: dependencies,
+             pending_dependencies: pending_dependencies,
+             inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
+             result: result,
+             result_at: result_at,
+             result_created_by: result_created_by,
+             metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
+             checkpoints: %{
+               before: enrich_checkpoints(checkpoints_before, db),
+               after: enrich_checkpoints(checkpoints_after, db)
+             }
+           }}
+        end)
+      end
+
+    requested_steps =
+      Enum.flat_map(step_numbers, fn number ->
+        case Map.fetch(steps_by_number, number) do
+          {:ok, step} -> [step]
+          :error -> []
+        end
+      end)
+
+    streams_by_step =
+      if requested_steps == [] do
+        %{}
+      else
+        {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
+        step_ids = MapSet.new(requested_steps, & &1.id)
+
+        run_streams
+        |> Enum.filter(&MapSet.member?(step_ids, &1.step_id))
+        |> then(&build_run_streams(db, &1))
+      end
+
+    step_details =
+      Map.new(requested_steps, fn step ->
+        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
+
+        {step.number,
+         %{
+           arguments: Enum.map(arguments, &build_value(&1, db)),
+           streams: Map.get(streams_by_step, step.id, %{})
+         }}
+      end)
+
+    %{executions: executions, steps: step_details}
+  end
+
+  defp get_tag_set(_db, nil), do: %{}
+
+  defp get_tag_set(db, tag_set_id) do
+    case TagSets.get_tag_set(db, tag_set_id) do
+      {:ok, tag_set} -> tag_set
+    end
+  end
+
+  defp load_cache_configs(db, steps) do
+    steps
+    |> Enum.map(& &1.cache_config_id)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Map.new(fn cache_config_id ->
+      case CacheConfigs.get_cache_config(db, cache_config_id) do
+        {:ok, cache_config} -> {cache_config_id, cache_config}
+      end
+    end)
+  end
+
+  defp build_successor(nil), do: nil
+
+  defp build_successor({run_ext, step_number, attempt}) do
+    %{type: "execution", id: execution_external_id(run_ext, step_number, attempt)}
+  end
+
+  defp build_created_by(nil, nil), do: nil
+  defp build_created_by(user_ext_id, nil), do: %{type: "user", external_id: user_ext_id}
+  defp build_created_by(nil, token_ext_id), do: %{type: "token", external_id: token_ext_id}
 
   defp ensure_run_in_active_epoch(state, run_external_id) do
     case Runs.get_run_by_external_id(state.db, run_external_id) do

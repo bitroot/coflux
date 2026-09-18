@@ -24,9 +24,12 @@ defmodule Coflux.Topics.RunExecution do
     workspace_id = Map.fetch!(params, :workspace_id)
     execution_id = Map.fetch!(params, :execution_id)
 
-    with {:ok, view, _run, _parent} <- Loader.load(project_id, run_id, workspace_id, self()),
+    with {:ok, view, _run, _parent, fetch} <-
+           Loader.load(project_id, run_id, workspace_id, self()),
          %{} = selection <- RunView.selection(view, execution_id) do
       view = RunView.with_selection(view, selection)
+      visible = RunView.visible_steps(view)
+      view = Sync.load(view, fetch, visible)
 
       value = %{
         root: root_id(view),
@@ -36,9 +39,10 @@ defmodule Coflux.Topics.RunExecution do
 
       state = %{
         view: view,
-        visible: RunView.visible_steps(view),
+        visible: visible,
         selection: selection,
-        execution_id: execution_id
+        execution_id: execution_id,
+        fetch: fetch
       }
 
       {:ok, Topic.new(value, state)}

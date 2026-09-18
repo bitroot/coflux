@@ -5,7 +5,10 @@ defmodule Coflux.RunView do
   The structure is what's needed to decide what to show: steps, their
   attempts (with status), the child links from executions to steps, and
   groups. The detail of each execution (result, dependencies, assets, and
-  so on) is held alongside. The projection follows one rule: from the root
+  so on) and of each step (arguments, streams) is held alongside, but only
+  once loaded: a snapshot carries structure alone, and detail is fetched
+  for what the projection shows (`missing_details/3`, `put_details/2`).
+  The projection follows one rule: from the root
   step, expand one attempt per step (pinned, else the latest), show that
   attempt's ungrouped children and one member of each group (pinned, else
   the first), and summarise the rest of each group by branch status. A step
@@ -57,7 +60,9 @@ defmodule Coflux.RunView do
   Builds a view from a run snapshot (the `steps` map `subscribe_run`
   returns). Executions outside `workspace_ids` are left out, as are child
   links from them; steps are kept whatever workspace their attempts are in,
-  since a later attempt may be in a shown workspace.
+  since a later attempt may be in a shown workspace. A snapshot may carry
+  detail (a step's `arguments`, an execution's `result` and so on) or
+  structure only; what's missing is reported by `missing_details/3`.
   """
   def new(run, steps, workspace_ids, opts \\ []) do
     view = %__MODULE__{
@@ -100,7 +105,7 @@ defmodule Coflux.RunView do
     |> Map.put(:initial, find_initial(view))
     |> init_branches()
     |> init_counts()
-    |> init_inputs()
+    |> index_inputs()
   end
 
   defp snapshot_step(number, step) do
@@ -121,27 +126,32 @@ defmodule Coflux.RunView do
       recurrent: step.recurrent == 1 or step.recurrent == true,
       timeout: step.timeout,
       created_at: step.created_at,
-      arguments: step.arguments,
+      arguments: Map.get(step, :arguments),
       requires: step.requires,
-      streams:
-        Map.new(step.streams, fn {index, stream} ->
-          {index,
-           %{
-             id: stream.id,
-             index: stream.index,
-             position: stream.position,
-             workspace_id: stream.workspace_id,
-             buffer: stream.buffer,
-             timeout_ms: stream.timeout_ms,
-             opened_at: stream.opened_at,
-             attempts: stream.attempts,
-             closed_at: stream.closed_at,
-             closed_by: stream.closed_by,
-             reason: if(stream.reason, do: Atom.to_string(stream.reason)),
-             error: Format.stream_error(stream.error)
-           }}
-        end)
+      streams: snapshot_streams(Map.get(step, :streams))
     }
+  end
+
+  defp snapshot_streams(nil), do: nil
+
+  defp snapshot_streams(streams) do
+    Map.new(streams, fn {index, stream} ->
+      {index,
+       %{
+         id: stream.id,
+         index: stream.index,
+         position: stream.position,
+         workspace_id: stream.workspace_id,
+         buffer: stream.buffer,
+         timeout_ms: stream.timeout_ms,
+         opened_at: stream.opened_at,
+         attempts: stream.attempts,
+         closed_at: stream.closed_at,
+         closed_by: stream.closed_by,
+         reason: if(stream.reason, do: Atom.to_string(stream.reason)),
+         error: Format.stream_error(stream.error)
+       }}
+    end)
   end
 
   defp snapshot_retries(%{retry_limit: 0}), do: nil
@@ -155,7 +165,7 @@ defmodule Coflux.RunView do
   end
 
   defp snapshot_execution(step, attempt, execution) do
-    %{
+    base = %{
       id: execution.execution_id,
       step: step,
       attempt: attempt,
@@ -164,19 +174,42 @@ defmodule Coflux.RunView do
       created_by: execution.created_by,
       execute_after: execution.execute_after,
       assigned_at: execution.assigned_at,
-      result_at: execution.result_at,
       completed_at: execution.completed_at,
       completion: execution.completion,
       groups: execution.groups,
-      assets: execution.assets,
-      dependencies: execution.dependencies,
-      pending: Map.get(execution, :pending_dependencies, MapSet.new()),
-      inputs: Map.get(execution, :inputs, %{}),
-      result: execution.result,
-      result_created_by: execution.result_created_by,
+      loaded: false,
+      assets: %{},
+      dependencies: %{},
+      pending: MapSet.new(),
+      inputs: %{},
+      result: nil,
+      result_at: nil,
+      result_created_by: nil,
       inner_result: nil,
-      metrics: execution.metric_definitions,
-      checkpoints: execution.checkpoints
+      metrics: %{},
+      checkpoints: %{before: %{}, after: %{}}
+    }
+
+    if Map.has_key?(execution, :result), do: apply_detail(base, execution), else: base
+  end
+
+  # Detail as `build_run_details` shapes it, replacing whatever the
+  # execution held: the database is authoritative at the moment it was
+  # read, and any notification still queued re-applies on top.
+  defp apply_detail(execution, detail) do
+    %{
+      execution
+      | loaded: true,
+        assets: detail.assets,
+        dependencies: detail.dependencies,
+        pending: Map.get(detail, :pending_dependencies, MapSet.new()),
+        inputs: Map.get(detail, :inputs, %{}),
+        result: detail.result,
+        result_at: detail.result_at,
+        result_created_by: detail.result_created_by,
+        inner_result: nil,
+        metrics: detail.metric_definitions,
+        checkpoints: detail.checkpoints
     }
   end
 
@@ -240,24 +273,87 @@ defmodule Coflux.RunView do
     end)
   end
 
-  defp init_inputs(view) do
-    Enum.reduce(view.executions, view, fn {execution_id, execution}, view ->
-      view =
-        Enum.reduce(execution.inputs, view, fn {input_id, input}, view ->
-          view
-          |> index_input(:input_submissions, input_id, execution_id)
-          |> record_input_status(input_id, input.status)
-        end)
+  defp index_inputs(view) do
+    Enum.reduce(view.executions, view, fn {_id, execution}, view ->
+      index_execution_inputs(view, execution)
+    end)
+  end
 
-      Enum.reduce(execution.dependencies, view, fn
-        {input_id, {:input, _title, status}}, view ->
-          view
-          |> index_input(:input_dependents, input_id, execution_id)
-          |> record_input_status(input_id, status)
-
-        _other, view ->
-          view
+  defp index_execution_inputs(view, execution) do
+    view =
+      Enum.reduce(execution.inputs, view, fn {input_id, input}, view ->
+        view
+        |> index_input(:input_submissions, input_id, execution.id)
+        |> record_input_status(input_id, input.status)
       end)
+
+    Enum.reduce(execution.dependencies, view, fn
+      {input_id, {:input, _title, status}}, view ->
+        view
+        |> index_input(:input_dependents, input_id, execution.id)
+        |> record_input_status(input_id, status)
+
+      _other, view ->
+        view
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Detail, loaded for what's shown
+
+  @doc """
+  What `build_run_details` needs to be asked for before the given steps can
+  be projected: each step whose arguments aren't loaded, and (unless
+  `executions?` is false) each step's expanded execution if its detail
+  isn't loaded. Shaped as the request `Orchestration.get_run_details` takes.
+  """
+  def missing_details(view, steps, executions? \\ true) do
+    Enum.reduce(steps, %{executions: [], steps: []}, fn number, request ->
+      request =
+        case Map.get(view.steps, number) do
+          %{arguments: nil} -> %{request | steps: [number | request.steps]}
+          _ -> request
+        end
+
+      case executions? && expanded_execution(view, number) do
+        %{loaded: false, attempt: attempt} ->
+          %{request | executions: [{number, attempt} | request.executions]}
+
+        _ ->
+          request
+      end
+    end)
+  end
+
+  def empty_request?(%{executions: [], steps: []}), do: true
+  def empty_request?(_request), do: false
+
+  @doc "Merges a `get_run_details` reply into the view."
+  def put_details(view, %{executions: executions, steps: steps}) do
+    view =
+      Enum.reduce(executions, view, fn {execution_id, detail}, view ->
+        case Map.fetch(view.executions, execution_id) do
+          {:ok, execution} ->
+            execution = apply_detail(execution, detail)
+            view |> store(execution) |> index_execution_inputs(execution)
+
+          :error ->
+            view
+        end
+      end)
+
+    Enum.reduce(steps, view, fn {number, detail}, view ->
+      case Map.fetch(view.steps, number) do
+        {:ok, step} ->
+          put_step(view, number, %{
+            step
+            | arguments: detail.arguments,
+              streams: snapshot_streams(detail.streams)
+          })
+
+        :error ->
+          view
+      end
     end)
   end
 
@@ -497,6 +593,7 @@ defmodule Coflux.RunView do
       completed_at: nil,
       completion: nil,
       groups: %{},
+      loaded: true,
       assets: %{},
       dependencies:
         Map.new(dependencies, fn {id, dependency} -> {id, tag_result(dependency)} end),
@@ -811,7 +908,7 @@ defmodule Coflux.RunView do
   end
 
   def apply(view, {:stream_closed, step, index, reason, error, attempt, closed_at}) do
-    if get_in(view.steps, [step, :streams, index]) do
+    if get_in(view.steps, [step, :streams]) && get_in(view.steps, [step, :streams, index]) do
       update_stream(view, step, index, fn stream ->
         %{stream | closed_at: closed_at, closed_by: attempt, reason: reason, error: error}
       end)
@@ -833,6 +930,7 @@ defmodule Coflux.RunView do
   defp update_stream(view, step, index, fun) do
     view =
       update_in(view.steps[step].streams, fn streams ->
+        streams = streams || %{}
         Map.put(streams, index, fun.(Map.get(streams, index)))
       end)
 
@@ -1143,9 +1241,9 @@ defmodule Coflux.RunView do
       recurrent: step.recurrent,
       timeout: step.timeout,
       createdAt: step.created_at,
-      arguments: Enum.map(step.arguments, &Format.value/1),
+      arguments: Enum.map(step.arguments || [], &Format.value/1),
       requires: step.requires,
-      streams: Format.streams(step.streams, view.workspace_ids),
+      streams: Format.streams(step.streams || %{}, view.workspace_ids),
       attempts:
         Map.new(attempts, fn {attempt, execution_id} ->
           {Integer.to_string(attempt), attempt_summary(view.executions[execution_id])}
@@ -1230,7 +1328,7 @@ defmodule Coflux.RunView do
       attempt: latest(view, link.step),
       module: step.module,
       target: step.target,
-      arguments: Enum.map(step.arguments, &Format.value/1),
+      arguments: Enum.map(step.arguments || [], &Format.value/1),
       status: member_status(view, link.step),
       createdAt: step.created_at
     }

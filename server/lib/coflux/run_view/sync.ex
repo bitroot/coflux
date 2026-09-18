@@ -3,9 +3,11 @@ defmodule Coflux.RunView.Sync do
   Keeps a topic's `steps` in step with its view after a batch of
   notifications has been applied.
 
-  The topic's state carries the `view` and the set of `visible` steps. Steps
-  that enter or leave the view are set or unset whole; steps that stay are
-  re-projected and diffed, so only what changed is sent.
+  The topic's state carries the `view`, the set of `visible` steps, and a
+  `fetch` function that loads detail (`Orchestration.get_run_details`).
+  Steps that enter or leave the view are set or unset whole; steps that
+  stay are re-projected and diffed, so only what changed is sent. Detail
+  for anything about to be projected is fetched first if it isn't loaded.
 
   Which steps are visible is recomputed in full only when a visible step
   gained an attempt (a re-run or retry can change which subtree is shown).
@@ -19,9 +21,15 @@ defmodule Coflux.RunView.Sync do
   alias Topical.Topic
 
   def steps(topic, effects) do
+    {added, removed, visible} = revisit(topic.state.view, topic.state.visible, effects.events)
+
+    dirty =
+      effects.dirty
+      |> MapSet.intersection(visible)
+      |> MapSet.difference(added)
+
+    topic = ensure(topic, MapSet.union(added, dirty))
     view = topic.state.view
-    visible = topic.state.visible
-    {added, removed, visible} = revisit(view, visible, effects.events)
 
     topic =
       Enum.reduce(removed, topic, fn step, topic ->
@@ -32,11 +40,6 @@ defmodule Coflux.RunView.Sync do
       Enum.reduce(added, topic, fn step, topic ->
         Topic.set(topic, [:steps, RunView.step_key(view, step)], RunView.project_step(view, step))
       end)
-
-    dirty =
-      effects.dirty
-      |> MapSet.intersection(visible)
-      |> MapSet.difference(added)
 
     topic =
       Enum.reduce(dirty, topic, fn step, topic ->
@@ -49,10 +52,33 @@ defmodule Coflux.RunView.Sync do
 
   @doc "Replaces the whole `steps` map, for when the view's root or pins moved."
   def reset(topic) do
+    visible = RunView.visible_steps(topic.state.view)
+    topic = ensure(topic, visible)
     view = topic.state.view
-    steps = RunView.project(view)
-    topic = Diff.apply(topic, [:steps], topic.value.steps, steps)
-    %{topic | state: %{topic.state | visible: RunView.visible_steps(view)}}
+    topic = Diff.apply(topic, [:steps], topic.value.steps, RunView.project(view))
+    %{topic | state: %{topic.state | visible: visible}}
+  end
+
+  @doc "Loads any detail the given steps need before they can be projected."
+  def ensure(topic, steps, executions? \\ true) do
+    view = topic.state.view
+    request = RunView.missing_details(view, steps, executions?)
+
+    if RunView.empty_request?(request) do
+      topic
+    else
+      view = RunView.put_details(view, topic.state.fetch.(request))
+      %{topic | state: %{topic.state | view: view}}
+    end
+  end
+
+  @doc "The view with detail loaded for the given steps, through `fetch`."
+  def load(view, fetch, steps, executions? \\ true) do
+    request = RunView.missing_details(view, steps, executions?)
+
+    if RunView.empty_request?(request),
+      do: view,
+      else: RunView.put_details(view, fetch.(request))
   end
 
   defp revisit(view, visible, events) do

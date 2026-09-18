@@ -103,7 +103,15 @@ def test_run_topics(worker):
             return f"{run_id}:{step}"
 
         # --- The skeleton: root, the group's first member, and the leaf. ---
-        steps = run_topic()["steps"]
+        # Children complete over their own connections, so the root's result
+        # can land before every child's completion has been processed.
+        def settled(steps):
+            members = steps[key(1)]["executions"]["1"]["groups"]["0"]["members"]
+            return members == counts(completed=2, errored=1)
+
+        steps = wait_for(
+            lambda: (lambda s: s if settled(s) else None)(run_topic()["steps"])
+        )
         assert set(steps) == {key(1), key(2), key(5)}
 
         root_execution = steps[key(1)]["executions"]["1"]

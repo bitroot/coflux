@@ -28,7 +28,10 @@ defmodule Coflux.Topics.Run do
       {:error, :not_found} ->
         {:error, :not_found}
 
-      {:ok, view, run, parent} ->
+      {:ok, view, run, parent, fetch} ->
+        visible = RunView.visible_steps(view)
+        view = Sync.load(view, fetch, visible)
+
         value = %{
           createdAt: run.created_at,
           createdBy: build_principal(run.created_by),
@@ -37,7 +40,7 @@ defmodule Coflux.Topics.Run do
           steps: RunView.project(view)
         }
 
-        {:ok, Topic.new(value, %{view: view, visible: RunView.visible_steps(view)})}
+        {:ok, Topic.new(value, %{view: view, visible: visible, fetch: fetch})}
     end
   end
 
