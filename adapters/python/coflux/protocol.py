@@ -199,6 +199,7 @@ def request_submit_execution(
     requires: dict[str, list[str]] | None = None,
     timeout: int = 0,
     streams: dict[str, Any] | None = None,
+    concurrency: dict[str, Any] | None = None,
 ) -> int:
     """Request to submit a child execution."""
     params: dict[str, Any] = {
@@ -231,6 +232,8 @@ def request_submit_execution(
         params["timeout"] = timeout
     if streams is not None:
         params["streams"] = streams
+    if concurrency is not None:
+        params["concurrency"] = concurrency
     return get_protocol().send_request("submit_execution", params)
 
 
@@ -459,16 +462,20 @@ def send_register_group(
     execution_id: str,
     group_id: int,
     name: str | None = None,
+    concurrency: int = 0,
 ) -> None:
-    """Register a group for organizing child executions."""
-    get_protocol().send_message(
-        "register_group",
-        {
-            "execution_id": execution_id,
-            "group_id": group_id,
-            "name": name,
-        },
-    )
+    """Register a group for organizing child executions.
+
+    ``concurrency`` is the group's limit on how many of its children run
+    at once; only sent when set, since zero means no limit."""
+    params: dict[str, Any] = {
+        "execution_id": execution_id,
+        "group_id": group_id,
+        "name": name,
+    }
+    if concurrency > 0:
+        params["concurrency"] = concurrency
+    get_protocol().send_message("register_group", params)
 
 
 def send_define_metric(

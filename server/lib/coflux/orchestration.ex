@@ -142,8 +142,8 @@ defmodule Coflux.Orchestration do
     )
   end
 
-  def register_group(project_id, parent_id, group_id, name) do
-    call_server(project_id, {:register_group, parent_id, group_id, name})
+  def register_group(project_id, parent_id, group_id, name, concurrency) do
+    call_server(project_id, {:register_group, parent_id, group_id, name, concurrency})
   end
 
   def cancel_execution(project_id, workspace_id, execution_id, access \\ nil) do
@@ -348,6 +348,13 @@ defmodule Coflux.Orchestration do
 
   def subscribe_run(project_id, run_id, pid) do
     call_server(project_id, {:subscribe_run, run_id, pid})
+  end
+
+  # Per-execution detail (results, dependencies, checkpoints, assets...) and
+  # per-step arguments and streams, for the parts of a run a topic shows.
+  # `request` is `%{executions: [{step_number, attempt}], steps: [step_number]}`.
+  def get_run_details(project_id, run_id, request) do
+    call_server(project_id, {:get_run_details, run_id, request})
   end
 
   def subscribe_stream_topic(project_id, stream_id, pid) do

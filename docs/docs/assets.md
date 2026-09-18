@@ -68,8 +68,8 @@ An entry can be read without restoring the whole file, by giving an offset and a
 
 ```python
 entry = asset["data.parquet"]
-footer = entry.read(entry.size - 8)   # to the end of the file
-header = entry.read(0, 4)             # the first four bytes
+footer = entry.read(entry.size - 8)  # to the end of the file
+header = entry.read(0, 4)  # the first four bytes
 ```
 
 `read()` with no arguments returns the whole entry. Omitting the length reads to the end.

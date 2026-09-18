@@ -1,3 +1,45 @@
+-- Concurrency limits — a cap on how many executions sharing a key may run at
+-- once, enforced by the scheduler before an execution is assigned to a
+-- worker (so a gated execution never occupies a worker slot).
+--
+-- The key is built like defer_key: a hash of the namespace (defaulting to
+-- "module:target") plus the selected argument values. A NULL key means the
+-- step declares no limit.
+--
+-- The limit is stored per step rather than folded into the key, so several
+-- targets can share one namespace while each is judged against its own
+-- declaration. Admission is `holders(key) < this step's limit`.
+--
+-- Nothing here records who holds a permit: a holder is an execution with an
+-- assignments row and no completions row, so the scheduler's in-memory
+-- ledger is derivable from the database and is rebuilt at boot.
+ALTER TABLE steps ADD COLUMN concurrency_key BLOB;
+ALTER TABLE steps ADD COLUMN concurrency_limit INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_steps_concurrency_key ON steps(concurrency_key) WHERE concurrency_key IS NOT NULL;
+
+-- Manifest-registered workflows: stored inline like defer_params.
+-- concurrency_params uses the encode_params_list convention:
+-- NULL = no params, '*' = all, '0,2' = indexes.
+ALTER TABLE workflows ADD COLUMN concurrency_limit INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflows ADD COLUMN concurrency_params TEXT;
+ALTER TABLE workflows ADD COLUMN concurrency_namespace TEXT;
+
+-- Group concurrency: a cap on how many direct children submitted inside one
+-- cf.group() may run at once. Registered with the group, then copied onto
+-- each child step at schedule time so the scheduler treats it exactly like
+-- a task limit (a second permit key on the step).
+ALTER TABLE groups ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0;
+
+-- The key is "<parent run>:<step>:<attempt>/<group id>" — the parent's
+-- external id, so it survives epoch rotation without remapping, and reads
+-- meaningfully on the queue. Not hashed: there are no arguments to fold in.
+-- NULL key = the step is in no limited group. children.group_id still
+-- records display membership (including memo-hit links, which never take
+-- a permit); this pair records what the step counts against.
+ALTER TABLE steps ADD COLUMN group_key TEXT;
+ALTER TABLE steps ADD COLUMN group_limit INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_steps_group_key ON steps(group_key) WHERE group_key IS NOT NULL;
+
 -- Catalog — paths holding versioned values.
 --
 -- A version is one publish at a path: which value, who published it and

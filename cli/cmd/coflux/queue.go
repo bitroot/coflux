@@ -111,6 +111,22 @@ func parseQueueDependency(raw any) (string, bool) {
 		path, _ := d["path"].(string)
 		number, _ := d["number"].(float64)
 		return fmt.Sprintf("catalog %s@%d+", path, int(number)), true
+	case "concurrency":
+		// Naming the holders is the point: a gate with nothing to point at
+		// can't be told apart from a stuck scheduler.
+		limit, _ := d["limit"].(float64)
+		var holders []string
+		if raw, ok := d["holders"].([]any); ok {
+			for _, h := range raw {
+				if id, ok := h.(string); ok {
+					holders = append(holders, id)
+				}
+			}
+		}
+		if len(holders) > 0 {
+			return fmt.Sprintf("concurrency limit %d (held by %s)", int(limit), strings.Join(holders, ", ")), true
+		}
+		return fmt.Sprintf("concurrency limit %d", int(limit)), true
 	}
 	return kind, kind != ""
 }

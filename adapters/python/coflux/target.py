@@ -38,6 +38,28 @@ class Defer:
 
 
 @dataclasses.dataclass(frozen=True)
+class Concurrency:
+    """A limit on how many executions of a target may run at once.
+
+    The limit is enforced by the scheduler, before an execution is assigned
+    to a worker, so a gated execution doesn't occupy a worker slot.
+
+    By default the limit applies to the target as a whole. ``params``
+    narrows it to a key built from argument values: ``True`` uses every
+    argument, an iterable (or comma-separated string) of parameter names
+    selects some.
+
+    ``namespace`` defaults to ``"{module}:{target}"``. Giving several
+    targets the same namespace makes them share one pool.
+    """
+
+    limit: int
+    _: dataclasses.KW_ONLY
+    params: bool | t.Iterable[str] | str = False
+    namespace: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class Retries:
     limit: int | None = None
     _: dataclasses.KW_ONLY
@@ -116,6 +138,7 @@ class TargetDefinition(t.NamedTuple):
     # ``cf.stream`` kwargs override these per-call. ``None`` means the
     # task never deals with streams — validated at decoration time.
     streams: Streams | None
+    concurrency: Concurrency | None
 
 
 def _json_dumps(obj: t.Any) -> str:
@@ -226,6 +249,34 @@ def _parse_memo(
     return _get_param_indexes(parameters, memo)
 
 
+def _validate_concurrency_limit(limit: t.Any) -> int:
+    # bool is an int subclass, but ``concurrency=True`` has no sensible
+    # reading — there's no default limit to mean.
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError(f"concurrency limit must be an integer >= 1, got {limit!r}")
+    return limit
+
+
+def _expand_concurrency(concurrency: int | Concurrency | None) -> Concurrency | None:
+    if isinstance(concurrency, Concurrency):
+        return Concurrency(
+            limit=_validate_concurrency_limit(concurrency.limit),
+            params=concurrency.params,
+            namespace=concurrency.namespace,
+        )
+    if concurrency is None or concurrency is False or concurrency == 0:
+        return None
+    return Concurrency(limit=_validate_concurrency_limit(concurrency))
+
+
+def _parse_concurrency_params(
+    params: bool | t.Iterable[str] | str, parameters: list[Parameter]
+) -> list[int] | bool:
+    if isinstance(params, bool):
+        return params
+    return _get_param_indexes(parameters, params)
+
+
 def _parse_require(value: str | bool | list[str]):
     if isinstance(value, bool):
         return ["true"] if value else ["false"]
@@ -314,6 +365,7 @@ def _build_definition(
     timeout: float | dt.timedelta,
     is_stub: bool,
     streams: t.Any = _STREAMS_UNSET,
+    concurrency: int | Concurrency = 0,
 ) -> TargetDefinition:
     parameters = inspect.signature(fn).parameters.values()
     for p in parameters:
@@ -350,6 +402,7 @@ def _build_definition(
         inspect.getdoc(fn),
         is_stub,
         _resolve_streams(streams, fn),
+        _expand_concurrency(concurrency),
     )
 
 
@@ -386,6 +439,18 @@ def serialize_cache(cache: Cache, parameters: list[Parameter]) -> dict:
 
 def serialize_defer(defer: Defer, parameters: list[Parameter]) -> dict:
     return {"params": _param_indexes(defer.params, parameters)}
+
+
+def serialize_concurrency(
+    concurrency: Concurrency, parameters: list[Parameter]
+) -> dict:
+    result: dict[str, t.Any] = {"limit": concurrency.limit}
+    params = _parse_concurrency_params(concurrency.params, parameters)
+    if params is not False:
+        result["params"] = params
+    if concurrency.namespace:
+        result["namespace"] = concurrency.namespace
+    return result
 
 
 def serialize_retries(retries: Retries) -> dict:
@@ -455,6 +520,7 @@ class Target(t.Generic[P, T]):
         timeout: float | dt.timedelta = 0,
         is_stub: bool = False,
         streams: t.Any = _STREAMS_UNSET,
+        concurrency: int | Concurrency = 0,
     ):
         self._fn = fn
         self._name = name or fn.__name__
@@ -473,6 +539,7 @@ class Target(t.Generic[P, T]):
             timeout,
             is_stub,
             streams,
+            concurrency,
         )
         functools.update_wrapper(self, fn)
 
@@ -503,6 +570,13 @@ class Target(t.Generic[P, T]):
     def with_defer(self, defer: bool | Defer) -> Target[P, T]:
         """Return a new Target with defer config overridden for this call site."""
         return self._copy(defer=_expand_defer(defer))
+
+    def with_concurrency(self, concurrency: int | Concurrency) -> Target[P, T]:
+        """Return a new Target with the concurrency limit overridden for this call site.
+
+        Pass ``0`` to disable a limit set on the decorator.
+        """
+        return self._copy(concurrency=_expand_concurrency(concurrency))
 
     def with_memo(self, memo: bool | t.Iterable[str] | str) -> Target[P, T]:
         """Return a new Target with memoisation config overridden for this call site."""
@@ -610,6 +684,11 @@ class Target(t.Generic[P, T]):
             if self._definition.defer
             else None
         )
+        concurrency_dict = (
+            serialize_concurrency(self._definition.concurrency, parameters)
+            if self._definition.concurrency
+            else None
+        )
         retries_dict = (
             serialize_retries(self._definition.retries)
             if self._definition.retries
@@ -641,6 +720,7 @@ class Target(t.Generic[P, T]):
             requires=self._definition.requires,
             timeout=_to_ms(self._definition.timeout) if self._definition.timeout else 0,
             streams=streams_dict,
+            concurrency=concurrency_dict,
         )
         return Execution(result["execution_id"], result["module"], result["target"])
 

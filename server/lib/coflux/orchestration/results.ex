@@ -372,6 +372,44 @@ defmodule Coflux.Orchestration.Results do
     end
   end
 
+  # Every completion in the run, with the successor resolved to the
+  # coordinates of the execution it names (an execution in this database,
+  # or an execution ref). Shape:
+  #   `{:ok, %{execution_id => {kind_atom, {run_ext, step_number, attempt} | nil, created_at}}}`
+  def get_run_completions(db, run_id) do
+    case query(
+           db,
+           """
+           SELECT c.execution_id, c.kind, c.created_at,
+                  r2.external_id, s2.number, e2.attempt,
+                  ref.run_external_id, ref.step_number, ref.attempt
+           FROM completions AS c
+           INNER JOIN executions AS e ON e.id = c.execution_id
+           INNER JOIN steps AS s ON s.id = e.step_id
+           LEFT JOIN executions AS e2 ON e2.id = c.successor_id
+           LEFT JOIN steps AS s2 ON s2.id = e2.step_id
+           LEFT JOIN runs AS r2 ON r2.id = s2.run_id
+           LEFT JOIN execution_refs AS ref ON ref.id = c.successor_ref_id
+           WHERE s.run_id = ?1
+           """,
+           {run_id}
+         ) do
+      {:ok, rows} ->
+        {:ok,
+         Map.new(rows, fn {execution_id, kind, created_at, run_ext, step_number, attempt,
+                           ref_run_ext, ref_step_number, ref_attempt} ->
+           successor =
+             cond do
+               run_ext -> {run_ext, step_number, attempt}
+               ref_run_ext -> {ref_run_ext, ref_step_number, ref_attempt}
+               true -> nil
+             end
+
+           {execution_id, {kind_atom(kind), successor, created_at}}
+         end)}
+    end
+  end
+
   # Returns the raw completion row for an execution. Shape:
   #   `{:ok, {kind_atom, successor_id, successor_ref_id, created_at, created_by}}`
   #   `{:ok, nil}` — no completion yet

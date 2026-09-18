@@ -247,6 +247,7 @@ class ExecutorContext:
         requires: dict[str, list[str]] | None = None,
         timeout: int = 0,
         streams: dict[str, Any] | None = None,
+        concurrency: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit a child execution and return its details.
 
@@ -272,6 +273,7 @@ class ExecutorContext:
             requires=requires,
             timeout=timeout,
             streams=streams,
+            concurrency=concurrency,
         )
         return self._wait_response(request_id)
 
@@ -720,12 +722,22 @@ class ExecutorContext:
         self.log(5, message)
 
     @contextmanager
-    def group(self, name: str | None = None) -> Iterator[None]:
+    def group(self, name: str | None = None, *, concurrency: int = 0) -> Iterator[None]:
         """Context manager for grouping child executions."""
+        # A bool is an int in Python, but `concurrency=True` is a mistake
+        # rather than a request for a limit of one.
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or concurrency < 0
+        ):
+            raise ValueError("Group concurrency must be a non-negative integer")
         with self._lock:
             group_id = len(self._groups)
             self._groups.append(name)
-        protocol.send_register_group(self.execution_id, group_id, name)
+        protocol.send_register_group(
+            self.execution_id, group_id, name, concurrency=concurrency
+        )
         token = _group_id.set(group_id)
         try:
             yield

@@ -70,7 +70,8 @@ defmodule Coflux.Topics.Manifests do
       defer: build_defer(workflow.defer),
       delay: workflow.delay,
       retries: build_retries(workflow.retries),
-      requires: workflow.requires
+      requires: workflow.requires,
+      concurrency: build_concurrency(workflow[:concurrency])
     }
   end
 
@@ -87,6 +88,16 @@ defmodule Coflux.Topics.Manifests do
 
   defp build_defer(nil), do: nil
   defp build_defer(defer), do: %{params: defer.params}
+
+  defp build_concurrency(nil), do: nil
+
+  defp build_concurrency(concurrency) do
+    %{
+      limit: concurrency.limit,
+      params: concurrency.params,
+      namespace: concurrency.namespace
+    }
+  end
 
   defp build_retries(nil), do: nil
 

@@ -1,139 +1,188 @@
-# Concurrency
+# Concurrency limits
 
-By default, when a task is called from another task (or workflow) - e.g., with `my_task()` - execution will block while waiting for the called task to complete. This is more intuitive for beginners, and also makes code more portable.
-
-Often, however, you'll want to be able to execute tasks in parallel, and collect the results later on. Or trigger a task without waiting for the result. This can be done by 'submitting' the task - e.g., with `my_task.submit(...)`. This returns an `Execution` object, which is a 'future'-like object that can be used to wait for the result (using `.result()`), when needed:
+Some work can't safely run in parallel with itself: a rebuild that writes to a
+shared index, a sync that would interleave badly with another copy of itself, an
+API that rations requests. A task (or workflow) can declare how many of its
+executions may run at once:
 
 ```python
-@cf.task()
-def load_user(user_id):
-    # ...
-
-@cf.task()
-def load_product(product_id):
-    # ...
-
-@cf.workflow()
-def process_order(user_id, product_id):
-    user_execution = load_user.submit(user_id)
-    product_execution = load_product.submit(product_id)
-
-    user = user_execution.result()
-    product = product_execution.result()
-
-    # ...
+@cf.task(concurrency=1)
+def rebuild_index(): ...
 ```
 
-In this case, the task to load the user and the task to load the product will run in parallel, reducing the total time for the workflow to run. This is clear by looking at the timeline:
-
-<img src="/img/asynchronous.png" alt="Asynchronous execution" width="500" />
-
-And comparing to a synchronous equivalent:
-
-<img src="/img/synchronous.png" alt="Synchronous execution" width="500" />
-
-Note the longer total execution time.
+The limit is enforced by the scheduler, before an execution is handed to a
+worker. An execution beyond the limit stays in the queue — it doesn't occupy a
+worker slot, and it doesn't cause a new worker to be launched.
 
 :::info
-Calling a task synchronously is the same as submitting it and then immediately waiting for its result. The following two workflows are equivalent:
-
-```python
-@cf.workflow()
-def my_workflow(a, b):
-    return my_task(a, b)
-```
-
-```python
-@cf.workflow()
-def my_workflow(a, b):
-    return my_task.submit(a, b).result()
-```
+For the mechanics of *achieving* parallelism — submitting tasks and collecting
+results later — see [parallelism](./parallelism.md).
 :::
 
-## Passing and returning executions
+## What the limit applies to
 
-`Execution` objects can be passed to other tasks as arguments, or returned from a task/workflow to avoid unnecessarily waiting for a result. They operate as a reference to the result. Demonstrating both:
-
-```python
-@cf.workflow()
-def process_order(user_id, product_id):
-    user_execution = load_user.submit(user_id)
-    product_execution = load_product.submit(product_id)
-    return create_order.submit(user_execution, product_execution)
-```
-
-In this case, the workflow function is responsible for submitting three tasks and wiring them together, after which it can return, without waiting for the tasks themselves to complete:
-
-<img src="/img/async_timeline.png" alt="Futures timeline" width="500" />
-
-The relationships between the tasks is indicated in the graph view. The dashed line indicates that there is a parent-child relationship, but without a strict dependency. This can help to indicate the direction that data is flowing:
-
-<img src="/img/async_graph.png" alt="Futures graph" width="500" />
-
-## Explicit waiting
-
-In the timeline above you can see that the `create_order` task is started immediately after being scheduled by the `process_order`. But it actually spends most of its time waiting for the results from the two 'load' tasks. We can avoid this idle time by specifying that execution of `process_order` shouldn't start until its dependencies are ready. To do this, we specify `wait=` on the `@task`, specifying either `True`, to wait for all arguments, or by specifying the names of arguments that should be waited for (either as an iterable, or a comma-separated string):
+By default the limit covers the target as a whole: one `rebuild_index` at a
+time, whatever its arguments. Limits above `1` cost nothing extra, and are
+written the same way:
 
 ```python
-@cf.task(wait=True)
-def create_order(user_execution, product_execution):
-    user = user_execution.result()
-    product = product_execution.result()
-    # ...
+@cf.task(concurrency=4)
+def call_model(prompt): ...
 ```
 
-We can see from the timeline that the `create_order` task waits to be executed until its dependencies have completed:
+`concurrency=0` (the default) means no limit.
 
-<img src="/img/wait_for.png" alt="Explicit waiting timeline" width="500" />
+## Limiting per argument
 
-If we only wanted to wait for the product, we would instead do:
+To get one execution at a time *per account*, rather than one overall, name the
+parameters the limit should key on with the `Concurrency` class:
 
 ```python
-@cf.task(wait={"product_execution"})
-def create_order(user_execution, product_execution):
-    user = user_execution.result()  # (this may still block waiting for the result)
-    product = product_execution.result()  # (this result will be available)
-    # ...
+@cf.task(concurrency=cf.Concurrency(1, params=["account_id"]))
+def sync_account(account_id, since): ...
 ```
 
-### Polling
-
-Instead of blocking with `.result()`, you can use `.poll()` to check whether a result is ready without suspending the caller:
+Two calls with different `account_id` values run side by side; two with the same
+one are serialised. `params` accepts an iterable of parameter names, a
+comma-separated string, or `True` for every argument:
 
 ```python
-execution = slow_task.submit()
-while (result := execution.poll(timeout=1)) is None:
-    print("waiting...")
+@cf.task(concurrency=cf.Concurrency(2, params=True))
+def fetch(url, headers): ...
 ```
 
-`poll()` returns the result if it's available, or `None` (by default) if the execution is still running. The optional `timeout` parameter specifies how long to wait (in seconds) before returning `None`.
+This is the opposite default to [caching](./caching.md) and
+[deferring](./deferring.md), where the argument tuple is the essence of the
+feature. Here the common case is "one of these at a time", so `params` defaults
+to `False`.
 
-A custom default value can be provided with the `default` keyword argument:
+:::note
+A `params=True` limit on a high-cardinality argument is harmless — the server
+only tracks executions that are actually running — but it also won't limit much,
+since each distinct argument tuple gets its own allowance.
+:::
+
+## Sharing a limit between targets
+
+The limit is keyed by a namespace, which defaults to `"{module}:{target}"`. Give
+several targets the same namespace and they draw on one pool:
 
 ```python
-result = execution.poll(default="not ready")
+@cf.task(concurrency=cf.Concurrency(4, namespace="openai"))
+def summarise(text): ...
+
+
+@cf.task(concurrency=cf.Concurrency(4, namespace="openai"))
+def classify(text): ...
 ```
 
-### Suspense
+At most four executions across both tasks run at once.
 
-A timeout can be imposed on the `.result()` call by surrounding it in a 'suspense' context. See the [suspense](/suspense) page for details.
+The limit itself is *not* part of the key: each execution is admitted against
+the number it declared, not the number its neighbours declared. If `summarise`
+says `4` and `classify` says `2`, then `classify` is admitted only while fewer
+than two of the pool's permits are taken, while `summarise` is admitted up to
+four. Mixed limits on one namespace are allowed, but they're easier to reason
+about kept in step.
 
-## Fire-and-forget
+## Scope
 
-A task can be submitted without ever waiting for the result. In this case the caller doesn't have a way to know that the task was successful, but it may be acceptable to rely on the retry mechanism or separate monitoring.
+Limits are counted per workspace. Workspaces are scheduled independently — each
+has its own workers and pools, and [deferring](./deferring.md) is per workspace
+too — and [inheritance](./concepts.md#workspace-inheritance) only shares
+results, so a limit follows suit: an execution in a workspace derived from
+`production` neither waits behind `production`'s executions nor holds them up.
+Projects are fully separate, so a limit never crosses one either.
 
-An example use case might be sending a notification to a user.
+That does mean the limit doesn't protect an external resource that several
+workspaces' workers all reach. If a derived workspace runs with production
+credentials, its executions add to whatever `production` is already doing.
 
-## Cancelling executions
+## When a permit is taken and released
 
-Once a task or workflow has been submitted, the returned `Execution` can be used to cancel the running execution:
+An execution takes a permit when it's assigned to a worker, and releases it when
+its completion is recorded. In practice:
+
+- **Cache hits, deferred duplicates and memo hits never take one.** They're
+  resolved by the server without an execution ever reaching a worker.
+- **Suspending releases the permit.** A [suspended](./suspense.md) execution
+  isn't running, so it doesn't hold the limit; its successor re-acquires when it
+  next becomes due.
+- **A failed attempt releases at completion.** A [retry](./retries.md) waiting
+  out its backoff holds nothing, and re-acquires when it's admitted.
+- **A [recurrent](./recurring.md) task releases at the end of each
+  occurrence** — with `concurrency=1`, that gives you one occurrence at a time
+  for free.
+- **Cancellation, timeout, abandonment and crashes all write a completion**, so
+  all of them release.
+- **A task producing a [stream](./streams.md) holds its permit until the stream
+  has drained**, since that's when the execution completes.
+
+Held permits are derived from what's in the database, so a server restart
+doesn't leak them.
+
+## Workflows
+
+`concurrency` on a `@workflow` limits executions of the workflow's own step. It
+isn't inherited by the tasks the workflow submits (unlike `requires` and `memo`).
+
+In the synchronous style — where the workflow blocks on each task it calls —
+that amounts to "one run at a time", because the workflow's own execution is
+alive for the whole run. If the workflow submits tasks and returns without
+waiting for them, it doesn't: the workflow step finishes early and releases,
+while its children carry on.
+
+## Limiting fan-out from one caller
+
+A task limit applies across the workspace: it protects a *resource*, and every
+execution of the task in that workspace counts against it, wherever it was
+submitted from. To bound how many of the children *one caller* has submitted run
+at once, put the limit on the
+[group](./groups.md#limiting-concurrency-within-a-group) instead:
 
 ```python
-@cf.workflow()
-def my_workflow():
-    execution = another_workflow.submit()
-    # ...
-    execution.cancel()
+with cf.group("fetch", concurrency=2):
+    executions = [fetch.submit(url) for url in urls]
 ```
 
-In this case `my_workflow` submits `another_workflow` (causing a separate run to be started), but then cancels it. The effect is the same as if the run had been cancelled in Studio.
+That's local to the one `cf.group()` block, in the one execution of the caller.
+A child can be under both kinds of limit, and is admitted only when both have
+room.
+
+## Composing with deferring
+
+A limit and [deferring](./deferring.md) solve different halves of the same
+problem, and compose well. Deferring collapses queued duplicates down to the
+newest; the limit then serialises whatever survives:
+
+```python
+@cf.task(delay=60, defer=True, concurrency=1)
+def rebuild_index(project_id): ...
+```
+
+## Deadlocks
+
+A limit is held for as long as the execution runs, including while it waits on
+something else. So an execution that holds the only permit and then
+synchronously calls a task needing that same permit will wait forever:
+
+```python
+@cf.task(concurrency=cf.Concurrency(1, namespace="db"))
+def child(): ...
+
+
+@cf.task(concurrency=cf.Concurrency(1, namespace="db"))
+def parent():
+    return child()  # never admitted — parent holds the only permit
+```
+
+The same thing happens more subtly when every holder of a pool is waiting on
+gated children.
+
+Coflux doesn't detect this. Two things help: the queue page in Studio names the
+executions holding a key, so a stuck execution says what it's stuck behind; and
+setting a [timeout](./timeouts.md) bounds how long the damage lasts.
+
+Avoid it by keeping the limited work at the leaves — put the limit on the task
+that actually touches the constrained resource, not on the one that orchestrates
+it.

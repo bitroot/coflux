@@ -23,7 +23,7 @@ const sidebars: SidebarsConfig = {
       items: [
         "workflows",
         "executions",
-        "concurrency",
+        "parallelism",
         "groups",
         "inputs",
       ],
@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "caching",
         "memoizing",
         "deferring",
+        "concurrency",
         "suspense",
         "checkpoints",
         "streams",

@@ -140,6 +140,23 @@ defmodule Coflux.Orchestration.Server do
               # from pending_dependencies; rebuilt with it.
               dependency_groups: %{},
 
+              # Concurrency permits currently held: execution_id ->
+              # %{workspace_id, key}. An execution holds a permit from the
+              # moment its assignment is written until its completion is. The
+              # same set is derivable from the database (assignment without
+              # completion), so this is rebuilt at boot and after an epoch
+              # rotation rather than being authoritative — a permit can't be
+              # leaked by a restart.
+              concurrency_permits: %{},
+
+              # Executions the last tick left gated on a permit:
+              # execution_id -> the queue-topic dependency map that was
+              # emitted for it. Keeping the map (rather than just the id)
+              # means a queue subscriber joining mid-gate is shown the same
+              # entry existing subscribers already have, without recomputing
+              # holders that may since have changed.
+              concurrency_gated: %{},
+
               # Active stream subscriptions — in-memory, session-scoped.
               # A consumer adapter opens a subscription by sending stream_subscribe
               # with a subscription_id unique within that consumer's adapter
@@ -447,6 +464,10 @@ defmodule Coflux.Orchestration.Server do
 
     # Initialize pending dependency tracking for existing unassigned executions
     state = initialize_pending_dependencies(state)
+
+    # Rebuild the concurrency ledger from the executions that are assigned
+    # but not yet completed
+    state = load_concurrency_permits(state)
 
     # Schedule periodic epoch rotation check
     Process.send_after(self(), :check_rotation, @rotation_check_interval_ms)
@@ -1421,6 +1442,9 @@ defmodule Coflux.Orchestration.Server do
          attempt: attempt,
          created_at: created_at,
          cache_key: cache_key,
+         concurrency_key: concurrency_key,
+         group_key: group_key,
+         group_limit: group_limit,
          memo_key: memo_key,
          memo_hit: memo_hit,
          child_added: child_added
@@ -1444,6 +1468,8 @@ defmodule Coflux.Orchestration.Server do
 
         group_id = Keyword.get(opts, :group_id)
         cache = Keyword.get(opts, :cache)
+        concurrency = Keyword.get(opts, :concurrency)
+        concurrency_limit = if concurrency, do: concurrency.limit, else: 0
         retries = Keyword.get(opts, :retries)
         timeout = Keyword.get(opts, :timeout, 0)
         delay = Keyword.get(opts, :delay, 0)
@@ -1500,6 +1526,10 @@ defmodule Coflux.Orchestration.Server do
                  cache_config: cache,
                  cache_key: cache_key,
                  memo_key: memo_key,
+                 concurrency_key: concurrency_key,
+                 concurrency_limit: concurrency_limit,
+                 group_key: group_key,
+                 group_limit: group_limit,
                  retries: retries,
                  recurrent: recurrent,
                  timeout: timeout,
@@ -1586,17 +1616,21 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:register_group, parent_external_id, group_id, name}, _from, state) do
+  def handle_call(
+        {:register_group, parent_external_id, group_id, name, concurrency},
+        _from,
+        state
+      ) do
     parent_id = Map.fetch!(state.execution_ids, parent_external_id)
     {:ok, {run_external_id}} = Runs.get_external_run_id_for_execution(state.db, parent_id)
 
-    case Runs.create_group(state.db, parent_id, group_id, name) do
+    case Runs.create_group(state.db, parent_id, group_id, name, concurrency) do
       :ok ->
         state =
           state
           |> notify_listeners(
             {:run, run_external_id},
-            {:group, parent_external_id, group_id, name}
+            {:group, parent_external_id, group_id, name, concurrency}
           )
           |> flush_notifications()
 
@@ -3133,13 +3167,20 @@ defmodule Coflux.Orchestration.Server do
   end
 
   def handle_call({:subscribe_run, external_run_id, pid}, _from, state) do
-    case find_and_build_run_data(state, external_run_id) do
-      {:ok, run, parent, steps} ->
+    case find_run(state, external_run_id, &build_run_structure/2) do
+      {:ok, {run, parent, steps}} ->
         {:ok, ref, state} = add_listener(state, {:run, run.external_id}, pid)
         {:reply, {:ok, run, parent, steps, ref}, state}
 
       :not_found ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:get_run_details, external_run_id, request}, _from, state) do
+    case find_run(state, external_run_id, &build_run_details(&1, &2, request)) do
+      {:ok, details} -> {:reply, {:ok, details}, state}
+      :not_found -> {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -3569,12 +3610,12 @@ defmodule Coflux.Orchestration.Server do
         end
       end)
 
-    {state, assigned, unassigned} =
+    {state, assigned, unassigned, _counts, gated_now} =
       Enum.reduce(
         executions_due,
-        {state, [], []},
+        {state, [], [], concurrency_held_counts(state), %{}},
         fn
-          execution, {state, assigned, unassigned} ->
+          execution, {state, assigned, unassigned, counts, gated} ->
             # TODO: support caching for other attempts?
             cached_result =
               if execution.attempt == 1 && execution.cache_config_id do
@@ -3606,13 +3647,13 @@ defmodule Coflux.Orchestration.Server do
               {:ok, state} = process_result(state, execution.execution_id, result)
               state = complete_execution(state, execution.execution_id)
 
-              {state, assigned, unassigned}
+              {state, assigned, unassigned, counts, gated}
             else
               # Skip executions whose dependencies haven't resolved yet
               has_pending = Map.has_key?(state.pending_dependencies, execution.execution_id)
 
               if has_pending do
-                {state, assigned, unassigned}
+                {state, assigned, unassigned, counts, gated}
               else
                 requires =
                   effective_requires(
@@ -3622,97 +3663,113 @@ defmodule Coflux.Orchestration.Server do
                   )
 
                 if execution.type == :task || !execution.parent_id do
-                  case choose_session(state, execution, requires) do
-                    nil ->
-                      {state, assigned, [execution | unassigned]}
+                  # Checked before a session is chosen, so a gated execution
+                  # never occupies a worker slot — and, by staying out of
+                  # `unassigned`, never triggers a pool launch either.
+                  case concurrency_gate(state, counts, execution) do
+                    gate when gate != [] ->
+                      {state, assigned, unassigned, counts,
+                       Map.put(gated, execution.execution_id, gate)}
 
-                    session_id ->
-                      {:ok, assigned_at} =
-                        Runs.assign_execution(state.db, execution.execution_id, session_id)
+                    [] ->
+                      case choose_session(state, execution, requires) do
+                        nil ->
+                          {state, assigned, [execution | unassigned], counts, gated}
 
-                      {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
+                        session_id ->
+                          {:ok, assigned_at} =
+                            Runs.assign_execution(state.db, execution.execution_id, session_id)
 
-                      # Enrich arguments with resolved references (asset/execution metadata)
-                      enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
+                          {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
 
-                      # Checkpoints travel with the execute message in the same
-                      # wire form as arguments, and are handled the same way
-                      # end-to-end — including the worker downloading any
-                      # blob-backed value before the adapter starts. Bounded by
-                      # this execution's own attempt, so it sees what it started
-                      # with rather than anything a stale writer lands later.
-                      {:ok, checkpoints} =
-                        Checkpoints.get_effective(
-                          state.db,
-                          execution.step_id,
-                          get_workspace_chain(state, execution.workspace_id),
-                          execution.attempt
-                        )
+                          # Enrich arguments with resolved references (asset/execution metadata)
+                          enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
 
-                      enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
+                          # Checkpoints travel with the execute message in the same
+                          # wire form as arguments, and are handled the same way
+                          # end-to-end — including the worker downloading any
+                          # blob-backed value before the adapter starts. Bounded by
+                          # this execution's own attempt, so it sees what it started
+                          # with rather than anything a stale writer lands later.
+                          {:ok, checkpoints} =
+                            Checkpoints.get_effective(
+                              state.db,
+                              execution.step_id,
+                              get_workspace_chain(state, execution.workspace_id),
+                              execution.attempt
+                            )
 
-                      workspace_external_id = state.workspaces[execution.workspace_id].external_id
+                          enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
 
-                      execution_external_id =
-                        execution_external_id(
-                          execution.run_external_id,
-                          execution.step_number,
-                          execution.attempt
-                        )
+                          workspace_external_id =
+                            state.workspaces[execution.workspace_id].external_id
 
-                      state =
-                        state
-                        |> put_in(
-                          [Access.key(:execution_ids), execution_external_id],
-                          execution.execution_id
-                        )
-                        |> update_in(
-                          [Access.key(:sessions), session_id, :starting],
-                          &MapSet.put(&1, execution_external_id)
-                        )
-                        |> update_in(
-                          [Access.key(:sessions), session_id, :total_executions],
-                          &(&1 + 1)
-                        )
-                        |> send_session(
-                          session_id,
-                          {:execute, execution_external_id, execution.module, execution.target,
-                           enriched_arguments, execution.run_external_id, workspace_external_id,
-                           execution.timeout,
-                           build_streams_config(
-                             execution.streams_buffer,
-                             execution.streams_timeout_ms
-                           ), enriched_checkpoints}
-                        )
+                          execution_external_id =
+                            execution_external_id(
+                              execution.run_external_id,
+                              execution.step_number,
+                              execution.attempt
+                            )
 
-                      # Notify sessions topic of updated total
-                      session = Map.fetch!(state.sessions, session_id)
+                          state =
+                            state
+                            |> put_in(
+                              [Access.key(:execution_ids), execution_external_id],
+                              execution.execution_id
+                            )
+                            |> update_in(
+                              [Access.key(:sessions), session_id, :starting],
+                              &MapSet.put(&1, execution_external_id)
+                            )
+                            |> update_in(
+                              [Access.key(:sessions), session_id, :total_executions],
+                              &(&1 + 1)
+                            )
+                            |> send_session(
+                              session_id,
+                              {:execute, execution_external_id, execution.module,
+                               execution.target, enriched_arguments, execution.run_external_id,
+                               workspace_external_id, execution.timeout,
+                               build_streams_config(
+                                 execution.streams_buffer,
+                                 execution.streams_timeout_ms
+                               ), enriched_checkpoints}
+                            )
 
-                      state =
-                        notify_listeners(
-                          state,
-                          {:sessions, workspace_external_id},
-                          {:executions, session.external_id, session.total_executions}
-                        )
+                          # Notify sessions topic of updated total
+                          session = Map.fetch!(state.sessions, session_id)
 
-                      state =
-                        if session.worker_id do
-                          worker = Map.get(state.workers, session.worker_id)
-
-                          if worker do
+                          state =
                             notify_listeners(
                               state,
-                              {:pool, workspace_external_id, worker.pool_name},
-                              {:worker_executions, worker.external_id, session.total_executions}
+                              {:sessions, workspace_external_id},
+                              {:executions, session.external_id, session.total_executions}
                             )
-                          else
-                            state
-                          end
-                        else
-                          state
-                        end
 
-                      {state, [{execution, assigned_at} | assigned], unassigned}
+                          state =
+                            if session.worker_id do
+                              worker = Map.get(state.workers, session.worker_id)
+
+                              if worker do
+                                notify_listeners(
+                                  state,
+                                  {:pool, workspace_external_id, worker.pool_name},
+                                  {:worker_executions, worker.external_id,
+                                   session.total_executions}
+                                )
+                              else
+                                state
+                              end
+                            else
+                              state
+                            end
+
+                          state = grant_concurrency_permit(state, execution)
+                          counts = increment_concurrency_count(counts, execution)
+
+                          {state, [{execution, assigned_at} | assigned], unassigned, counts,
+                           gated}
+                      end
                   end
                 else
                   {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
@@ -3742,7 +3799,17 @@ defmodule Coflux.Orchestration.Server do
                                  backoff_max: execution.retry_backoff_max
                                }
                              ),
-                           requires: requires
+                           requires: requires,
+                           # The spawning execution never takes a permit (no
+                           # worker runs it); the gate moves to the spawned
+                           # run's own initial step. Passed as the already-
+                           # built key because the step stores the key, not
+                           # the params it was derived from — the arguments
+                           # are the same, so it's the same key either way.
+                           concurrency_key: execution.concurrency_key,
+                           concurrency_limit: execution.concurrency_limit,
+                           group_key: execution.group_key,
+                           group_limit: execution.group_limit
                          ) do
                       {:ok, _external_run_id, _external_step_id, spawned_execution_id, state} ->
                         {:ok, state} =
@@ -3755,12 +3822,14 @@ defmodule Coflux.Orchestration.Server do
                         state
                     end
 
-                  {state, assigned, unassigned}
+                  {state, assigned, unassigned, counts, gated}
                 end
               end
             end
         end
       )
+
+    state = update_concurrency_gates(state, gated_now)
 
     state =
       assigned
@@ -5281,6 +5350,10 @@ defmodule Coflux.Orchestration.Server do
     |> Map.put(:dependency_waiters, %{})
     |> Map.put(:dependency_groups, %{})
     |> initialize_pending_dependencies()
+    # Execution ids are reassigned by the copy, so the ledger is rebuilt
+    # against the new database rather than remapped.
+    |> Map.put(:concurrency_gated, %{})
+    |> load_concurrency_permits()
     |> maybe_start_index_build()
   end
 
@@ -5760,16 +5833,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  defp find_and_build_run_data(state, external_run_id) do
+  # Runs `fun.(db, run)` against the database the run lives in: the active
+  # epoch, or an archived one found through the epoch index.
+  defp find_run(state, external_run_id, fun) do
     case Runs.get_run_by_external_id(state.db, external_run_id) do
       {:ok, run} when not is_nil(run) ->
-        build_run_data(state.db, run)
+        {:ok, fun.(state.db, run)}
 
       {:ok, nil} ->
         query_fn = fn archive_db ->
           case Runs.get_run_by_external_id(archive_db, external_run_id) do
             {:ok, run} when not is_nil(run) ->
-              {:found, build_run_data(archive_db, run)}
+              {:found, fun.(archive_db, run)}
 
             {:ok, nil} ->
               :not_found
@@ -5781,215 +5856,95 @@ defmodule Coflux.Orchestration.Server do
         end
 
         case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> result
+          {:found, result} -> {:ok, result}
           :not_found -> :not_found
         end
     end
   end
 
-  defp build_run_data(db, run) do
+  # The run's structure: every step and attempt with its status, the links
+  # between them, and groups — but none of the per-execution detail
+  # (results, dependencies, checkpoints, assets, inputs, metrics) or the
+  # per-step arguments and streams. Those are loaded for the parts a topic
+  # shows, through `build_run_details/3`. Nothing here is resolved per
+  # execution: external ids come from the run, step number and attempt.
+  defp build_run_structure(db, run) do
     parent =
       if run.parent_ref_id do
         resolve_execution_ref(db, run.parent_ref_id)
       end
 
-    run_requires =
-      if run.requires_tag_set_id do
-        case TagSets.get_tag_set(db, run.requires_tag_set_id) do
-          {:ok, tag_set} -> tag_set
-        end
-      else
-        %{}
-      end
-
-    run = Map.put(run, :requires, run_requires)
+    run = Map.put(run, :requires, get_tag_set(db, run.requires_tag_set_id))
 
     {:ok, steps} = Runs.get_run_steps(db, run.id)
     {:ok, run_executions} = Runs.get_run_executions(db, run.id)
-    {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
-    {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
-    {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
-    streams_by_step = build_run_streams(db, run_streams)
     {:ok, run_children} = Runs.get_run_children(db, run.id)
     {:ok, groups} = Runs.get_groups_for_run(db, run.id)
-    {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
-    {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
-    {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
-    {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
-    {:ok, run_catalog_reads} = Catalog.get_reads_for_run(db, run.id)
-    {:ok, run_catalog_waits} = Catalog.get_waits_for_run(db, run.id)
-    {:ok, run_catalog_publishes} = Catalog.get_publishes_for_run(db, run.external_id)
+    {:ok, completions} = Results.get_run_completions(db, run.id)
+    {:ok, workspaces} = Workspaces.get_all_workspaces(db)
 
-    # Resolving a checkpoint needs the workspace chain of the execution
-    # reading it. Resolved from `db` rather than `state` because this also
-    # runs against archived epochs, which remap workspace ids.
-    workspace_chains =
-      run_executions
-      |> Enum.map(fn {_execution_id, _step_id, _attempt, workspace_id, _, _, _, _, _} ->
-        workspace_id
-      end)
-      |> Enum.uniq()
-      |> Map.new(fn workspace_id ->
-        {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
-        {workspace_id, chain}
+    steps_by_id = Map.new(steps, &{&1.id, &1})
+
+    external_ids =
+      Map.new(run_executions, fn {execution_id, step_id, attempt, _, _, _, _, _, _} ->
+        {execution_id,
+         execution_external_id(run.external_id, Map.fetch!(steps_by_id, step_id).number, attempt)}
       end)
 
-    submitted_inputs_by_execution =
-      run_submitted_inputs
-      |> Enum.group_by(
-        fn {execution_id, _run_ext_id, _input_number, _title, _response_type} -> execution_id end,
-        fn {_execution_id, run_ext_id, input_number, title, response_type} ->
-          {input_external_id(run_ext_id, input_number),
-           %{
-             title: title,
-             status: if(response_type, do: decode_input_response_type(response_type))
-           }}
-        end
-      )
-      |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
-
-    input_deps_by_execution =
-      run_input_deps
-      |> Enum.group_by(
-        fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
-            _response_type, _response_value, _responded_at, _created_by} ->
-          execution_id
-        end,
-        fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
-            response_type, _response_value, _responded_at, _response_created_by} ->
-          {input_external_id(run_ext_id, input_number),
-           {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    asset_deps_by_execution =
-      run_asset_deps
-      |> Enum.group_by(
-        fn {execution_id, _asset_id} -> execution_id end,
-        fn {_execution_id, asset_id} ->
-          {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
-          {external_id, {:asset, {name, total_count, total_size, entry}}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    catalog_reads_by_execution =
-      run_catalog_reads
-      |> Enum.group_by(
-        fn {execution_id, _version} -> execution_id end,
-        fn {_execution_id, version} ->
-          {catalog_version_key(version.path, version.number),
-           {:catalog, build_catalog_version(db, version)}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    catalog_waits_by_execution =
-      run_catalog_waits
-      |> Enum.group_by(
-        fn {execution_id, _path, _number} -> execution_id end,
-        fn {_execution_id, path, number} ->
-          {catalog_wait_key(path, number), {:catalog_wait, path, number}}
-        end
-      )
-      |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-    catalog_publishes_by_attempt =
-      run_catalog_publishes
-      |> Enum.group_by(
-        fn {key, _version} -> key end,
-        fn {_key, version} ->
-          {catalog_version_key(version.path, version.number), build_catalog_version(db, version)}
-        end
-      )
-      |> Map.new(fn {key, versions} -> {key, Map.new(versions)} end)
-
-    metric_definitions_by_execution =
-      Enum.group_by(
-        run_metric_defs,
-        fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
-        fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress, lower,
-            upper} ->
-          {key,
-           %{
-             group: group,
-             group_units: group_units,
-             group_lower: group_lower,
-             group_upper: group_upper,
-             scale: scale,
-             units: units,
-             progress: progress == 1,
-             lower: lower,
-             upper: upper
-           }}
-        end
-      )
-      |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
-
-    cache_configs =
-      steps
-      |> Enum.map(& &1.cache_config_id)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.reduce(%{}, fn cache_config_id, cache_configs ->
-        case CacheConfigs.get_cache_config(db, cache_config_id) do
-          {:ok, cache_config} -> Map.put(cache_configs, cache_config_id, cache_config)
-        end
+    groups_by_execution =
+      groups
+      |> Enum.group_by(&elem(&1, 0))
+      |> Map.new(fn {execution_id, rows} ->
+        {execution_id,
+         Map.new(rows, fn {_, group_id, name, concurrency} ->
+           {group_id, %{name: name, concurrency: concurrency}}
+         end)}
       end)
 
-    results =
-      run_executions
-      |> Enum.map(&elem(&1, 0))
-      |> Enum.reduce(%{}, fn execution_id, results ->
-        {result, result_at, completed_at, result_created_by} =
-          case Results.get_result(db, execution_id) do
-            {:ok, {result, result_at, completion_at, created_by}} ->
-              result = build_result(result, db)
-              {result, result_at, completion_at, created_by}
-
-            {:ok, nil} ->
-              {nil, nil, nil, nil}
-          end
-
-        completion =
-          case Results.get_completion(db, execution_id) do
-            {:ok, {kind, successor_id, successor_ref_id, _, _}} ->
-              %{
-                kind: Atom.to_string(kind),
-                successor: build_completion_successor(db, successor_id, successor_ref_id)
-              }
-
-            {:ok, nil} ->
-              nil
-          end
-
-        Map.put(
-          results,
-          execution_id,
-          {result, result_at, completed_at, result_created_by, completion}
-        )
-      end)
+    executions_by_step = Enum.group_by(run_executions, &elem(&1, 1))
+    cache_configs = load_cache_configs(db, steps)
 
     steps =
       Map.new(steps, fn step ->
-        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
-        arguments = Enum.map(arguments, &build_value(&1, db))
-
-        requires =
-          if step.requires_tag_set_id do
-            case TagSets.get_tag_set(db, step.requires_tag_set_id) do
-              {:ok, requires} -> requires
-            end
-          else
-            %{}
-          end
-
+        # A step's parent is an execution of this run, except for a step
+        # copied in from an archive, which is looked up.
         parent_execution_external_id =
           if step.parent_id do
-            {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
-            execution_external_id(r, s, a)
+            Map.get_lazy(external_ids, step.parent_id, fn ->
+              {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
+              execution_external_id(r, s, a)
+            end)
           end
+
+        executions =
+          executions_by_step
+          |> Map.get(step.id, [])
+          |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after, created_at,
+                         assigned_at, created_by_user_ext_id, created_by_token_ext_id} ->
+            {completed_at, completion} =
+              case Map.get(completions, execution_id) do
+                nil ->
+                  {nil, nil}
+
+                {kind, successor, completion_at} ->
+                  {completion_at,
+                   %{kind: Atom.to_string(kind), successor: build_successor(successor)}}
+              end
+
+            {attempt,
+             %{
+               execution_id: Map.fetch!(external_ids, execution_id),
+               workspace_id: Map.fetch!(workspaces, workspace_id).external_id,
+               created_at: created_at,
+               created_by: build_created_by(created_by_user_ext_id, created_by_token_ext_id),
+               execute_after: execute_after,
+               assigned_at: assigned_at,
+               completed_at: completed_at,
+               completion: completion,
+               groups: Map.get(groups_by_execution, execution_id, %{}),
+               children: Map.get(run_children, execution_id, [])
+             }}
+          end)
 
         {step.number,
          %{
@@ -6001,137 +5956,340 @@ defmodule Coflux.Orchestration.Server do
              if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
            cache_key: step.cache_key,
            memo_key: step.memo_key,
+           concurrency_key: step.concurrency_key,
+           concurrency_limit: step.concurrency_limit,
+           group_key: step.group_key,
+           group_limit: step.group_limit,
            retry_limit: step.retry_limit,
            retry_backoff_min: step.retry_backoff_min,
            retry_backoff_max: step.retry_backoff_max,
            recurrent: step.recurrent,
            timeout: step.timeout,
            created_at: step.created_at,
-           arguments: arguments,
-           requires: requires,
-           streams: Map.get(streams_by_step, step.id, %{}),
-           executions:
-             run_executions
-             |> Enum.filter(&(elem(&1, 1) == step.id))
-             |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after,
-                            created_at, assigned_at, created_by_user_ext_id,
-                            created_by_token_ext_id} ->
-               execution_created_by =
-                 case {created_by_user_ext_id, created_by_token_ext_id} do
-                   {nil, nil} -> nil
-                   {user_ext_id, nil} -> %{type: "user", external_id: user_ext_id}
-                   {nil, token_ext_id} -> %{type: "token", external_id: token_ext_id}
-                 end
-
-               {:ok, {r, s, a}} = Runs.get_execution_key(db, execution_id)
-               exec_external_id = execution_external_id(r, s, a)
-
-               {:ok, workspace_external_id} =
-                 Workspaces.get_workspace_external_id(db, workspace_id)
-
-               {result, result_at, completed_at, result_created_by, completion} =
-                 Map.fetch!(results, execution_id)
-
-               execution_groups =
-                 groups
-                 |> Enum.filter(fn {e_id, _, _} -> e_id == execution_id end)
-                 |> Map.new(fn {_, group_id, name} -> {group_id, name} end)
-
-               # TODO: load assets in one query
-               {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
-
-               assets =
-                 asset_ids
-                 |> Enum.map(&resolve_asset(db, &1))
-                 |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
-                   {external_id, {name, total_count, total_size, entry}}
-                 end)
-
-               # TODO: batch? get `get_dependencies` to resolve?
-               result_deps =
-                 run_dependencies
-                 |> Map.get(execution_id, [])
-                 |> Map.new(fn dependency_ref_id ->
-                   {ext_id, _module, _target} =
-                     execution =
-                     resolve_execution_ref(db, dependency_ref_id)
-
-                   {ext_id, {:result, execution}}
-                 end)
-
-               stream_deps =
-                 run_stream_dependencies
-                 |> Map.get(execution_id, [])
-                 |> Map.new(fn stream_ref_id ->
-                   {:ok, {stream_run_ext_id, step_number, index, module, target}} =
-                     Streams.get_stream_ref(db, stream_ref_id)
-
-                   id = stream_external_id(stream_run_ext_id, step_number, index)
-                   {id, {:stream, id, module, target}}
-                 end)
-
-               dependencies =
-                 [
-                   build_argument_dependencies(db, step.id, step.wait_for),
-                   result_deps,
-                   stream_deps,
-                   Map.get(input_deps_by_execution, execution_id, %{}),
-                   Map.get(asset_deps_by_execution, execution_id, %{}),
-                   Map.get(catalog_reads_by_execution, execution_id, %{}),
-                   Map.get(catalog_waits_by_execution, execution_id, %{})
-                 ]
-                 |> Enum.reduce(%{}, &Map.merge(&2, &1))
-
-               # Nothing is outstanding for an execution that has finished:
-               # it isn't waiting on anything any more, whatever state its
-               # dependencies are in. Skipping those also keeps a large
-               # finished run's snapshot from re-deriving every dependency.
-               pending_dependencies =
-                 if completed_at,
-                   do: MapSet.new(),
-                   else: unresolved_dependency_ids(db, execution_id)
-
-               {:ok, {checkpoints_before, checkpoints_after}} =
-                 Checkpoints.get_execution_snapshots(
-                   db,
-                   execution_id,
-                   step.id,
-                   Map.fetch!(workspace_chains, workspace_id),
-                   attempt
-                 )
-
-               {attempt,
-                %{
-                  execution_id: exec_external_id,
-                  workspace_id: workspace_external_id,
-                  created_at: created_at,
-                  created_by: execution_created_by,
-                  execute_after: execute_after,
-                  assigned_at: assigned_at,
-                  result_at: result_at,
-                  completed_at: completed_at,
-                  completion: completion,
-                  groups: execution_groups,
-                  assets: assets,
-                  published: Map.get(catalog_publishes_by_attempt, {step.number, attempt}, %{}),
-                  dependencies: dependencies,
-                  pending_dependencies: pending_dependencies,
-                  inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
-                  result: result,
-                  result_created_by: result_created_by,
-                  children: Map.get(run_children, execution_id, []),
-                  metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
-                  checkpoints: %{
-                    before: enrich_checkpoints(checkpoints_before, db),
-                    after: enrich_checkpoints(checkpoints_after, db)
-                  }
-                }}
-             end)
+           requires: get_tag_set(db, step.requires_tag_set_id),
+           executions: executions
          }}
       end)
 
-    {:ok, run, parent, steps}
+    {run, parent, steps}
   end
+
+  # The detail of the executions named by `{step number, attempt}`, and the
+  # arguments and streams of the named steps. The row scans are over the
+  # whole run (they're indexed by it and cheap); everything that resolves a
+  # value, ref or asset is done only for what was asked for.
+  defp build_run_details(db, run, %{executions: execution_keys, steps: step_numbers}) do
+    {:ok, steps} = Runs.get_run_steps(db, run.id)
+    {:ok, run_executions} = Runs.get_run_executions(db, run.id)
+    steps_by_id = Map.new(steps, &{&1.id, &1})
+    steps_by_number = Map.new(steps, &{&1.number, &1})
+
+    executions_by_key =
+      Map.new(run_executions, fn {execution_id, step_id, attempt, workspace_id, _, _, _, _, _} ->
+        {{Map.fetch!(steps_by_id, step_id).number, attempt}, {execution_id, workspace_id}}
+      end)
+
+    requested =
+      Enum.flat_map(execution_keys, fn {number, attempt} ->
+        case Map.fetch(executions_by_key, {number, attempt}) do
+          {:ok, {execution_id, workspace_id}} ->
+            [{execution_id, workspace_id, Map.fetch!(steps_by_number, number), attempt}]
+
+          :error ->
+            []
+        end
+      end)
+
+    requested_ids = MapSet.new(requested, &elem(&1, 0))
+    requested? = fn execution_id -> MapSet.member?(requested_ids, execution_id) end
+
+    executions =
+      if requested == [] do
+        %{}
+      else
+        {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
+        {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
+        {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
+        {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
+        {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
+        {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
+        {:ok, run_catalog_reads} = Catalog.get_reads_for_run(db, run.id)
+        {:ok, run_catalog_waits} = Catalog.get_waits_for_run(db, run.id)
+        {:ok, run_catalog_publishes} = Catalog.get_publishes_for_run(db, run.external_id)
+
+        # Resolving a checkpoint needs the workspace chain of the execution
+        # reading it. Resolved from `db` rather than `state` because this
+        # also runs against archived epochs, which remap workspace ids.
+        workspace_chains =
+          requested
+          |> Enum.map(&elem(&1, 1))
+          |> Enum.uniq()
+          |> Map.new(fn workspace_id ->
+            {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
+            {workspace_id, chain}
+          end)
+
+        submitted_inputs_by_execution =
+          run_submitted_inputs
+          |> Enum.filter(fn {execution_id, _, _, _, _} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _run_ext_id, _input_number, _title, _response_type} ->
+              execution_id
+            end,
+            fn {_execution_id, run_ext_id, input_number, title, response_type} ->
+              {input_external_id(run_ext_id, input_number),
+               %{
+                 title: title,
+                 status: if(response_type, do: decode_input_response_type(response_type))
+               }}
+            end
+          )
+          |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
+
+        input_deps_by_execution =
+          run_input_deps
+          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
+          |> Enum.group_by(
+            fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
+                _response_type, _response_value, _responded_at, _created_by} ->
+              execution_id
+            end,
+            fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
+                response_type, _response_value, _responded_at, _response_created_by} ->
+              {input_external_id(run_ext_id, input_number),
+               {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        asset_deps_by_execution =
+          run_asset_deps
+          |> Enum.filter(fn {execution_id, _asset_id} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _asset_id} -> execution_id end,
+            fn {_execution_id, asset_id} ->
+              {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
+              {external_id, {:asset, {name, total_count, total_size, entry}}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        catalog_reads_by_execution =
+          run_catalog_reads
+          |> Enum.filter(fn {execution_id, _version} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _version} -> execution_id end,
+            fn {_execution_id, version} ->
+              {catalog_version_key(version.path, version.number),
+               {:catalog, build_catalog_version(db, version)}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        catalog_waits_by_execution =
+          run_catalog_waits
+          |> Enum.filter(fn {execution_id, _path, _number} -> requested?.(execution_id) end)
+          |> Enum.group_by(
+            fn {execution_id, _path, _number} -> execution_id end,
+            fn {_execution_id, path, number} ->
+              {catalog_wait_key(path, number), {:catalog_wait, path, number}}
+            end
+          )
+          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
+
+        # Publishes are recorded against the publishing execution's ref, so
+        # they come keyed by `{step number, attempt}` rather than by id.
+        requested_keys =
+          MapSet.new(requested, fn {_execution_id, _workspace_id, step, attempt} ->
+            {step.number, attempt}
+          end)
+
+        catalog_publishes_by_attempt =
+          run_catalog_publishes
+          |> Enum.filter(fn {key, _version} -> MapSet.member?(requested_keys, key) end)
+          |> Enum.group_by(
+            fn {key, _version} -> key end,
+            fn {_key, version} ->
+              {catalog_version_key(version.path, version.number),
+               build_catalog_version(db, version)}
+            end
+          )
+          |> Map.new(fn {key, versions} -> {key, Map.new(versions)} end)
+
+        metric_definitions_by_execution =
+          run_metric_defs
+          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
+          |> Enum.group_by(
+            fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
+            fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress,
+                lower, upper} ->
+              {key,
+               %{
+                 group: group,
+                 group_units: group_units,
+                 group_lower: group_lower,
+                 group_upper: group_upper,
+                 scale: scale,
+                 units: units,
+                 progress: progress == 1,
+                 lower: lower,
+                 upper: upper
+               }}
+            end
+          )
+          |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
+
+        Map.new(requested, fn {execution_id, workspace_id, step, attempt} ->
+          {result, result_at, completed_at, result_created_by} =
+            case Results.get_result(db, execution_id) do
+              {:ok, {result, result_at, completion_at, created_by}} ->
+                {build_result(result, db), result_at, completion_at, created_by}
+
+              {:ok, nil} ->
+                {nil, nil, nil, nil}
+            end
+
+          {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
+
+          assets =
+            asset_ids
+            |> Enum.map(&resolve_asset(db, &1))
+            |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
+              {external_id, {name, total_count, total_size, entry}}
+            end)
+
+          result_deps =
+            run_dependencies
+            |> Map.get(execution_id, [])
+            |> Map.new(fn dependency_ref_id ->
+              {ext_id, _module, _target} =
+                execution = resolve_execution_ref(db, dependency_ref_id)
+
+              {ext_id, {:result, execution}}
+            end)
+
+          stream_deps =
+            run_stream_dependencies
+            |> Map.get(execution_id, [])
+            |> Map.new(fn stream_ref_id ->
+              {:ok, {stream_run_ext_id, step_number, index, module, target}} =
+                Streams.get_stream_ref(db, stream_ref_id)
+
+              id = stream_external_id(stream_run_ext_id, step_number, index)
+              {id, {:stream, id, module, target}}
+            end)
+
+          dependencies =
+            [
+              build_argument_dependencies(db, step.id, step.wait_for),
+              result_deps,
+              stream_deps,
+              Map.get(input_deps_by_execution, execution_id, %{}),
+              Map.get(asset_deps_by_execution, execution_id, %{}),
+              Map.get(catalog_reads_by_execution, execution_id, %{}),
+              Map.get(catalog_waits_by_execution, execution_id, %{})
+            ]
+            |> Enum.reduce(%{}, &Map.merge(&2, &1))
+
+          # Nothing is outstanding for an execution that has finished: it
+          # isn't waiting on anything any more, whatever state its
+          # dependencies are in.
+          pending_dependencies =
+            if completed_at,
+              do: MapSet.new(),
+              else: unresolved_dependency_ids(db, execution_id)
+
+          {:ok, {checkpoints_before, checkpoints_after}} =
+            Checkpoints.get_execution_snapshots(
+              db,
+              execution_id,
+              step.id,
+              Map.fetch!(workspace_chains, workspace_id),
+              attempt
+            )
+
+          {execution_external_id(run.external_id, step.number, attempt),
+           %{
+             assets: assets,
+             published: Map.get(catalog_publishes_by_attempt, {step.number, attempt}, %{}),
+             dependencies: dependencies,
+             pending_dependencies: pending_dependencies,
+             inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
+             result: result,
+             result_at: result_at,
+             result_created_by: result_created_by,
+             metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
+             checkpoints: %{
+               before: enrich_checkpoints(checkpoints_before, db),
+               after: enrich_checkpoints(checkpoints_after, db)
+             }
+           }}
+        end)
+      end
+
+    requested_steps =
+      Enum.flat_map(step_numbers, fn number ->
+        case Map.fetch(steps_by_number, number) do
+          {:ok, step} -> [step]
+          :error -> []
+        end
+      end)
+
+    streams_by_step =
+      if requested_steps == [] do
+        %{}
+      else
+        {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
+        step_ids = MapSet.new(requested_steps, & &1.id)
+
+        run_streams
+        |> Enum.filter(&MapSet.member?(step_ids, &1.step_id))
+        |> then(&build_run_streams(db, &1))
+      end
+
+    step_details =
+      Map.new(requested_steps, fn step ->
+        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
+
+        {step.number,
+         %{
+           arguments: Enum.map(arguments, &build_value(&1, db)),
+           streams: Map.get(streams_by_step, step.id, %{})
+         }}
+      end)
+
+    %{executions: executions, steps: step_details}
+  end
+
+  defp get_tag_set(_db, nil), do: %{}
+
+  defp get_tag_set(db, tag_set_id) do
+    case TagSets.get_tag_set(db, tag_set_id) do
+      {:ok, tag_set} -> tag_set
+    end
+  end
+
+  defp load_cache_configs(db, steps) do
+    steps
+    |> Enum.map(& &1.cache_config_id)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Map.new(fn cache_config_id ->
+      case CacheConfigs.get_cache_config(db, cache_config_id) do
+        {:ok, cache_config} -> {cache_config_id, cache_config}
+      end
+    end)
+  end
+
+  defp build_successor(nil), do: nil
+
+  defp build_successor({run_ext, step_number, attempt}) do
+    %{type: "execution", id: execution_external_id(run_ext, step_number, attempt)}
+  end
+
+  defp build_created_by(nil, nil), do: nil
+  defp build_created_by(user_ext_id, nil), do: %{type: "user", external_id: user_ext_id}
+  defp build_created_by(nil, token_ext_id), do: %{type: "token", external_id: token_ext_id}
 
   defp ensure_run_in_active_epoch(state, run_external_id) do
     case Runs.get_run_by_external_id(state.db, run_external_id) do
@@ -7722,6 +7880,13 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp fire_completion_notification(state, execution_id, completion_at) do
+    # Every completion funnels through here, whoever wrote it, so this is
+    # the one place a permit needs releasing. Suspension, retry backoff,
+    # recurrence, cancellation and abandonment all write a completion, so
+    # all of them release; the successor re-acquires when it's next
+    # admitted.
+    state = release_concurrency_permit(state, execution_id)
+
     {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
     execution_external_id = execution_external_id(r, s, a)
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
@@ -8449,15 +8614,19 @@ defmodule Coflux.Orchestration.Server do
   # Build a map of execution_external_id -> [dependency] for all pending
   # executions in the given workspace, for the Queue topic snapshot.
   defp build_queue_dependencies(state, workspace_id) do
-    state.pending_dependencies
-    |> Enum.reduce(%{}, fn {execution_id, dependency_ids}, acc ->
+    # Gated executions belong here as much as blocked ones do — both are
+    # executions the queue is showing as not running for a reason.
+    execution_ids =
+      Enum.uniq(Map.keys(state.pending_dependencies) ++ Map.keys(state.concurrency_gated))
+
+    Enum.reduce(execution_ids, %{}, fn execution_id, acc ->
       case Runs.get_workspace_id_for_execution(state.db, execution_id) do
         {:ok, ^workspace_id} ->
           case Runs.get_execution_key(state.db, execution_id) do
             {:ok, {r, s, a}} ->
               ext_id = execution_external_id(r, s, a)
 
-              Map.put(acc, ext_id, queue_dependencies(state.db, dependency_ids))
+              Map.put(acc, ext_id, build_execution_queue_dependencies(state, execution_id))
 
             {:error, _} ->
               acc
@@ -8467,6 +8636,199 @@ defmodule Coflux.Orchestration.Server do
           acc
       end
     end)
+  end
+
+  # Rebuild the concurrency ledger from the database: every execution with
+  # an assignment and no completion holds a permit for each key it declares.
+  defp load_concurrency_permits(state) do
+    {:ok, permits} = Runs.get_held_concurrency_permits(state.db)
+
+    Map.put(
+      state,
+      :concurrency_permits,
+      Map.new(permits, fn {execution_id, workspace_id, concurrency_key, group_key} ->
+        {execution_id,
+         %{
+           workspace_id: workspace_id,
+           keys: Enum.reject([concurrency_key, group_key], &is_nil/1)
+         }}
+      end)
+    )
+  end
+
+  # An execution can be subject to two limits at once: its task's (a blob
+  # key hashed from namespace and arguments) and its group's (a string
+  # naming the parent execution), so the two never collide in the counts.
+  # Each is judged against its own limit; admission needs room in all.
+  defp execution_requirements(execution) do
+    [
+      {:concurrency, execution.concurrency_key, execution.concurrency_limit},
+      {:group, execution.group_key, execution.group_limit}
+    ]
+    |> Enum.reject(fn {_type, key, limit} -> is_nil(key) or limit == 0 end)
+    |> Enum.map(fn {type, key, limit} -> %{type: type, key: key, limit: limit} end)
+  end
+
+  # The keys an execution holds while it runs — whichever of the two it
+  # declares. Empty for an execution under no limit, which never enters
+  # the ledger.
+  defp permit_keys(execution) do
+    Enum.reject([execution.concurrency_key, execution.group_key], &is_nil/1)
+  end
+
+  # Permits are counted per {workspace, key}. Workspaces are scheduled
+  # independently — each has its own workers, pools and defer keys — and
+  # inheritance only shares results, so a limit is scoped the same way: a
+  # derived workspace neither waits behind its base nor holds it up.
+  #
+  # %{{workspace_id, key} => count}, computed once per tick.
+  defp concurrency_held_counts(state) do
+    Enum.reduce(state.concurrency_permits, %{}, fn {_execution_id, permit}, counts ->
+      Enum.reduce(permit.keys, counts, fn key, counts ->
+        Map.update(counts, concurrency_scope(permit.workspace_id, key), 1, &(&1 + 1))
+      end)
+    end)
+  end
+
+  defp concurrency_scope(workspace_id, key), do: {workspace_id, key}
+
+  # Empty when the execution declares no limit, or when there's room under
+  # every limit it declares. Otherwise one queue-topic dependency map per
+  # limit that lacks room, each naming the current holders — so an
+  # execution gated on both its task and its group reports both, and
+  # neither is reserved while waiting on the other.
+  #
+  # The limit compared against is the execution's own, not the holders' —
+  # targets sharing a namespace may each declare a different one, and each
+  # is judged by what it asked for.
+  defp concurrency_gate(state, counts, execution) do
+    execution
+    |> execution_requirements()
+    |> Enum.reject(fn requirement ->
+      scope = concurrency_scope(execution.workspace_id, requirement.key)
+      Map.get(counts, scope, 0) < requirement.limit
+    end)
+    |> Enum.map(fn requirement ->
+      scope = concurrency_scope(execution.workspace_id, requirement.key)
+
+      holders =
+        state.concurrency_permits
+        |> Enum.filter(fn {_execution_id, permit} ->
+          requirement.key in permit.keys and
+            concurrency_scope(permit.workspace_id, requirement.key) == scope
+        end)
+        |> Enum.map(fn {holder_id, _permit} ->
+          case Runs.get_execution_key(state.db, holder_id) do
+            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
+            {:error, _} -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      build_gate(requirement, holders)
+    end)
+  end
+
+  defp build_gate(%{type: :concurrency, key: key, limit: limit}, holders) do
+    %{type: "concurrency", key: build_concurrency_key(key), limit: limit, holders: holders}
+  end
+
+  # The group key is readable as it stands — "<parent execution>/<group>" —
+  # so it's sent verbatim, split into its parts for the queue's benefit.
+  # The group's name isn't carried: the run topic has it, and resolving it
+  # here would need a join the spawned-run case can't make.
+  defp build_gate(%{type: :group, key: key, limit: limit}, holders) do
+    [parent, group] = String.split(key, "/", parts: 2)
+
+    %{
+      type: "group",
+      key: key,
+      parent: parent,
+      group: String.to_integer(group),
+      limit: limit,
+      holders: holders
+    }
+  end
+
+  # Rendered like the run topic's cacheKey — a short hex prefix, enough to
+  # tell two pools apart at a glance.
+  defp build_concurrency_key(key) do
+    key |> Base.encode16(case: :lower) |> String.slice(0, 10)
+  end
+
+  defp grant_concurrency_permit(state, execution) do
+    case permit_keys(execution) do
+      [] ->
+        state
+
+      keys ->
+        put_in(state, [Access.key(:concurrency_permits), execution.execution_id], %{
+          workspace_id: execution.workspace_id,
+          keys: keys
+        })
+    end
+  end
+
+  # A no-op for an execution that never held one (never assigned, or
+  # declaring no limit), which is every completion but a holder's.
+  defp release_concurrency_permit(state, execution_id) do
+    if Map.has_key?(state.concurrency_permits, execution_id) do
+      # A completion that only frees a permit doesn't necessarily tick —
+      # the result-time tick has already happened by the time a draining
+      # execution completes — so whatever was gated on it would otherwise
+      # wait for the next unrelated tick.
+      send(self(), :tick)
+
+      state
+      |> Map.put(:concurrency_permits, Map.delete(state.concurrency_permits, execution_id))
+      |> Map.put(:concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
+    else
+      Map.put(state, :concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
+    end
+  end
+
+  defp increment_concurrency_count(counts, execution) do
+    Enum.reduce(permit_keys(execution), counts, fn key, counts ->
+      Map.update(counts, concurrency_scope(execution.workspace_id, key), 1, &(&1 + 1))
+    end)
+  end
+
+  # Emit queue-topic dependency updates for executions that have just become
+  # gated, or have just stopped being. Transitions only — re-sending an
+  # unchanged gate every tick would be pure noise on a busy queue.
+  defp update_concurrency_gates(state, gated_now) do
+    changed =
+      Enum.uniq(Map.keys(gated_now) ++ Map.keys(state.concurrency_gated))
+      |> Enum.reject(&(Map.get(gated_now, &1) == Map.get(state.concurrency_gated, &1)))
+
+    state = Map.put(state, :concurrency_gated, gated_now)
+
+    Enum.reduce(changed, state, fn execution_id, state ->
+      notify_queue_dependencies(state, execution_id)
+    end)
+  end
+
+  # The queue's answer to "why isn't this running?": whatever the execution
+  # is waiting on, plus each concurrency gate that's holding it back.
+  defp notify_queue_dependencies(state, execution_id) do
+    with {:ok, {r, s, a}} <- Runs.get_execution_key(state.db, execution_id),
+         {:ok, workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id) do
+      notify_listeners(
+        state,
+        {:queue, workspace_external_id(state, workspace_id)},
+        {:dependencies, execution_external_id(r, s, a),
+         build_execution_queue_dependencies(state, execution_id)}
+      )
+    else
+      _ -> state
+    end
+  end
+
+  defp build_execution_queue_dependencies(state, execution_id) do
+    pending = Map.get(state.pending_dependencies, execution_id, MapSet.new())
+
+    queue_dependencies(state.db, pending) ++
+      Map.get(state.concurrency_gated, execution_id, [])
   end
 
   # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.

@@ -106,6 +106,14 @@ func resolveStepAttempt(data map[string]any, stepAttempt string) (string, error)
 	if !ok {
 		return "", fmt.Errorf("step %q has invalid data", stepID)
 	}
+	// Every attempt of a step is summarised under "attempts"; only the
+	// expanded one is under "executions".
+	attempts, _ := s["attempts"].(map[string]any)
+	if a, ok := attempts[attempt].(map[string]any); ok {
+		if eid, ok := a["executionId"].(string); ok {
+			return eid, nil
+		}
+	}
 	executions, _ := s["executions"].(map[string]any)
 	execData, ok := executions[attempt]
 	if !ok {

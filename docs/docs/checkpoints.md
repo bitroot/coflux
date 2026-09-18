@@ -38,11 +38,11 @@ cursor = cf.Checkpoint("cursor", default=0)
 The name identifies storage scoped to the step, so declaring the handle at module level is fine — it isn't module state.
 
 ```python
-cursor.get()          # the current value, or the default if unset
-cursor.set(value)     # replace the value
-cursor.update(fn)     # set it to fn(current), and return that
-cursor.reset()        # clear it, so get() returns the default again
-cursor.is_set()       # whether it has a value
+cursor.get()  # the current value, or the default if unset
+cursor.set(value)  # replace the value
+cursor.update(fn)  # set it to fn(current), and return that
+cursor.reset()  # clear it, so get() returns the default again
+cursor.is_set()  # whether it has a value
 ```
 
 `update` is the read-modify-write most checkpoints do — advancing a cursor, accumulating a total — without naming the old value:

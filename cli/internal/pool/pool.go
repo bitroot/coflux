@@ -37,8 +37,9 @@ type ExecutionHandler interface {
 	Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait, catalogWait *adapter.CatalogWait) error
 	// Cancel cancels one or more handles (executions and/or inputs)
 	Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error
-	// RegisterGroup registers a group for organizing child executions
-	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string) error
+	// RegisterGroup registers a group for organizing child executions.
+	// Concurrency limits how many of the group's children run at once (0 = no limit).
+	RegisterGroup(ctx context.Context, executionID string, groupID int, name *string, concurrency int) error
 	// RecordLog records a log message (level: 0=debug, 1=stdout, 2=info, 3=stderr, 4=warning, 5=error)
 	// Template is the message template, values contains serialized values (each is ["raw", data, refs] or ["blob", key, size, refs])
 	RecordLog(ctx context.Context, executionID string, level int, template *string, values map[string]*adapter.Value) error
@@ -618,7 +619,7 @@ func (p *Pool) handleRegisterGroup(ctx context.Context, executionID string, para
 		return
 	}
 
-	if err := p.handler.RegisterGroup(ctx, req.ExecutionID, req.GroupID, req.Name); err != nil {
+	if err := p.handler.RegisterGroup(ctx, req.ExecutionID, req.GroupID, req.Name, req.Concurrency); err != nil {
 		logger.Error("failed to register group", "error", err)
 	}
 }

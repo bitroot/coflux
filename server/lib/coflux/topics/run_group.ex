@@ -1,0 +1,130 @@
+defmodule Coflux.Topics.RunGroup do
+  @moduledoc """
+  The members of one group, for the group popover: every child submitted
+  into the group by that execution, with its branch status. The run topic
+  only carries the group's first member and a summary of the rest.
+
+  Members are keyed by step under `members`, with submission order kept in
+  `order`, so a member's status or attempt changes by key and the order
+  only ever grows by appending — no update names a position in a list.
+  """
+
+  use Topical.Topic,
+    route: [
+      "workspaces",
+      :workspace_id,
+      "runs",
+      :run_id,
+      "executions",
+      :execution_id,
+      "groups",
+      :group_id
+    ]
+
+  alias Coflux.RunView
+  alias Coflux.RunView.{Loader, Sync}
+
+  def connect(params, context) do
+    {:ok, Map.put(params, :project, context.project)}
+  end
+
+  def init(params) do
+    project_id = Map.fetch!(params, :project)
+    run_id = Map.fetch!(params, :run_id)
+    workspace_id = Map.fetch!(params, :workspace_id)
+    execution_id = Map.fetch!(params, :execution_id)
+
+    with {group_id, ""} <- Integer.parse(Map.fetch!(params, :group_id)),
+         {:ok, view, _run, _parent, fetch} <-
+           Loader.load(project_id, run_id, workspace_id, self()),
+         %{groups: %{^group_id => group}} <- Map.get(view.executions, execution_id) do
+      # Members are listed with their arguments, so those are loaded for
+      # every member step (and nothing else).
+      member_steps =
+        view.children
+        |> Map.get(execution_id, [])
+        |> Enum.filter(&(&1.group_id == group_id))
+        |> Enum.map(& &1.step)
+
+      view = Sync.load(view, fetch, member_steps, false)
+      members = RunView.group_members(view, execution_id, group_id)
+
+      value = %{
+        name: group.name,
+        concurrency: group.concurrency,
+        members: Map.new(members, &{&1.stepId, &1}),
+        order: Enum.map(members, & &1.stepId)
+      }
+
+      state = %{
+        view: view,
+        execution_id: execution_id,
+        group_id: group_id,
+        fetch: fetch
+      }
+
+      {:ok, Topic.new(value, state)}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  def handle_info({:topic, _ref, notifications}, topic) do
+    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+    topic = %{topic | state: %{topic.state | view: view}}
+    %{execution_id: execution_id, group_id: group_id} = topic.state
+
+    topic =
+      Enum.reduce(effects.events, topic, fn
+        {:link, ^execution_id, step, ^group_id}, topic ->
+          topic = Sync.ensure(topic, [step], false)
+          view = topic.state.view
+          link = Enum.find(view.children[execution_id], &(&1.step == step))
+          member = RunView.group_member(view, link)
+
+          topic
+          |> Topic.set([:members, member.stepId], member)
+          |> Topic.insert([:order], member.stepId)
+
+        _event, topic ->
+          topic
+      end)
+
+    topic =
+      Enum.reduce(effects.branches, topic, fn step, topic ->
+        update_member(topic, view, step, :status, RunView.member_status(view, step))
+      end)
+
+    topic =
+      Enum.reduce(effects.events, topic, fn
+        {:attempt, step}, topic ->
+          update_member(topic, view, step, :attempt, RunView.latest(view, step))
+
+        _event, topic ->
+          topic
+      end)
+
+    group = view.executions[execution_id].groups[group_id]
+
+    topic =
+      topic
+      |> maybe_set([:name], group.name)
+      |> maybe_set([:concurrency], group.concurrency)
+
+    {:ok, topic}
+  end
+
+  defp update_member(topic, view, step, field, value) do
+    key = RunView.step_key(view, step)
+
+    case Map.fetch(topic.value.members, key) do
+      {:ok, %{^field => ^value}} -> topic
+      {:ok, _member} -> Topic.set(topic, [:members, key, field], value)
+      :error -> topic
+    end
+  end
+
+  defp maybe_set(topic, [key] = path, value) do
+    if Map.get(topic.value, key) == value, do: topic, else: Topic.set(topic, path, value)
+  end
+end

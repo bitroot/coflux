@@ -160,6 +160,9 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if streams, ok := workflow["streams"].(map[string]any); ok && streams != nil {
 		options["streams"] = streams
 	}
+	if concurrency, ok := workflow["concurrency"].(map[string]any); ok && concurrency != nil {
+		options["concurrency"] = concurrency
+	}
 
 	// Apply per-run overrides from flags.
 	if cmd.Flags().Changed("requires") {
