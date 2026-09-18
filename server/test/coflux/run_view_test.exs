@@ -209,6 +209,17 @@ defmodule Coflux.RunViewTest do
     assert_branches(topic.state.view)
   end
 
+  # A structure topic kept in sync alongside
+  defp structure_topic(view) do
+    Topic.new(%{steps: RunView.project_structure(view)}, %{view: view})
+  end
+
+  defp sync_structure(topic, notifications) do
+    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+    topic = %{topic | state: %{topic.state | view: view}}
+    Sync.structure(topic, effects)
+  end
+
   # Studio's `getBranchStatus`: the latest attempt's status combined with
   # every child's branch, recursively.
   defp assert_branches(view) do
@@ -457,6 +468,65 @@ defmodule Coflux.RunViewTest do
       topic = sync(topic, [{:input_submitted, id(6, 1), "I1", "Pick"}])
       assert topic.value.steps["R1:6"].executions["1"].inputs["I1"].status == "value"
       assert_in_sync(topic)
+    end
+  end
+
+  describe "the structure" do
+    test "carries every step with all attempts and complete children, and nothing else" do
+      view = fixture(false)
+      steps = RunView.project_structure(view)
+
+      assert steps |> Map.keys() |> Enum.sort() == [
+               "R1:1",
+               "R1:2",
+               "R1:3",
+               "R1:4",
+               "R1:5",
+               "R1:6"
+             ]
+
+      root = steps["R1:1"].attempts["1"]
+
+      assert Enum.map(root.children, &{&1.stepId, &1.groupId}) == [
+               {"R1:2", nil},
+               {"R1:3", 1},
+               {"R1:4", 1},
+               {"R1:5", 1}
+             ]
+
+      assert root.completion == nil
+      refute Map.has_key?(steps["R1:1"], :executions)
+      refute Map.has_key?(steps["R1:1"], :arguments)
+    end
+
+    test "stays in sync as steps, attempts and links arrive" do
+      batches = [
+        [n_execution(3, 2)],
+        [n_completion(id(3, 2), :succeeded)],
+        [n_step(7, id(3, 2)), n_execution(7, 1), n_child(id(3, 2), 7, 1, nil)],
+        [n_step(8, id(1, 1)), n_execution(8, 1, ws: "W2"), n_child(id(1, 1), 8, 1, 1)],
+        [n_execution(8, 2)]
+      ]
+
+      topic =
+        Enum.reduce(batches, structure_topic(fixture(false)), fn batch, topic ->
+          topic = sync_structure(topic, batch)
+          assert topic.value.steps == RunView.project_structure(topic.state.view)
+          topic
+        end)
+
+      assert topic.value.steps["R1:3"].attempts |> Map.keys() |> Enum.sort() == ["1", "2"]
+      assert Enum.map(topic.value.steps["R1:3"].attempts["2"].children, & &1.stepId) == ["R1:7"]
+      # Step 8's first attempt was in another workspace; it joined with its second
+      assert Map.keys(topic.value.steps["R1:8"].attempts) == ["2"]
+
+      assert Enum.map(topic.value.steps["R1:1"].attempts["1"].children, & &1.stepId) == [
+               "R1:2",
+               "R1:3",
+               "R1:4",
+               "R1:5",
+               "R1:8"
+             ]
     end
   end
 

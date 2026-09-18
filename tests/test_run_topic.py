@@ -136,10 +136,24 @@ def test_run_topics(worker):
             "steps": {},
         }
 
+        # --- The steps topic has every step, with complete children. ---
+        structure = ctx.inspect_steps(run_id)["steps"]
+        assert set(structure) == {key(n) for n in range(1, 7)}
+        root_attempt = structure[key(1)]["attempts"]["1"]
+        assert [(c["stepId"], c["groupId"]) for c in root_attempt["children"]] == [
+            (key(2), 0),
+            (key(3), 0),
+            (key(4), 0),
+            (key(5), None),
+        ]
+        assert structure[key(2)]["attempts"]["1"]["completion"]["kind"] == "errored"
+        assert "executions" not in structure[key(1)]
+
         # --- The group topic lists every member with its branch status. ---
         group = group_topic()
         assert group["name"] == "batch"
-        assert [(c["stepId"], c["status"]) for c in group["children"]] == [
+        assert group["order"] == [key(2), key(3), key(4)]
+        assert [(s, group["members"][s]["status"]) for s in group["order"]] == [
             (key(2), "errored"),
             (key(3), "completed"),
             (key(4), "completed"),
@@ -165,6 +179,10 @@ def test_run_topics(worker):
             completed=3
         )
 
+        # The steps topic gained the attempt too
+        structure = ctx.inspect_steps(run_id)["steps"]
+        assert set(structure[key(2)]["attempts"]) == {"1", "2"}
+
         # The old attempt can still be opened, on its own.
         opened = execution_topic(f"{run_id}:2:1")
         assert opened["root"] == f"{run_id}:2:1"
@@ -173,10 +191,13 @@ def test_run_topics(worker):
         assert set(opened["steps"][key(2)]["executions"]) == {"1"}
         assert set(opened["steps"][key(2)]["attempts"]) == {"1", "2"}
 
-        # And the group's member status follows the latest attempt.
+        # And the group's member status and attempt follow the latest attempt.
         group = wait_for(
             lambda: (
-                lambda g: g if g["children"][0]["status"] == "completed" else None
+                lambda g: g if g["members"][key(2)]["status"] == "completed" else None
             )(group_topic())
         )
-        assert [c["status"] for c in group["children"]] == ["completed"] * 3
+        assert [group["members"][s]["status"] for s in group["order"]] == [
+            "completed"
+        ] * 3
+        assert group["members"][key(2)]["attempt"] == 2

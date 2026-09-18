@@ -87,7 +87,7 @@ def test_execution_groups(worker):
         assert group["name"] == "batch"
         assert group["members"]["total"] == 2
         members = ctx.inspect_group(run_id, ex0.execution_id, 1)
-        assert len(members["children"]) == 2
+        assert len(members["order"]) == 2
 
         assert ctx.result(run_id)["value"]["data"] == "grouped"
 

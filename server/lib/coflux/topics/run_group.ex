@@ -1,9 +1,12 @@
 defmodule Coflux.Topics.RunGroup do
   @moduledoc """
   The members of one group, for the group popover: every child submitted
-  into the group by that execution, in submission order, with its branch
-  status. The run topic only carries the group's first member and a
-  summary of the rest.
+  into the group by that execution, with its branch status. The run topic
+  only carries the group's first member and a summary of the rest.
+
+  Members are keyed by step under `members`, with submission order kept in
+  `order`, so a member's status or attempt changes by key and the order
+  only ever grows by appending — no update names a position in a list.
   """
 
   use Topical.Topic,
@@ -49,16 +52,15 @@ defmodule Coflux.Topics.RunGroup do
       value = %{
         name: group.name,
         concurrency: group.concurrency,
-        children: members
+        members: Map.new(members, &{&1.stepId, &1}),
+        order: Enum.map(members, & &1.stepId)
       }
 
       state = %{
         view: view,
         execution_id: execution_id,
         group_id: group_id,
-        fetch: fetch,
-        # Position of each member step in `children`, for updating in place.
-        index: members |> Enum.with_index() |> Map.new(fn {member, i} -> {member.stepId, i} end)
+        fetch: fetch
       }
 
       {:ok, Topic.new(value, state)}
@@ -79,11 +81,10 @@ defmodule Coflux.Topics.RunGroup do
           view = topic.state.view
           link = Enum.find(view.children[execution_id], &(&1.step == step))
           member = RunView.group_member(view, link)
-          position = map_size(topic.state.index)
 
           topic
-          |> Topic.insert([:children], member)
-          |> put_in([Access.key(:state), :index, member.stepId], position)
+          |> Topic.set([:members, member.stepId], member)
+          |> Topic.insert([:order], member.stepId)
 
         _event, topic ->
           topic
@@ -114,14 +115,12 @@ defmodule Coflux.Topics.RunGroup do
   end
 
   defp update_member(topic, view, step, field, value) do
-    case Map.fetch(topic.state.index, RunView.step_key(view, step)) do
-      {:ok, position} ->
-        if Map.fetch!(Enum.at(topic.value.children, position), field) == value,
-          do: topic,
-          else: Topic.set(topic, [:children, position, field], value)
+    key = RunView.step_key(view, step)
 
-      :error ->
-        topic
+    case Map.fetch(topic.value.members, key) do
+      {:ok, %{^field => ^value}} -> topic
+      {:ok, _member} -> Topic.set(topic, [:members, key, field], value)
+      :error -> topic
     end
   end
 

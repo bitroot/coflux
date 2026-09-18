@@ -69,6 +69,17 @@ class WorkerContext:
             execution_id,
         )
 
+    def inspect_steps(self, run_id):
+        """Get the steps topic snapshot: every step's structure, nothing collapsed."""
+        return get_topic(
+            self.host,
+            "workspaces",
+            workspace_id(self.host, self.workspace),
+            "runs",
+            run_id,
+            "steps",
+        )
+
     def inspect_group(self, run_id, execution_id, group_id):
         """Get the group topic snapshot: every member of the group."""
         return get_topic(

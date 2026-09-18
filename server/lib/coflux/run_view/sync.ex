@@ -59,6 +59,30 @@ defmodule Coflux.RunView.Sync do
     %{topic | state: %{topic.state | visible: visible}}
   end
 
+  @doc """
+  Keeps a structure topic's `steps` in step with its view: every step that
+  changed is re-projected and diffed. Steps only ever join (with their first
+  shown attempt), never leave, and no detail is involved.
+  """
+  def structure(topic, effects) do
+    view = topic.state.view
+
+    Enum.reduce(effects.dirty, topic, fn step, topic ->
+      if RunView.latest(view, step) do
+        key = RunView.step_key(view, step)
+
+        Diff.apply(
+          topic,
+          [:steps, key],
+          topic.value.steps[key],
+          RunView.project_structure_step(view, step)
+        )
+      else
+        topic
+      end
+    end)
+  end
+
   @doc "Loads any detail the given steps need before they can be projected."
   def ensure(topic, steps, executions? \\ true) do
     view = topic.state.view

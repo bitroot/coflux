@@ -1309,6 +1309,42 @@ defmodule Coflux.RunView do
     }
   end
 
+  @doc """
+  Every step with an attempt in a shown workspace, as structure only: the
+  step's identity, and each attempt summarised with its complete list of
+  children. Nothing is collapsed and nothing needs detail, so it's what the
+  whole-run pages (timeline, logs) work from.
+  """
+  def project_structure(view) do
+    Map.new(view.attempts, fn {number, _attempts} ->
+      {step_key(view, number), project_structure_step(view, number)}
+    end)
+  end
+
+  def project_structure_step(view, number) do
+    step = view.steps[number]
+
+    %{
+      stepNumber: number,
+      module: step.module,
+      target: step.target,
+      type: step.type,
+      parentId: step.parent_id,
+      createdAt: step.created_at,
+      attempts:
+        Map.new(Map.get(view.attempts, number, %{}), fn {attempt, execution_id} ->
+          execution = view.executions[execution_id]
+
+          children =
+            view.children
+            |> Map.get(execution_id, [])
+            |> Enum.map(&Format.child(&1, view.run.external_id))
+
+          {Integer.to_string(attempt), Map.put(attempt_summary(execution), :children, children)}
+        end)
+    }
+  end
+
   @doc "The members of a group, in the order they were linked, with branch status."
   def group_members(view, execution_id, group_id) do
     view.children
