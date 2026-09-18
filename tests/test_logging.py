@@ -75,12 +75,19 @@ def test_execution_groups(worker):
 
         ex0.conn.complete(ex0.execution_id, value="grouped")
 
-        # Verify groups show in inspect
+        # The run topic collapses the group to its first member plus a
+        # summary; the group topic lists every member.
         data = ctx.inspect(run_id)
         child_steps = {
             sid: s for sid, s in data["steps"].items() if s.get("target") == "item"
         }
-        assert len(child_steps) == 2
+        assert len(child_steps) == 1
+        root_step = next(s for s in data["steps"].values() if s["parentId"] is None)
+        group = next(iter(root_step["executions"].values()))["groups"]["1"]
+        assert group["name"] == "batch"
+        assert group["members"]["total"] == 2
+        members = ctx.inspect_group(run_id, ex0.execution_id, 1)
+        assert len(members["children"]) == 2
 
         assert ctx.result(run_id)["value"]["data"] == "grouped"
 

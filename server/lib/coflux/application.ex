@@ -37,6 +37,8 @@ defmodule Coflux.Application do
       Topics.Workspaces,
       Topics.Modules,
       Topics.Run,
+      Topics.RunExecution,
+      Topics.RunGroup,
       Topics.Workflow,
       Topics.Pools,
       Topics.Pool,

@@ -35,6 +35,19 @@ def poll_result(
     )
 
 
+def get_topic(host, *route):
+    """Capture a topic snapshot over the REST endpoint."""
+    url = f"http://{host}/topics/" + "/".join(str(part) for part in route)
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=5) as resp:
+        return json.load(resp)
+
+
+def workspace_id(host, name="default"):
+    """The external id of the workspace called ``name``."""
+    workspaces = get_topic(host, "workspaces")
+    return next(k for k, v in workspaces.items() if v["name"] == name)
+
+
 def api_post(port, project_id, path, token=None, body=None):
     """POST to a server management API endpoint, returning the decoded reply."""
     if token is None:

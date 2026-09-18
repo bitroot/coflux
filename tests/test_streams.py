@@ -2245,9 +2245,12 @@ def test_stream_dependency_reported_for_each_consumer_attempt(worker):
         cons_resp = ctx.submit("test", "consumer")
         cons_ex = ctx.executor.next_execute()
 
-        # Open the topic before anything subscribes, so every edge below has
+        # Open the topics before anything subscribes, so every edge below has
         # to arrive as an update rather than being read from the snapshot.
+        # The run topic will show the latest attempt; the execution topic
+        # for the first attempt shows that one once it's been superseded.
         ctx.inspect(cons_resp["runId"])
+        ctx.inspect_execution(cons_resp["runId"], cons_ex.execution_id)
 
         cons_ex.conn.stream_subscribe(
             cons_ex.execution_id, subscription_id=1, stream_id=stream["id"]
@@ -2279,7 +2282,8 @@ def test_stream_dependency_reported_for_each_consumer_attempt(worker):
                 "pending": False,
             }
         }
-        _, step = next(iter(ctx.inspect(cons_resp["runId"])["steps"].items()))
-        assert sorted(step["executions"]) == ["1", "2"]
-        for attempt, execution in step["executions"].items():
-            assert execution["dependencies"] == expected, f"attempt {attempt}"
+        step_id, step = next(iter(ctx.inspect(cons_resp["runId"])["steps"].items()))
+        assert sorted(step["attempts"]) == ["1", "2"]
+        assert step["executions"]["2"]["dependencies"] == expected
+        opened = ctx.inspect_execution(cons_resp["runId"], cons_ex.execution_id)
+        assert opened["steps"][step_id]["executions"]["1"]["dependencies"] == expected
