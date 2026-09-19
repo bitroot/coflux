@@ -84,13 +84,20 @@ defmodule Coflux.Orchestration.Server.State do
             # named on the wire.
             workspace_names: %{},
 
-            # worker_id -> %{created_at, pool_id, pool_name, workspace_id, state, data, session_id, stop_id, last_poll_at}
+            # worker_id -> %{created_at, pool_id, pool_name, workspace_id, state, data, session_id, stop_id, stop_retry_at, last_poll_at, polling, poll_failures, first_poll_failure_at}
             #
             # Workers this server launched and hasn't deactivated.
             # `session_id` links to the session that connected for it, if
             # one has. Rebuilt at boot by `Fleet.load/1`, which deactivates
             # any that were launched but never got a session - nothing is
             # going to connect to those.
+            #
+            # `polling` is set while a poll is in flight, so a slow
+            # launcher can't accumulate overlapping polls. The poll failure
+            # counters track *transient* launcher errors only: a launcher
+            # that cannot answer is not evidence the worker is gone, so a
+            # worker is only given up on once both counters pass their
+            # thresholds (see `Scheduler`).
             workers: %{},
 
             # ref -> {pid, session_id}
@@ -100,7 +107,7 @@ defmodule Coflux.Orchestration.Server.State do
             # why a session is separate from it and outlives it.
             connections: %{},
 
-            # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
+            # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, declared_at, activation_timeout, reconnection_timeout}
             #
             # One entry per worker session. A session outlives its
             # connection - a worker that drops reconnects into the same one
@@ -109,6 +116,12 @@ defmodule Coflux.Orchestration.Server.State do
             # meanwhile. Restored at boot by `Fleet.load/1` (with an empty
             # queue: commands buffered for a session do not survive a
             # restart); owned by `Fleet` thereafter.
+            #
+            # `activated_at` is when the worker first connected,
+            # `declared_at` when it first said what it can run. Both are
+            # needed before the session counts as ready: until then it has
+            # never been able to take work, so its idleness means nothing
+            # (see `Fleet.session_ready?/1`).
             sessions: %{},
 
             # external_id -> session_id
@@ -201,6 +214,17 @@ defmodule Coflux.Orchestration.Server.State do
             # the server stopped is lost, and the worker it started (if
             # any) is deactivated at boot for having no session.
             launcher_tasks: %{},
+
+            # pool_id -> %{failures, last_attempt_at}
+            #
+            # Consecutive failed launches per pool, and when the last one
+            # was attempted, so a pool whose launches keep failing backs
+            # off instead of retrying every pass. Keyed by pool id rather
+            # than name: pool rows are immutable, so editing a pool mints a
+            # new id and the backoff clears itself. Cleared when a worker
+            # from the pool becomes ready. In-memory only - a restart is
+            # worth one free attempt.
+            pool_failures: %{},
 
             # `Coflux.Store.Index`: the Bloom filter per archived epoch,
             # so a lookup for a row that cannot be in an epoch never opens

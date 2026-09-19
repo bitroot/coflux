@@ -13,6 +13,9 @@ defmodule Coflux.Application do
       # TODO: separate launch supervisor per project? (and specify max_children?)
       {Task.Supervisor, name: Coflux.LauncherSupervisor},
       {DynamicSupervisor, name: Coflux.ProcessLauncher.Supervisor, strategy: :one_for_one},
+      # Keyed by OS pid, so a launched worker is found by something that
+      # means the same thing after a restart as before one.
+      {Registry, keys: :unique, name: Coflux.ProcessLauncher.Registry},
       Orchestration.Supervisor,
       {Registry, keys: :unique, name: Coflux.Logs.Registry},
       Logs.Supervisor,

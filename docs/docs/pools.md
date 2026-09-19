@@ -31,6 +31,12 @@ coflux pools create mypool --type docker \
 |-------|-------------|
 | `image` | Docker image to run |
 | `dockerHost` | Docker host (default: local socket) |
+| `networkMode` | Container network mode (default: `host`) |
+
+The default `host` network mode lets workers reach a server running on the same
+machine without further configuration. It isn't available on Docker Desktop,
+where containers run inside a VM — there, set `networkMode` to `bridge` and
+point `serverHost` at `host.docker.internal`.
 
 #### Process launcher
 
@@ -81,7 +87,7 @@ Note that the token is stored in the orchestration database.
 | `namespace` | Kubernetes namespace (default: `default`) |
 | `apiServer` | Kubernetes API server URL (default: in-cluster) |
 | `token` | Bearer token for API authentication |
-| `caCert` | CA certificate for TLS verification |
+| `caCert` | Path, on the server's host, to a CA certificate file for TLS verification |
 | `insecure` | Skip TLS verification |
 | `serviceAccount` | Service account for launched pods |
 | `imagePullPolicy` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
@@ -102,7 +108,7 @@ These fields apply to all launcher types:
 
 | Field / Flag | Description |
 |--------------|-------------|
-| `--modules`, `-m` | Modules to host (can be specified multiple times) |
+| `--modules`, `-m` | Modules to host (can be specified multiple times). Module names only — wildcards aren't supported, since this is also what launched workers are told to import |
 | `--provides` | Features that workers provide (e.g., `gpu:A100`) |
 | `--accepts` | Tags that executions must have to be assigned to this pool |
 | `serverHost` | Server host override for launched workers |
@@ -152,6 +158,15 @@ coflux pools export --only mypool --only gpu-pool -o pools.toml
 
 # Import pools
 coflux pools import pools.toml
+```
+
+Launcher secrets — currently the Kubernetes `token` — are redacted on export
+unless `--include-secrets` is given. Importing a redacted file is refused rather
+than silently clearing the secrets it omits, so use `--include-secrets` when the
+exported file is meant to be imported again:
+
+```bash
+coflux pools export --include-secrets -o pools.toml
 ```
 
 ## Provides, accepts, and requires

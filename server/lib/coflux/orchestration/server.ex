@@ -143,7 +143,11 @@ defmodule Coflux.Orchestration.Server do
             data: data,
             session_id: nil,
             stop_id: nil,
-            last_poll_at: nil
+            stop_retry_at: nil,
+            last_poll_at: nil,
+            polling: false,
+            poll_failures: 0,
+            first_poll_failure_at: nil
           })
         end
       )
@@ -528,7 +532,10 @@ defmodule Coflux.Orchestration.Server do
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
-              if worker.state == :active &&
+              # Pool names are per workspace: a pool of the same name in
+              # another workspace is a different pool, and its workers are
+              # not ours to drain.
+              if worker.state == :active && worker.workspace_id == workspace_id &&
                    MapSet.member?(changed_pool_names, worker.pool_name) do
                 Fleet.update_worker_state(
                   state,
@@ -619,11 +626,12 @@ defmodule Coflux.Orchestration.Server do
              pool_patch,
              access[:principal_id]
            ) do
-        {:ok, _pool_id} ->
+        {:ok, _pool_id, :updated} ->
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
-              if worker.state == :active && worker.pool_name == pool_name do
+              if worker.state == :active && worker.workspace_id == workspace_id &&
+                   worker.pool_name == pool_name do
                 Fleet.update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
               else
                 state
@@ -644,6 +652,9 @@ defmodule Coflux.Orchestration.Server do
 
           {:reply, :ok, state}
 
+        {:ok, _pool_id, :unchanged} ->
+          {:reply, :ok, state}
+
         {:error, :not_found} ->
           {:reply, {:error, :not_found}, state}
 
@@ -658,13 +669,14 @@ defmodule Coflux.Orchestration.Server do
 
   defp dispatch_call({:disable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- require_pool(state, workspace_id, pool_name) do
       :ok = Workspaces.disable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
         state
         |> put_in(
-          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          [Access.key(:pools), Access.key!(workspace_id), Access.key!(pool_name), :state],
           :disabled
         )
         |> Effects.emit(%PoolStateChanged{
@@ -684,13 +696,14 @@ defmodule Coflux.Orchestration.Server do
 
   defp dispatch_call({:enable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- require_pool(state, workspace_id, pool_name) do
       :ok = Workspaces.enable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
         state
         |> put_in(
-          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          [Access.key(:pools), Access.key!(workspace_id), Access.key!(pool_name), :state],
           :active
         )
         |> Effects.emit(%PoolStateChanged{
@@ -874,6 +887,8 @@ defmodule Coflux.Orchestration.Server do
             worker_id: nil,
             last_idle_at: now,
             activated_at: nil,
+            declared_at: nil,
+            ready_deadline_at: nil,
             activation_timeout: activation_timeout,
             reconnection_timeout: reconnection_timeout,
             total_executions: 0
@@ -940,12 +955,26 @@ defmodule Coflux.Orchestration.Server do
       |> Enum.reverse()
       |> Enum.each(&send(pid, &1))
 
+      # A worker that has connected but not yet said what it can run is
+      # given until this deadline to do so, after which it is treated as
+      # broken rather than idle (see `Scheduler`). Each connection gets a
+      # fresh one; a session that has already declared keeps none.
+      ready_deadline_at =
+        if is_nil(session.declared_at) do
+          System.os_time(:millisecond) + session.activation_timeout
+        end
+
       state =
         state
         |> put_in([Access.key(:connections), ref], {pid, session_id})
         |> update_in(
           [Access.key(:sessions), session_id],
-          &Map.merge(&1, %{connection: ref, queue: [], activated_at: activated_at})
+          &Map.merge(&1, %{
+            connection: ref,
+            queue: [],
+            activated_at: activated_at,
+            ready_deadline_at: ready_deadline_at
+          })
         )
 
       state = Effects.emit(state, Fleet.session_event(state, session))
@@ -992,11 +1021,26 @@ defmodule Coflux.Orchestration.Server do
 
     now = System.os_time(:millisecond)
 
+    previous = Map.fetch!(state.sessions, session_id)
+
     state =
       state
       |> Fleet.assign_targets(targets, session_id)
       |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
       |> put_in([Access.key(:sessions), session_id, :last_idle_at], now)
+      # The worker has answered, so it is ready and the deadline for
+      # answering no longer applies - even if it declared nothing, which
+      # is an empty manifest rather than a broken worker.
+      |> put_in([Access.key(:sessions), session_id, :declared_at], previous.declared_at || now)
+      |> put_in([Access.key(:sessions), session_id, :ready_deadline_at], nil)
+
+    # A pool that produces a working worker has no failures to back off
+    # from, whatever its previous launches did.
+    state =
+      case previous.worker_id && Map.fetch(state.workers, previous.worker_id) do
+        {:ok, worker} -> Map.update!(state, :pool_failures, &Map.delete(&1, worker.pool_id))
+        _ -> state
+      end
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -2885,4 +2929,15 @@ defmodule Coflux.Orchestration.Server do
 
   defp ok_or({:ok, val}, _reason), do: {:ok, val}
   defp ok_or(:error, reason), do: {:error, reason}
+
+  # Enabling or disabling a pool that doesn't exist must not conjure one:
+  # a state-only entry has no launcher and no modules, and every reader of
+  # `state.pools` assumes a pool has both.
+  defp require_pool(state, workspace_id, pool_name) do
+    if state.pools |> Map.get(workspace_id, %{}) |> Map.has_key?(pool_name) do
+      :ok
+    else
+      {:error, :not_found}
+    end
+  end
 end

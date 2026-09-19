@@ -496,17 +496,24 @@ defmodule Coflux.Orchestration.Workspaces do
                 pool_definition_id
               end
 
+            # Definitions are content-addressed, so a patch that re-states
+            # what is already there resolves to the same definition and
+            # writes no row. Say so: the caller drains the pool's workers
+            # on a change, and re-applying the current configuration
+            # should not restart anything.
             if pool_definition_id != existing_pool_definition_id do
-              insert_workspace_pool(
-                db,
-                workspace_id,
-                pool_name,
-                pool_definition_id,
-                now,
-                created_by
-              )
+              case insert_workspace_pool(
+                     db,
+                     workspace_id,
+                     pool_name,
+                     pool_definition_id,
+                     now,
+                     created_by
+                   ) do
+                {:ok, pool_id} -> {:ok, pool_id, :updated}
+              end
             else
-              {:ok, existing_pool_id}
+              {:ok, existing_pool_id, :unchanged}
             end
           end
       end

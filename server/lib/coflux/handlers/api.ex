@@ -6,6 +6,11 @@ defmodule Coflux.Handlers.Api do
 
   @max_parameters 20
 
+  # Stands in for a secret the caller didn't ask for. It is deliberately
+  # not a valid value: a config exported without secrets and imported
+  # again is refused rather than quietly clearing the real one.
+  @redacted_secret "<redacted>"
+
   # A directory upload arrives as one entry per file, so this bounds an
   # accidental drop of a very large tree. Unlike the sizes, which the
   # client asserts, the count is something the server can see for itself.
@@ -305,7 +310,7 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "POST", ["disable_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
-           pool_name: "poolName"
+           pool_name: {"poolName", &parse_pool_name/1}
          }) do
       {:ok, arguments, req} ->
         case Orchestration.disable_pool(
@@ -315,6 +320,7 @@ defmodule Coflux.Handlers.Api do
                access
              ) do
           :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
@@ -327,7 +333,7 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "POST", ["enable_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
-           pool_name: "poolName"
+           pool_name: {"poolName", &parse_pool_name/1}
          }) do
       {:ok, arguments, req} ->
         case Orchestration.enable_pool(
@@ -337,6 +343,7 @@ defmodule Coflux.Handlers.Api do
                access
              ) do
           :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
@@ -347,13 +354,19 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["get_pools"], project_id, _access) do
-    case read_arguments(req, %{workspace_id: "workspaceId"}) do
+    case read_arguments(
+           req,
+           %{workspace_id: "workspaceId"},
+           %{include_secrets: {"includeSecrets", &parse_boolean(&1, optional: true)}}
+         ) do
       {:ok, arguments, req} ->
+        include_secrets = Map.get(arguments, :include_secrets) == true
+
         case Orchestration.get_pools(project_id, arguments.workspace_id) do
           {:ok, pools, hash} ->
             result =
               Map.new(pools, fn {name, pool} ->
-                {name, build_pool_config(pool)}
+                {name, build_pool_config(pool, include_secrets)}
               end)
 
             req = :cowboy_req.set_resp_header("etag", "\"#{hash}\"", req)
@@ -1086,20 +1099,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp is_valid_module_pattern?(pattern) do
-    cond do
-      not is_binary(pattern) ->
-        false
-
-      String.length(pattern) > 100 ->
-        false
-
-      true ->
-        parts = String.split(pattern, ".")
-        Enum.all?(parts, &(&1 == "*" || Regex.match?(~r/^[a-z_][a-z0-9_]*$/i, &1)))
-    end
-  end
-
   defp is_valid_tag_key?(key) do
     is_valid_string?(key, regex: ~r/^[a-z0-9_-]{1,20}$/i)
   end
@@ -1120,10 +1119,15 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # A pool's modules are module names, not patterns: the same list is
+  # handed to the launcher as the worker's arguments, so a wildcard would
+  # be passed to the worker to import - nothing expands it - as well as
+  # matching no execution. Accepting one would mean a pool that quietly
+  # never runs anything, so they are validated like any other module name.
   defp parse_modules(value) do
     value = List.wrap(value)
 
-    if Enum.all?(value, &is_valid_module_pattern?/1) do
+    if Enum.all?(value, &is_valid_module_name?/1) do
       {:ok, value}
     else
       {:error, :invalid}
@@ -1173,6 +1177,7 @@ defmodule Coflux.Handlers.Api do
   defp parse_docker_launcher(value) do
     image = Map.get(value, "image")
     docker_host = Map.get(value, "dockerHost")
+    network_mode = Map.get(value, "networkMode")
 
     cond do
       not is_binary(image) or String.length(image) > 200 ->
@@ -1181,11 +1186,18 @@ defmodule Coflux.Handlers.Api do
       not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
         {:error, :invalid}
 
+      not is_nil(network_mode) and
+          (not is_binary(network_mode) or String.length(network_mode) > 200) ->
+        {:error, :invalid}
+
       true ->
         launcher = %{type: :docker, image: image}
 
         launcher =
           if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+
+        launcher =
+          if network_mode, do: Map.put(launcher, :network_mode, network_mode), else: launcher
 
         {:ok, launcher}
     end
@@ -1241,6 +1253,9 @@ defmodule Coflux.Handlers.Api do
 
       not is_nil(token) and not is_binary(token) ->
         {:error, :invalid}
+
+      token == @redacted_secret ->
+        {:error, :redacted}
 
       not is_nil(ca_cert) and not is_binary(ca_cert) ->
         {:error, :invalid}
@@ -1450,12 +1465,18 @@ defmodule Coflux.Handlers.Api do
                 {:ok, pool} when is_map(pool) ->
                   {:cont, {:ok, Map.put(result, name, pool)}}
 
+                # Keep why, against the pool it came from: "invalid" alone
+                # leaves the caller no idea which pool, or what to do about
+                # it - and `redacted` in particular has a specific remedy.
+                {:error, error} ->
+                  {:halt, {:error, %{name => error}}}
+
                 _ ->
-                  {:halt, {:error, :invalid}}
+                  {:halt, {:error, %{name => :invalid}}}
               end
 
             {:error, _} ->
-              {:halt, {:error, :invalid}}
+              {:halt, {:error, %{name => :invalid_name}}}
           end
         end)
 
@@ -1464,7 +1485,11 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp build_pool_config(pool) do
+  defp secret_value(nil, _include_secrets), do: nil
+  defp secret_value(value, true), do: value
+  defp secret_value(_value, false), do: @redacted_secret
+
+  defp build_pool_config(pool, include_secrets) do
     provides = pool.provides
     accepts = Map.get(pool, :accepts, %{})
 
@@ -1474,18 +1499,19 @@ defmodule Coflux.Handlers.Api do
     config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
 
     if pool.launcher do
-      Map.put(config, "launcher", build_launcher_config(pool.launcher))
+      Map.put(config, "launcher", build_launcher_config(pool.launcher, include_secrets))
     else
       config
     end
   end
 
-  defp build_launcher_config(launcher) do
+  defp build_launcher_config(launcher, include_secrets) do
     type_fields =
       case launcher.type do
         :docker ->
           %{"type" => "docker", "image" => launcher.image}
           |> maybe_put_value("dockerHost", Map.get(launcher, :docker_host))
+          |> maybe_put_value("networkMode", Map.get(launcher, :network_mode))
 
         :process ->
           %{"type" => "process", "directory" => launcher.directory}
@@ -1495,7 +1521,7 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("namespace", Map.get(launcher, :namespace))
           |> maybe_put_value("apiServer", Map.get(launcher, :api_server))
           |> maybe_put_value("serviceAccount", Map.get(launcher, :service_account))
-          |> maybe_put_value("token", Map.get(launcher, :token))
+          |> maybe_put_value("token", secret_value(Map.get(launcher, :token), include_secrets))
           |> maybe_put_value("caCert", Map.get(launcher, :ca_cert))
           |> maybe_put_value("insecure", Map.get(launcher, :insecure))
           |> maybe_put_value("imagePullPolicy", Map.get(launcher, :image_pull_policy))
@@ -1631,6 +1657,7 @@ defmodule Coflux.Handlers.Api do
     field_specs = [
       {"image", &is_binary/1},
       {"dockerHost", &is_binary/1},
+      {"networkMode", &is_binary/1},
       {"directory", &is_binary/1},
       {"namespace", &is_binary/1},
       {"serviceAccount", &is_binary/1},
@@ -1662,6 +1689,7 @@ defmodule Coflux.Handlers.Api do
     key_map = %{
       "image" => :image,
       "dockerHost" => :docker_host,
+      "networkMode" => :network_mode,
       "directory" => :directory,
       "namespace" => :namespace,
       "serviceAccount" => :service_account,

@@ -965,13 +965,51 @@ defmodule Coflux.Orchestration.Epoch do
     if old_ws_ids == [] do
       %{}
     else
-      copy_pools_query(old_db, new_db, workspace_ids, old_ws_ids)
+      pool_ids = copy_pools_query(old_db, new_db, workspace_ids, old_ws_ids)
+      copy_pool_states(old_db, new_db, workspace_ids, old_ws_ids)
+      pool_ids
     end
+  end
+
+  # Whether a pool is disabled lives apart from its definition, so without
+  # this every disabled pool comes back enabled in the new epoch.
+  defp copy_pool_states(old_db, new_db, workspace_ids, old_ws_ids) do
+    placeholders = Enum.map_join(1..length(old_ws_ids), ", ", &"?#{&1}")
+
+    {:ok, rows} =
+      query(
+        old_db,
+        """
+        SELECT workspace_id, pool_name, state, created_at, created_by
+        FROM pool_states
+        WHERE workspace_id IN (#{placeholders})
+        ORDER BY rowid
+        """,
+        List.to_tuple(old_ws_ids)
+      )
+
+    Enum.each(rows, fn {old_ws_id, pool_name, state, created_at, created_by} ->
+      {:ok, _} =
+        insert_one(new_db, :pool_states, %{
+          workspace_id: Map.fetch!(workspace_ids, old_ws_id),
+          pool_name: pool_name,
+          state: state,
+          created_at: created_at,
+          created_by: ensure_principal(old_db, new_db, created_by)
+        })
+    end)
   end
 
   defp copy_pools_query(old_db, new_db, workspace_ids, old_ws_ids) do
     placeholders = Enum.map_join(1..length(old_ws_ids), ", ", &"?#{&1}")
 
+    # Every row, deletions included, in id order. A pool is a sequence of
+    # immutable rows and the current one is whichever has the highest id,
+    # so both parts matter: skipping the null-definition rows would
+    # resurrect deleted pools by promoting the definition they replaced,
+    # and copying out of order would change which row wins. Superseded
+    # rows are kept because workers reference the row they were launched
+    # from, not just the current one.
     {:ok, rows} =
       query(
         old_db,
@@ -979,8 +1017,8 @@ defmodule Coflux.Orchestration.Epoch do
         SELECT id, external_id, workspace_id, name,
           pool_definition_id, created_at, created_by
         FROM pools
-        WHERE pool_definition_id IS NOT NULL
-          AND workspace_id IN (#{placeholders})
+        WHERE workspace_id IN (#{placeholders})
+        ORDER BY id
         """,
         List.to_tuple(old_ws_ids)
       )

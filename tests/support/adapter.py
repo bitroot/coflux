@@ -9,9 +9,16 @@ import os
 import socket
 import sys
 import threading
+import time
 
 
 def discover(args):
+    # --discover-delay stands in for a worker that is slow to start: a big
+    # import, or an image still being pulled. The worker has a session
+    # from the moment the server launches it, but can't say what it runs
+    # until this returns.
+    if args.discover_delay:
+        time.sleep(args.discover_delay)
     with open(args.manifest) as f:
         print(f.read(), end="")
 
@@ -67,6 +74,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--socket")
+    parser.add_argument("--discover-delay", type=float, default=0)
     parser.add_argument("command", choices=["discover", "execute"])
     parser.add_argument("modules", nargs="*")
     args = parser.parse_args()

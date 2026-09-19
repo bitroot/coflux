@@ -366,6 +366,34 @@ def pools_launches(name, host=None, workspace="default"):
     return json.loads(result.stdout)
 
 
+def pools_enable(name, host=None, workspace="default"):
+    _coflux("pools", "enable", name, host=host, workspace=workspace, output=None)
+
+
+def pools_disable(name, host=None, workspace="default"):
+    _coflux("pools", "disable", name, host=host, workspace=workspace, output=None)
+
+
+def pools_export(include_secrets=False, host=None, workspace="default"):
+    args = ["pools", "export"]
+    if include_secrets:
+        args.append("--include-secrets")
+    result = _coflux(*args, host=host, workspace=workspace, output=None)
+    return result.stdout
+
+
+def pools_import(path, host=None, workspace="default"):
+    _coflux(
+        "pools",
+        "import",
+        str(path),
+        "--yes",
+        host=host,
+        workspace=workspace,
+        output=None,
+    )
+
+
 def worker(
     modules,
     adapter,

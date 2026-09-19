@@ -181,7 +181,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 | `pools disable <name>` | Disable a pool (drain workers) |
 | `pools enable <name>` | Re-enable a pool |
 | `pools launches <pool> [worker-id]` | View launched workers (`--watch`) |
-| `pools export` | Export pool configs as TOML (`-o`, `--only`) |
+| `pools export` | Export pool configs as TOML (`-o`, `--only`, `--include-secrets`) |
 | `pools import [file]` | Import pool configs from TOML or stdin. Declarative: pools absent from the file are deleted. Flags: `--dry-run`, `--yes`, `--only` |
 
 ### Pool creation flags
@@ -190,7 +190,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 |------|-------------|
 | `--type` | Launcher type: `kubernetes`, `docker`, `process` (required) |
 | `--set` | Set a field (e.g., `--set image=myapp:latest`, `--set env.KEY=VALUE`) |
-| `--modules` | Modules to host |
+| `--modules`, `-m` | Modules to host |
 | `--provides` | Features workers provide |
 | `--accepts` | Tags executions must have |
 
@@ -200,7 +200,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 |------|-------------|
 | `--set` | Set a field |
 | `--unset` | Unset a field |
-| `--modules` | Modules to host |
+| `--modules`, `-m` | Modules to host |
 | `--provides` / `--no-provides` | Set or clear provides |
 | `--accepts` / `--no-accepts` | Set or clear accepts |
 

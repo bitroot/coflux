@@ -207,9 +207,17 @@ defmodule Coflux.Orchestration.Server.Routing do
   # ---------------------------------------------------------------------------
   # Sessions, pools and workers
 
-  def route(%SessionUpdated{} = e, _state), do: [{:sessions, e.workspace}]
+  # A pool-launched worker's connection state belongs to its pool as much
+  # as to the sessions list: it is the difference between a worker that is
+  # running and one that was merely started.
+  def route(%SessionUpdated{} = e, _state),
+    do: [{:sessions, e.workspace} | if(e.pool, do: [{:pool, e.workspace, e.pool}], else: [])]
+
   def route(%SessionEnded{} = e, _state), do: [{:sessions, e.workspace}]
-  def route(%SessionConnected{} = e, _state), do: [{:sessions, e.workspace}]
+
+  def route(%SessionConnected{} = e, state),
+    do: [{:sessions, e.workspace} | session_pool_topics(state, e.workspace, e.session)]
+
   def route(%SessionExecuting{} = e, _state), do: [{:sessions, e.workspace}]
 
   def route(%SessionExecutions{} = e, _state) do
@@ -247,6 +255,17 @@ defmodule Coflux.Orchestration.Server.Routing do
       {:ok, %{base_id: nil}} -> [workspace_id]
       {:ok, %{base_id: base_id}} -> [workspace_id | chain(state, base_id)]
       :error -> []
+    end
+  end
+
+  defp session_pool_topics(state, workspace, session_external_id) do
+    with {:ok, session_id} <- Map.fetch(state.session_ids, session_external_id),
+         {:ok, session} <- Map.fetch(state.sessions, session_id),
+         worker_id when not is_nil(worker_id) <- session.worker_id,
+         {:ok, worker} <- Map.fetch(state.workers, worker_id) do
+      [{:pool, workspace, worker.pool_name}]
+    else
+      _ -> []
     end
   end
 end

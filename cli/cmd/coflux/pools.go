@@ -551,14 +551,14 @@ func init() {
 	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process)")
 	_ = poolsCreateCmd.MarkFlagRequired("type")
 	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
-	poolsCreateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted")
 	poolsCreateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsCreateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 
 	// pools update flags
 	poolsUpdateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
 	poolsUpdateCmd.Flags().StringArray("unset", nil, "Unset a field")
-	poolsUpdateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsUpdateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted")
 	poolsUpdateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsUpdateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 	poolsUpdateCmd.Flags().Bool("no-provides", false, "Clear provides")
@@ -623,105 +623,68 @@ type poolFieldOp struct {
 	value  any // only for "set"
 }
 
-// collectFieldOps builds an ordered list of field operations from os.Args,
-// processing convenience flags (--modules, --provides, --accepts, --no-provides,
-// --no-accepts) alongside --set/--unset in the order they appear on the command line.
+// collectFieldOps builds the list of field operations from the parsed
+// flags: the convenience flags (--modules, --provides, --accepts) and
+// --set first, then --unset and the --no-* flags, so a field named by
+// both ends up unset however it was ordered on the command line.
+//
+// Taking the order from os.Args instead would look more faithful, but it
+// only sees the flag spellings the scan anticipates - a shorthand, or a
+// form it doesn't recognise, is silently dropped - and order only decides
+// anything for contradictory operations on one field.
 func collectFieldOps(cmd *cobra.Command) ([]poolFieldOp, error) {
 	var ops []poolFieldOp
 
-	// Build a map from flag to its parsed values for quick lookup
+	if cmd.Flags().Changed("modules") {
+		values, _ := cmd.Flags().GetStringSlice("modules")
+		ops = append(ops, poolFieldOp{action: "set", key: "modules", value: toAnySlice(values)})
+	}
+
+	if cmd.Flags().Changed("provides") {
+		values, _ := cmd.Flags().GetStringSlice("provides")
+		ops = append(ops, poolFieldOp{action: "set", key: "provides", value: parseProvides(values)})
+	}
+
+	if cmd.Flags().Changed("accepts") {
+		values, _ := cmd.Flags().GetStringSlice("accepts")
+		ops = append(ops, poolFieldOp{action: "set", key: "accepts", value: parseProvides(values)})
+	}
+
 	setValues, _ := cmd.Flags().GetStringArray("set")
+	for _, kv := range setValues {
+		key, val, hasVal := strings.Cut(kv, "=")
+		if !hasVal {
+			return nil, fmt.Errorf("invalid --set value %q: must be key=value", kv)
+		}
+		if !isValidFieldName(key) {
+			return nil, fmt.Errorf("unknown field %q", key)
+		}
+		ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
+	}
+
 	unsetValues, _ := cmd.Flags().GetStringArray("unset")
-	setIdx := 0
-	unsetIdx := 0
-
-	modulesValues, _ := cmd.Flags().GetStringSlice("modules")
-	providesValues, _ := cmd.Flags().GetStringSlice("provides")
-	acceptsValues, _ := cmd.Flags().GetStringSlice("accepts")
-
-	// Walk os.Args to determine command-line order of flags
-	args := os.Args
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-
-		// Normalize: handle --flag=value and --flag value forms
-		flagName := ""
-		switch {
-		case strings.HasPrefix(arg, "--set="):
-			flagName = "set"
-		case arg == "--set" && i+1 < len(args):
-			flagName = "set"
-		case strings.HasPrefix(arg, "--unset="):
-			flagName = "unset"
-		case arg == "--unset" && i+1 < len(args):
-			flagName = "unset"
-		case strings.HasPrefix(arg, "--modules=") || arg == "--modules":
-			flagName = "modules"
-		case strings.HasPrefix(arg, "--provides=") || arg == "--provides":
-			flagName = "provides"
-		case strings.HasPrefix(arg, "--accepts=") || arg == "--accepts":
-			flagName = "accepts"
-		case arg == "--no-provides":
-			flagName = "no-provides"
-		case arg == "--no-accepts":
-			flagName = "no-accepts"
-		default:
-			continue
+	for _, key := range unsetValues {
+		if !isValidFieldName(key) {
+			return nil, fmt.Errorf("unknown field %q", key)
 		}
+		ops = append(ops, poolFieldOp{action: "unset", key: key})
+	}
 
-		switch flagName {
-		case "set":
-			if setIdx < len(setValues) {
-				kv := setValues[setIdx]
-				setIdx++
-				key, val, hasVal := strings.Cut(kv, "=")
-				if !hasVal {
-					return nil, fmt.Errorf("invalid --set value %q: must be key=value", kv)
-				}
-				if !isValidFieldName(key) {
-					return nil, fmt.Errorf("unknown field %q", key)
-				}
-				ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
-			}
-			// Skip next arg if it was --set value (not --set=value)
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "unset":
-			if unsetIdx < len(unsetValues) {
-				key := unsetValues[unsetIdx]
-				unsetIdx++
-				if !isValidFieldName(key) {
-					return nil, fmt.Errorf("unknown field %q", key)
-				}
-				ops = append(ops, poolFieldOp{action: "unset", key: key})
-			}
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "modules":
-			ops = append(ops, poolFieldOp{action: "set", key: "modules", value: toAnySlice(modulesValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "provides":
-			ops = append(ops, poolFieldOp{action: "set", key: "provides", value: parseProvides(providesValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "accepts":
-			ops = append(ops, poolFieldOp{action: "set", key: "accepts", value: parseProvides(acceptsValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "no-provides":
-			ops = append(ops, poolFieldOp{action: "unset", key: "provides"})
-		case "no-accepts":
-			ops = append(ops, poolFieldOp{action: "unset", key: "accepts"})
-		}
+	if boolFlag(cmd, "no-provides") {
+		ops = append(ops, poolFieldOp{action: "unset", key: "provides"})
+	}
+
+	if boolFlag(cmd, "no-accepts") {
+		ops = append(ops, poolFieldOp{action: "unset", key: "accepts"})
 	}
 
 	return ops, nil
+}
+
+// boolFlag reads a bool flag that a given command may not define.
+func boolFlag(cmd *cobra.Command, name string) bool {
+	value, err := cmd.Flags().GetBool(name)
+	return err == nil && value
 }
 
 // toAnySlice converts []string to []any for JSON serialization.
@@ -823,6 +786,13 @@ func runPoolsCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Created pool '%s'.\n", name)
+
+	// A pool is matched to executions by module, so one with no modules
+	// can never launch anything.
+	if modules, ok := pool["modules"].([]any); !ok || len(modules) == 0 {
+		fmt.Fprintf(os.Stderr, "Warning: pool '%s' has no modules, so it will not be used. Set some with: coflux pools update %s --modules <module>...\n", name, name)
+	}
+
 	return nil
 }
 
@@ -972,21 +942,52 @@ func runPoolsEnable(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// redactedSecret is what the server substitutes for a secret the caller
+// didn't ask for. It is deliberately not a usable value, so a config
+// exported without secrets can't be imported back over the real ones.
+const redactedSecret = "<redacted>"
+
+// redactedPools names the pools whose config still carries a redacted
+// secret, so both export and import can say which ones and why.
+func redactedPools(pools map[string]map[string]any) []string {
+	var names []string
+	for name, pool := range pools {
+		launcher, ok := pool["launcher"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, value := range launcher {
+			if s, ok := value.(string); ok && s == redactedSecret {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // pools export
 
 var poolsExportOutput string
 var poolsExportOnly []string
+var poolsExportIncludeSecrets bool
 
 var poolsExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export pool configuration",
-	Long:  `Export all pool configurations for the workspace as TOML. Writes to stdout by default.`,
-	RunE:  runPoolsExport,
+	Long: `Export all pool configurations for the workspace as TOML. Writes to stdout by default.
+
+Launcher secrets, such as a Kubernetes token, are redacted unless --include-secrets
+is given. A redacted file is refused by 'pools import', so it cannot silently clear
+the secrets it omits.`,
+	RunE: runPoolsExport,
 }
 
 func init() {
 	poolsExportCmd.Flags().StringVarP(&poolsExportOutput, "output", "o", "", "Output file (default: stdout)")
 	poolsExportCmd.Flags().StringSliceVar(&poolsExportOnly, "only", nil, "Export only named pools")
+	poolsExportCmd.Flags().BoolVar(&poolsExportIncludeSecrets, "include-secrets", false, "Include launcher secrets (such as Kubernetes tokens) in the output")
 }
 
 func runPoolsExport(cmd *cobra.Command, args []string) error {
@@ -1005,7 +1006,7 @@ func runPoolsExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID, poolsExportIncludeSecrets)
 	if err != nil {
 		return err
 	}
@@ -1044,6 +1045,13 @@ func runPoolsExport(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Exported %d pool(s) to %s\n", len(pools), poolsExportOutput)
 	} else {
 		fmt.Print(buf.String())
+	}
+
+	// Better to hear this now than when an import is refused later.
+	if names := redactedPools(pools); len(names) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"Warning: secrets were redacted for %s, so this is not a complete configuration and cannot be imported as-is.\nRe-run with --include-secrets to export it in full.\n",
+			strings.Join(names, ", "))
 	}
 
 	return nil
@@ -1122,6 +1130,12 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		desiredPools[name] = tomlPoolToAPI(pool)
 	}
 
+	if names := redactedPools(desiredPools); len(names) > 0 {
+		return fmt.Errorf(
+			"%s: secrets were redacted when this was exported, so importing it would clear them.\nRe-export with --include-secrets, or set the secret explicitly with: coflux pools update <pool> --set <field>=<value>",
+			strings.Join(names, ", "))
+	}
+
 	// Connect and get current state
 	workspace, err := requireWorkspace()
 	if err != nil {
@@ -1138,7 +1152,9 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
+	// With secrets: out-of-scope pools are merged into the update below, so
+	// redacted values here would overwrite the real ones on the server.
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID, true)
 	if err != nil {
 		return err
 	}

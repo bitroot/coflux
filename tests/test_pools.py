@@ -408,3 +408,192 @@ class TestCommonLauncherFields:
 
         result_b = poll_result(resp_b["runId"], host, timeout=_RESULT_TIMEOUT)
         assert result_b["value"]["data"] == "from_b"
+
+
+class TestWorkerReadiness:
+    def test_slow_starting_worker_is_not_drained(self, pool_env):
+        """A worker slower to start than the idle timeout still gets work.
+
+        The server creates the session when it launches the worker, but the
+        worker can't accept anything until it has connected and declared
+        its targets. Anything that measures idleness from before that point
+        drains the worker while it is still starting, and it is stopped
+        having never run a thing.
+        """
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        manifest_path = pool_env["manifest_path"]
+        socket_path = pool_env["socket_path"]
+
+        with open(manifest_path, "w") as f:
+            json.dump(manifest([workflow("test", "my_workflow")]), f)
+
+        base_adapter = [
+            "python3",
+            ADAPTER_SCRIPT,
+            "--manifest",
+            manifest_path,
+            "--socket",
+            socket_path,
+        ]
+
+        # Comfortably longer than the server's 5s idle timeout.
+        slow_adapter = base_adapter + ["--discover-delay", "8"]
+
+        cli.pools_create(
+            "test-pool",
+            type="process",
+            modules=["test"],
+            process_dir=str(pool_env["worker_dir"]),
+            adapter=slow_adapter,
+            host=host,
+        )
+
+        # Registered with the prompt adapter: only the launched worker
+        # should be slow.
+        cli.manifests_register("test", adapter=",".join(base_adapter), host=host)
+
+        resp = cli.submit("test/my_workflow", host=host)
+
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="ok")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "ok"
+
+
+class TestPoolState:
+    def test_enable_unknown_pool_is_rejected(self, pool_env):
+        """Enabling a pool that doesn't exist fails, and changes nothing.
+
+        The name is not a pool, so there is nothing to enable. Recording
+        the state anyway would leave behind an entry that looks like a pool
+        but has no launcher and no modules, which the scheduler then trips
+        over on its next pass.
+        """
+        host = pool_env["host"]
+        targets = [workflow("test", "my_workflow")]
+        _setup_pool(pool_env, targets)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_enable("no-such-pool", host=host)
+        assert "not_found" in exc_info.value.stderr
+
+        assert "no-such-pool" not in cli.pools_list(host=host)
+
+        # The next pass still runs: a phantom pool would crash it.
+        executor = pool_env["executor"]
+        resp = cli.submit("test/my_workflow", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="ok")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+    def test_disable_unknown_pool_is_rejected(self, pool_env):
+        """Disabling a pool that doesn't exist fails, and changes nothing."""
+        host = pool_env["host"]
+        _setup_pool(pool_env, [workflow("test", "my_workflow")])
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_disable("no-such-pool", host=host)
+        assert "not_found" in exc_info.value.stderr
+
+        assert "no-such-pool" not in cli.pools_list(host=host)
+
+    def test_disable_and_enable_round_trip(self, pool_env):
+        """A real pool can be disabled and enabled again."""
+        host = pool_env["host"]
+        _setup_pool(pool_env, [workflow("test", "my_workflow")])
+
+        cli.pools_disable("test-pool", host=host)
+        assert cli.pools_get("test-pool", host=host)["state"] == "disabled"
+
+        cli.pools_enable("test-pool", host=host)
+        assert cli.pools_get("test-pool", host=host)["state"] == "active"
+
+
+class TestPoolModules:
+    def test_wildcard_modules_are_rejected(self, pool_env):
+        """A pool's modules are names, not patterns.
+
+        The same list is handed to the launcher as the worker's arguments,
+        so a wildcard would be passed to the worker to import as well as
+        matching no execution - a pool that silently never runs anything.
+        """
+        host = pool_env["host"]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_create(
+                "wildcard-pool",
+                type="process",
+                modules=["myapp.*"],
+                process_dir=str(pool_env["worker_dir"]),
+                host=host,
+            )
+        assert "bad_request" in exc_info.value.stderr
+
+        assert "wildcard-pool" not in cli.pools_list(host=host)
+
+
+class TestPoolSecrets:
+    def _create_kubernetes_pool(self, host, name="k8s-pool"):
+        cli._coflux(
+            "pools",
+            "create",
+            name,
+            "--type",
+            "kubernetes",
+            "--set",
+            "image=myorg/worker:latest",
+            "--set",
+            "token=super-secret-token",
+            "--set",
+            "apiServer=https://k8s.example.com",
+            "--modules",
+            "test",
+            host=host,
+            output=None,
+        )
+
+    def test_export_redacts_secrets_by_default(self, pool_env):
+        """An export doesn't put the cluster token on disk unasked."""
+        host = pool_env["host"]
+        self._create_kubernetes_pool(host)
+
+        exported = cli.pools_export(host=host)
+        assert "super-secret-token" not in exported
+        assert "<redacted>" in exported
+        # Everything that isn't a secret is still there.
+        assert "https://k8s.example.com" in exported
+
+    def test_export_with_secrets_round_trips(self, pool_env, tmp_path):
+        """--include-secrets gives a config that imports back unchanged."""
+        host = pool_env["host"]
+        self._create_kubernetes_pool(host)
+
+        exported = cli.pools_export(include_secrets=True, host=host)
+        assert "super-secret-token" in exported
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+
+        again = cli.pools_export(include_secrets=True, host=host)
+        assert "super-secret-token" in again
+
+    def test_importing_a_redacted_export_is_refused(self, pool_env, tmp_path):
+        """A redacted export can't silently clear the secrets it omits."""
+        host = pool_env["host"]
+        self._create_kubernetes_pool(host)
+
+        path = tmp_path / "pools.toml"
+        path.write_text(cli.pools_export(host=host))
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_import(path, host=host)
+        assert "k8s-pool" in exc_info.value.stderr
+        assert "--include-secrets" in exc_info.value.stderr
+
+        # And the real token is untouched.
+        assert "super-secret-token" in cli.pools_export(include_secrets=True, host=host)

@@ -54,17 +54,29 @@ defmodule Coflux.Topics.Pool do
         :docker ->
           %{type: "docker", image: launcher.image}
           |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
+          |> maybe_put(:networkMode, Map.get(launcher, :network_mode))
 
         :process ->
           %{type: "process", directory: launcher.directory}
 
+        # `token` is deliberately absent: this shape is delivered to every
+        # subscriber of the topic, and the launcher's credentials are not
+        # part of what a pool looks like. `caCert` is a path on the
+        # server's host rather than a credential, so it stays. Everything
+        # else a pool is configured with belongs here too, or `pools get`
+        # shows less than `pools export` does.
         :kubernetes ->
           %{type: "kubernetes", image: launcher.image}
           |> maybe_put(:namespace, Map.get(launcher, :namespace))
           |> maybe_put(:apiServer, Map.get(launcher, :api_server))
           |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
+          |> maybe_put(:caCert, Map.get(launcher, :ca_cert))
           |> maybe_put(:insecure, Map.get(launcher, :insecure))
           |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
+          |> maybe_put(:nodeSelector, Map.get(launcher, :node_selector))
+          |> maybe_put(:tolerations, Map.get(launcher, :tolerations))
+          |> maybe_put(:imagePullSecrets, Map.get(launcher, :image_pull_secrets))
+          |> maybe_put(:hostAliases, Map.get(launcher, :host_aliases))
           |> maybe_put(:labels, Map.get(launcher, :labels))
           |> maybe_put(:annotations, Map.get(launcher, :annotations))
           |> maybe_put(:activeDeadlineSeconds, Map.get(launcher, :active_deadline_seconds))
@@ -93,7 +105,9 @@ defmodule Coflux.Topics.Pool.Model do
   alias Coflux.Events.{
     PoolStateChanged,
     PoolUpdated,
+    SessionConnected,
     SessionExecutions,
+    SessionUpdated,
     WorkerCreated,
     WorkerDeactivated,
     WorkerLaunchResult,
@@ -128,6 +142,7 @@ defmodule Coflux.Topics.Pool.Model do
       logs: nil,
       state: :active,
       session: e.session,
+      connected: false,
       executions: 0
     }
 
@@ -159,10 +174,26 @@ defmodule Coflux.Topics.Pool.Model do
   def apply(model, %SessionExecutions{} = e),
     do: update(model, e.worker, &%{&1 | executions: e.executions})
 
+  # Session events name a session, not a worker, so they land on whichever
+  # worker was launched with it - and on none, for a session that isn't a
+  # pool worker's.
+  def apply(model, %SessionUpdated{} = e),
+    do: update_by_session(model, e.session, &%{&1 | connected: e.connected})
+
+  def apply(model, %SessionConnected{} = e),
+    do: update_by_session(model, e.session, &%{&1 | connected: e.connected})
+
   defp update(model, worker, fun) do
     case Map.fetch(model.workers, worker) do
       {:ok, entry} -> %{model | workers: Map.put(model.workers, worker, fun.(entry))}
       :error -> model
+    end
+  end
+
+  defp update_by_session(model, session, fun) do
+    case Enum.find(model.workers, fn {_id, worker} -> worker.session == session end) do
+      {worker_id, _} -> update(model, worker_id, fun)
+      nil -> model
     end
   end
 
@@ -184,6 +215,7 @@ defmodule Coflux.Topics.Pool.Model do
              logs: worker.logs,
              state: worker.state,
              sessionId: worker.session,
+             connected: worker.connected,
              executions: worker.executions
            }}
         end)

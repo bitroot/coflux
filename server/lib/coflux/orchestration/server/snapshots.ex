@@ -44,6 +44,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     ResultRecorded,
     RunCreated,
     RunOutcome,
+    SessionConnected,
     SessionExecutions,
     StepArguments,
     StepCreated,
@@ -507,7 +508,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     with {:ok, workspace_id} <-
            Permissions.resolve_workspace_external_id(state, workspace_external_id) do
       pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
-      {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
+      {:ok, pool_workers} = Workers.get_pool_workers(state.db, workspace_id, pool_name)
 
       if is_nil(pool) and pool_workers == [] do
         {:error, :not_found}
@@ -525,14 +526,18 @@ defmodule Coflux.Orchestration.Server.Snapshots do
                                           deactivated_at, error, logs, total_executions} ->
             worker = Map.get(state.workers, worker_id)
 
-            session_external_id =
+            session =
               if worker && worker.session_id do
                 case Map.fetch(state.sessions, worker.session_id) do
-                  {:ok, session} -> session.external_id
+                  {:ok, session} -> session
                   :error -> nil
                 end
               end
 
+            session_external_id = session && session.external_id
+
+            # So a subscriber joining now sees the same connection state
+            # a subscriber watching all along would have.
             [
               %WorkerCreated{
                 workspace: workspace_external_id,
@@ -604,7 +609,17 @@ defmodule Coflux.Orchestration.Server.Snapshots do
                   pool: pool_name,
                   executions: total_executions
                 }
-              ]
+              ] ++
+              if(session,
+                do: [
+                  %SessionConnected{
+                    workspace: workspace_external_id,
+                    session: session.external_id,
+                    connected: !is_nil(session.connection)
+                  }
+                ],
+                else: []
+              )
           end)
 
         {:ok, definition ++ workers}

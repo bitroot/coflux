@@ -260,8 +260,9 @@ type GetPoolConfigsResult struct {
 }
 
 // GetPoolConfigs retrieves all pool configs for a workspace along with an ETag.
-func (c *Client) GetPoolConfigs(ctx context.Context, workspaceID string) (*GetPoolConfigsResult, error) {
-	body := map[string]any{"workspaceId": workspaceID}
+// Secrets (such as a Kubernetes token) are redacted unless includeSecrets is set.
+func (c *Client) GetPoolConfigs(ctx context.Context, workspaceID string, includeSecrets bool) (*GetPoolConfigsResult, error) {
+	body := map[string]any{"workspaceId": workspaceID, "includeSecrets": includeSecrets}
 	var pools map[string]map[string]any
 	headers, err := c.post(ctx, "/api/get_pools", body, &pools)
 	if err != nil {
