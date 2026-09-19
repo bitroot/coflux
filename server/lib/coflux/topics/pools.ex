@@ -1,7 +1,11 @@
 defmodule Coflux.Topics.Pools do
+  @moduledoc "The pools defined in a workspace, keyed by name."
+
   use Topical.Topic, route: ["workspaces", :workspace_id, "pools"]
 
   alias Coflux.Orchestration
+  alias Coflux.Topics.Diff
+  alias Coflux.Topics.Pools.Model
 
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}
@@ -11,81 +15,61 @@ defmodule Coflux.Topics.Pools do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    case Orchestration.subscribe_pools(project_id, workspace_id, self()) do
-      {:ok, pools, ref} ->
-        {:ok, Topic.new(build_value(pools), %{ref: ref})}
+    case Orchestration.subscribe(project_id, {:pools, workspace_id}, self()) do
+      {:ok, events, ref} ->
+        {model, _dirty} = Model.fold(Model.new(), events)
+        {:ok, Topic.new(Model.project(model), %{model: model, ref: ref})}
 
       {:error, :workspace_invalid} ->
         {:error, :not_found}
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
-    {:ok, topic}
-  end
+  def handle_info({:topic, _ref, events}, topic) do
+    {model, dirty} = Model.fold(topic.state.model, events)
 
-  defp process_notification(topic, {:pool, pool_name, pool}) do
-    if pool do
-      Topic.set(topic, [pool_name], build_pool(pool))
-    else
-      Topic.unset(topic, [], pool_name)
-    end
-  end
+    topic =
+      Enum.reduce(dirty, topic, fn name, topic ->
+        Diff.apply(topic, [name], Map.get(topic.value, name), Model.project_entry(model, name))
+      end)
 
-  defp process_notification(topic, {:pool_state, pool_name, state}) do
-    Topic.set(topic, [pool_name, :state], to_string(state))
+    {:ok, %{topic | state: %{topic.state | model: model}}}
   end
+end
 
-  defp build_value(pools) do
-    Map.new(pools, fn {key, pool} ->
-      {key, build_pool(pool)}
+defmodule Coflux.Topics.Pools.Model do
+  @moduledoc false
+
+  import Kernel, except: [apply: 2]
+
+  alias Coflux.Events.{PoolStateChanged, PoolUpdated}
+  alias Coflux.Topics.Pool
+
+  def new, do: %{}
+
+  def fold(model, events) do
+    Enum.reduce(events, {model, MapSet.new()}, fn event, {model, dirty} ->
+      {model, keys} = apply(model, event)
+      {model, Enum.into(keys, dirty)}
     end)
   end
 
-  defp build_pool(pool) do
-    %{
-      modules: pool.modules,
-      provides: pool.provides,
-      accepts: Map.get(pool, :accepts, %{}),
-      launcher: pool.launcher && build_launcher(pool.launcher),
-      state: to_string(Map.get(pool, :state, :active))
-    }
+  def apply(model, %PoolUpdated{definition: nil} = e), do: {Map.delete(model, e.pool), [e.pool]}
+  def apply(model, %PoolUpdated{} = e), do: {Map.put(model, e.pool, e.definition), [e.pool]}
+
+  def apply(model, %PoolStateChanged{} = e) do
+    case Map.fetch(model, e.pool) do
+      {:ok, pool} -> {Map.put(model, e.pool, Map.put(pool, :state, e.state)), [e.pool]}
+      :error -> {model, []}
+    end
   end
 
-  defp build_launcher(launcher) do
-    type_fields =
-      case launcher.type do
-        :docker ->
-          %{type: "docker", image: launcher.image}
-          |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
+  def project(model), do: Map.new(model, fn {name, _} -> {name, project_entry(model, name)} end)
 
-        :process ->
-          %{type: "process", directory: launcher.directory}
-
-        :kubernetes ->
-          %{type: "kubernetes", image: launcher.image}
-          |> maybe_put(:namespace, Map.get(launcher, :namespace))
-          |> maybe_put(:apiServer, Map.get(launcher, :api_server))
-          |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
-          |> maybe_put(:insecure, Map.get(launcher, :insecure))
-          |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
-          |> maybe_put(:labels, Map.get(launcher, :labels))
-          |> maybe_put(:annotations, Map.get(launcher, :annotations))
-          |> maybe_put(:activeDeadlineSeconds, Map.get(launcher, :active_deadline_seconds))
-          |> maybe_put(:volumes, Map.get(launcher, :volumes))
-          |> maybe_put(:volumeMounts, Map.get(launcher, :volume_mounts))
-          |> maybe_put(:resources, Map.get(launcher, :resources))
-      end
-
-    type_fields
-    |> maybe_put(:serverHost, Map.get(launcher, :server_host))
-    |> maybe_put(:serverSecure, Map.get(launcher, :server_secure))
-    |> maybe_put(:adapter, Map.get(launcher, :adapter))
-    |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
-    |> maybe_put(:env, Map.get(launcher, :env))
+  def project_entry(model, name) do
+    case Map.fetch(model, name) do
+      {:ok, pool} -> Pool.build_pool(pool)
+      :error -> nil
+    end
   end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

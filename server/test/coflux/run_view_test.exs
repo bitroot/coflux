@@ -1,29 +1,76 @@
 defmodule Coflux.RunViewTest do
   use ExUnit.Case, async: true
 
+  alias Coflux.Events.{
+    ChildLinked,
+    CompletionRecorded,
+    DependenciesPending,
+    ExecutionAssigned,
+    ExecutionScheduled,
+    GroupCreated,
+    InputDependencyRecorded,
+    InputResponded,
+    InputSubmitted,
+    ResultDependencyRecorded,
+    ResultRecorded,
+    RunCreated,
+    StepArguments,
+    StepCreated
+  }
+
   alias Coflux.RunView
-  alias Coflux.RunView.{Diff, Sync}
+  alias Coflux.RunView.Sync
+  alias Coflux.Topics.Diff
   alias Topical.Topic
 
-  @run %{external_id: "R1", created_at: 0, created_by: nil, requires: %{}}
+  @run "R1"
   @ws "W1"
 
   # ---------------------------------------------------------------------------
-  # Snapshot builders (the shape `build_run_data` produces)
+  # Event builders (what a `{:run, id}` snapshot, a `get_run_details` reply
+  # and the live emits carry)
 
-  defp id(number, attempt), do: "R1:#{number}:#{attempt}"
+  defp id(number, attempt), do: "#{@run}:#{number}:#{attempt}"
 
-  # A snapshot step. With `detail: false` it carries structure only, as
-  # `subscribe_run` returns it: no arguments or streams, and executions
-  # without results, dependencies and the rest.
-  defp step(number, opts \\ []) do
-    detail? = Keyword.get(opts, :detail, true)
+  defp identity(execution_id) do
+    [run, number, attempt] = String.split(execution_id, ":")
 
-    base = %{
+    %{
+      execution: execution_id,
+      run: run,
+      step: String.to_integer(number),
+      attempt: String.to_integer(attempt),
+      workspace: @ws,
       module: "m",
       target: "t#{number}",
       type: "task",
-      parent_id: Keyword.get(opts, :parent),
+      root_module: "m",
+      root_target: "t1"
+    }
+  end
+
+  defp run_created do
+    %RunCreated{
+      run: @run,
+      workspace: @ws,
+      root_module: "m",
+      root_target: "t1",
+      type: "workflow",
+      created_at: 0,
+      created_by: nil,
+      parent: nil,
+      requires: %{}
+    }
+  end
+
+  defp n_step(number, parent) do
+    %StepCreated{
+      run: @run,
+      step: number,
+      module: "m",
+      target: "t#{number}",
+      type: "task",
+      parent: parent,
       cache_config: nil,
       cache_key: nil,
       memo_key: nil,
@@ -31,57 +78,140 @@ defmodule Coflux.RunViewTest do
       concurrency_limit: 0,
       group_key: nil,
       group_limit: 0,
-      retry_limit: 0,
-      retry_backoff_min: 0,
-      retry_backoff_max: 0,
-      recurrent: 0,
+      retries: nil,
+      recurrent: false,
       timeout: 0,
       created_at: number * 10,
-      requires: %{},
-      executions:
-        Map.new(Keyword.get(opts, :executions, []), fn {attempt, execution_opts} ->
-          {attempt, execution(number, attempt, [{:detail, detail?} | execution_opts])}
+      requires: %{}
+    }
+  end
+
+  defp n_arguments(number, arguments \\ []) do
+    %StepArguments{run: @run, step: number, arguments: arguments}
+  end
+
+  defp n_execution(number, attempt, opts \\ []) do
+    struct(
+      ExecutionScheduled,
+      Map.merge(identity(id(number, attempt)), %{
+        workspace: Keyword.get(opts, :ws, @ws),
+        execute_after: nil,
+        created_at: Keyword.get(opts, :created_at, number * 10 + attempt),
+        created_by: nil,
+        requires: %{}
+      })
+    )
+  end
+
+  defp n_child(parent_id, number, attempt, group_id) do
+    %ChildLinked{run: @run, parent: parent_id, step: number, attempt: attempt, group: group_id}
+  end
+
+  defp n_group(execution_id, group_id, name) do
+    %GroupCreated{run: @run, execution: execution_id, group: group_id, name: name, concurrency: 0}
+  end
+
+  defp n_assigned(execution_id, at \\ 100) do
+    struct(ExecutionAssigned, Map.put(identity(execution_id), :assigned_at, at))
+  end
+
+  defp n_completion(execution_id, kind, at \\ 200) do
+    struct(
+      CompletionRecorded,
+      Map.merge(identity(execution_id), %{kind: kind, successor: nil, completed_at: at})
+    )
+  end
+
+  # Detail as `get_run_details` returns it for one execution.
+  defp detail(execution_id, dependencies \\ %{}, result \\ nil) do
+    pending = [%DependenciesPending{run: @run, execution: execution_id, pending: MapSet.new()}]
+
+    dependencies =
+      Enum.map(dependencies, fn {_id, {:result, execution}} ->
+        %ResultDependencyRecorded{
+          run: @run,
+          execution: execution_id,
+          dependency: execution,
+          pending: false
+        }
+      end)
+
+    result =
+      if result do
+        [
+          %ResultRecorded{
+            run: @run,
+            execution: execution_id,
+            result: result,
+            result_at: nil,
+            created_by: nil,
+            final: true
+          }
+        ]
+      else
+        []
+      end
+
+    pending ++ dependencies ++ result
+  end
+
+  # A step of the fixture: its events, and those of its executions.
+  # Options per execution: `assigned_at`, `completed_at`, `completion`,
+  # `groups`, `children`.
+  defp step(number, opts \\ []) do
+    executions = Keyword.get(opts, :executions, [])
+
+    scheduled =
+      Enum.flat_map(executions, fn {attempt, execution_opts} ->
+        execution_id = id(number, attempt)
+
+        groups =
+          Enum.map(Keyword.get(execution_opts, :groups, %{}), fn {group_id, group} ->
+            n_group(execution_id, group_id, group.name)
+          end)
+
+        assigned =
+          case Keyword.get(execution_opts, :assigned_at) do
+            nil -> []
+            at -> [n_assigned(execution_id, at)]
+          end
+
+        completion =
+          case Keyword.get(execution_opts, :completion) do
+            nil ->
+              []
+
+            kind ->
+              [
+                n_completion(
+                  execution_id,
+                  String.to_atom(kind),
+                  Keyword.get(execution_opts, :completed_at)
+                )
+              ]
+          end
+
+        [n_execution(number, attempt) | groups ++ assigned ++ completion]
+      end)
+
+    children =
+      Enum.flat_map(executions, fn {attempt, execution_opts} ->
+        Enum.map(Keyword.get(execution_opts, :children, []), fn {step, child_attempt, group_id} ->
+          n_child(id(number, attempt), step, child_attempt, group_id)
         end)
-    }
+      end)
 
-    if detail?, do: Map.merge(base, %{arguments: [], streams: %{}}), else: base
-  end
-
-  defp execution(number, attempt, opts) do
-    base = %{
-      execution_id: id(number, attempt),
-      workspace_id: Keyword.get(opts, :ws, @ws),
-      created_at: Keyword.get(opts, :created_at, number * 10 + attempt),
-      created_by: nil,
-      execute_after: nil,
-      assigned_at: Keyword.get(opts, :assigned_at),
-      completed_at: Keyword.get(opts, :completed_at),
-      completion:
-        case Keyword.get(opts, :completion) do
-          nil -> nil
-          kind -> %{kind: kind, successor: nil}
-        end,
-      groups: Keyword.get(opts, :groups, %{}),
-      children: Keyword.get(opts, :children, [])
-    }
-
-    if Keyword.get(opts, :detail, true),
-      do: Map.merge(base, detail(Keyword.get(opts, :dependencies, %{}))),
-      else: base
-  end
-
-  # Detail as `get_run_details` returns it.
-  defp detail(dependencies \\ %{}, result \\ nil) do
     %{
-      assets: %{},
-      dependencies: dependencies,
-      pending_dependencies: MapSet.new(),
-      inputs: %{},
-      result: result,
-      result_at: nil,
-      result_created_by: nil,
-      metric_definitions: %{},
-      checkpoints: %{before: %{}, after: %{}}
+      structure: [n_step(number, Keyword.get(opts, :parent)) | scheduled],
+      children: children,
+      detail: [
+        n_arguments(number)
+        | Enum.flat_map(executions, fn {attempt, _} -> detail(id(number, attempt)) end)
+      ],
+      request: %{
+        steps: [number],
+        executions: Enum.map(executions, fn {attempt, _} -> {number, attempt} end)
+      }
     }
   end
 
@@ -90,82 +220,52 @@ defmodule Coflux.RunViewTest do
   # └─ group 1 "batch": 3 (running) ─ 6 (assigning)
   #                     4 (errored)
   #                     5 (assigning)
+  #
+  # With `detail?`, every step and execution has its detail loaded, as a
+  # topic would after fetching it; otherwise it's structure only, as a
+  # snapshot arrives.
   defp fixture(detail? \\ true) do
-    steps = %{
-      1 =>
-        step(1,
-          detail: detail?,
-          executions: [
-            {1,
-             [
-               assigned_at: 1,
-               groups: %{1 => %{name: "batch", concurrency: 0}},
-               children: [{2, 1, nil}, {3, 1, 1}, {4, 1, 1}, {5, 1, 1}]
-             ]}
-          ]
-        ),
-      2 =>
-        step(2,
-          detail: detail?,
-          parent: id(1, 1),
-          executions: [{1, [assigned_at: 1, completed_at: 2, completion: "succeeded"]}]
-        ),
-      3 =>
-        step(3,
-          detail: detail?,
-          parent: id(1, 1),
-          executions: [{1, [assigned_at: 1, children: [{6, 1, nil}]]}]
-        ),
-      4 =>
-        step(4,
-          detail: detail?,
-          parent: id(1, 1),
-          executions: [{1, [assigned_at: 1, completed_at: 2, completion: "errored"]}]
-        ),
-      5 => step(5, detail: detail?, parent: id(1, 1), executions: [{1, []}]),
-      6 => step(6, detail: detail?, parent: id(3, 1), executions: [{1, []}])
-    }
+    steps = [
+      step(1,
+        executions: [
+          {1,
+           [
+             assigned_at: 1,
+             groups: %{1 => %{name: "batch", concurrency: 0}},
+             children: [{2, 1, nil}, {3, 1, 1}, {4, 1, 1}, {5, 1, 1}]
+           ]}
+        ]
+      ),
+      step(2,
+        parent: id(1, 1),
+        executions: [{1, [assigned_at: 1, completed_at: 2, completion: "succeeded"]}]
+      ),
+      step(3, parent: id(1, 1), executions: [{1, [assigned_at: 1, children: [{6, 1, nil}]]}]),
+      step(4,
+        parent: id(1, 1),
+        executions: [{1, [assigned_at: 1, completed_at: 2, completion: "errored"]}]
+      ),
+      step(5, parent: id(1, 1), executions: [{1, []}]),
+      step(6, parent: id(3, 1), executions: [{1, []}])
+    ]
 
-    RunView.new(@run, steps, [@ws])
+    events =
+      [run_created() | Enum.flat_map(steps, & &1.structure)] ++
+        Enum.flat_map(steps, & &1.children)
+
+    view = RunView.new(events, [@ws])
+
+    if detail? do
+      request = %{
+        steps: Enum.flat_map(steps, & &1.request.steps),
+        executions: Enum.flat_map(steps, & &1.request.executions)
+      }
+
+      RunView.put_details(view, request, Enum.flat_map(steps, & &1.detail))
+    else
+      view
+    end
   end
-
-  # ---------------------------------------------------------------------------
-  # Notification builders
-
-  defp n_step(number, parent) do
-    {:step, number,
-     %{
-       module: "m",
-       target: "t#{number}",
-       type: "task",
-       parent_id: parent,
-       cache_config: nil,
-       cache_key: nil,
-       memo_key: nil,
-       concurrency_key: nil,
-       concurrency_limit: 0,
-       group_key: nil,
-       group_limit: 0,
-       retries: nil,
-       recurrent: false,
-       timeout: 0,
-       created_at: number * 10,
-       arguments: [],
-       requires: %{}
-     }, @ws}
-  end
-
-  defp n_execution(number, attempt, opts \\ []) do
-    {:execution, number, attempt, id(number, attempt), Keyword.get(opts, :ws, @ws),
-     Keyword.get(opts, :created_at, number * 10 + attempt), nil, %{}, nil, %{}, MapSet.new()}
-  end
-
-  defp n_child(parent_id, number, attempt, group_id) do
-    {:child, parent_id, {number, attempt, group_id}}
-  end
-
-  defp n_assigned(execution_id), do: {:assigned, %{execution_id => 100}}
-  defp n_completion(execution_id, kind), do: {:completion, execution_id, kind, nil, 200}
 
   # ---------------------------------------------------------------------------
   # A topic kept in sync, and oracles
@@ -184,21 +284,18 @@ defmodule Coflux.RunViewTest do
     fn request ->
       Agent.update(log, &[request | &1])
 
-      %{
-        executions:
-          Map.new(request.executions, fn {number, attempt} ->
-            {id(number, attempt), detail(%{}, {:value, {:raw, "r#{number}", []}})}
-          end),
-        steps:
-          Map.new(request.steps, fn number ->
-            {number, %{arguments: [{:raw, "arg#{number}", []}], streams: %{}}}
-          end)
-      }
+      Enum.flat_map(request.executions, fn {number, attempt} ->
+        detail(id(number, attempt), %{}, {:value, {:raw, "r#{number}", []}})
+      end) ++
+        Enum.map(request.steps, fn number ->
+          n_arguments(number, [{:raw, "arg#{number}", []}])
+        end)
     end
   end
 
-  defp sync(topic, notifications) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  # A batch may nest lists (a new step comes with its arguments).
+  defp sync(topic, events) do
+    {view, effects} = RunView.apply_all(topic.state.view, List.flatten(events))
     topic = %{topic | state: %{topic.state | view: view}}
     Sync.steps(topic, effects)
   end
@@ -214,8 +311,8 @@ defmodule Coflux.RunViewTest do
     Topic.new(%{steps: RunView.project_structure(view)}, %{view: view})
   end
 
-  defp sync_structure(topic, notifications) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  defp sync_structure(topic, events) do
+    {view, effects} = RunView.apply_all(topic.state.view, List.flatten(events))
     topic = %{topic | state: %{topic.state | view: view}}
     Sync.structure(topic, effects)
   end
@@ -380,7 +477,7 @@ defmodule Coflux.RunViewTest do
     test "a new child appears under an expanded execution and is counted under a collapsed group" do
       topic =
         sync(topic(fixture()), [
-          n_step(7, id(2, 1)),
+          [n_step(7, id(2, 1)), n_arguments(7)],
           n_execution(7, 1),
           n_child(id(2, 1), 7, 1, nil)
         ])
@@ -389,7 +486,13 @@ defmodule Coflux.RunViewTest do
       assert Enum.map(topic.value.steps["R1:2"].executions["1"].children, & &1.stepId) == ["R1:7"]
       assert_in_sync(topic)
 
-      topic = sync(topic, [n_step(8, id(1, 1)), n_execution(8, 1), n_child(id(1, 1), 8, 1, 1)])
+      topic =
+        sync(topic, [
+          [n_step(8, id(1, 1)), n_arguments(8)],
+          n_execution(8, 1),
+          n_child(id(1, 1), 8, 1, 1)
+        ])
+
       refute Map.has_key?(topic.value.steps, "R1:8")
       assert topic.value.steps["R1:1"].executions["1"].groups["1"].members.total == 4
       assert_in_sync(topic)
@@ -403,7 +506,7 @@ defmodule Coflux.RunViewTest do
     test "an attempt in another workspace is ignored until one lands in a shown workspace" do
       topic =
         sync(topic(fixture()), [
-          n_step(7, id(2, 1)),
+          [n_step(7, id(2, 1)), n_arguments(7)],
           n_execution(7, 1, ws: "W2"),
           n_child(id(2, 1), 7, 1, nil)
         ])
@@ -421,18 +524,18 @@ defmodule Coflux.RunViewTest do
     test "matches a fresh projection through a sequence of batches" do
       batches = [
         [n_assigned(id(5, 1))],
-        [n_step(7, id(3, 1)), n_execution(7, 1), n_child(id(3, 1), 7, 1, nil)],
+        [[n_step(7, id(3, 1)), n_arguments(7)], n_execution(7, 1), n_child(id(3, 1), 7, 1, nil)],
         [n_assigned(id(7, 1)), n_completion(id(7, 1), :errored)],
         [n_execution(7, 2)],
         [n_assigned(id(7, 2)), n_completion(id(7, 2), :succeeded)],
         [n_execution(3, 2)],
         [n_completion(id(3, 2), :succeeded)],
-        [n_step(8, id(3, 2)), n_execution(8, 1), n_child(id(3, 2), 8, 1, nil)],
+        [[n_step(8, id(3, 2)), n_arguments(8)], n_execution(8, 1), n_child(id(3, 2), 8, 1, nil)],
         [n_child(id(3, 2), 6, 1, nil)],
         [n_completion(id(1, 1), :succeeded)],
         [n_execution(1, 2)],
         [
-          n_step(9, id(1, 2)),
+          [n_step(9, id(1, 2)), n_arguments(9)],
           n_execution(9, 1),
           n_child(id(1, 2), 9, 1, nil),
           n_child(id(1, 2), 3, 2, nil)
@@ -449,8 +552,15 @@ defmodule Coflux.RunViewTest do
     test "input responses reach submissions and dependencies" do
       topic =
         sync(topic(fixture()), [
-          {:input_submitted, id(3, 1), "I1", "Pick"},
-          {:input_dependency, id(2, 1), "I1", "Pick", nil, true}
+          %InputSubmitted{run: @run, execution: id(3, 1), input: "I1", title: "Pick"},
+          %InputDependencyRecorded{
+            run: @run,
+            execution: id(2, 1),
+            input: "I1",
+            title: "Pick",
+            response: nil,
+            pending: true
+          }
         ])
 
       assert topic.value.steps["R1:3"].executions["1"].inputs == %{
@@ -459,13 +569,19 @@ defmodule Coflux.RunViewTest do
 
       assert topic.value.steps["R1:2"].executions["1"].dependencies["I1"].pending == true
 
-      topic = sync(topic, [{:input_response, "I1", "value"}])
+      topic =
+        sync(topic, [
+          %InputResponded{run: @run, workspace: @ws, input: "I1", response: %{type: "value"}}
+        ])
+
       assert topic.value.steps["R1:3"].executions["1"].inputs["I1"].status == "value"
       assert topic.value.steps["R1:2"].executions["1"].dependencies["I1"].status == "value"
       assert_in_sync(topic)
 
       # A later submission of the same input starts with its status
-      topic = sync(topic, [{:input_submitted, id(6, 1), "I1", "Pick"}])
+      topic =
+        sync(topic, [%InputSubmitted{run: @run, execution: id(6, 1), input: "I1", title: "Pick"}])
+
       assert topic.value.steps["R1:6"].executions["1"].inputs["I1"].status == "value"
       assert_in_sync(topic)
     end
@@ -503,8 +619,12 @@ defmodule Coflux.RunViewTest do
       batches = [
         [n_execution(3, 2)],
         [n_completion(id(3, 2), :succeeded)],
-        [n_step(7, id(3, 2)), n_execution(7, 1), n_child(id(3, 2), 7, 1, nil)],
-        [n_step(8, id(1, 1)), n_execution(8, 1, ws: "W2"), n_child(id(1, 1), 8, 1, 1)],
+        [[n_step(7, id(3, 2)), n_arguments(7)], n_execution(7, 1), n_child(id(3, 2), 7, 1, nil)],
+        [
+          [n_step(8, id(1, 1)), n_arguments(8)],
+          n_execution(8, 1, ws: "W2"),
+          n_child(id(1, 1), 8, 1, 1)
+        ],
         [n_execution(8, 2)]
       ]
 
@@ -679,7 +799,7 @@ defmodule Coflux.RunViewTest do
 
       topic =
         sync(topic, [
-          n_step(7, id(4, 1)),
+          [n_step(7, id(4, 1)), n_arguments(7)],
           n_execution(7, 1),
           n_child(id(4, 1), 7, 1, nil),
           n_assigned(id(4, 1))

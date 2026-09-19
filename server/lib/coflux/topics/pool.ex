@@ -1,7 +1,11 @@
 defmodule Coflux.Topics.Pool do
+  @moduledoc "One pool: its definition and the workers launched for it."
+
   use Topical.Topic, route: ["workspaces", :workspace_id, "pools", :pool_name]
 
   alias Coflux.Orchestration
+  alias Coflux.Topics.Diff
+  alias Coflux.Topics.Pool.Model
 
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}
@@ -12,19 +16,10 @@ defmodule Coflux.Topics.Pool do
     workspace_id = Map.fetch!(params, :workspace_id)
     pool_name = Map.fetch!(params, :pool_name)
 
-    case Orchestration.subscribe_pool(project_id, workspace_id, pool_name, self()) do
-      {:ok, pool, workers, ref} ->
-        {:ok,
-         Topic.new(
-           %{
-             pool: build_pool(pool),
-             workers:
-               Map.new(workers, fn {worker_external_id, worker} ->
-                 {worker_external_id, build_worker(worker)}
-               end)
-           },
-           %{ref: ref}
-         )}
+    case Orchestration.subscribe(project_id, {:pool, workspace_id, pool_name}, self()) do
+      {:ok, events, ref} ->
+        model = Model.fold(Model.new(pool_name), events)
+        {:ok, Topic.new(Model.project(model), %{model: model, ref: ref})}
 
       {:error, :not_found} ->
         {:error, :not_found}
@@ -34,70 +29,23 @@ defmodule Coflux.Topics.Pool do
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
-    {:ok, topic}
+  def handle_info({:topic, _ref, events}, topic) do
+    model = Model.fold(topic.state.model, events)
+    topic = Diff.apply(topic, [], topic.value, Model.project(model))
+    {:ok, %{topic | state: %{topic.state | model: model}}}
   end
 
-  defp process_notification(topic, {:updated, pool}) do
-    Topic.set(topic, [:pool], build_pool(pool))
-  end
+  @doc "The wire shape of a pool definition, shared with the pools topic."
+  def build_pool(nil), do: nil
 
-  defp process_notification(topic, {:state, state}) do
-    Topic.set(topic, [:pool, :state], to_string(state))
-  end
-
-  defp process_notification(
-         topic,
-         {:worker, _worker_id, worker_external_id, starting_at, session_external_id}
-       ) do
-    Topic.set(topic, [:workers, worker_external_id], %{
-      startingAt: starting_at,
-      startedAt: nil,
-      startError: nil,
-      stoppingAt: nil,
-      stopError: nil,
-      deactivatedAt: nil,
-      logs: nil,
-      state: :active,
-      sessionId: session_external_id,
-      executions: 0
-    })
-  end
-
-  defp process_notification(topic, {:launch_result, worker_external_id, started_at, error}) do
-    topic
-    |> Topic.set([:workers, worker_external_id, :startedAt], started_at)
-    |> Topic.set([:workers, worker_external_id, :startError], error)
-  end
-
-  defp process_notification(topic, {:worker_stopping, worker_external_id, stopping_at}) do
-    Topic.set(topic, [:workers, worker_external_id, :stoppingAt], stopping_at)
-  end
-
-  defp process_notification(topic, {:worker_stop_result, worker_external_id, stopped_at, error}) do
-    # TODO: don't set 'stopped_at' if error?
-    topic
-    |> Topic.set([:workers, worker_external_id, :stoppedAt], stopped_at)
-    |> Topic.set([:workers, worker_external_id, :stopError], error)
-  end
-
-  defp process_notification(
-         topic,
-         {:worker_deactivated, worker_external_id, deactivated_at, error, logs}
-       ) do
-    topic
-    |> Topic.set([:workers, worker_external_id, :deactivatedAt], deactivated_at)
-    |> Topic.set([:workers, worker_external_id, :error], error)
-    |> Topic.set([:workers, worker_external_id, :logs], logs)
-  end
-
-  defp process_notification(topic, {:worker_state, worker_external_id, state}) do
-    Topic.set(topic, [:workers, worker_external_id, :state], state)
-  end
-
-  defp process_notification(topic, {:worker_executions, worker_external_id, total}) do
-    Topic.set(topic, [:workers, worker_external_id, :executions], total)
+  def build_pool(pool) do
+    %{
+      modules: pool.modules,
+      provides: pool.provides,
+      accepts: Map.get(pool, :accepts, %{}),
+      launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
+      state: to_string(Map.get(pool, :state, :active))
+    }
   end
 
   defp build_launcher(launcher) do
@@ -135,34 +83,110 @@ defmodule Coflux.Topics.Pool do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+end
 
-  defp build_pool(pool) do
-    if pool do
-      %{
-        modules: pool.modules,
-        provides: pool.provides,
-        accepts: Map.get(pool, :accepts, %{}),
-        # TODO: include launcher ID?
-        launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
-        state: to_string(Map.get(pool, :state, :active))
-      }
+defmodule Coflux.Topics.Pool.Model do
+  @moduledoc false
+
+  import Kernel, except: [apply: 2]
+
+  alias Coflux.Events.{
+    PoolStateChanged,
+    PoolUpdated,
+    SessionExecutions,
+    WorkerCreated,
+    WorkerDeactivated,
+    WorkerLaunchResult,
+    WorkerStateChanged,
+    WorkerStopping,
+    WorkerStopResult
+  }
+
+  alias Coflux.Topics.Pool
+
+  def new(name), do: %{name: name, pool: nil, workers: %{}}
+
+  def fold(model, events), do: Enum.reduce(events, model, &apply(&2, &1))
+
+  def apply(model, %PoolUpdated{} = e), do: %{model | pool: e.definition}
+
+  def apply(%{pool: nil} = model, %PoolStateChanged{}), do: model
+
+  def apply(model, %PoolStateChanged{} = e),
+    do: %{model | pool: Map.put(model.pool, :state, e.state)}
+
+  def apply(model, %WorkerCreated{} = e) do
+    worker = %{
+      starting_at: e.created_at,
+      started_at: nil,
+      start_error: nil,
+      stopping_at: nil,
+      stopped_at: nil,
+      stop_error: nil,
+      deactivated_at: nil,
+      error: nil,
+      logs: nil,
+      state: :active,
+      session: e.session,
+      executions: 0
+    }
+
+    %{model | workers: Map.put(model.workers, e.worker, worker)}
+  end
+
+  def apply(model, %WorkerLaunchResult{} = e),
+    do: update(model, e.worker, &%{&1 | started_at: e.started_at, start_error: e.error})
+
+  def apply(model, %WorkerStopping{} = e),
+    do: update(model, e.worker, &%{&1 | stopping_at: e.stopping_at})
+
+  def apply(model, %WorkerStopResult{} = e),
+    do: update(model, e.worker, &%{&1 | stopped_at: e.stopped_at, stop_error: e.error})
+
+  def apply(model, %WorkerDeactivated{} = e),
+    do:
+      update(
+        model,
+        e.worker,
+        &%{&1 | deactivated_at: e.deactivated_at, error: e.error, logs: e.logs}
+      )
+
+  def apply(model, %WorkerStateChanged{} = e),
+    do: update(model, e.worker, &%{&1 | state: e.state})
+
+  def apply(model, %SessionExecutions{worker: nil}), do: model
+
+  def apply(model, %SessionExecutions{} = e),
+    do: update(model, e.worker, &%{&1 | executions: e.executions})
+
+  defp update(model, worker, fun) do
+    case Map.fetch(model.workers, worker) do
+      {:ok, entry} -> %{model | workers: Map.put(model.workers, worker, fun.(entry))}
+      :error -> model
     end
   end
 
-  defp build_worker(worker) do
+  def project(model) do
     %{
-      # TODO: launcher ID? (and/or launcher?)
-      startingAt: worker.starting_at,
-      startedAt: worker.started_at,
-      startError: worker.start_error,
-      stoppingAt: worker.stopping_at,
-      stopError: worker.stop_error,
-      deactivatedAt: worker.deactivated_at,
-      error: worker.error,
-      logs: worker.logs,
-      state: worker.state,
-      sessionId: worker.session_external_id,
-      executions: worker.total_executions
+      pool: Pool.build_pool(model.pool),
+      workers:
+        Map.new(model.workers, fn {id, worker} ->
+          {id,
+           %{
+             startingAt: worker.starting_at,
+             startedAt: worker.started_at,
+             startError: worker.start_error,
+             stoppingAt: worker.stopping_at,
+             stoppedAt: worker.stopped_at,
+             stopError: worker.stop_error,
+             deactivatedAt: worker.deactivated_at,
+             error: worker.error,
+             logs: worker.logs,
+             state: worker.state,
+             sessionId: worker.session,
+             executions: worker.executions
+           }}
+        end)
     }
   end
 end

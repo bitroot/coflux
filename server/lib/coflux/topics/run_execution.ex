@@ -24,8 +24,7 @@ defmodule Coflux.Topics.RunExecution do
     workspace_id = Map.fetch!(params, :workspace_id)
     execution_id = Map.fetch!(params, :execution_id)
 
-    with {:ok, view, _run, _parent, fetch} <-
-           Loader.load(project_id, run_id, workspace_id, self()),
+    with {:ok, view, fetch} <- Loader.load(project_id, run_id, workspace_id, self()),
          %{} = selection <- RunView.selection(view, execution_id) do
       view = RunView.with_selection(view, selection)
       visible = RunView.visible_steps(view)
@@ -52,8 +51,8 @@ defmodule Coflux.Topics.RunExecution do
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  def handle_info({:topic, _ref, events}, topic) do
+    {view, effects} = RunView.apply_all(topic.state.view, events)
     topic = %{topic | state: %{topic.state | view: view}}
     previous = topic.state.selection
 

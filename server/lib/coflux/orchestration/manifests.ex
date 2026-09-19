@@ -3,6 +3,10 @@ defmodule Coflux.Orchestration.Manifests do
 
   alias Coflux.Orchestration.{TagSets, CacheConfigs, Utils}
 
+  # SQLite binds at most 999 parameters by default, so an id list longer
+  # than this is queried in chunks.
+  @max_query_ids 900
+
   def register_manifests(db, workspace_id, manifests, created_by \\ nil) do
     with_transaction(db, fn ->
       manifest_ids =
@@ -176,6 +180,25 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
+  @doc "The workflows of the module's latest manifest in the workspace, or nil if none or archived."
+  def get_latest_manifest(db, workspace_id, module) do
+    case query_one(
+           db,
+           """
+           SELECT manifest_id
+           FROM workspace_manifests
+           WHERE workspace_id = ?1 AND module = ?2
+           ORDER BY created_at DESC
+           LIMIT 1
+           """,
+           {workspace_id, module}
+         ) do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, {nil}} -> {:ok, nil}
+      {:ok, {manifest_id}} -> get_manifest_workflows(db, manifest_id)
+    end
+  end
+
   def get_latest_workflow(db, workspace_id, module, target_name) do
     case query_one(
            db,
@@ -265,28 +288,6 @@ defmodule Coflux.Orchestration.Manifests do
           end)
 
         {:ok, workflows}
-    end
-  end
-
-  def get_all_workflows_for_workspace(db, workspace_id) do
-    case query(
-           db,
-           """
-           SELECT DISTINCT wm.module, w.name
-           FROM workspace_manifests AS wm
-           INNER JOIN manifests AS m on m.id = wm.manifest_id
-           INNER JOIN workflows AS w ON w.manifest_id = m.id
-           WHERE wm.workspace_id = ?1
-           """,
-           {workspace_id}
-         ) do
-      {:ok, rows} ->
-        {:ok,
-         Enum.reduce(rows, %{}, fn {module, target_name}, result ->
-           result
-           |> Map.put_new(module, MapSet.new())
-           |> Map.update!(module, &MapSet.put(&1, target_name))
-         end)}
     end
   end
 
@@ -448,10 +449,30 @@ defmodule Coflux.Orchestration.Manifests do
     end
   end
 
-  def get_instruction(db, instruction_id) do
-    case query_one(db, "SELECT content FROM instructions WHERE id = ?1", {instruction_id}) do
-      {:ok, {content}} -> {:ok, content}
-    end
+  @doc """
+  The content of each of `instruction_ids`, as `%{id => content}`. Ids
+  with no row are absent. One query per batch, so a whole workspace's
+  manifests can be resolved without a round trip per workflow.
+  """
+  def get_instructions(db, instruction_ids) do
+    contents =
+      instruction_ids
+      |> Enum.uniq()
+      |> Enum.chunk_every(@max_query_ids)
+      |> Enum.reduce(%{}, fn chunk, acc ->
+        placeholders = Enum.map_join(1..length(chunk), ", ", &"?#{&1}")
+
+        {:ok, rows} =
+          query(
+            db,
+            "SELECT id, content FROM instructions WHERE id IN (#{placeholders})",
+            List.to_tuple(chunk)
+          )
+
+        Enum.into(rows, acc, fn {id, content} -> {id, content} end)
+      end)
+
+    {:ok, contents}
   end
 
   defp get_or_create_parameter_set_id(db, parameters) do

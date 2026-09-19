@@ -2,6 +2,7 @@ defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
   alias Coflux.{Auth, Config, Orchestration, MapUtils, Version}
+  alias Coflux.Orchestration.Ids
 
   @max_parameters 20
 
@@ -548,7 +549,7 @@ defmodule Coflux.Handlers.Api do
           {:ok, run_id, step_number, execution_external_id} ->
             json_response(req, %{
               "runId" => run_id,
-              "stepId" => "#{run_id}:#{step_number}",
+              "stepId" => Ids.step(run_id, step_number),
               "executionId" => execution_external_id
             })
 

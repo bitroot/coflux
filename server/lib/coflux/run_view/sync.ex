@@ -1,7 +1,7 @@
 defmodule Coflux.RunView.Sync do
   @moduledoc """
-  Keeps a topic's `steps` in step with its view after a batch of
-  notifications has been applied.
+  Keeps a topic's `steps` in step with its view after a batch of events
+  has been applied.
 
   The topic's state carries the `view`, the set of `visible` steps, and a
   `fetch` function that loads detail (`Orchestration.get_run_details`).
@@ -17,7 +17,7 @@ defmodule Coflux.RunView.Sync do
   """
 
   alias Coflux.RunView
-  alias Coflux.RunView.Diff
+  alias Coflux.Topics.Diff
   alias Topical.Topic
 
   def steps(topic, effects) do
@@ -91,7 +91,7 @@ defmodule Coflux.RunView.Sync do
     if RunView.empty_request?(request) do
       topic
     else
-      view = RunView.put_details(view, topic.state.fetch.(request))
+      view = RunView.put_details(view, request, topic.state.fetch.(request))
       %{topic | state: %{topic.state | view: view}}
     end
   end
@@ -102,7 +102,7 @@ defmodule Coflux.RunView.Sync do
 
     if RunView.empty_request?(request),
       do: view,
-      else: RunView.put_details(view, fetch.(request))
+      else: RunView.put_details(view, request, fetch.(request))
   end
 
   defp revisit(view, visible, events) do

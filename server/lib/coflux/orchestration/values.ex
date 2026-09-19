@@ -1,6 +1,8 @@
 defmodule Coflux.Orchestration.Values do
   import Coflux.Store
 
+  alias Coflux.Orchestration.Ids
+
   # TODO: move, or make private?
   def get_or_create_blob(db, blob_key, size) do
     case query_one(db, "SELECT id FROM blobs WHERE key = ?1", {blob_key}) do
@@ -132,7 +134,7 @@ defmodule Coflux.Orchestration.Values do
           )
 
         {:execution, run_ext, step_num, attempt} ->
-          [2, "#{run_ext}:#{step_num}:#{attempt}"]
+          [2, Ids.execution(run_ext, step_num, attempt)]
 
         {:asset, external_id} ->
           [3, external_id]

@@ -14,13 +14,13 @@ defmodule Coflux.RunView do
   the first), and summarise the rest of each group by branch status. A step
   only reachable through an attempt that isn't expanded isn't shown.
 
-  Status roll-ups are kept incrementally so the cost of a notification is
+  Status roll-ups are kept incrementally so the cost of an event is
   proportional to the depth of the tree rather than the size of the run:
   `branch` memoises each step's branch status, and `child_counts` and
   `group_counts` count the branch statuses of an execution's children so a
   step's status can be recomputed without walking them.
 
-  `apply/2` returns the updated view with the *effects* of the notification:
+  `apply/2` returns the updated view with the *effects* of the event:
   which steps' projected entries may have changed (`dirty`), which steps'
   branch status changed (`branches`), and the structural `events` (a new
   step, a new attempt, a new child link) that can change which steps are
@@ -28,6 +28,34 @@ defmodule Coflux.RunView do
   """
 
   alias Coflux.RunView.Format
+
+  alias Coflux.Events.{
+    AssetDependencyRecorded,
+    AssetPut,
+    CatalogPublished,
+    CatalogRead,
+    CatalogWaitRecorded,
+    CheckpointsInherited,
+    CheckpointsSet,
+    ChildLinked,
+    CompletionRecorded,
+    DependenciesPending,
+    ExecutionAssigned,
+    ExecutionScheduled,
+    GroupCreated,
+    InputDependencyRecorded,
+    InputResponded,
+    InputSubmitted,
+    MetricDefined,
+    ResultDependencyRecorded,
+    ResultRecorded,
+    RunCreated,
+    StepArguments,
+    StepCreated,
+    StreamClosed,
+    StreamDependencyRecorded,
+    StreamRegistered
+  }
 
   @branch_priority [:running, :assigning, :errored, :aborted, :suspended]
 
@@ -51,168 +79,34 @@ defmodule Coflux.RunView do
             group_counts: %{},
             input_status: %{},
             input_submissions: %{},
-            input_dependents: %{}
+            input_dependents: %{},
+            redirects: %{}
 
   # ---------------------------------------------------------------------------
   # Building
 
   @doc """
-  Builds a view from a run snapshot (the `steps` map `subscribe_run`
-  returns). Executions outside `workspace_ids` are left out, as are child
-  links from them; steps are kept whatever workspace their attempts are in,
-  since a later attempt may be in a shown workspace. A snapshot may carry
-  detail (a step's `arguments`, an execution's `result` and so on) or
-  structure only; what's missing is reported by `missing_details/3`.
+  Builds a view by folding the events a `{:run, id}` snapshot returns.
+  Executions outside `workspace_ids` are left out, as are child links from
+  them; steps are kept whatever workspace their attempts are in, since a
+  later attempt may be in a shown workspace. A snapshot carries structure
+  only: what each shown step and execution still needs is reported by
+  `missing_details/3` and loaded through `put_details/3`.
   """
-  def new(run, steps, workspace_ids, opts \\ []) do
+  def new(events, workspace_ids, opts \\ []) do
     view = %__MODULE__{
-      run: run,
       workspace_ids: workspace_ids,
       root: Keyword.get(opts, :root, :initial),
       pins: Keyword.get(opts, :pins, @empty_pins)
     }
 
-    view =
-      Enum.reduce(steps, view, fn {number, step}, view ->
-        put_step(view, number, snapshot_step(number, step))
-      end)
+    {view, _effects} = apply_all(view, events)
 
-    view =
-      Enum.reduce(steps, view, fn {number, step}, view ->
-        Enum.reduce(step.executions, view, fn {attempt, execution}, view ->
-          execution = snapshot_execution(number, attempt, execution)
+    # A snapshot withholds detail; a live execution arrives with all it has.
+    executions =
+      Map.new(view.executions, fn {id, execution} -> {id, %{execution | loaded: false}} end)
 
-          if execution.workspace_id in workspace_ids,
-            do: insert_execution(view, execution),
-            else: view
-        end)
-      end)
-
-    view =
-      Enum.reduce(steps, view, fn {_number, step}, view ->
-        Enum.reduce(step.executions, view, fn {_attempt, execution}, view ->
-          if Map.has_key?(view.executions, execution.execution_id) do
-            Enum.reduce(execution.children, view, fn {step, attempt, group_id}, view ->
-              insert_link(view, execution.execution_id, step, attempt, group_id)
-            end)
-          else
-            view
-          end
-        end)
-      end)
-
-    view
-    |> Map.put(:initial, find_initial(view))
-    |> init_branches()
-    |> init_counts()
-    |> index_inputs()
-  end
-
-  defp snapshot_step(number, step) do
-    %{
-      number: number,
-      module: step.module,
-      target: step.target,
-      type: step.type,
-      parent_id: step.parent_id,
-      cache_config: step.cache_config,
-      cache_key: step.cache_key,
-      memo_key: step.memo_key,
-      concurrency_key: step.concurrency_key,
-      concurrency_limit: step.concurrency_limit,
-      group_key: step.group_key,
-      group_limit: step.group_limit,
-      retries: snapshot_retries(step),
-      recurrent: step.recurrent == 1 or step.recurrent == true,
-      timeout: step.timeout,
-      created_at: step.created_at,
-      arguments: Map.get(step, :arguments),
-      requires: step.requires,
-      streams: snapshot_streams(Map.get(step, :streams))
-    }
-  end
-
-  defp snapshot_streams(nil), do: nil
-
-  defp snapshot_streams(streams) do
-    Map.new(streams, fn {index, stream} ->
-      {index,
-       %{
-         id: stream.id,
-         index: stream.index,
-         position: stream.position,
-         workspace_id: stream.workspace_id,
-         buffer: stream.buffer,
-         timeout_ms: stream.timeout_ms,
-         opened_at: stream.opened_at,
-         attempts: stream.attempts,
-         closed_at: stream.closed_at,
-         closed_by: stream.closed_by,
-         reason: if(stream.reason, do: Atom.to_string(stream.reason)),
-         error: Format.stream_error(stream.error)
-       }}
-    end)
-  end
-
-  defp snapshot_retries(%{retry_limit: 0}), do: nil
-
-  defp snapshot_retries(step) do
-    %{
-      limit: if(step.retry_limit == -1, do: nil, else: step.retry_limit),
-      backoff_min: step.retry_backoff_min,
-      backoff_max: step.retry_backoff_max
-    }
-  end
-
-  defp snapshot_execution(step, attempt, execution) do
-    base = %{
-      id: execution.execution_id,
-      step: step,
-      attempt: attempt,
-      workspace_id: execution.workspace_id,
-      created_at: execution.created_at,
-      created_by: execution.created_by,
-      execute_after: execution.execute_after,
-      assigned_at: execution.assigned_at,
-      completed_at: execution.completed_at,
-      completion: execution.completion,
-      groups: execution.groups,
-      loaded: false,
-      assets: %{},
-      published: %{},
-      dependencies: %{},
-      pending: MapSet.new(),
-      inputs: %{},
-      result: nil,
-      result_at: nil,
-      result_created_by: nil,
-      inner_result: nil,
-      metrics: %{},
-      checkpoints: %{before: %{}, after: %{}}
-    }
-
-    if Map.has_key?(execution, :result), do: apply_detail(base, execution), else: base
-  end
-
-  # Detail as `build_run_details` shapes it, replacing whatever the
-  # execution held: the database is authoritative at the moment it was
-  # read, and any notification still queued re-applies on top.
-  defp apply_detail(execution, detail) do
-    %{
-      execution
-      | loaded: true,
-        assets: detail.assets,
-        published: Map.get(detail, :published, %{}),
-        dependencies: detail.dependencies,
-        pending: Map.get(detail, :pending_dependencies, MapSet.new()),
-        inputs: Map.get(detail, :inputs, %{}),
-        result: detail.result,
-        result_at: detail.result_at,
-        result_created_by: detail.result_created_by,
-        inner_result: nil,
-        metrics: detail.metric_definitions,
-        checkpoints: detail.checkpoints
-    }
+    %{view | executions: executions, initial: find_initial(view)}
   end
 
   defp find_initial(view) do
@@ -224,80 +118,6 @@ defmodule Coflux.RunView do
       nil -> nil
       step -> step.number
     end
-  end
-
-  defp init_branches(view) do
-    Enum.reduce(Map.keys(view.steps), view, fn step, view ->
-      {view, _status} = ensure_branch(view, step, MapSet.new())
-      view
-    end)
-  end
-
-  # Memoised, bottom-up. A step reached again while it's being computed (a
-  # cycle through memo links) contributes nothing to its own status.
-  defp ensure_branch(view, step, visiting) do
-    case Map.fetch(view.branch, step) do
-      {:ok, status} ->
-        {view, status}
-
-      :error ->
-        cond do
-          MapSet.member?(visiting, step) ->
-            {view, nil}
-
-          true ->
-            case latest_execution(view, step) do
-              nil ->
-                {view, nil}
-
-              execution ->
-                visiting = MapSet.put(visiting, step)
-
-                {view, statuses} =
-                  Enum.reduce(child_steps(view, execution.id), {view, []}, fn child,
-                                                                              {view, statuses} ->
-                    {view, status} = ensure_branch(view, child, visiting)
-                    {view, [status | statuses]}
-                  end)
-
-                status = combine(own_status(execution), statuses)
-                {%{view | branch: Map.put(view.branch, step, status)}, status}
-            end
-        end
-    end
-  end
-
-  defp init_counts(view) do
-    Enum.reduce(view.child_index, view, fn {execution_id, children}, view ->
-      Enum.reduce(children, view, fn {step, group_id}, view ->
-        move_count(view, execution_id, group_id, nil, Map.get(view.branch, step))
-      end)
-    end)
-  end
-
-  defp index_inputs(view) do
-    Enum.reduce(view.executions, view, fn {_id, execution}, view ->
-      index_execution_inputs(view, execution)
-    end)
-  end
-
-  defp index_execution_inputs(view, execution) do
-    view =
-      Enum.reduce(execution.inputs, view, fn {input_id, input}, view ->
-        view
-        |> index_input(:input_submissions, input_id, execution.id)
-        |> record_input_status(input_id, input.status)
-      end)
-
-    Enum.reduce(execution.dependencies, view, fn
-      {input_id, {:input, _title, status}}, view ->
-        view
-        |> index_input(:input_dependents, input_id, execution.id)
-        |> record_input_status(input_id, status)
-
-      _other, view ->
-        view
-    end)
   end
 
   # ---------------------------------------------------------------------------
@@ -330,33 +150,32 @@ defmodule Coflux.RunView do
   def empty_request?(%{executions: [], steps: []}), do: true
   def empty_request?(_request), do: false
 
-  @doc "Merges a `get_run_details` reply into the view."
-  def put_details(view, %{executions: executions, steps: steps}) do
-    view =
-      Enum.reduce(executions, view, fn {execution_id, detail}, view ->
-        case Map.fetch(view.executions, execution_id) do
-          {:ok, execution} ->
-            execution = apply_detail(execution, detail)
-            view |> store(execution) |> index_execution_inputs(execution)
+  @doc """
+  Folds a `get_run_details` reply into the view and marks what `request`
+  asked for as loaded. The database was authoritative at the moment it was
+  read, and any event still queued re-applies on top: every clause is
+  idempotent, so that is safe.
+  """
+  def put_details(view, request, events) do
+    {view, _effects} = apply_all(view, events)
 
-          :error ->
-            view
+    executions =
+      Enum.reduce(request.executions, view.executions, fn {number, attempt}, executions ->
+        case get_in(view.attempts, [number, attempt]) do
+          nil -> executions
+          id -> Map.update!(executions, id, &%{&1 | loaded: true})
         end
       end)
 
-    Enum.reduce(steps, view, fn {number, detail}, view ->
-      case Map.fetch(view.steps, number) do
-        {:ok, step} ->
-          put_step(view, number, %{
-            step
-            | arguments: detail.arguments,
-              streams: snapshot_streams(detail.streams)
-          })
+    steps =
+      Enum.reduce(request.steps, view.steps, fn number, steps ->
+        case Map.fetch(steps, number) do
+          {:ok, %{arguments: nil} = step} -> Map.put(steps, number, %{step | arguments: []})
+          _ -> steps
+        end
+      end)
 
-        :error ->
-          view
-      end
-    end)
+    %{view | executions: executions, steps: steps}
   end
 
   # ---------------------------------------------------------------------------
@@ -524,12 +343,12 @@ defmodule Coflux.RunView do
   end
 
   # ---------------------------------------------------------------------------
-  # Notifications
+  # Events
 
-  def apply_all(view, notifications) do
+  def apply_all(view, events) do
     {view, effects} =
-      Enum.reduce(notifications, {view, @empty_effects}, fn notification, {view, effects} ->
-        {view, more} = __MODULE__.apply(view, notification)
+      Enum.reduce(events, {view, @empty_effects}, fn event, {view, effects} ->
+        {view, more} = __MODULE__.apply(view, event)
         {view, merge_effects(effects, more)}
       end)
 
@@ -547,49 +366,67 @@ defmodule Coflux.RunView do
   defp dirty(effects, step), do: %{effects | dirty: MapSet.put(effects.dirty, step)}
   defp event(effects, event), do: %{effects | events: [event | effects.events]}
 
-  def apply(view, {:step, number, step, _workspace_external_id}) do
-    if Map.has_key?(view.steps, number) do
+  def apply(view, %RunCreated{} = e) do
+    run = %{
+      external_id: e.run,
+      created_at: e.created_at,
+      created_by: e.created_by,
+      requires: e.requires,
+      parent: e.parent
+    }
+
+    {%{view | run: run}, @empty_effects}
+  end
+
+  def apply(view, %StepCreated{} = e) do
+    if Map.has_key?(view.steps, e.step) do
       {view, @empty_effects}
     else
       step = %{
-        number: number,
-        module: step.module,
-        target: step.target,
-        type: step.type,
-        parent_id: step.parent_id,
-        cache_config: step.cache_config,
-        cache_key: step.cache_key,
-        memo_key: step.memo_key,
-        concurrency_key: step.concurrency_key,
-        concurrency_limit: step.concurrency_limit,
-        group_key: step.group_key,
-        group_limit: step.group_limit,
-        retries: step.retries,
-        recurrent: step.recurrent == true,
-        timeout: step.timeout,
-        created_at: step.created_at,
-        arguments: step.arguments,
-        requires: step.requires,
-        streams: %{}
+        number: e.step,
+        module: e.module,
+        target: e.target,
+        type: e.type,
+        parent_id: e.parent,
+        cache_config: e.cache_config,
+        cache_key: e.cache_key,
+        memo_key: e.memo_key,
+        concurrency_key: e.concurrency_key,
+        concurrency_limit: e.concurrency_limit,
+        group_key: e.group_key,
+        group_limit: e.group_limit,
+        retries: e.retries,
+        recurrent: e.recurrent == true,
+        timeout: e.timeout,
+        created_at: e.created_at,
+        arguments: nil,
+        requires: e.requires,
+        streams: nil
       }
 
-      {put_step(view, number, step), event(@empty_effects, {:step, number})}
+      {put_step(view, e.step, step), event(@empty_effects, {:step, e.step})}
     end
   end
 
-  def apply(
-        view,
-        {:execution, step, attempt, execution_id, workspace_id, created_at, execute_after,
-         dependencies, created_by, checkpoints, pending}
-      ) do
+  def apply(view, %StepArguments{} = e) do
+    case Map.fetch(view.steps, e.step) do
+      {:ok, step} ->
+        {put_step(view, e.step, %{step | arguments: e.arguments}), dirty(@empty_effects, e.step)}
+
+      :error ->
+        {view, @empty_effects}
+    end
+  end
+
+  def apply(view, %ExecutionScheduled{} = e) do
     execution = %{
-      id: execution_id,
-      step: step,
-      attempt: attempt,
-      workspace_id: workspace_id,
-      created_at: created_at,
-      created_by: created_by,
-      execute_after: execute_after,
+      id: e.execution,
+      step: e.step,
+      attempt: e.attempt,
+      workspace_id: e.workspace,
+      created_at: e.created_at,
+      created_by: e.created_by,
+      execute_after: e.execute_after,
       assigned_at: nil,
       result_at: nil,
       completed_at: nil,
@@ -598,27 +435,24 @@ defmodule Coflux.RunView do
       loaded: true,
       assets: %{},
       published: %{},
-      dependencies:
-        Map.new(dependencies, fn {id, dependency} -> {id, tag_result(dependency)} end),
-      pending: pending,
+      dependencies: %{},
+      pending: MapSet.new(),
       inputs: %{},
       result: nil,
       result_created_by: nil,
       inner_result: nil,
       metrics: %{},
-      # Nothing has run yet, so what the execution will start from is also
-      # what it currently holds.
-      checkpoints: %{before: checkpoints, after: checkpoints}
+      checkpoints: %{before: %{}, after: %{}}
     }
 
     cond do
       execution.workspace_id not in view.workspace_ids ->
         {view, @empty_effects}
 
-      not Map.has_key?(view.steps, step) ->
+      not Map.has_key?(view.steps, e.step) ->
         {view, @empty_effects}
 
-      Map.has_key?(view.executions, execution_id) ->
+      Map.has_key?(view.executions, e.execution) ->
         {view, @empty_effects}
 
       true ->
@@ -626,42 +460,42 @@ defmodule Coflux.RunView do
         # attempt in a shown workspace can bring an already-linked step
         # into view, a later one can change which subtree is shown.
         view = insert_execution(view, execution)
-        effects = @empty_effects |> dirty(step) |> event({:attempt, step})
+        effects = @empty_effects |> dirty(e.step) |> event({:attempt, e.step})
 
-        if latest(view, step) == attempt do
-          recompute_branch(view, step, effects, MapSet.new())
+        if latest(view, e.step) == e.attempt do
+          recompute_branch(view, e.step, effects, MapSet.new())
         else
           {view, effects}
         end
     end
   end
 
-  def apply(view, {:child, parent_id, {step, attempt, group_id}}) do
+  def apply(view, %ChildLinked{} = e) do
     cond do
-      not Map.has_key?(view.executions, parent_id) ->
+      not Map.has_key?(view.executions, e.parent) ->
         {view, @empty_effects}
 
-      not Map.has_key?(view.steps, step) ->
+      not Map.has_key?(view.steps, e.step) ->
         {view, @empty_effects}
 
-      Map.has_key?(Map.get(view.child_index, parent_id, %{}), step) ->
+      Map.has_key?(Map.get(view.child_index, e.parent, %{}), e.step) ->
         {view, @empty_effects}
 
       true ->
-        view = insert_link(view, parent_id, step, attempt, group_id)
-        parent = view.executions[parent_id]
+        view = insert_link(view, e.parent, e.step, e.attempt, e.group)
+        parent = view.executions[e.parent]
 
         effects =
           @empty_effects
           |> dirty(parent.step)
-          |> event({:link, parent_id, step, group_id})
+          |> event({:link, e.parent, e.step, e.group})
 
-        case Map.get(view.branch, step) do
+        case Map.get(view.branch, e.step) do
           nil ->
             {view, effects}
 
           status ->
-            view = move_count(view, parent_id, group_id, nil, status)
+            view = move_count(view, e.parent, e.group, nil, status)
 
             if latest(view, parent.step) == parent.attempt do
               recompute_branch(view, parent.step, effects, MapSet.new())
@@ -672,166 +506,158 @@ defmodule Coflux.RunView do
     end
   end
 
-  def apply(view, {:assigned, assigned}) do
-    Enum.reduce(assigned, {view, @empty_effects}, fn {execution_id, assigned_at},
-                                                     {view, effects} ->
-      case Map.fetch(view.executions, execution_id) do
-        {:ok, execution} ->
-          view = store(view, %{execution | assigned_at: assigned_at})
-          {view, more} = status_changed(view, execution_id, @empty_effects)
-          {view, merge_effects(effects, more)}
-
-        :error ->
-          {view, effects}
-      end
-    end)
-  end
-
-  def apply(view, {:completion, execution_id, kind, successor, completed_at}) do
-    case Map.fetch(view.executions, execution_id) do
+  def apply(view, %ExecutionAssigned{} = e) do
+    case Map.fetch(view.executions, e.execution) do
       {:ok, execution} ->
-        # Nothing is outstanding once the execution has finished, whatever
-        # state its dependencies are in - the rule the snapshot applies too.
-        view =
-          store(view, %{
-            execution
-            | completed_at: completed_at,
-              completion: %{kind: Atom.to_string(kind), successor: successor},
-              pending: MapSet.new()
-          })
-
-        status_changed(view, execution_id, @empty_effects)
+        view = store(view, %{execution | assigned_at: e.assigned_at})
+        status_changed(view, e.execution, @empty_effects)
 
       :error ->
         {view, @empty_effects}
     end
   end
 
-  def apply(view, {:result, execution_id, result, result_at, created_by}) do
-    update_execution(view, execution_id, fn execution ->
-      %{execution | result: result, result_at: result_at, result_created_by: created_by}
+  def apply(view, %CompletionRecorded{} = e) do
+    case Map.fetch(view.executions, e.execution) do
+      {:ok, execution} ->
+        # Nothing is outstanding once the execution has finished, whatever
+        # state its dependencies are in - the rule the snapshot applies too.
+        view =
+          store(view, %{
+            execution
+            | completed_at: e.completed_at,
+              completion: %{kind: Atom.to_string(e.kind), successor: e.successor},
+              pending: MapSet.new()
+          })
+
+        view = index_redirect(view, e.execution, e.successor)
+        status_changed(view, e.execution, @empty_effects)
+
+      :error ->
+        {view, @empty_effects}
+    end
+  end
+
+  # A result that stands is also shown nested inside every execution that
+  # handed off to this one (deferred, cached, spawned).
+  def apply(view, %ResultRecorded{} = e) do
+    {view, effects} =
+      update_execution(view, e.execution, fn execution ->
+        %{execution | result: e.result, result_at: e.result_at, result_created_by: e.created_by}
+      end)
+
+    if e.final do
+      view
+      |> redirecting_to(e.execution)
+      |> Enum.reduce({view, effects}, fn execution_id, {view, effects} ->
+        {view, more} =
+          update_execution(view, execution_id, fn execution ->
+            %{execution | inner_result: {e.result, e.created_by}}
+          end)
+
+        {view, merge_effects(effects, more)}
+      end)
+    else
+      {view, effects}
+    end
+  end
+
+  def apply(view, %MetricDefined{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      %{execution | metrics: Map.put(execution.metrics, e.key, e.definition)}
     end)
   end
 
-  # The result of a deferred/cached/spawned execution's target, shown nested
-  # inside the redirecting result.
-  def apply(view, {:result_result, execution_id, result, _created_at, created_by}) do
-    update_execution(view, execution_id, fn execution ->
-      %{execution | inner_result: {result, created_by}}
-    end)
-  end
-
-  def apply(view, {:metric_defined, execution_id, key, definition}) do
-    update_execution(view, execution_id, fn execution ->
-      metric = %{
-        group: Map.get(definition, "group"),
-        group_units: Map.get(definition, "group_units"),
-        group_lower: Map.get(definition, "group_lower"),
-        group_upper: Map.get(definition, "group_upper"),
-        scale: Map.get(definition, "scale"),
-        units: Map.get(definition, "units"),
-        progress: Map.get(definition, "progress", false),
-        lower: Map.get(definition, "lower"),
-        upper: Map.get(definition, "upper")
-      }
-
-      %{execution | metrics: Map.put(execution.metrics, key, metric)}
-    end)
-  end
-
-  def apply(view, {:group, execution_id, group_id, name, concurrency}) do
-    update_execution(view, execution_id, fn execution ->
+  def apply(view, %GroupCreated{} = e) do
+    update_execution(view, e.execution, fn execution ->
       %{
         execution
-        | groups: Map.put(execution.groups, group_id, %{name: name, concurrency: concurrency})
+        | groups: Map.put(execution.groups, e.group, %{name: e.name, concurrency: e.concurrency})
       }
     end)
   end
 
-  def apply(view, {:asset, execution_id, asset_id, asset}) do
-    update_execution(view, execution_id, fn execution ->
-      %{execution | assets: Map.put(execution.assets, asset_id, asset)}
+  def apply(view, %AssetPut{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      %{execution | assets: Map.put(execution.assets, e.asset, e.summary)}
     end)
   end
 
-  # Which dependencies the execution is still waiting on. Sent as the whole
-  # set rather than a delta: a result that redirects (to a suspend's
-  # successor, say) clears a dependency keyed by the execution originally
-  # referenced, so there's no dependable one-to-one between what resolved
-  # and which entry it releases.
-  def apply(view, {:pending_dependencies, execution_id, pending}) do
-    update_execution(view, execution_id, fn execution -> %{execution | pending: pending} end)
+  def apply(view, %DependenciesPending{} = e) do
+    update_execution(view, e.execution, fn execution -> %{execution | pending: e.pending} end)
   end
 
-  def apply(view, {:result_dependency, execution_id, dependency_id, dependency, pending}) do
-    update_execution(view, execution_id, fn execution ->
+  def apply(view, %ResultDependencyRecorded{} = e) do
+    {id, _module, _target} = e.dependency
+
+    update_execution(view, e.execution, fn execution ->
       execution
-      |> put_dependency(dependency_id, tag_result(dependency))
-      |> set_pending(dependency_id, pending)
+      |> put_dependency(id, {:result, e.dependency})
+      |> set_pending(id, e.pending)
     end)
   end
 
-  def apply(view, {:stream_dependency, execution_id, stream_id, module, target, pending}) do
-    update_execution(view, execution_id, fn execution ->
+  def apply(view, %StreamDependencyRecorded{} = e) do
+    update_execution(view, e.execution, fn execution ->
       execution
-      |> put_dependency(stream_id, {:stream, stream_id, module, target})
-      |> set_pending(stream_id, pending)
+      |> put_dependency(e.stream, {:stream, e.stream, e.module, e.target})
+      |> set_pending(e.stream, e.pending)
     end)
   end
 
-  def apply(view, {:asset_dependency, execution_id, asset_id, asset, pending}) do
-    update_execution(view, execution_id, fn execution ->
+  def apply(view, %AssetDependencyRecorded{} = e) do
+    update_execution(view, e.execution, fn execution ->
       execution
-      |> put_dependency(asset_id, {:asset, asset})
-      |> set_pending(asset_id, pending)
+      |> put_dependency(e.asset, {:asset, e.summary})
+      |> set_pending(e.asset, e.pending)
     end)
   end
 
   # A version the execution published: keyed like a read (`path@number`).
-  def apply(view, {:catalog_publish, execution_id, version}) do
-    update_execution(view, execution_id, fn execution ->
-      key = Format.catalog_version_key(version.path, version.number)
-      %{execution | published: Map.put(execution.published, key, version)}
+  def apply(view, %CatalogPublished{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      key = Format.catalog_version_key(e.version.path, e.version.number)
+      %{execution | published: Map.put(execution.published, key, e.version)}
     end)
   end
 
   # A version the execution resolved. Recorded once it has been read, so
   # it's never pending.
-  def apply(view, {:catalog_read, execution_id, version}) do
-    update_execution(view, execution_id, fn execution ->
-      key = Format.catalog_version_key(version.path, version.number)
+  def apply(view, %CatalogRead{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      key = Format.catalog_version_key(e.version.path, e.version.number)
 
       execution
-      |> put_dependency(key, {:catalog, version})
+      |> put_dependency(key, {:catalog, e.version})
       |> set_pending(key, false)
     end)
   end
 
   # A path the execution suspended waiting on, for whatever follows
   # `number`; keyed apart from a read of that version.
-  def apply(view, {:catalog_wait, execution_id, path, number, pending}) do
-    update_execution(view, execution_id, fn execution ->
-      key = Format.catalog_wait_key(path, number)
+  def apply(view, %CatalogWaitRecorded{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      key = Format.catalog_wait_key(e.path, e.number)
 
       execution
-      |> put_dependency(key, {:catalog_wait, path, number})
-      |> set_pending(key, pending)
+      |> put_dependency(key, {:catalog_wait, e.path, e.number})
+      |> set_pending(key, e.pending)
     end)
   end
 
-  def apply(view, {:input_dependency, execution_id, input_id, title, response_type, pending}) do
+  def apply(view, %InputDependencyRecorded{} = e) do
     {view, effects} =
-      update_execution(view, execution_id, fn execution ->
+      update_execution(view, e.execution, fn execution ->
         execution
-        |> put_dependency(input_id, {:input, title, response_type})
-        |> set_pending(input_id, pending)
+        |> put_dependency(e.input, {:input, e.title, e.response})
+        |> set_pending(e.input, e.pending)
       end)
 
     view =
-      if Map.has_key?(view.executions, execution_id) do
+      if Map.has_key?(view.executions, e.execution) do
         view
-        |> index_input(:input_dependents, input_id, execution_id)
-        |> record_input_status(input_id, response_type)
+        |> index_input(:input_dependents, e.input, e.execution)
+        |> record_input_status(e.input, e.response)
       else
         view
       end
@@ -839,38 +665,39 @@ defmodule Coflux.RunView do
     {view, effects}
   end
 
-  def apply(view, {:input_submitted, execution_id, input_id, title}) do
-    status = Map.get(view.input_status, input_id)
+  def apply(view, %InputSubmitted{} = e) do
+    status = Map.get(view.input_status, e.input)
 
     {view, effects} =
-      update_execution(view, execution_id, fn execution ->
+      update_execution(view, e.execution, fn execution ->
         %{
           execution
-          | inputs: Map.put(execution.inputs, input_id, %{title: title, status: status})
+          | inputs: Map.put(execution.inputs, e.input, %{title: e.title, status: status})
         }
       end)
 
     view =
-      if Map.has_key?(view.executions, execution_id),
-        do: index_input(view, :input_submissions, input_id, execution_id),
+      if Map.has_key?(view.executions, e.execution),
+        do: index_input(view, :input_submissions, e.input, e.execution),
         else: view
 
     {view, effects}
   end
 
-  def apply(view, {:input_response, input_id, response_type}) do
-    view = record_input_status(view, input_id, response_type)
+  def apply(view, %InputResponded{} = e) do
+    response_type = e.response.type
+    view = record_input_status(view, e.input, response_type)
 
     {view, effects} =
       view.input_submissions
-      |> Map.get(input_id, MapSet.new())
+      |> Map.get(e.input, MapSet.new())
       |> Enum.reduce({view, @empty_effects}, fn execution_id, {view, effects} ->
         {view, more} =
           update_execution(view, execution_id, fn execution ->
             %{
               execution
               | inputs:
-                  Map.update!(execution.inputs, input_id, &Map.put(&1, :status, response_type))
+                  Map.update!(execution.inputs, e.input, &Map.put(&1, :status, response_type))
             }
           end)
 
@@ -878,13 +705,13 @@ defmodule Coflux.RunView do
       end)
 
     view.input_dependents
-    |> Map.get(input_id, MapSet.new())
+    |> Map.get(e.input, MapSet.new())
     |> Enum.reduce({view, effects}, fn execution_id, {view, effects} ->
       {view, more} =
         update_execution(view, execution_id, fn execution ->
-          case Map.fetch(execution.dependencies, input_id) do
+          case Map.fetch(execution.dependencies, e.input) do
             {:ok, {:input, title, _status}} ->
-              put_dependency(execution, input_id, {:input, title, response_type})
+              put_dependency(execution, e.input, {:input, title, response_type})
 
             _ ->
               execution
@@ -895,36 +722,42 @@ defmodule Coflux.RunView do
     end)
   end
 
-  def apply(view, {:checkpoints, execution_id, checkpoints}) do
-    # Only the "after" side moves — what the execution started from was
-    # fixed when it was created.
-    update_execution(view, execution_id, fn execution ->
-      %{execution | checkpoints: %{execution.checkpoints | after: checkpoints}}
+  def apply(view, %CheckpointsInherited{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      %{execution | checkpoints: %{execution.checkpoints | before: e.checkpoints}}
     end)
   end
 
-  # An execution registered on one of the step's streams — opening it, or
-  # resuming it after a suspend (`continued`).
-  def apply(view, {:stream_registered, step, index, info}) do
+  # Only the "after" side moves; what the execution started from was fixed
+  # when it was created.
+  def apply(view, %CheckpointsSet{} = e) do
+    update_execution(view, e.execution, fn execution ->
+      %{execution | checkpoints: %{execution.checkpoints | after: e.checkpoints}}
+    end)
+  end
+
+  # An execution registered on one of the step's streams: opening it, or
+  # resuming it after a suspend.
+  def apply(view, %StreamRegistered{} = e) do
     cond do
-      info.workspace_id not in view.workspace_ids ->
+      e.workspace not in view.workspace_ids ->
         {view, @empty_effects}
 
-      not Map.has_key?(view.steps, step) ->
+      not Map.has_key?(view.steps, e.step) ->
         {view, @empty_effects}
 
       true ->
-        update_stream(view, step, index, fn
+        update_stream(view, e.step, e.index, fn
           nil ->
             %{
-              id: info.id,
-              index: index,
-              position: info.position,
-              workspace_id: info.workspace_id,
-              buffer: info.buffer,
-              timeout_ms: info.timeout_ms,
-              opened_at: info.opened_at,
-              attempts: [info.attempt],
+              id: e.stream,
+              index: e.index,
+              position: e.position,
+              workspace_id: e.workspace,
+              buffer: e.buffer,
+              timeout_ms: e.timeout_ms,
+              opened_at: e.opened_at,
+              attempts: [e.attempt],
               closed_at: nil,
               closed_by: nil,
               reason: nil,
@@ -933,23 +766,47 @@ defmodule Coflux.RunView do
 
           stream ->
             attempts =
-              if info.attempt in stream.attempts,
+              if e.attempt in stream.attempts,
                 do: stream.attempts,
-                else: stream.attempts ++ [info.attempt]
+                else: stream.attempts ++ [e.attempt]
 
-            %{stream | attempts: attempts, buffer: info.buffer, timeout_ms: info.timeout_ms}
+            %{stream | attempts: attempts, buffer: e.buffer, timeout_ms: e.timeout_ms}
         end)
     end
   end
 
-  def apply(view, {:stream_closed, step, index, reason, error, attempt, closed_at}) do
-    if get_in(view.steps, [step, :streams]) && get_in(view.steps, [step, :streams, index]) do
-      update_stream(view, step, index, fn stream ->
-        %{stream | closed_at: closed_at, closed_by: attempt, reason: reason, error: error}
+  def apply(view, %StreamClosed{} = e) do
+    if get_in(view.steps, [e.step, :streams]) && get_in(view.steps, [e.step, :streams, e.index]) do
+      update_stream(view, e.step, e.index, fn stream ->
+        %{stream | closed_at: e.closed_at, closed_by: e.attempt, reason: e.reason, error: e.error}
       end)
     else
       {view, @empty_effects}
     end
+  end
+
+  # Executions whose completion handed off to `execution_id`, transitively.
+  defp redirecting_to(view, execution_id, seen \\ MapSet.new()) do
+    seen = MapSet.put(seen, execution_id)
+
+    view.redirects
+    |> Map.get(execution_id, MapSet.new())
+    |> Enum.reject(&MapSet.member?(seen, &1))
+    |> Enum.flat_map(fn id -> [id | redirecting_to(view, id, seen)] end)
+  end
+
+  defp index_redirect(view, _execution_id, nil), do: view
+
+  defp index_redirect(view, execution_id, %{id: successor_id}) do
+    redirects =
+      Map.update(
+        view.redirects,
+        successor_id,
+        MapSet.new([execution_id]),
+        &MapSet.put(&1, execution_id)
+      )
+
+    %{view | redirects: redirects}
   end
 
   defp update_execution(view, execution_id, fun) do
@@ -986,11 +843,6 @@ defmodule Coflux.RunView do
   defp set_pending(execution, id, _),
     do: %{execution | pending: MapSet.delete(execution.pending, id)}
 
-  # Result dependencies arrive both tagged (from the snapshot, and argument
-  # dependencies) and as a bare execution reference (from notifications).
-  defp tag_result({:result, _execution} = dependency), do: dependency
-  defp tag_result({_ext_id, _module, _target} = execution), do: {:result, execution}
-
   # ---------------------------------------------------------------------------
   # Reading the structure
 
@@ -1025,10 +877,6 @@ defmodule Coflux.RunView do
   end
 
   def branch_status(view, step), do: Map.get(view.branch, step)
-
-  defp child_steps(view, execution_id) do
-    view.child_index |> Map.get(execution_id, %{}) |> Map.keys()
-  end
 
   @doc "The step shown for a group: the pinned member, else the first."
   def chosen_member(view, execution_id, group_id) do

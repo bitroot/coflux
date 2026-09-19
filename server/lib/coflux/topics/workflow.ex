@@ -1,10 +1,15 @@
 defmodule Coflux.Topics.Workflow do
+  @moduledoc """
+  One workflow in a workspace: its latest definition and its most recent
+  runs, each with its outcome and whether it is still in flight.
+  """
+
   use Topical.Topic,
     route: ["workspaces", :workspace_id, "workflows", :module, :target]
 
-  import Coflux.TopicUtils
-
   alias Coflux.Orchestration
+  alias Coflux.Topics.Diff
+  alias Coflux.Topics.Workflow.Model
 
   @max_runs 50
 
@@ -15,31 +20,14 @@ defmodule Coflux.Topics.Workflow do
   def init(params) do
     project_id = Map.fetch!(params, :project)
     module = Map.fetch!(params, :module)
-    target_name = Map.fetch!(params, :target)
+    target = Map.fetch!(params, :target)
     workspace_id = Map.fetch!(params, :workspace_id)
+    key = {:workflow, module, target, workspace_id}
 
-    case Orchestration.subscribe_workflow(
-           project_id,
-           module,
-           target_name,
-           workspace_id,
-           @max_runs,
-           self()
-         ) do
-      {:ok, workflow, instruction, runs, active_runs, ref} ->
-        value =
-          %{
-            parameters: if(workflow, do: build_parameters(workflow.parameters)),
-            instruction: instruction,
-            configuration: build_configuration(workflow),
-            runs: build_runs(runs, active_runs)
-          }
-
-        # `active_runs` is %{run_id => %{execution_id => assigned?}} for
-        # everything still in flight, kept in step with the scheduled /
-        # assigned / completed notifications so that each run's activity can
-        # be recomputed as they arrive
-        {:ok, Topic.new(value, %{ref: ref, active_runs: active_runs})}
+    case Orchestration.subscribe(project_id, key, self(), max_runs: @max_runs) do
+      {:ok, events, ref} ->
+        {model, _dirty} = Model.fold(Model.new(module, target, @max_runs), events)
+        {:ok, Topic.new(Model.project(model), %{model: model, ref: ref})}
 
       {:error, :not_found} ->
         {:error, :not_found}
@@ -49,100 +37,131 @@ defmodule Coflux.Topics.Workflow do
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    topic = Enum.reduce(notifications, topic, &process_notification/2)
-    {:ok, topic}
+  def handle_info({:topic, _ref, events}, topic) do
+    {model, _dirty} = Model.fold(topic.state.model, events)
+    topic = Diff.apply(topic, [], topic.value, Model.project(model))
+    {:ok, %{topic | state: %{topic.state | model: model}}}
+  end
+end
+
+defmodule Coflux.Topics.Workflow.Model do
+  @moduledoc """
+  The workflow topic as a fold over events: the workflow's definition from
+  the module's latest manifest, its `max_runs` most recent runs, and the
+  in-flight executions of each run.
+  """
+
+  import Kernel, except: [apply: 2]
+  import Coflux.TopicUtils, only: [build_principal: 1]
+
+  alias Coflux.Events.{
+    CompletionRecorded,
+    ExecutionAssigned,
+    ExecutionScheduled,
+    ManifestRegistered,
+    ModuleArchived,
+    RunCreated,
+    RunOutcome
+  }
+
+  def new(module, target, max_runs) do
+    %{module: module, target: target, max_runs: max_runs, workflow: nil, runs: %{}, active: %{}}
   end
 
-  defp process_notification({:target, target}, topic) do
-    topic
-    |> Topic.set([:parameters], build_parameters(target.parameters))
-    |> Topic.set([:instruction], target.instruction)
-    |> Topic.set([:configuration], build_configuration(target))
+  def fold(model, events) do
+    Enum.reduce(events, {model, false}, fn event, {model, _} -> {apply(model, event), true} end)
   end
 
-  defp process_notification({:run, external_run_id, created_at, created_by}, topic) do
-    topic =
-      Topic.set(
-        topic,
-        [:runs, external_run_id],
-        %{
-          id: external_run_id,
-          createdAt: created_at,
-          createdBy: build_principal(created_by),
-          outcome: nil,
-          active: build_active(topic.state.active_runs[external_run_id])
-        }
-      )
-
-    runs = topic.value.runs
-
-    if map_size(runs) > @max_runs do
-      {oldest_id, _} = Enum.min_by(runs, fn {_id, run} -> run.createdAt end)
-      Topic.unset(topic, [:runs], oldest_id)
-    else
-      topic
+  # A manifest that no longer names the workflow leaves its last definition.
+  def apply(model, %ManifestRegistered{} = e) do
+    case Map.fetch(e.workflows, model.target) do
+      {:ok, workflow} -> %{model | workflow: workflow}
+      :error -> model
     end
   end
 
-  defp process_notification({:scheduled, external_run_id, execution_id}, topic) do
-    update_active(topic, external_run_id, &Map.put(&1, execution_id, false))
-  end
+  def apply(model, %ModuleArchived{}), do: %{model | workflow: nil}
 
-  defp process_notification({:assigned, executions}, topic) do
-    Enum.reduce(executions, topic, fn {external_run_id, execution_id}, topic ->
-      update_active(topic, external_run_id, &Map.put(&1, execution_id, true))
-    end)
-  end
+  def apply(model, %RunCreated{type: :workflow} = e) do
+    runs =
+      Map.put_new(model.runs, e.run, %{
+        created_at: e.created_at,
+        created_by: e.created_by,
+        outcome: nil
+      })
 
-  defp process_notification({:completed, external_run_id, execution_id}, topic) do
-    update_active(topic, external_run_id, &Map.delete(&1, execution_id))
-  end
-
-  defp process_notification({:outcome, external_run_id, outcome}, topic) do
-    if Map.has_key?(topic.value.runs, external_run_id) do
-      Topic.set(topic, [:runs, external_run_id, :outcome], build_outcome(outcome))
-    else
-      topic
-    end
-  end
-
-  defp update_active(topic, external_run_id, fun) do
-    topic =
-      update_in(
-        topic,
-        [Access.key(:state), :active_runs, Access.key(external_run_id, %{})],
-        fun
-      )
-
-    topic =
-      if topic.state.active_runs[external_run_id] == %{} do
-        update_in(topic, [Access.key(:state), :active_runs], &Map.delete(&1, external_run_id))
+    runs =
+      if map_size(runs) > model.max_runs do
+        {oldest, _} = Enum.min_by(runs, fn {_id, run} -> run.created_at end)
+        Map.delete(runs, oldest)
       else
-        topic
+        runs
       end
 
-    # Runs that have been evicted from the list (or that belong to another
-    # workspace) still get notifications, but have nothing to update
-    if Map.has_key?(topic.value.runs, external_run_id) do
-      Topic.set(
-        topic,
-        [:runs, external_run_id, :active],
-        build_active(topic.state.active_runs[external_run_id])
-      )
-    else
-      topic
+    %{model | runs: runs}
+  end
+
+  def apply(model, %RunCreated{}), do: model
+
+  # Runs that have been evicted from the list still get their outcome, and
+  # have nothing to update.
+  def apply(model, %RunOutcome{} = e) do
+    case Map.fetch(model.runs, e.run) do
+      {:ok, run} -> put_in(model, [:runs, e.run], %{run | outcome: e.outcome})
+      :error -> model
     end
   end
 
-  # A run is "running" once any of its in-flight executions has been assigned
-  # to a worker, and "queued" while they're all still waiting for one
+  def apply(model, %ExecutionScheduled{} = e) do
+    update_active(model, e.run, &Map.put_new(&1, e.execution, false))
+  end
+
+  def apply(model, %ExecutionAssigned{} = e) do
+    update_active(model, e.run, &Map.put(&1, e.execution, true))
+  end
+
+  def apply(model, %CompletionRecorded{} = e) do
+    update_active(model, e.run, &Map.delete(&1, e.execution))
+  end
+
+  defp update_active(model, run, fun) do
+    case fun.(Map.get(model.active, run, %{})) do
+      executions when map_size(executions) == 0 ->
+        %{model | active: Map.delete(model.active, run)}
+
+      executions ->
+        %{model | active: Map.put(model.active, run, executions)}
+    end
+  end
+
+  def project(model) do
+    workflow = model.workflow
+
+    %{
+      parameters: if(workflow, do: build_parameters(workflow.parameters)),
+      instruction: if(workflow, do: workflow.instruction),
+      configuration: build_configuration(workflow),
+      runs:
+        Map.new(model.runs, fn {id, run} ->
+          {id,
+           %{
+             id: id,
+             createdAt: run.created_at,
+             createdBy: build_principal(run.created_by),
+             outcome: build_outcome(run.outcome),
+             active: build_active(Map.get(model.active, id))
+           }}
+        end)
+    }
+  end
+
+  # A run is "running" once any of its in-flight executions has been
+  # assigned to a worker, and "queued" while they're all still waiting for
+  # one.
   defp build_active(nil), do: nil
 
-  defp build_active(executions) when map_size(executions) == 0, do: nil
-
   defp build_active(executions) do
-    if Enum.any?(executions, fn {_, assigned} -> assigned end), do: "running", else: "queued"
+    if Enum.any?(executions, fn {_, assigned?} -> assigned? end), do: "running", else: "queued"
   end
 
   defp build_outcome(nil), do: nil
@@ -216,28 +235,5 @@ defmodule Coflux.Topics.Workflow do
       buffer: streams[:buffer],
       timeoutMs: streams[:timeout_ms]
     }
-  end
-
-  defp build_runs(runs, active_runs) do
-    Map.new(runs, fn
-      {external_run_id, created_at, created_by_user_ext_id, created_by_token_ext_id, outcome} ->
-        created_by =
-          case {created_by_user_ext_id, created_by_token_ext_id} do
-            {nil, nil} -> nil
-            {user_ext_id, nil} -> %{type: "user", externalId: user_ext_id}
-            {nil, token_ext_id} -> %{type: "token", externalId: token_ext_id}
-          end
-
-        active = build_active(Map.get(active_runs, external_run_id))
-
-        {external_run_id,
-         %{
-           id: external_run_id,
-           createdAt: created_at,
-           createdBy: created_by,
-           outcome: build_outcome(outcome),
-           active: active
-         }}
-    end)
   end
 end

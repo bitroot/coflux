@@ -28,15 +28,16 @@ defmodule Coflux.Topics.Run do
       {:error, :not_found} ->
         {:error, :not_found}
 
-      {:ok, view, run, parent, fetch} ->
+      {:ok, view, fetch} ->
         visible = RunView.visible_steps(view)
         view = Sync.load(view, fetch, visible)
+        run = view.run
 
         value = %{
           createdAt: run.created_at,
           createdBy: build_principal(run.created_by),
           requires: run.requires,
-          parent: if(parent, do: build_execution(parent)),
+          parent: if(run.parent, do: build_execution(run.parent)),
           steps: RunView.project(view)
         }
 
@@ -44,8 +45,8 @@ defmodule Coflux.Topics.Run do
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  def handle_info({:topic, _ref, events}, topic) do
+    {view, effects} = RunView.apply_all(topic.state.view, events)
     topic = %{topic | state: %{topic.state | view: view}}
     {:ok, Sync.steps(topic, effects)}
   end

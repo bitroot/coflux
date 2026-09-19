@@ -39,6 +39,8 @@ defmodule Coflux.Orchestration.Streams do
 
   alias Coflux.Orchestration.{Errors, Results, Values}
 
+  @tail_size 200
+
   # --- Registration ---
 
   # Registers `execution_id` as a producer of the stream it opened at
@@ -405,11 +407,18 @@ defmodule Coflux.Orchestration.Streams do
     end
   end
 
+  @doc """
+  How many of a stream's most recent items a topic carries. The snapshot
+  fetches this many and the stream topic keeps this many, so it is defined
+  once, here, next to the query that reads them.
+  """
+  def tail_size, do: @tail_size
+
   # The last `max_items` items in sequence order, each with the attempt
   # that appended it, alongside the total item count. Used by the
   # inspection topic to bootstrap its bounded tail without materialising
   # the full log.
-  def get_stream_tail(db, stream_id, max_items) do
+  def get_stream_tail(db, stream_id, max_items \\ @tail_size) do
     {:ok, {total_count}} =
       query_one(
         db,
