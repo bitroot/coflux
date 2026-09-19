@@ -3,7 +3,7 @@
 Enhancements:
 
 - Adds `--type ecs` support for `pools create` and `pools update`.
-- Adds the `idleTimeout` launcher field, for how long a pool keeps an idle worker before stopping it.
+- Adds the `idleTimeout` pool field, for how long a pool keeps an idle worker before stopping it.
 
 ## 0.12.0
 

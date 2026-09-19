@@ -155,6 +155,11 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Accepts: %s\n", accepts)
 	}
 
+	// Idle timeout
+	if idleTimeout, ok := pool["idleTimeout"].(float64); ok {
+		fmt.Printf("Idle timeout: %ds\n", int(idleTimeout))
+	}
+
 	// Launcher
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		fmt.Printf("Launcher: %s\n", getString(launcher, "type"))
@@ -227,9 +232,6 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		}
 		if concurrency := getFloat64(launcher, "concurrency"); concurrency > 0 {
 			fmt.Printf("Concurrency: %d\n", int(concurrency))
-		}
-		if idleTimeout, ok := launcher["idleTimeout"].(float64); ok {
-			fmt.Printf("Idle timeout: %ds\n", int(idleTimeout))
 		}
 		if env, ok := launcher["env"].(map[string]any); ok && len(env) > 0 {
 			fmt.Printf("Environment:\n")
@@ -616,9 +618,10 @@ func parseSetValue(s string) any {
 
 // poolTopLevelFields lists field names that are pool-level (not launcher-level).
 var poolTopLevelFields = map[string]bool{
-	"modules":  true,
-	"provides": true,
-	"accepts":  true,
+	"modules":     true,
+	"provides":    true,
+	"accepts":     true,
+	"idleTimeout": true,
 }
 
 // launcherFields lists valid launcher field names.
@@ -636,7 +639,7 @@ var launcherFields = map[string]bool{
 	"platformVersion": true, "accessKeyId": true, "secretAccessKey": true,
 	"sessionToken": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
-	"concurrency": true, "idleTimeout": true, "env": true,
+	"concurrency": true, "env": true,
 }
 
 // mapSubkeyFields lists launcher fields that support dotted sub-key access
@@ -1435,7 +1438,6 @@ var camelToSnake = map[string]string{
 	"networkMode":           "network_mode",
 	"serverHost":            "server_host",
 	"serverSecure":          "server_secure",
-	"idleTimeout":           "idle_timeout",
 	"serviceAccount":        "service_account",
 	"apiServer":             "api_server",
 	"imagePullPolicy":       "image_pull_policy",
@@ -1486,6 +1488,9 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 			result["accepts"] = accepts
 		}
 	}
+	if idleTimeout, ok := pool["idleTimeout"]; ok {
+		result["idle_timeout"] = idleTimeout
+	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
 	}
@@ -1522,6 +1527,14 @@ func tomlPoolToAPI(pool map[string]any) map[string]any {
 	if accepts, ok := pool["accepts"]; ok {
 		result["accepts"] = toStringSliceMap(accepts)
 	}
+	if idleTimeout, ok := pool["idle_timeout"]; ok {
+		// TOML int64 → JSON number
+		if i, ok := idleTimeout.(int64); ok {
+			result["idleTimeout"] = int(i)
+		} else {
+			result["idleTimeout"] = idleTimeout
+		}
+	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = tomlLauncherToAPI(launcher)
 	}
@@ -1537,12 +1550,10 @@ func tomlLauncherToAPI(launcher map[string]any) map[string]any {
 			result[k] = v
 		}
 	}
-	// Ensure integer fields are integers (TOML int64 → JSON number)
-	for _, key := range []string{"concurrency", "idleTimeout"} {
-		if v, ok := result[key]; ok {
-			if i, ok := v.(int64); ok {
-				result[key] = int(i)
-			}
+	// Ensure concurrency is an integer (TOML int64 → JSON number)
+	if c, ok := result["concurrency"]; ok {
+		if i, ok := c.(int64); ok {
+			result["concurrency"] = int(i)
 		}
 	}
 	return result

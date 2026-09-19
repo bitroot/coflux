@@ -827,7 +827,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   # worker that takes a while to start is worth keeping warm between
   # runs. One whose pool doesn't say gets the default.
   defp worker_idle_timeout_ms(state, worker) do
-    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :launcher, :idle_timeout]) do
+    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout]) do
       seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1000
       _ -> @default_worker_idle_timeout_ms
     end

@@ -296,17 +296,38 @@ class TestCommonLauncherFields:
         assert pool["launcher"]["env"]["MY_VAR"] == "hello"
         assert pool["launcher"]["env"]["OTHER_VAR"] == "world"
 
-    def test_get_returns_idle_timeout(self, pool_env):
-        """An idle timeout configured on a pool is returned in pool details,
-        including zero."""
+    def test_idle_timeout_is_a_pool_field(self, pool_env, tmp_path):
+        """An idle timeout is set, exported, unset and imported at the pool
+        level, and zero is a value rather than an absence."""
         host = pool_env["host"]
         targets = [workflow("test", "my_workflow")]
         _setup_pool(pool_env, targets, pool_name="idle-pool", idle_timeout=300)
 
-        assert cli.pools_get("idle-pool", host=host)["launcher"]["idleTimeout"] == 300
+        pool = cli.pools_get("idle-pool", host=host)
+        assert pool["idleTimeout"] == 300
+        assert "idleTimeout" not in pool["launcher"]
+
+        exported = cli.pools_export(host=host)
+        assert "idle_timeout = 300" in exported
 
         cli.pools_update("idle-pool", idle_timeout=0, host=host)
-        assert cli.pools_get("idle-pool", host=host)["launcher"]["idleTimeout"] == 0
+        assert cli.pools_get("idle-pool", host=host)["idleTimeout"] == 0
+
+        cli._coflux(
+            "pools",
+            "update",
+            "idle-pool",
+            "--unset",
+            "idleTimeout",
+            host=host,
+            output=None,
+        )
+        assert "idleTimeout" not in cli.pools_get("idle-pool", host=host)
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+        assert cli.pools_get("idle-pool", host=host)["idleTimeout"] == 300
 
     def test_idle_timeout_keeps_worker_warm(self, pool_env):
         """A worker with an idle timeout outlives the gap between runs, so

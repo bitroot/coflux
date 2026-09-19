@@ -134,3 +134,7 @@ ALTER TABLE assignments ADD COLUMN catalog_sequence INTEGER;
 -- NULL means "not chosen": resolve by the rule above.
 ALTER TABLE runs ADD COLUMN catalog_sequence INTEGER;
 ALTER TABLE executions ADD COLUMN catalog_sequence INTEGER;
+
+-- How long a pool keeps an idle worker before stopping it, in seconds.
+-- NULL leaves it to the scheduler's default.
+ALTER TABLE pool_definitions ADD COLUMN idle_timeout INTEGER;

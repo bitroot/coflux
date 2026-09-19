@@ -172,11 +172,11 @@ These fields apply to all launcher types:
 | `--modules`, `-m` | Modules to host (can be specified multiple times). Module names only — wildcards aren't supported, since this is also what launched workers are told to import |
 | `--provides` | Features that workers provide (e.g., `gpu:A100`) |
 | `--accepts` | Tags that executions must have to be assigned to this pool |
+| `idleTimeout` | Seconds the pool keeps an idle worker before stopping it (default: 5). Worth raising for launchers with slow starts, such as ECS |
 | `serverHost` | Server host override for launched workers |
 | `serverSecure` | Use TLS for server connection |
 | `adapter` | Adapter command |
 | `concurrency` | Maximum concurrent executions per worker |
-| `idleTimeout` | Seconds an idle worker is kept before being stopped (default: 5). Worth raising for launchers with slow starts, such as ECS |
 | `env` | Environment variables (e.g., `--set env.KEY=VALUE`) |
 
 ## Managing pools

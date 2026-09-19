@@ -1488,7 +1488,6 @@ defmodule Coflux.Handlers.Api do
     server_secure = Map.get(value, "serverSecure")
     adapter = Map.get(value, "adapter")
     concurrency = Map.get(value, "concurrency")
-    idle_timeout = Map.get(value, "idleTimeout")
     env = Map.get(value, "env")
 
     cond do
@@ -1504,9 +1503,6 @@ defmodule Coflux.Handlers.Api do
         {:error, :invalid}
 
       not is_nil(concurrency) and (not is_integer(concurrency) or concurrency < 1) ->
-        {:error, :invalid}
-
-      not is_nil(idle_timeout) and (not is_integer(idle_timeout) or idle_timeout < 0) ->
         {:error, :invalid}
 
       not is_nil(env) and not is_map(env) ->
@@ -1531,11 +1527,6 @@ defmodule Coflux.Handlers.Api do
 
         launcher =
           if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
-
-        launcher =
-          if not is_nil(idle_timeout),
-            do: Map.put(launcher, :idle_timeout, idle_timeout),
-            else: launcher
 
         launcher = if env, do: Map.put(launcher, :env, env), else: launcher
         {:ok, launcher}
@@ -1622,6 +1613,7 @@ defmodule Coflux.Handlers.Api do
 
     config = if Enum.any?(provides), do: Map.put(config, "provides", provides), else: config
     config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
+    config = maybe_put_value(config, "idleTimeout", Map.get(pool, :idle_timeout))
 
     if pool.launcher do
       Map.put(config, "launcher", build_launcher_config(pool.launcher, include_secrets))
@@ -1692,7 +1684,6 @@ defmodule Coflux.Handlers.Api do
     |> maybe_put_value("serverSecure", Map.get(launcher, :server_secure))
     |> maybe_put_value("adapter", Map.get(launcher, :adapter))
     |> maybe_put_value("concurrency", Map.get(launcher, :concurrency))
-    |> maybe_put_value("idleTimeout", Map.get(launcher, :idle_timeout))
     |> maybe_put_value("env", Map.get(launcher, :env))
   end
 
@@ -1707,6 +1698,7 @@ defmodule Coflux.Handlers.Api do
             {"modules", &parse_modules/1, :modules, []},
             {"provides", &parse_tag_set/1, :provides, %{}},
             {"accepts", &parse_tag_set/1, :accepts, %{}},
+            {"idleTimeout", &parse_idle_timeout/1, :idle_timeout, nil},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
           {:ok, %{}},
@@ -1735,6 +1727,10 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # Seconds an idle worker is kept for. Zero means the next sweep.
+  defp parse_idle_timeout(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp parse_idle_timeout(_value), do: {:error, :invalid}
+
   # Parses a partial pool update (PATCH semantics).
   # Only keys present in the JSON are included. A JSON null value means "unset".
   defp parse_pool_patch(value) do
@@ -1744,6 +1740,7 @@ defmodule Coflux.Handlers.Api do
           {"modules", &parse_modules/1, :modules},
           {"provides", &parse_tag_set/1, :provides},
           {"accepts", &parse_tag_set/1, :accepts},
+          {"idleTimeout", &parse_idle_timeout/1, :idle_timeout},
           {"launcher", &parse_launcher_patch/1, :launcher}
         ]
 
@@ -1840,7 +1837,6 @@ defmodule Coflux.Handlers.Api do
       {"serverSecure", &is_boolean/1},
       {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
       {"concurrency", fn v -> is_integer(v) and v >= 1 end},
-      {"idleTimeout", fn v -> is_integer(v) and v >= 0 end},
       {"env",
        fn v ->
          is_map(v) and
@@ -1887,7 +1883,6 @@ defmodule Coflux.Handlers.Api do
       "serverSecure" => :server_secure,
       "adapter" => :adapter,
       "concurrency" => :concurrency,
-      "idleTimeout" => :idle_timeout,
       "env" => :env
     }
 
