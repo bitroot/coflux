@@ -1708,77 +1708,27 @@ defmodule Coflux.Orchestration.Epoch do
 
   defp ensure_principal(_source_db, _target_db, nil), do: nil
 
+  # A principal names its user or token by external id, so it needs nothing
+  # else copied to exist in the target.
   defp ensure_principal(source_db, target_db, old_id) do
-    case query_one!(
-           source_db,
-           "SELECT user_external_id, token_id FROM principals WHERE id = ?1",
-           {old_id}
-         ) do
-      {:ok, {user_ext_id, nil}} ->
-        # User principal — find or create by user_external_id
-        case query_one(
-               target_db,
-               "SELECT id FROM principals WHERE user_external_id = ?1",
-               {user_ext_id}
-             ) do
-          {:ok, {existing_id}} ->
-            existing_id
-
-          {:ok, nil} ->
-            {:ok, new_id} =
-              insert_one(target_db, :principals, %{user_external_id: user_ext_id})
-
-            new_id
-        end
-
-      {:ok, {nil, token_id}} ->
-        # Token principal — ensure the token first, then find or create principal
-        new_token_id = ensure_token(source_db, target_db, token_id)
-
-        case query_one(target_db, "SELECT id FROM principals WHERE token_id = ?1", {new_token_id}) do
-          {:ok, {existing_id}} ->
-            existing_id
-
-          {:ok, nil} ->
-            {:ok, new_id} =
-              insert_one(target_db, :principals, %{token_id: new_token_id})
-
-            new_id
-        end
-    end
-  end
-
-  defp ensure_token(source_db, target_db, old_id) do
-    {:ok, {ext_id, token_hash, name, workspaces, created_by, created_at, expires_at}} =
+    {:ok, {user_ext_id, token_ext_id}} =
       query_one!(
         source_db,
-        """
-        SELECT external_id, token_hash, name, workspaces,
-          created_by, created_at, expires_at
-        FROM tokens
-        WHERE id = ?1
-        """,
+        "SELECT user_external_id, token_external_id FROM principals WHERE id = ?1",
         {old_id}
       )
 
-    case query_one(target_db, "SELECT id FROM tokens WHERE external_id = ?1", {ext_id}) do
+    {column, ext_id} =
+      if user_ext_id,
+        do: {:user_external_id, user_ext_id},
+        else: {:token_external_id, token_ext_id}
+
+    case query_one(target_db, "SELECT id FROM principals WHERE #{column} = ?1", {ext_id}) do
       {:ok, {existing_id}} ->
         existing_id
 
       {:ok, nil} ->
-        new_created_by = ensure_principal(source_db, target_db, created_by)
-
-        {:ok, new_id} =
-          insert_one(target_db, :tokens, %{
-            external_id: ext_id,
-            token_hash: token_hash,
-            name: name,
-            workspaces: workspaces,
-            created_by: new_created_by,
-            created_at: created_at,
-            expires_at: expires_at
-          })
-
+        {:ok, new_id} = insert_one(target_db, :principals, %{column => ext_id})
         new_id
     end
   end

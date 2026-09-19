@@ -388,9 +388,7 @@ defmodule Coflux.Orchestration.Server.Archives do
           |> Enum.reject(&MapSet.member?(unindexed_ids, &1))
 
         Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
-          path = Epochs.archive_path(state.epochs, epoch_id)
-
-          case Exqlite.Sqlite3.open(path) do
+          case Epochs.open_archive(state.epochs, epoch_id) do
             {:ok, archive_db} ->
               try do
                 case query_epoch(state, epoch_id, archive_db, query_fn) do

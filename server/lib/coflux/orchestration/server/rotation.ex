@@ -100,11 +100,11 @@ defmodule Coflux.Orchestration.Server.Rotation do
   end
 
   def maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
+    epochs = state.epochs
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
-        {:ok, db} = Exqlite.Sqlite3.open(path)
+        {:ok, db} = Epochs.open_archive(epochs, epoch_id)
 
         try do
           build_blooms_for_epoch(db)

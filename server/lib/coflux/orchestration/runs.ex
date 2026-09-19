@@ -813,7 +813,7 @@ defmodule Coflux.Orchestration.Runs do
     s.requires_tag_set_id AS step_requires_tag_set_id,
     r.requires_tag_set_id AS run_requires_tag_set_id,
     p.user_external_id AS created_by_user_external_id,
-    t.external_id AS created_by_token_external_id
+    p.token_external_id AS created_by_token_external_id
   """
 
   @execution_joins """
@@ -825,7 +825,6 @@ defmodule Coflux.Orchestration.Runs do
     LEFT JOIN assignments AS a ON a.execution_id = e.id
     LEFT JOIN completions AS c ON c.execution_id = e.id
     LEFT JOIN principals AS p ON e.created_by = p.id
-    LEFT JOIN tokens AS t ON p.token_id = t.id
   """
 
   @doc """
@@ -996,7 +995,7 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT DISTINCT r.external_id, r.created_at,
              p.user_external_id AS created_by_user_external_id,
-             t.external_id AS created_by_token_external_id,
+             p.token_external_id AS created_by_token_external_id,
              (
                SELECT e2.id FROM executions AS e2
                WHERE e2.step_id = s.id
@@ -1007,7 +1006,6 @@ defmodule Coflux.Orchestration.Runs do
       INNER JOIN steps AS s ON s.run_id = r.id
       INNER JOIN executions AS e ON e.step_id == s.id
       LEFT JOIN principals AS p ON r.created_by = p.id
-      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE s.module = ?1 AND s.target = ?2 AND s.type = ?3 AND s.parent_id IS NULL AND e.workspace_id = ?4
       ORDER BY r.created_at DESC
       LIMIT ?5
@@ -1022,10 +1020,9 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.memo, r.created_at,
              p.user_external_id AS created_by_user_external_id,
-             t.external_id AS created_by_token_external_id
+             p.token_external_id AS created_by_token_external_id
       FROM runs AS r
       LEFT JOIN principals AS p ON r.created_by = p.id
-      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE r.id = ?1
       """,
       {id},
@@ -1039,10 +1036,9 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT r.id, r.external_id, r.parent_ref_id, r.idempotency_key, r.requires_tag_set_id, r.memo, r.created_at,
              p.user_external_id AS created_by_user_external_id,
-             t.external_id AS created_by_token_external_id
+             p.token_external_id AS created_by_token_external_id
       FROM runs AS r
       LEFT JOIN principals AS p ON r.created_by = p.id
-      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE r.external_id = ?1
       """,
       {external_id},
@@ -1200,12 +1196,11 @@ defmodule Coflux.Orchestration.Runs do
       """
       SELECT e.id, e.step_id, e.attempt, e.workspace_id, e.execute_after, e.created_at, a.created_at,
              p.user_external_id AS created_by_user_external_id,
-             t.external_id AS created_by_token_external_id
+             p.token_external_id AS created_by_token_external_id
       FROM steps AS s
       INNER JOIN executions AS e ON e.step_id = s.id
       LEFT JOIN assignments AS a ON a.execution_id = e.id
       LEFT JOIN principals AS p ON e.created_by = p.id
-      LEFT JOIN tokens AS t ON p.token_id = t.id
       WHERE s.run_id = ?1
       """,
       {run_id}

@@ -98,9 +98,14 @@ defmodule Coflux.Orchestration.Server do
       {:ok, epochs} ->
         db = Epochs.active_db(epochs)
 
+        # The admin store isn't an epoch: it holds what outlives them.
+        {:ok, admin_db} = Coflux.Store.open(project_id, "admin")
+        :ok = Coflux.Admin.Tokens.import_legacy(db, admin_db)
+
         state = %State{
           project_id: project_id,
           db: db,
+          admin_db: admin_db,
           epochs: epochs,
           epoch_index: epoch_index,
           index_queue: unindexed_epoch_ids
@@ -253,17 +258,30 @@ defmodule Coflux.Orchestration.Server do
   # Token management
 
   defp dispatch_call({:check_token, token_hash}, state) do
-    case Principals.check_token(state.db, token_hash) do
-      {:ok, %{principal_id: principal_id, workspaces: workspaces}} ->
-        {:reply, {:ok, %{workspaces: workspaces, principal_id: principal_id}}, state}
-
+    with {:ok, %{external_id: external_id, workspaces: workspaces}} <-
+           Coflux.Admin.Tokens.check_token(state.admin_db, token_hash),
+         {:ok, principal_id} <- Principals.ensure_token(state.db, external_id) do
+      {:reply, {:ok, %{workspaces: workspaces, principal_id: principal_id}}, state}
+    else
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
     end
   end
 
   defp dispatch_call({:create_token, name, principal_id, opts}, state) do
-    {:ok, result} = Principals.create_token(state.db, state.project_id, name, principal_id, opts)
+    created_by =
+      case Principals.get_principal(state.db, principal_id) do
+        {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+        {:ok, nil} -> nil
+      end
+
+    {:ok, result} =
+      Coflux.Admin.Tokens.create_token(state.admin_db, state.project_id, name, created_by, opts)
+
+    # The token can act straight away, so give it its principal now rather
+    # than on first use.
+    {:ok, token_principal_id} = Principals.ensure_token(state.db, result.external_id)
+    result = Map.put(result, :principal_id, token_principal_id)
 
     state =
       state
@@ -281,12 +299,12 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp dispatch_call(:list_tokens, state) do
-    {:ok, tokens} = Principals.list_tokens(state.db)
+    {:ok, tokens} = Coflux.Admin.Tokens.list_tokens(state.admin_db)
     {:reply, {:ok, tokens}, state}
   end
 
   defp dispatch_call({:revoke_token, token_id}, state) do
-    case Principals.revoke_token(state.db, token_id) do
+    case Coflux.Admin.Tokens.revoke_token(state.admin_db, token_id) do
       {:ok, external_id} ->
         state = Effects.emit(state, %TokenRevoked{token: external_id})
         {:reply, {:ok, external_id}, state}
@@ -297,8 +315,18 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp dispatch_call({:get_token, external_id}, state) do
-    result = Principals.get_token_by_external_id(state.db, external_id)
-    {:reply, result, state}
+    case Coflux.Admin.Tokens.get_token_by_external_id(state.admin_db, external_id) do
+      {:ok, nil} ->
+        {:reply, {:ok, nil}, state}
+
+      {:ok, token} ->
+        # Whether the caller may revoke it is decided by principal id, and
+        # a principal is local to this epoch, so the creator's identity is
+        # given one here if it hasn't one yet.
+        {:ok, created_by_principal_id} = Principals.ensure_identity(state.db, token.created_by)
+        token = Map.put(token, :created_by_principal_id, created_by_principal_id)
+        {:reply, {:ok, token}, state}
+    end
   end
 
   # Workspace management
@@ -2890,6 +2918,10 @@ defmodule Coflux.Orchestration.Server do
 
     if state.epochs do
       Epochs.close(state.epochs)
+    end
+
+    if state.admin_db do
+      Coflux.Store.close(state.admin_db)
     end
   end
 

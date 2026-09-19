@@ -209,7 +209,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
 
   # Revoked tokens are absent: created-then-revoked folds to absence.
   def load(state, :tokens, _opts) do
-    {:ok, tokens} = Principals.list_tokens(state.db)
+    {:ok, tokens} = Coflux.Admin.Tokens.list_tokens(state.admin_db)
 
     events =
       tokens
@@ -411,9 +411,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
          workspace_external_id,
          limit
        ) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
-
-    case Exqlite.Sqlite3.open(path) do
+    case Epochs.open_archive(state.epochs, epoch_id) do
       {:ok, db} ->
         try do
           query_archive_target_runs(db, module, target, workspace_external_id, limit)

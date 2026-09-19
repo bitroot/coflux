@@ -37,6 +37,10 @@ defmodule Coflux.Orchestration.Server.State do
             # by `Rotation`, so nothing may hold onto it across a call.
             db: nil,
 
+            # The admin store: tokens, and whatever else outlives an
+            # epoch. Not rotated, so unlike `db` it never changes hands.
+            admin_db: nil,
+
             # `Coflux.Store.Epochs`: the active database plus the ids of
             # the archived epochs behind it. `Archives` searches backwards
             # through those for rows the active epoch no longer holds.

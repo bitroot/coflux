@@ -75,4 +75,4 @@ The server is configured via environment variables. When using `coflux server`, 
 
 ## Data storage
 
-The server stores data in the configured data directory. Each project gets its own SQLite database. Data is managed in rotating epochs, which allows the server to manage data growth without losing access to historical runs.
+The server stores data in the configured data directory. Each project gets its own set of SQLite databases. Orchestration, logs and metrics data is managed in rotating epochs, which allows the server to manage data growth without losing access to historical runs. An admin database holds service tokens, and isn't rotated.

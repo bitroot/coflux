@@ -12,5 +12,13 @@ defmodule Coflux.MigrationsTest do
 
       :ok = Sqlite3.close(db)
     end
+
+    test "evaluates admin migrations" do
+      {:ok, db} = Sqlite3.open(":memory:")
+
+      assert :ok = Migrations.run(db, "admin")
+
+      :ok = Sqlite3.close(db)
+    end
   end
 end
