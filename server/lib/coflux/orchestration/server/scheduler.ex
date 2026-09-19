@@ -58,10 +58,11 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   @connected_worker_poll_interval_ms 30_000
   @disconnected_worker_poll_interval_ms 5_000
 
-  # How long a *ready* worker sits idle before it is stopped. A worker
-  # that has never declared targets is not idle, it is still starting -
-  # see `Fleet.session_ready?/1`.
-  @worker_idle_timeout_ms 5_000
+  # How long a *ready* worker sits idle before it is stopped, unless its
+  # pool says otherwise (see `worker_idle_timeout_ms/2`). A worker that
+  # has never declared targets is not idle, it is still starting - see
+  # `Fleet.session_ready?/1`.
+  @default_worker_idle_timeout_ms 5_000
 
   # How often to sweep while any worker exists, for the deadlines above.
   @sweep_interval_ms 5_000
@@ -679,7 +680,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
              # time, but it means nothing.
              true <- Fleet.session_ready?(session) do
           Enum.empty?(session.starting) && Enum.empty?(session.executing) &&
-            now - session.last_idle_at >= @worker_idle_timeout_ms
+            now - session.last_idle_at >= worker_idle_timeout_ms(state, worker)
         else
           _ -> false
         end
@@ -820,6 +821,16 @@ defmodule Coflux.Orchestration.Server.Scheduler do
         %{failures: failures + 1, last_attempt_at: System.os_time(:millisecond)}
       end
     )
+  end
+
+  # A pool can say how long its workers linger once idle, in seconds: a
+  # worker that takes a while to start is worth keeping warm between
+  # runs. One whose pool doesn't say gets the default.
+  defp worker_idle_timeout_ms(state, worker) do
+    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :launcher, :idle_timeout]) do
+      seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1000
+      _ -> @default_worker_idle_timeout_ms
+    end
   end
 
   defp poll_due?(state, worker, now) do

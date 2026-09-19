@@ -1488,6 +1488,7 @@ defmodule Coflux.Handlers.Api do
     server_secure = Map.get(value, "serverSecure")
     adapter = Map.get(value, "adapter")
     concurrency = Map.get(value, "concurrency")
+    idle_timeout = Map.get(value, "idleTimeout")
     env = Map.get(value, "env")
 
     cond do
@@ -1503,6 +1504,9 @@ defmodule Coflux.Handlers.Api do
         {:error, :invalid}
 
       not is_nil(concurrency) and (not is_integer(concurrency) or concurrency < 1) ->
+        {:error, :invalid}
+
+      not is_nil(idle_timeout) and (not is_integer(idle_timeout) or idle_timeout < 0) ->
         {:error, :invalid}
 
       not is_nil(env) and not is_map(env) ->
@@ -1527,6 +1531,11 @@ defmodule Coflux.Handlers.Api do
 
         launcher =
           if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
+
+        launcher =
+          if not is_nil(idle_timeout),
+            do: Map.put(launcher, :idle_timeout, idle_timeout),
+            else: launcher
 
         launcher = if env, do: Map.put(launcher, :env, env), else: launcher
         {:ok, launcher}
@@ -1683,6 +1692,7 @@ defmodule Coflux.Handlers.Api do
     |> maybe_put_value("serverSecure", Map.get(launcher, :server_secure))
     |> maybe_put_value("adapter", Map.get(launcher, :adapter))
     |> maybe_put_value("concurrency", Map.get(launcher, :concurrency))
+    |> maybe_put_value("idleTimeout", Map.get(launcher, :idle_timeout))
     |> maybe_put_value("env", Map.get(launcher, :env))
   end
 
@@ -1830,6 +1840,7 @@ defmodule Coflux.Handlers.Api do
       {"serverSecure", &is_boolean/1},
       {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
       {"concurrency", fn v -> is_integer(v) and v >= 1 end},
+      {"idleTimeout", fn v -> is_integer(v) and v >= 0 end},
       {"env",
        fn v ->
          is_map(v) and
@@ -1876,6 +1887,7 @@ defmodule Coflux.Handlers.Api do
       "serverSecure" => :server_secure,
       "adapter" => :adapter,
       "concurrency" => :concurrency,
+      "idleTimeout" => :idle_timeout,
       "env" => :env
     }
 

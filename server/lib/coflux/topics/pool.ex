@@ -110,6 +110,7 @@ defmodule Coflux.Topics.Pool do
     |> maybe_put(:serverSecure, Map.get(launcher, :server_secure))
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
     |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
+    |> maybe_put(:idleTimeout, Map.get(launcher, :idle_timeout))
     |> maybe_put(:env, Map.get(launcher, :env))
   end
 

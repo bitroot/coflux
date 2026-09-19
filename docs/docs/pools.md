@@ -176,6 +176,7 @@ These fields apply to all launcher types:
 | `serverSecure` | Use TLS for server connection |
 | `adapter` | Adapter command |
 | `concurrency` | Maximum concurrent executions per worker |
+| `idleTimeout` | Seconds an idle worker is kept before being stopped (default: 5). Worth raising for launchers with slow starts, such as ECS |
 | `env` | Environment variables (e.g., `--set env.KEY=VALUE`) |
 
 ## Managing pools

@@ -262,6 +262,7 @@ def _pools_set_args(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
 ):
     """Build --set/--modules/--provides/--accepts args for pool create/update."""
@@ -282,6 +283,8 @@ def _pools_set_args(
         args.extend(["--set", f"adapter={json.dumps(adapter)}"])
     if concurrency:
         args.extend(["--set", f"concurrency={concurrency}"])
+    if idle_timeout is not None:
+        args.extend(["--set", f"idleTimeout={idle_timeout}"])
     if env:
         for k, v in env.items():
             args.extend(["--set", f"env.{k}={v}"])
@@ -298,6 +301,7 @@ def pools_create(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
     host=None,
     workspace="default",
@@ -312,6 +316,7 @@ def pools_create(
             docker_image=docker_image,
             adapter=adapter,
             concurrency=concurrency,
+            idle_timeout=idle_timeout,
             env=env,
         )
     )
@@ -327,6 +332,7 @@ def pools_update(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
     host=None,
     workspace="default",
@@ -341,6 +347,7 @@ def pools_update(
             docker_image=docker_image,
             adapter=adapter,
             concurrency=concurrency,
+            idle_timeout=idle_timeout,
             env=env,
         )
     )

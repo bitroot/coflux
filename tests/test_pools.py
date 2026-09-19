@@ -296,6 +296,48 @@ class TestCommonLauncherFields:
         assert pool["launcher"]["env"]["MY_VAR"] == "hello"
         assert pool["launcher"]["env"]["OTHER_VAR"] == "world"
 
+    def test_get_returns_idle_timeout(self, pool_env):
+        """An idle timeout configured on a pool is returned in pool details,
+        including zero."""
+        host = pool_env["host"]
+        targets = [workflow("test", "my_workflow")]
+        _setup_pool(pool_env, targets, pool_name="idle-pool", idle_timeout=300)
+
+        assert cli.pools_get("idle-pool", host=host)["launcher"]["idleTimeout"] == 300
+
+        cli.pools_update("idle-pool", idle_timeout=0, host=host)
+        assert cli.pools_get("idle-pool", host=host)["launcher"]["idleTimeout"] == 0
+
+    def test_idle_timeout_keeps_worker_warm(self, pool_env):
+        """A worker with an idle timeout outlives the gap between runs, so
+        the second run reuses it rather than paying for another launch."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_pool(pool_env, targets, pool_name="warm-pool", idle_timeout=60)
+
+        resp = cli.submit("test/greet", '"one"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="one")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        # Longer than the default idle timeout and the sweep that enforces it.
+        time.sleep(12)
+        workers = cli.pools_launches("warm-pool", host=host)
+        assert len(workers) == 1
+        assert all(w["stoppingAt"] is None for w in workers.values())
+
+        resp = cli.submit("test/greet", '"two"', host=host)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="two")
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "two"
+
+        # Same worker, same connection: nothing else was launched.
+        executor.wait_connections(1, timeout=1)
+        assert len(cli.pools_launches("warm-pool", host=host)) == 1
+
     def test_update_common_fields(self, pool_env):
         """Common launcher fields can be updated on an existing pool."""
         host = pool_env["host"]

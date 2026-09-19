@@ -228,6 +228,9 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if concurrency := getFloat64(launcher, "concurrency"); concurrency > 0 {
 			fmt.Printf("Concurrency: %d\n", int(concurrency))
 		}
+		if idleTimeout, ok := launcher["idleTimeout"].(float64); ok {
+			fmt.Printf("Idle timeout: %ds\n", int(idleTimeout))
+		}
 		if env, ok := launcher["env"].(map[string]any); ok && len(env) > 0 {
 			fmt.Printf("Environment:\n")
 			for k, v := range env {
@@ -633,7 +636,7 @@ var launcherFields = map[string]bool{
 	"platformVersion": true, "accessKeyId": true, "secretAccessKey": true,
 	"sessionToken": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
-	"concurrency": true, "env": true,
+	"concurrency": true, "idleTimeout": true, "env": true,
 }
 
 // mapSubkeyFields lists launcher fields that support dotted sub-key access
@@ -1432,6 +1435,7 @@ var camelToSnake = map[string]string{
 	"networkMode":           "network_mode",
 	"serverHost":            "server_host",
 	"serverSecure":          "server_secure",
+	"idleTimeout":           "idle_timeout",
 	"serviceAccount":        "service_account",
 	"apiServer":             "api_server",
 	"imagePullPolicy":       "image_pull_policy",
@@ -1533,10 +1537,12 @@ func tomlLauncherToAPI(launcher map[string]any) map[string]any {
 			result[k] = v
 		}
 	}
-	// Ensure concurrency is an integer (TOML int64 → JSON number)
-	if c, ok := result["concurrency"]; ok {
-		if i, ok := c.(int64); ok {
-			result["concurrency"] = int(i)
+	// Ensure integer fields are integers (TOML int64 → JSON number)
+	for _, key := range []string{"concurrency", "idleTimeout"} {
+		if v, ok := result[key]; ok {
+			if i, ok := v.(int64); ok {
+				result[key] = int(i)
+			}
 		}
 	}
 	return result
