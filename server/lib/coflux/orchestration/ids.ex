@@ -43,6 +43,40 @@ defmodule Coflux.Orchestration.Ids do
     end
   end
 
+  def parse_step(step_id) do
+    case String.split(step_id, ":", parts: 2) do
+      [run_external_id, step_number] ->
+        case Integer.parse(step_number) do
+          {step_number, ""} -> {:ok, run_external_id, step_number}
+          _ -> {:error, :invalid}
+        end
+
+      _ ->
+        {:error, :invalid}
+    end
+  end
+
+  # The index is separated by the last `_`, so a run id containing one is
+  # still unambiguous.
+  def parse_stream(id) when is_binary(id) do
+    case String.split(id, "_") do
+      parts when length(parts) >= 2 ->
+        {index, prefix_parts} = List.pop_at(parts, -1)
+
+        with {index, ""} when index >= 0 <- Integer.parse(index),
+             {:ok, run_external_id, step_number} <- parse_step(Enum.join(prefix_parts, "_")) do
+          {:ok, run_external_id, step_number, index}
+        else
+          _ -> {:error, :invalid_format}
+        end
+
+      _ ->
+        {:error, :invalid_format}
+    end
+  end
+
+  def parse_stream(_), do: {:error, :invalid_format}
+
   def parse_input(external_id) do
     case String.split(external_id, "/i", parts: 2) do
       [run_external_id, number] ->

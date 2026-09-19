@@ -17,6 +17,7 @@ defmodule Coflux.EventsTest do
 
   alias Coflux.Events.{CompletionRecorded, ResultRecorded}
   alias Coflux.Orchestration
+  alias Coflux.Orchestration.Server.Dependencies
   alias Coflux.RunView
   alias Coflux.RunView.Sync
   alias Coflux.Topics.{Manifests, Modules, Queue, Search, Sessions, Tokens, Workflow, Workspaces}
@@ -224,6 +225,82 @@ defmodule Coflux.EventsTest do
     {_subs, models} = check(project, subs)
     assert models[:workspaces][ws].state == :active
     assert models[:tokens] == %{}
+  end
+
+  # The claim every in-memory index in `Coflux.Orchestration.Server.State`
+  # makes: it accelerates a question the database can already answer, so
+  # it is never authoritative and can always be thrown away and rebuilt.
+  # That is what lets a restart and an epoch rotation re-derive it rather
+  # than carry it, and it is only true as long as this passes.
+  test "the dependency ledgers are re-derivable from the database", %{project: project} do
+    {:ok, _workspace_id, ws} = Orchestration.create_workspace(project, "default", nil)
+    {:ok, token} = Orchestration.create_session(project, ws)
+    {:ok, session, []} = Orchestration.resume_session(project, token, ws, self())
+
+    :ok =
+      Orchestration.declare_targets(
+        project,
+        session,
+        %{"test" => %{workflow: ["main"], task: ["child"]}},
+        1
+      )
+
+    {:ok, _run, 1, root} =
+      Orchestration.start_run(project, "test", "main", :workflow, [], nil, workspace: ws)
+
+    # A child, and a second child waiting on the first: the waiter is
+    # blocked on a dependency, and with one slot something is gated.
+    {:ok, _, 2, child, _} =
+      Orchestration.schedule_step(project, root, "test", "child", :task, [],
+        concurrency: %{limit: 1, params: [], namespace: nil}
+      )
+
+    {:ok, _, 3, _waiter, _} =
+      Orchestration.schedule_step(
+        project,
+        root,
+        "test",
+        "child",
+        :task,
+        [{:raw, nil, [{:execution, child}]}],
+        wait_for: [0]
+      )
+
+    # The root finishing frees the worker's only slot, so the child is
+    # assigned and takes a concurrency permit.
+    :ok = Orchestration.record_result(project, root, {:value, {:raw, "done", []}})
+    :ok = Orchestration.notify_terminated(project, [root])
+    {:ok, _} = Orchestration.get_workspaces(project)
+
+    {:ok, pid} = Coflux.Orchestration.Supervisor.get_server(project)
+    state = :sys.get_state(pid)
+
+    refute Enum.empty?(state.pending_dependencies), "nothing was blocked; the test proves nothing"
+
+    refute Enum.empty?(state.concurrency_permits),
+           "nothing held a permit; the test proves nothing"
+
+    rebuilt = Dependencies.rebuild(state)
+
+    for field <- [
+          :pending_dependencies,
+          :dependency_waiters,
+          :dependency_groups,
+          :stream_dependency_keys,
+          :concurrency_permits
+        ] do
+      assert Map.fetch!(rebuilt, field) == Map.fetch!(state, field),
+             """
+             #{field} does not survive a rebuild from the database.
+             held:     #{inspect(Map.fetch!(state, field), pretty: true)}
+             rebuilt:  #{inspect(Map.fetch!(rebuilt, field), pretty: true)}
+             """
+    end
+
+    # `concurrency_gated` is deliberately not in that list: it is the last
+    # scheduler pass's decision, not a fact about the database, and the
+    # next pass recomputes it.
+    assert rebuilt.concurrency_gated == %{}
   end
 
   # The fan-out a result gets when other runs handed off to the execution

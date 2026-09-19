@@ -4,6 +4,7 @@ defmodule Coflux.Orchestration.Runs do
     Catalog,
     Ids,
     Models,
+    Principals,
     Results,
     Streams,
     TagSets,
@@ -896,14 +897,10 @@ defmodule Coflux.Orchestration.Runs do
     |> Map.put(:type, Utils.decode_step_type(fields.type))
     |> Map.put(
       :created_by,
-      principal(fields.created_by_user_external_id, fields.created_by_token_external_id)
+      Principals.build(fields.created_by_user_external_id, fields.created_by_token_external_id)
     )
     |> Map.drop([:created_by_user_external_id, :created_by_token_external_id])
   end
-
-  defp principal(nil, nil), do: nil
-  defp principal(user_external_id, nil), do: %{type: "user", external_id: user_external_id}
-  defp principal(nil, token_external_id), do: %{type: "token", external_id: token_external_id}
 
   @doc """
   An execution's identity as events carry it: every id external, the

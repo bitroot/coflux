@@ -1,4 +1,4 @@
-defmodule Coflux.Orchestration.Identity do
+defmodule Coflux.Orchestration.Server.Identity do
   @moduledoc """
   Resolves an execution's identity, as events carry it, from the database:
   every id external, plus the step's module, target and type and the run's

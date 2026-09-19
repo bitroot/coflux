@@ -1,4 +1,4 @@
-defmodule Coflux.Orchestration.Gates do
+defmodule Coflux.Orchestration.Server.Gates do
   @moduledoc """
   The queue's answer to "why isn't this running?": whatever the execution
   is waiting on, plus each concurrency gate that's holding it back, in the

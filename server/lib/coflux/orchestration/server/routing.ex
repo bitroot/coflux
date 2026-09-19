@@ -1,4 +1,4 @@
-defmodule Coflux.Orchestration.Routing do
+defmodule Coflux.Orchestration.Server.Routing do
   @moduledoc """
   Which topic keys receive each event. The only place that knows which
   topics care about which facts: an emit site records a fact, a topic folds
@@ -57,8 +57,8 @@ defmodule Coflux.Orchestration.Routing do
     WorkerDeactivated,
     WorkerLaunchResult,
     WorkerStateChanged,
-    WorkerStopping,
     WorkerStopResult,
+    WorkerStopping,
     WorkspaceCreated,
     WorkspaceStateChanged,
     WorkspaceUpdated

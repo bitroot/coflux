@@ -29,6 +29,15 @@ defmodule Coflux.Orchestration.Principals do
   end
 
   @doc """
+  Who did something, from the external ids of the user and token a
+  `principals` join yields. At most one is set; neither means nobody - a
+  run the server started on its own.
+  """
+  def build(nil, nil), do: nil
+  def build(user_external_id, nil), do: %{type: "user", external_id: user_external_id}
+  def build(nil, token_external_id), do: %{type: "token", external_id: token_external_id}
+
+  @doc """
   Gets the type and external_id for a principal.
   Returns {:ok, {type, external_id}} or {:ok, nil} if not found.
   """
