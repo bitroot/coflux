@@ -1,13 +1,27 @@
-defmodule Coflux.RunView.Diff do
+defmodule Coflux.Topics.Diff do
   @moduledoc """
   Emits the topic updates that turn one projected value into another.
 
-  Maps are walked key by key so a change deep in a step's entry becomes one
-  `set` at that path; anything else that differs is set wholesale. Structs
-  never appear in projected values, but are treated as leaves just in case.
+  Maps are walked key by key so a change deep in an entry becomes one `set`
+  at that path; anything else that differs is set wholesale. A `nil` new
+  value *at the given path* unsets the entry, so a projection that returns
+  `nil` for something the model no longer holds removes it from the topic;
+  a field inside an entry that becomes `nil` is set to `nil`, as any other
+  value would be. At the root there is no entry to unset, so the topic's
+  value becomes `nil` instead. Structs never appear in projected values,
+  but are treated as leaves just in case.
   """
 
   alias Topical.Topic
+
+  def apply(topic, _path, nil, nil), do: topic
+
+  def apply(topic, [], _old, nil), do: Topic.set(topic, [], nil)
+
+  def apply(topic, path, _old, nil) do
+    {parent, [key]} = Enum.split(path, -1)
+    Topic.unset(topic, parent, key)
+  end
 
   def apply(topic, path, old, new) do
     diff(topic, path, old, new)

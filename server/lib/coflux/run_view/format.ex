@@ -6,9 +6,11 @@ defmodule Coflux.RunView.Format do
 
   import Coflux.TopicUtils
 
+  alias Coflux.Orchestration.Ids
+
   @branch_statuses [:assigning, :running, :completed, :errored, :aborted, :suspended]
 
-  def step_key(run_external_id, step_number), do: "#{run_external_id}:#{step_number}"
+  defdelegate step_key(run_external_id, step_number), to: Ids, as: :step
 
   def child(%{step: step, attempt: attempt, group_id: group_id}, run_external_id) do
     %{stepId: step_key(run_external_id, step), attempt: attempt, groupId: group_id}
@@ -26,11 +28,8 @@ defmodule Coflux.RunView.Format do
 
   # How a resolved version and a wait are keyed among an execution's
   # dependencies (and its publishes): the same keys the orchestration uses.
-  def catalog_version_key(path, number), do: "#{path}@#{number}"
-
-  # A wait is for whatever comes after `number`, so it's keyed apart from a
-  # read of that version.
-  def catalog_wait_key(path, number), do: "#{path}@#{number}+"
+  defdelegate catalog_version_key(path, number), to: Ids, as: :catalog_version
+  defdelegate catalog_wait_key(path, number), to: Ids, as: :catalog_wait
 
   def branch_status(status), do: Atom.to_string(status)
 

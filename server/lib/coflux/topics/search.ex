@@ -1,5 +1,13 @@
 defmodule Coflux.Topics.Search do
+  @moduledoc """
+  Target search for a workspace. The topic has no value; it answers `query`
+  from the targets it knows: every workflow in a registered manifest and
+  every target that has run, with the latest execution of each.
+  """
+
   alias Coflux.Orchestration
+  alias Coflux.Orchestration.Ids
+  alias Coflux.Topics.Search.Model
 
   use Topical.Topic, route: ["workspaces", :workspace_id, "search"]
 
@@ -11,52 +19,19 @@ defmodule Coflux.Topics.Search do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    case Orchestration.subscribe_targets(project_id, workspace_id, self()) do
-      {:ok, targets, _ref} ->
-        topic = Topical.Topic.new(nil, %{targets: targets})
-        {:ok, topic}
+    case Orchestration.subscribe(project_id, {:targets, workspace_id}, self()) do
+      {:ok, events, ref} ->
+        targets = Model.fold(Model.new(), events)
+        {:ok, Topical.Topic.new(nil, %{targets: targets, ref: ref})}
 
       {:error, :workspace_invalid} ->
         {:error, :not_found}
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
-    {:ok, topic}
-  end
-
-  defp process_notification(topic, {:manifests, targets}) do
-    update_in(topic.state.targets, fn existing ->
-      Enum.reduce(targets, existing, fn {module_name, workflow_names}, existing ->
-        Enum.reduce(workflow_names, existing, fn target_name, existing ->
-          existing_target = get_in(existing, [module_name, target_name])
-
-          if !existing_target || elem(existing_target, 0) != :workflow do
-            put_in(
-              existing,
-              [Access.key(module_name, %{}), target_name],
-              {:workflow, nil}
-            )
-          else
-            existing
-          end
-        end)
-      end)
-    end)
-  end
-
-  defp process_notification(
-         topic,
-         {:step, module, target_name, target_type, external_run_id, external_step_id, attempt}
-       ) do
-    update_in(topic.state.targets, fn targets ->
-      put_in(
-        targets,
-        [Access.key(module, %{}), target_name],
-        {target_type, {external_run_id, external_step_id, attempt}}
-      )
-    end)
+  def handle_info({:topic, _ref, events}, topic) do
+    targets = Model.fold(topic.state.targets, events)
+    {:ok, %{topic | state: %{topic.state | targets: targets}}}
   end
 
   def handle_execute("query", {query}, topic, _context) do
@@ -134,7 +109,7 @@ defmodule Coflux.Topics.Search do
             {run_id, step_id, attempt} ->
               %{
                 runId: run_id,
-                stepId: "#{run_id}:#{step_id}",
+                stepId: Ids.step(run_id, step_id),
                 stepNumber: step_id,
                 attempt: attempt
               }
@@ -150,5 +125,50 @@ defmodule Coflux.Topics.Search do
           run: run
         }
     end
+  end
+end
+
+defmodule Coflux.Topics.Search.Model do
+  @moduledoc """
+  The search index as a fold over events: `%{module => %{target => {type,
+  latest}}}`, where `latest` is `{run, step, attempt}` of the most recently
+  scheduled execution, or nil for a workflow that has only been registered.
+  """
+
+  import Kernel, except: [apply: 2]
+
+  alias Coflux.Events.{ExecutionScheduled, ManifestRegistered, ModuleArchived}
+
+  def new, do: %{}
+
+  def fold(targets, events), do: Enum.reduce(events, targets, &apply(&2, &1))
+
+  # A registered workflow that has already run keeps its latest execution.
+  def apply(targets, %ManifestRegistered{} = e) do
+    Enum.reduce(Map.keys(e.workflows), targets, fn target, targets ->
+      case get_in(targets, [e.module, target]) do
+        {:workflow, _latest} -> targets
+        _ -> put_in(targets, [Access.key(e.module, %{}), target], {:workflow, nil})
+      end
+    end)
+  end
+
+  # Archiving forgets the module's workflows that never ran; anything that
+  # has run stays searchable by its latest execution.
+  def apply(targets, %ModuleArchived{} = e) do
+    case Map.fetch(targets, e.module) do
+      {:ok, module} ->
+        case Map.reject(module, fn {_target, entry} -> entry == {:workflow, nil} end) do
+          remaining when map_size(remaining) == 0 -> Map.delete(targets, e.module)
+          remaining -> Map.put(targets, e.module, remaining)
+        end
+
+      :error ->
+        targets
+    end
+  end
+
+  def apply(targets, %ExecutionScheduled{} = e) do
+    put_in(targets, [Access.key(e.module, %{}), e.target], {e.type, {e.run, e.step, e.attempt}})
   end
 end

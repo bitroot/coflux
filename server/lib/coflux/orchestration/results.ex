@@ -78,6 +78,71 @@ defmodule Coflux.Orchestration.Results do
   # server for server-initiated dispositions).
 
   # Writes a value payload. Returns the created timestamp on success.
+  @doc """
+  The result an execution ultimately produced, following every redirect:
+  a retry, a hand-off (deferred, cached, spawned), a suspension or a
+  recurrence all resolve to whatever the execution that took over
+  produced.
+
+  Returns `{:ok, result}` once something stands, or `{:pending,
+  execution_id}` naming the execution still being waited on. An error
+  payload with no completion row is pending: the retry decision is on the
+  completion, so it isn't yet known whether the error stands.
+  """
+  def resolve(db, execution_id) do
+    # TODO: check execution exists?
+    case get_result(db, execution_id) do
+      {:ok, nil} ->
+        {:pending, execution_id}
+
+      {:ok, {result, _created_at, completion_at, _created_by}} ->
+        case result do
+          {:error, _, _, _, nil, _retryable} when is_nil(completion_at) ->
+            {:pending, execution_id}
+
+          {:error, _, _, _, successor_id, _retryable} when not is_nil(successor_id) ->
+            resolve(db, successor_id)
+
+          {:abandoned, successor_id} when not is_nil(successor_id) ->
+            resolve(db, successor_id)
+
+          {:crashed, successor_id} when not is_nil(successor_id) ->
+            resolve(db, successor_id)
+
+          {:timeout, successor_id} when not is_nil(successor_id) ->
+            resolve(db, successor_id)
+
+          {:deferred, successor_id} when is_integer(successor_id) ->
+            resolve(db, successor_id)
+
+          {:cached, successor_id} when is_integer(successor_id) ->
+            resolve(db, successor_id)
+
+          {:spawned, successor_id} when is_integer(successor_id) ->
+            resolve(db, successor_id)
+
+          {:suspended, successor_id} ->
+            resolve(db, successor_id)
+
+          {:recurred, successor_id} ->
+            resolve(db, successor_id)
+
+          # Resolved ref forms: the value is already stored, return it.
+          {:deferred, _ref_id, value} ->
+            {:ok, {:value, value}}
+
+          {:cached, _ref_id, value} ->
+            {:ok, {:value, value}}
+
+          {:spawned, _ref_id, value} ->
+            {:ok, {:value, value}}
+
+          other ->
+            {:ok, other}
+        end
+    end
+  end
+
   def record_value_result(db, execution_id, value) do
     with_snapshot(db, fn ->
       {:ok, value_id} = Values.get_or_create_value(db, value)

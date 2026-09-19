@@ -35,8 +35,7 @@ defmodule Coflux.Topics.RunGroup do
     execution_id = Map.fetch!(params, :execution_id)
 
     with {group_id, ""} <- Integer.parse(Map.fetch!(params, :group_id)),
-         {:ok, view, _run, _parent, fetch} <-
-           Loader.load(project_id, run_id, workspace_id, self()),
+         {:ok, view, fetch} <- Loader.load(project_id, run_id, workspace_id, self()),
          %{groups: %{^group_id => group}} <- Map.get(view.executions, execution_id) do
       # Members are listed with their arguments, so those are loaded for
       # every member step (and nothing else).
@@ -69,8 +68,8 @@ defmodule Coflux.Topics.RunGroup do
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  def handle_info({:topic, _ref, events}, topic) do
+    {view, effects} = RunView.apply_all(topic.state.view, events)
     topic = %{topic | state: %{topic.state | view: view}}
     %{execution_id: execution_id, group_id: group_id} = topic.state
 

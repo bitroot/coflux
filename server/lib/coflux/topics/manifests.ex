@@ -1,7 +1,11 @@
 defmodule Coflux.Topics.Manifests do
+  @moduledoc "The latest manifest of each module registered in a workspace."
+
   use Topical.Topic, route: ["workspaces", :workspace_id, "manifests"]
 
   alias Coflux.Orchestration
+  alias Coflux.Topics.Diff
+  alias Coflux.Topics.Manifests.Model
 
   def connect(params, context) do
     {:ok, Map.put(params, :project, context.project)}
@@ -11,52 +15,65 @@ defmodule Coflux.Topics.Manifests do
     project_id = Map.fetch!(params, :project)
     workspace_id = Map.fetch!(params, :workspace_id)
 
-    case Orchestration.subscribe_manifests(project_id, workspace_id, self()) do
-      {:ok, manifests, ref} ->
-        {:ok, Topic.new(build_value(manifests), %{ref: ref})}
+    case Orchestration.subscribe(project_id, {:manifests, workspace_id}, self()) do
+      {:ok, events, ref} ->
+        {model, _dirty} = Model.fold(Model.new(), events)
+        {:ok, Topic.new(Model.project(model), %{model: model, ref: ref})}
 
       {:error, :workspace_invalid} ->
         {:error, :not_found}
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    topic = Enum.reduce(notifications, topic, &process_notification(&2, &1))
-    {:ok, topic}
-  end
+  def handle_info({:topic, _ref, events}, topic) do
+    {model, dirty} = Model.fold(topic.state.model, events)
 
-  defp process_notification(topic, {:manifests, manifests}) do
-    Enum.reduce(manifests, topic, fn {module, workflows}, topic ->
-      update_module(topic, module, workflows)
-    end)
-  end
-
-  defp process_notification(topic, {:manifest, module, workflows}) do
-    update_module(topic, module, workflows)
-  end
-
-  defp update_module(topic, module, nil) do
-    Topic.unset(topic, [], module)
-  end
-
-  defp update_module(topic, module, workflows) do
-    targets =
-      Map.new(workflows, fn {name, workflow} ->
-        {name, build_workflow(workflow)}
+    topic =
+      Enum.reduce(dirty, topic, fn module, topic ->
+        Diff.apply(
+          topic,
+          [module],
+          Map.get(topic.value, module),
+          Model.project_entry(model, module)
+        )
       end)
 
-    Topic.set(topic, [module], targets)
+    {:ok, %{topic | state: %{topic.state | model: model}}}
+  end
+end
+
+defmodule Coflux.Topics.Manifests.Model do
+  @moduledoc false
+
+  import Kernel, except: [apply: 2]
+
+  alias Coflux.Events.{ManifestRegistered, ModuleArchived}
+
+  def new, do: %{}
+
+  def fold(model, events) do
+    Enum.reduce(events, {model, MapSet.new()}, fn event, {model, dirty} ->
+      {model, keys} = apply(model, event)
+      {model, Enum.into(keys, dirty)}
+    end)
   end
 
-  defp build_value(manifests) do
-    Map.new(manifests, fn {module, workflows} ->
-      targets =
-        Map.new(workflows, fn {name, workflow} ->
-          {name, build_workflow(workflow)}
-        end)
+  def apply(model, %ManifestRegistered{} = e),
+    do: {Map.put(model, e.module, e.workflows), [e.module]}
 
-      {module, targets}
-    end)
+  def apply(model, %ModuleArchived{} = e), do: {Map.delete(model, e.module), [e.module]}
+
+  def project(model),
+    do: Map.new(model, fn {module, _} -> {module, project_entry(model, module)} end)
+
+  def project_entry(model, module) do
+    case Map.fetch(model, module) do
+      {:ok, workflows} ->
+        Map.new(workflows, fn {name, workflow} -> {name, build_workflow(workflow)} end)
+
+      :error ->
+        nil
+    end
   end
 
   defp build_workflow(workflow) do

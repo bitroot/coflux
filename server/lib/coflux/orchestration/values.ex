@@ -1,6 +1,8 @@
 defmodule Coflux.Orchestration.Values do
   import Coflux.Store
 
+  alias Coflux.Orchestration.Ids
+
   # TODO: move, or make private?
   def get_or_create_blob(db, blob_key, size) do
     case query_one(db, "SELECT id FROM blobs WHERE key = ?1", {blob_key}) do
@@ -132,7 +134,7 @@ defmodule Coflux.Orchestration.Values do
           )
 
         {:execution, run_ext, step_num, attempt} ->
-          [2, "#{run_ext}:#{step_num}:#{attempt}"]
+          [2, Ids.execution(run_ext, step_num, attempt)]
 
         {:asset, external_id} ->
           [3, external_id]
@@ -150,6 +152,30 @@ defmodule Coflux.Orchestration.Values do
       |> Enum.intersperse(0)
 
     :crypto.hash(:sha256, data)
+  end
+
+  @doc """
+  An incoming value with its references in the stored form: an execution
+  reference arrives as an external id and is stored as the run, step and
+  attempt it names. Everything else passes through. The inverse of
+  `Coflux.Orchestration.Server.Resolve.value/2`, and what a value must go through
+  before `get_or_create_value/2`.
+  """
+  def normalize({:raw, data, refs}), do: {:raw, data, normalize_references(refs)}
+  def normalize({:blob, key, size, refs}), do: {:blob, key, size, normalize_references(refs)}
+
+  defp normalize_references(references) do
+    Enum.map(references, fn
+      {:execution, execution_external_id} ->
+        {:ok, run_ext, step_num, attempt} = Ids.parse_execution(execution_external_id)
+        {:execution, run_ext, step_num, attempt}
+
+      {:input, external_id} ->
+        {:input, external_id}
+
+      ref ->
+        ref
+    end)
   end
 
   def get_or_create_value(db, value) do

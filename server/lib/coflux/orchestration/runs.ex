@@ -1,13 +1,15 @@
 defmodule Coflux.Orchestration.Runs do
   alias Coflux.Orchestration.{
-    Models,
-    Results,
-    Values,
-    TagSets,
     CacheConfigs,
-    Utils,
+    Catalog,
+    Ids,
+    Models,
+    Principals,
+    Results,
     Streams,
-    Catalog
+    TagSets,
+    Utils,
+    Values
   }
 
   import Coflux.Store
@@ -195,36 +197,6 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def get_steps_for_workspace(db, workspace_id) do
-    case query(
-           db,
-           """
-           WITH latest_executions AS (
-             SELECT s.module, s.target, MAX(e.created_at) AS max_created_at
-             FROM executions AS e
-             INNER JOIN steps AS s ON s.id = e.step_id
-             WHERE e.workspace_id = ?1
-             GROUP BY s.module, s.target
-           )
-           SELECT s.module, s.target, s.type, r.external_id, s.number, e.attempt
-           FROM executions AS e
-           INNER JOIN steps AS s ON s.id = e.step_id
-           INNER JOIN latest_executions AS le ON s.module = le.module AND s.target = le.target AND e.created_at = le.max_created_at
-           INNER JOIN runs AS r ON r.id = s.run_id
-           WHERE e.workspace_id = ?1
-           """,
-           {workspace_id}
-         ) do
-      {:ok, rows} ->
-        {:ok,
-         Enum.map(rows, fn {module_name, target_name, target_type, run_external_id, step_number,
-                            attempt} ->
-           {module_name, target_name, Utils.decode_step_type(target_type), run_external_id,
-            step_number, attempt}
-         end)}
-    end
-  end
-
   def schedule_run(
         db,
         module,
@@ -342,7 +314,7 @@ defmodule Coflux.Orchestration.Runs do
               )
 
             {:execution, run_ext, step_num, attempt} ->
-              [2, "#{run_ext}:#{step_num}:#{attempt}"]
+              [2, Ids.execution(run_ext, step_num, attempt)]
 
             {:asset, external_id} ->
               [3, external_id]
@@ -822,36 +794,141 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
-  def get_queue_executions(db, workspace_id) do
-    # "Still in the queue" = no completion yet. An execution with a value
-    # result but no completion (streams draining) is still running from
-    # the lifecycle's point of view, so it stays visible on the queue.
-    case query(
-           db,
-           """
-           SELECT
-             s.module,
-             s.target,
-             r.external_id,
-             s.number,
-             e.attempt,
-             e.execute_after,
-             e.created_at,
-             a.created_at,
-             s.requires_tag_set_id,
-             r.requires_tag_set_id
-           FROM executions AS e
-           INNER JOIN steps AS s ON s.id = e.step_id
-           INNER JOIN runs AS r ON r.id = s.run_id
-           LEFT JOIN assignments AS a ON a.execution_id = e.id
-           LEFT JOIN completions AS c ON c.execution_id = e.id
-           WHERE e.workspace_id = ?1 AND c.created_at IS NULL
-           """,
-           {workspace_id}
-         ) do
-      {:ok, rows} ->
-        {:ok, rows}
-    end
+  # The columns an `ExecutionScheduled` event carries (minus `requires`,
+  # which the caller resolves from the two tag set ids), and the joins that
+  # supply them.
+  @execution_columns """
+    r.external_id AS run,
+    s.number AS step,
+    e.attempt,
+    w.external_id AS workspace,
+    s.module,
+    s.target,
+    s.type,
+    root.module AS root_module,
+    root.target AS root_target,
+    e.execute_after,
+    e.created_at,
+    a.created_at AS assigned_at,
+    s.requires_tag_set_id AS step_requires_tag_set_id,
+    r.requires_tag_set_id AS run_requires_tag_set_id,
+    p.user_external_id AS created_by_user_external_id,
+    t.external_id AS created_by_token_external_id
+  """
+
+  @execution_joins """
+    FROM executions AS e
+    INNER JOIN steps AS s ON s.id = e.step_id
+    INNER JOIN runs AS r ON r.id = s.run_id
+    INNER JOIN steps AS root ON root.run_id = r.id AND root.parent_id IS NULL
+    INNER JOIN workspaces AS w ON w.id = e.workspace_id
+    LEFT JOIN assignments AS a ON a.execution_id = e.id
+    LEFT JOIN completions AS c ON c.execution_id = e.id
+    LEFT JOIN principals AS p ON e.created_by = p.id
+    LEFT JOIN tokens AS t ON p.token_id = t.id
+  """
+
+  @doc """
+  Every execution in the workspace without a completion. An execution with
+  a value result but no completion (streams draining) is still running
+  from the lifecycle's point of view, so it is included.
+  """
+  def get_active_executions(db, workspace_id) do
+    query(
+      db,
+      """
+      SELECT #{@execution_columns}
+      #{@execution_joins}
+      WHERE e.workspace_id = ?1 AND c.created_at IS NULL
+      ORDER BY e.created_at, e.id
+      """,
+      {workspace_id},
+      &execution_row/1
+    )
+  end
+
+  @doc """
+  Every execution in the workspace without a completion whose run started
+  at `module`/`target` - the same set as `get_active_executions/2`, narrowed
+  to one workflow.
+  """
+  def get_active_executions_for_target(db, workspace_id, module, target) do
+    query(
+      db,
+      """
+      SELECT #{@execution_columns}
+      #{@execution_joins}
+      WHERE e.workspace_id = ?1 AND c.created_at IS NULL
+        AND root.module = ?2 AND root.target = ?3
+      ORDER BY e.created_at, e.id
+      """,
+      {workspace_id, module, target},
+      &execution_row/1
+    )
+  end
+
+  @doc "The most recently created execution of each target in the workspace."
+  def get_latest_executions_for_workspace(db, workspace_id) do
+    query(
+      db,
+      """
+      WITH latest AS (
+        SELECT s.module, s.target, MAX(e.created_at) AS max_created_at
+        FROM executions AS e
+        INNER JOIN steps AS s ON s.id = e.step_id
+        WHERE e.workspace_id = ?1
+        GROUP BY s.module, s.target
+      )
+      SELECT #{@execution_columns}
+      #{@execution_joins}
+      INNER JOIN latest AS l
+        ON l.module = s.module AND l.target = s.target AND l.max_created_at = e.created_at
+      WHERE e.workspace_id = ?1
+      ORDER BY e.created_at, e.id
+      """,
+      {workspace_id},
+      &execution_row/1
+    )
+  end
+
+  defp execution_row(fields) do
+    fields
+    |> Map.put(:execution, Ids.execution(fields.run, fields.step, fields.attempt))
+    |> Map.put(:type, Utils.decode_step_type(fields.type))
+    |> Map.put(
+      :created_by,
+      Principals.build(fields.created_by_user_external_id, fields.created_by_token_external_id)
+    )
+    |> Map.drop([:created_by_user_external_id, :created_by_token_external_id])
+  end
+
+  @doc """
+  An execution's identity as events carry it: every id external, the
+  step's module, target and type (still encoded), and the run's root
+  target. Nil if the execution doesn't exist, or if its run has no
+  parentless step to take a root target from.
+
+  The root join is ordered and bounded so a run that somehow holds more
+  than one parentless step still resolves to one identity - the
+  lowest-numbered, which is the one every other reader treats as initial.
+  """
+  def get_execution_identity(db, execution_id) do
+    query_one(
+      db,
+      """
+      SELECT r.external_id, s.number, e.attempt, w.external_id, s.module, s.target, s.type,
+             root.module, root.target
+      FROM executions AS e
+      INNER JOIN steps AS s ON s.id = e.step_id
+      INNER JOIN runs AS r ON r.id = s.run_id
+      INNER JOIN steps AS root ON root.run_id = r.id AND root.parent_id IS NULL
+      INNER JOIN workspaces AS w ON w.id = e.workspace_id
+      WHERE e.id = ?1
+      ORDER BY root.number
+      LIMIT 1
+      """,
+      {execution_id}
+    )
   end
 
   def get_pending_executions_for_workspace(db, workspace_id) do
@@ -1315,6 +1392,10 @@ defmodule Coflux.Orchestration.Runs do
     )
   end
 
+  # SQLite binds at most 999 parameters by default, so an id list longer
+  # than this is queried in chunks.
+  @max_query_ids 900
+
   defp build_placeholders(count, offset \\ 0) do
     1..count
     |> Enum.map_intersperse(", ", &"?#{&1 + offset}")
@@ -1643,6 +1724,40 @@ defmodule Coflux.Orchestration.Runs do
       {:ok, nil} ->
         {:error, :not_found}
     end
+  end
+
+  @doc """
+  The external key of each of `execution_ids` that belongs to
+  `workspace_id`, as `%{execution_id => {run_external_id, step_number,
+  attempt}}`. Executions in other workspaces (and ones that no longer
+  exist) are simply absent, so a caller holding a project-wide set can
+  narrow it to one workspace without a round trip per execution.
+  """
+  def get_execution_keys_in_workspace(db, execution_ids, workspace_id) do
+    keys =
+      execution_ids
+      |> Enum.chunk_every(@max_query_ids)
+      |> Enum.reduce(%{}, fn chunk, acc ->
+        {:ok, rows} =
+          query(
+            db,
+            """
+            SELECT e.id, r.external_id, s.number, e.attempt
+            FROM executions AS e
+            INNER JOIN steps AS s ON s.id = e.step_id
+            INNER JOIN runs AS r ON r.id = s.run_id
+            WHERE e.workspace_id = ?1
+              AND e.id IN (#{build_placeholders(length(chunk), 1)})
+            """,
+            List.to_tuple([workspace_id | chunk])
+          )
+
+        Enum.into(rows, acc, fn {id, run_external_id, step_number, attempt} ->
+          {id, {run_external_id, step_number, attempt}}
+        end)
+      end)
+
+    {:ok, keys}
   end
 
   def get_execution_keys(db, execution_ids) do

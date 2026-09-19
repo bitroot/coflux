@@ -25,13 +25,13 @@ defmodule Coflux.Topics.RunSteps do
       {:error, :not_found} ->
         {:error, :not_found}
 
-      {:ok, view, _run, _parent, _fetch} ->
+      {:ok, view, _fetch} ->
         {:ok, Topic.new(%{steps: RunView.project_structure(view)}, %{view: view})}
     end
   end
 
-  def handle_info({:topic, _ref, notifications}, topic) do
-    {view, effects} = RunView.apply_all(topic.state.view, notifications)
+  def handle_info({:topic, _ref, events}, topic) do
+    {view, effects} = RunView.apply_all(topic.state.view, events)
     topic = %{topic | state: %{topic.state | view: view}}
     {:ok, Sync.structure(topic, effects)}
   end

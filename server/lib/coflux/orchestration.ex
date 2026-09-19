@@ -25,10 +25,6 @@ defmodule Coflux.Orchestration do
     call_server(project_id, :list_tokens)
   end
 
-  def subscribe_tokens(project_id, pid) do
-    call_server(project_id, {:subscribe_tokens, pid})
-  end
-
   def revoke_token(project_id, token_id) do
     call_server(project_id, {:revoke_token, token_id})
   end
@@ -105,10 +101,6 @@ defmodule Coflux.Orchestration do
 
   def get_manifests(project_id, workspace_id) do
     call_server(project_id, {:get_manifests, workspace_id})
-  end
-
-  def subscribe_manifests(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_manifests, workspace_id, pid})
   end
 
   def get_workflow(project_id, workspace_id, module, target_name) do
@@ -314,55 +306,11 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:publish_catalog, workspace_id, path, value, access})
   end
 
-  def subscribe_catalog(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_catalog, workspace_id, pid})
-  end
-
-  def subscribe_workspaces(project_id, pid) do
-    call_server(project_id, {:subscribe_workspaces, pid})
-  end
-
-  def subscribe_modules(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_modules, workspace_id, pid})
-  end
-
-  def subscribe_queue(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_queue, workspace_id, pid})
-  end
-
-  def subscribe_pools(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_pools, workspace_id, pid})
-  end
-
-  def subscribe_pool(project_id, workspace_id, pool_name, pid) do
-    call_server(project_id, {:subscribe_pool, workspace_id, pool_name, pid})
-  end
-
-  def subscribe_sessions(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_sessions, workspace_id, pid})
-  end
-
-  def subscribe_workflow(project_id, module, target, workspace_id, max_runs, pid) do
-    call_server(project_id, {:subscribe_workflow, module, target, workspace_id, max_runs, pid})
-  end
-
-  def subscribe_run(project_id, run_id, pid) do
-    call_server(project_id, {:subscribe_run, run_id, pid})
-  end
-
   # Per-execution detail (results, dependencies, checkpoints, assets...) and
   # per-step arguments and streams, for the parts of a run a topic shows.
   # `request` is `%{executions: [{step_number, attempt}], steps: [step_number]}`.
   def get_run_details(project_id, run_id, request) do
     call_server(project_id, {:get_run_details, run_id, request})
-  end
-
-  def subscribe_stream_topic(project_id, stream_id, pid) do
-    call_server(project_id, {:subscribe_stream_topic, stream_id, pid})
-  end
-
-  def subscribe_targets(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_targets, workspace_id, pid})
   end
 
   # Input management
@@ -398,16 +346,17 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:get_input, input_external_id})
   end
 
-  def subscribe_input(project_id, input_external_id, pid) do
-    call_server(project_id, {:subscribe_input, input_external_id, pid})
-  end
-
-  def subscribe_inputs(project_id, workspace_id, pid) do
-    call_server(project_id, {:subscribe_inputs, workspace_id, pid})
-  end
-
   def rotate_epoch(project_id) do
     call_server(project_id, :rotate_epoch)
+  end
+
+  @doc """
+  Subscribes `pid` to a topic key. Replies with the key's initial events,
+  which the subscriber folds exactly as it folds the events delivered later
+  as `{:topic, ref, events}` messages.
+  """
+  def subscribe(project_id, key, pid, opts \\ []) do
+    call_server(project_id, {:subscribe, key, opts, pid})
   end
 
   def unsubscribe(project_id, ref) do

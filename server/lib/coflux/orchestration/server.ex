@@ -1,222 +1,87 @@
 defmodule Coflux.Orchestration.Server do
+  alias Coflux.Events.{
+    AssetDependencyRecorded,
+    AssetPut,
+    CheckpointsSet,
+    ChildLinked,
+    ExecutionScheduled,
+    GroupCreated,
+    InputResponded,
+    InputSubmitted,
+    ManifestRegistered,
+    MetricDefined,
+    ModuleArchived,
+    PoolStateChanged,
+    PoolUpdated,
+    SessionConnected,
+    SessionExecuting,
+    StepArguments,
+    StepCreated,
+    StreamDependencyRecorded,
+    TokenCreated,
+    TokenRevoked,
+    WorkspaceCreated,
+    WorkspaceStateChanged,
+    WorkspaceUpdated
+  }
+
+  alias Coflux.Store.{Epochs, Index}
+
+  alias Coflux.Orchestration.{
+    Assets,
+    Catalog,
+    Checkpoints,
+    Ids,
+    Inputs,
+    Manifests,
+    Principals,
+    Results,
+    Runs,
+    Sessions,
+    Streams,
+    TagSets,
+    Values,
+    Workers,
+    Workspaces
+  }
+
+  alias Coflux.Orchestration.Server.{
+    Archives,
+    Cancellation,
+    CatalogFlow,
+    Commands,
+    Dependencies,
+    Effects,
+    Fleet,
+    Gates,
+    InputFlow,
+    Lifecycle,
+    Listeners,
+    Permissions,
+    Resolve,
+    Rotation,
+    Scheduler,
+    Scheduling,
+    Snapshots,
+    State,
+    StreamDelivery,
+    Waiters
+  }
+
   use GenServer, restart: :transient
   require Logger
 
-  alias Coflux.Store.{Bloom, Epochs, Index}
-  alias Coflux.MapUtils
-
-  alias Coflux.Orchestration.{
-    Workspaces,
-    Sessions,
-    Runs,
-    Results,
-    Streams,
-    Checkpoints,
-    Assets,
-    Inputs,
-    Values,
-    CacheConfigs,
-    TagSets,
-    Workers,
-    Manifests,
-    Principals,
-    Errors,
-    Epoch,
-    Catalog
-  }
-
   @default_activation_timeout_ms 600_000
   @default_reconnection_timeout_ms 30_000
-  @target_runs_archive_depth 5
-  @connected_worker_poll_interval_ms 30_000
-  @disconnected_worker_poll_interval_ms 5_000
-  @worker_idle_timeout_ms 5_000
   @rotation_check_interval_ms 60_000
   @rotation_size_threshold_bytes 100 * 1024 * 1024
-  @idempotency_ttl_ms 24 * 60 * 60 * 1000
-  @idle_timeout_ms 30_000
-
-  defmodule State do
-    defstruct project_id: nil,
-              db: nil,
-              epochs: nil,
-              tick_timer: nil,
-              expire_waiters_timer: nil,
-              expire_sessions_timer: nil,
-              idle_timer: nil,
-
-              # id -> %{name, base_id, state}
-              workspaces: %{},
-
-              # workspace_id -> %{pool_name -> pool}
-              pools: %{},
-
-              # name -> id
-              workspace_names: %{},
-
-              # worker_id -> %{created_at, pool_id, pool_name, workspace_id, state, data, session_id, stop_id, last_poll_at}
-              workers: %{},
-
-              # ref -> {pid, session_id}
-              connections: %{},
-
-              # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, activation_timeout, reconnection_timeout}
-              sessions: %{},
-
-              # external_id -> session_id
-              session_ids: %{},
-
-              # session_id -> expiry_timestamp_ms
-              session_expiries: %{},
-
-              # {module, target} -> %{type, session_ids}
-              targets: %{},
-
-              # external_id -> workspace_id
-              workspace_external_ids: %{},
-
-              # external_id -> worker_id
-              worker_external_ids: %{},
-
-              # execution_external_id -> execution_id (internal)
-              execution_ids: %{},
-
-              # ref -> topic
-              listeners: %{},
-
-              # topic -> %{ref -> pid}
-              topics: %{},
-
-              # topic -> [notification]
-              notifications: %{},
-
-              # Pending RPCs blocked on a dependency, keyed by what they wait for.
-              # Key is a tagged tuple:
-              #   {:execution, execution_external_id} — woken by notify_waiting
-              #   {:input, input_external_id}         — woken by respond_input / dismiss_input
-              #   {:catalog, workspace_external_id, path, number}
-              #                                       — woken by wake_catalog_waiters
-              # Keys name things by external id only: this map is carried across
-              # an epoch rotation as it is, and rotation reassigns internal ids.
-              # A new kind MUST be handled in: notify_waiting, respond_input /
-              # dismiss_input, expire_waiters, cleanup_execution, and
-              # cancel_other_execution_keys.
-              # Value is a list of {from_execution_external_id, request_id, expire_at, suspend?}.
-              waiting: %{},
-
-              # task_ref -> callback
-              launcher_tasks: %{},
-
-              # Coflux.Store.Index struct for Bloom filter lookups
-              epoch_index: nil,
-
-              # ref of running background index build task
-              index_task: nil,
-
-              # [epoch_id] awaiting Bloom filter build (FIFO)
-              index_queue: [],
-
-              # run_external_id -> {root_module, root_target, MapSet of execution_ids}
-              run_workflows: %{},
-
-              # execution_id -> MapSet of execution_ids that this execution is waiting on
-              pending_dependencies: %{},
-              # Stream waits indexed by stream, so an append can check for
-              # waiters with one lookup instead of scanning every pending
-              # dependency. Derived from pending_dependencies; rebuilt with it.
-              stream_dependency_keys: %{},
-
-              # execution_id -> MapSet of execution_ids that are waiting on this execution
-              dependency_waiters: %{},
-
-              # execution_id -> MapSet of the dependency keys that were
-              # recorded on it by a suspended select (a result, input,
-              # stream or catalog wait). Select is first-wins, so these
-              # form an any-of group: when one clears, the execution is
-              # done waiting on all of them. Argument dependencies
-              # (`wait_for`) are never in a group — they must all resolve —
-              # but they are also always resolved by the time a step has
-              # run once, so the two never coexist in practice. Derived
-              # from pending_dependencies; rebuilt with it.
-              dependency_groups: %{},
-
-              # Concurrency permits currently held: execution_id ->
-              # %{workspace_id, key}. An execution holds a permit from the
-              # moment its assignment is written until its completion is. The
-              # same set is derivable from the database (assignment without
-              # completion), so this is rebuilt at boot and after an epoch
-              # rotation rather than being authoritative — a permit can't be
-              # leaked by a restart.
-              concurrency_permits: %{},
-
-              # Executions the last tick left gated on a permit:
-              # execution_id -> the queue-topic dependency map that was
-              # emitted for it. Keeping the map (rather than just the id)
-              # means a queue subscriber joining mid-gate is shown the same
-              # entry existing subscribers already have, without recomputing
-              # holders that may since have changed.
-              concurrency_gated: %{},
-
-              # Active stream subscriptions — in-memory, session-scoped.
-              # A consumer adapter opens a subscription by sending stream_subscribe
-              # with a subscription_id unique within that consumer's adapter
-              # process; we push items (stream_items command) as they arrive on
-              # the producer side, and a terminal stream_closed command when the
-              # stream ends. Dropped when the session disconnects, when the
-              # consumer unsubscribes, when the consumer execution terminates,
-              # or when the stream closes.
-              #
-              # The key includes consumer_execution_id so concurrent consumer
-              # adapters (each starting subscription counters from 0) can't
-              # collide.
-              #
-              # Delivery is credit-gated: the consumer declares a `prefetch`
-              # window on subscribe and reports progress with `stream_ack`.
-              # We only push while `delivered - acked_count < prefetch`, which
-              # is what bounds the consumer's in-memory queue. Undelivered
-              # items aren't lost — they're durable, and the next ack pumps
-              # them from the DB.
-              #
-              # stream_subscriptions: {consumer_execution_id, subscription_id} ->
-              #     %{consumer_execution_external_id, stream_id, cursor,
-              #       stride, prefetch, delivered, acked_count, acked_seq,
-              #       pending_close}
-              # stream_subscribers: stream_id -> MapSet of
-              #     {consumer_execution_id, subscription_id}
-              stream_subscriptions: %{},
-              stream_subscribers: %{},
-
-              # Per-stream producer state for backpressure. Only present
-              # when the producer opted in by registering with a non-nil
-              # buffer. Keyed by stream_id (the `streams` row).
-              #
-              #   %{buffer, demand_granted, session_id, execution_external_id,
-              #     index}
-              #
-              # * buffer                — configured backpressure budget
-              # * demand_granted        — cumulative credits sent so far, in
-              #                           sequence space (so a producer
-              #                           resuming a paused stream starts at
-              #                           head + 1)
-              # * session_id            — where to route stream_demand
-              # * execution_external_id — the current producer, for the wire
-              # * index                 — the stream's step index, for the wire
-              #
-              # A stream that spans a suspension changes producer: the
-              # resuming execution's registration replaces this entry.
-              #
-              # The watermark the budget is measured against is the
-              # *slowest* subscriber's acknowledged position, recomputed
-              # from stream_subscribers on demand rather than cached here,
-              # since it changes often and is cheap to derive.
-              stream_producers: %{}
-  end
 
   def start_link(opts) do
     {project_id, opts} = Keyword.pop!(opts, :project_id)
     GenServer.start_link(__MODULE__, project_id, opts)
   end
 
+  @impl true
   def init(project_id) do
     index_path = ["projects", project_id, "orchestration", "index.json"]
 
@@ -247,6 +112,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  @impl true
   def handle_continue(:setup, state) do
     {:ok, workspaces} = Workspaces.get_all_workspaces(state.db)
     {:ok, workers} = Workers.get_active_workers(state.db)
@@ -305,183 +171,50 @@ defmodule Coflux.Orchestration.Server do
         worker_external_ids: worker_external_ids
       })
 
-    # Load active sessions from DB
-    {:ok, active_sessions} = Sessions.load_active_sessions(state.db)
-
-    # Load total assignment counts per session for lifetime execution tracking
-    {:ok, assignment_counts} = Sessions.get_assignment_counts(state.db)
-
-    assignment_counts_by_session =
-      Map.new(assignment_counts, fn {session_id, total} -> {session_id, total} end)
-
+    # Each owner restores what it holds from the database. Nothing here
+    # knows the shape of another's state, so a new index is one module's
+    # problem rather than this function's.
     state =
-      Enum.reduce(
-        active_sessions,
-        state,
-        fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
-            accepts_tag_set_id, activation_timeout, reconnection_timeout, secret_hash, created_at,
-            activated_at},
-           state ->
-          provides =
-            if provides_tag_set_id do
-              case TagSets.get_tag_set(state.db, provides_tag_set_id) do
-                {:ok, tag_set} -> tag_set
-              end
-            else
-              %{}
-            end
-
-          accepts =
-            if accepts_tag_set_id do
-              case TagSets.get_tag_set(state.db, accepts_tag_set_id) do
-                {:ok, tag_set} -> tag_set
-              end
-            else
-              %{}
-            end
-
-          activation_timeout = activation_timeout || @default_activation_timeout_ms
-          reconnection_timeout = reconnection_timeout || @default_reconnection_timeout_ms
-
-          session = %{
-            external_id: external_id,
-            secret_hash: secret_hash,
-            connection: nil,
-            targets: %{},
-            queue: [],
-            starting: MapSet.new(),
-            executing: MapSet.new(),
-            concurrency: 0,
-            draining: false,
-            workspace_id: workspace_id,
-            provides: provides,
-            accepts: accepts,
-            worker_id: worker_id,
-            last_idle_at: activated_at || created_at,
-            activated_at: activated_at,
-            activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout,
-            total_executions: Map.get(assignment_counts_by_session, session_id, 0)
-          }
-
-          state =
-            state
-            |> put_in([Access.key(:sessions), session_id], session)
-            |> put_in([Access.key(:session_ids), external_id], session_id)
-
-          # Schedule expiry - either activation (if never connected) or reconnection (if was connected)
-          state =
-            if activated_at do
-              schedule_session_expiry(state, session_id, reconnection_timeout)
-            else
-              schedule_session_expiry(state, session_id, activation_timeout)
-            end
-
-          # Link session to worker if applicable
-          if worker_id && Map.has_key?(state.workers, worker_id) do
-            put_in(state, [Access.key(:workers), worker_id, Access.key(:session_id)], session_id)
-          else
-            state
-          end
-        end
-      )
-
-    # Deactivate orphaned workers that have no launch result (data: nil) and
-    # no associated session. These were created but the server crashed before
-    # a session could be created for them, so nothing will ever connect.
-    # Workers that DO have a session are left alone — the session's activation
-    # timeout will handle cleanup if the launched process never connects.
-    state =
-      state.workers
-      |> Enum.filter(fn {_worker_id, worker} ->
-        is_nil(worker.data) && is_nil(worker.session_id)
-      end)
-      |> Enum.reduce(state, fn {worker_id, _worker}, state ->
-        deactivate_worker(state, worker_id, "server_restarted")
-      end)
-
-    # Restore pending assignments into session state instead of abandoning them.
-    # Workers will reconnect and report via heartbeats which executions they're
-    # still running. Any that aren't reported will be abandoned by the heartbeat
-    # handler. If the worker doesn't reconnect at all, session expiry handles it.
-    {:ok, pending} = Runs.get_pending_assignments(state.db)
-
-    # Group by session and collect all execution IDs
-    {by_session, all_execution_ids} =
-      Enum.reduce(pending, {%{}, []}, fn {session_id, execution_id}, {by_session, all} ->
-        by_session = Map.update(by_session, session_id, [execution_id], &[execution_id | &1])
-        {by_session, [execution_id | all]}
-      end)
-
-    # Populate execution_ids cache (external -> internal) so heartbeats can resolve them
-    {:ok, key_map} = Runs.get_execution_keys(state.db, all_execution_ids)
-
-    # Build internal->external mapping for this batch
-    internal_to_external =
-      Map.new(key_map, fn {execution_id, {run_ext_id, step_num, attempt}} ->
-        {execution_id, execution_external_id(run_ext_id, step_num, attempt)}
-      end)
-
-    state =
-      Enum.reduce(internal_to_external, state, fn {execution_id, ext_id}, state ->
-        put_in(state, [Access.key(:execution_ids), ext_id], execution_id)
-      end)
-
-    # Add pending executions to each session's executing set (using external IDs)
-    state =
-      Enum.reduce(by_session, state, fn {session_id, execution_ids}, state ->
-        if Map.has_key?(state.sessions, session_id) do
-          update_in(
-            state.sessions[session_id].executing,
-            &Enum.reduce(execution_ids, &1, fn id, set ->
-              case Map.fetch(internal_to_external, id) do
-                {:ok, ext_id} -> MapSet.put(set, ext_id)
-                :error -> set
-              end
-            end)
-          )
-        else
-          # Session no longer active - abandon these executions. Server-initiated
-          # so we write both the results row (via process_result) and the
-          # completion row (via complete_execution) here — no worker is
-          # going to send notify_terminated for this execution.
-          Enum.reduce(execution_ids, state, fn execution_id, state ->
-            {:ok, state} = process_result(state, execution_id, :abandoned)
-            complete_execution(state, execution_id)
-          end)
-        end
-      end)
-
-    # Populate run_workflows lookup for all active runs
-    {:ok, active_run_workflows} = Runs.get_active_run_workflows(state.db)
-
-    state =
-      Enum.reduce(active_run_workflows, state, fn {run_ext_id, module, target, _step_number,
-                                                   _attempt, execution_id, _assigned},
-                                                  state ->
-        track_run_execution(state, run_ext_id, execution_id, module, target)
-      end)
-
-    # Initialize pending dependency tracking for existing unassigned executions
-    state = initialize_pending_dependencies(state)
-
-    # Rebuild the concurrency ledger from the executions that are assigned
-    # but not yet completed
-    state = load_concurrency_permits(state)
+      state
+      |> Fleet.load()
+      |> State.load_indexes()
+      |> Dependencies.rebuild()
 
     # Schedule periodic epoch rotation check
     Process.send_after(self(), :check_rotation, @rotation_check_interval_ms)
 
     # Kick off background Bloom filter builds for any unindexed epochs
-    state = maybe_start_index_build(state)
+    state = Rotation.maybe_start_index_build(state)
 
     # Schedule idle shutdown if no sessions or listeners yet
-    state = maybe_schedule_idle_shutdown(state)
+    state = Listeners.maybe_schedule_idle_shutdown(state)
 
-    {:noreply, state}
+    flush({:noreply, state})
   end
 
-  def handle_call(:get_workspaces, _from, state) do
+  # Every operation ends by flushing what it recorded: the callbacks below
+  # do that once, here, so no individual clause can forget to. Flushing
+  # before the reply is returned keeps the guarantee subscribers rely on -
+  # that the events of an operation arrive before whatever the caller does
+  # next in response to its reply.
+  @impl true
+  def handle_call(request, _from, state), do: flush(dispatch_call(request, state))
+
+  @impl true
+  def handle_cast(request, state), do: flush(dispatch_cast(request, state))
+
+  @impl true
+  def handle_info(message, state), do: flush(dispatch_info(message, state))
+
+  defp flush(result) do
+    case result do
+      {:reply, reply, state} -> {:reply, reply, Effects.flush(state)}
+      {:noreply, state} -> {:noreply, Effects.flush(state)}
+      {:stop, reason, state} -> {:stop, reason, Effects.flush(state)}
+    end
+  end
+
+  defp dispatch_call(:get_workspaces, state) do
     workspaces =
       state.workspaces
       |> Enum.filter(fn {_, e} -> e.state != :archived end)
@@ -508,14 +241,14 @@ defmodule Coflux.Orchestration.Server do
 
   # Principal management
 
-  def handle_call({:ensure_principal, external_id}, _from, state) do
+  defp dispatch_call({:ensure_principal, external_id}, state) do
     {:ok, principal_id} = Principals.ensure_user(state.db, external_id)
     {:reply, {:ok, principal_id}, state}
   end
 
   # Token management
 
-  def handle_call({:check_token, token_hash}, _from, state) do
+  defp dispatch_call({:check_token, token_hash}, state) do
     case Principals.check_token(state.db, token_hash) do
       {:ok, %{principal_id: principal_id, workspaces: workspaces}} ->
         {:reply, {:ok, %{workspaces: workspaces, principal_id: principal_id}}, state}
@@ -525,27 +258,33 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:create_token, name, principal_id, opts}, _from, state) do
+  defp dispatch_call({:create_token, name, principal_id, opts}, state) do
     {:ok, result} = Principals.create_token(state.db, state.project_id, name, principal_id, opts)
-    state = notify_listeners(state, :tokens, {:token, result.external_id, result})
+
+    state =
+      state
+      |> Effects.emit(%TokenCreated{
+        token: result.external_id,
+        id: result.id,
+        name: result.name,
+        workspaces: result.workspaces,
+        created_at: result.created_at,
+        expires_at: result.expires_at,
+        created_by: result.created_by
+      })
+
     {:reply, {:ok, result}, state}
   end
 
-  def handle_call(:list_tokens, _from, state) do
+  defp dispatch_call(:list_tokens, state) do
     {:ok, tokens} = Principals.list_tokens(state.db)
     {:reply, {:ok, tokens}, state}
   end
 
-  def handle_call({:subscribe_tokens, pid}, _from, state) do
-    {:ok, tokens} = Principals.list_tokens(state.db)
-    {:ok, ref, state} = add_listener(state, :tokens, pid)
-    {:reply, {:ok, tokens, ref}, state}
-  end
-
-  def handle_call({:revoke_token, token_id}, _from, state) do
+  defp dispatch_call({:revoke_token, token_id}, state) do
     case Principals.revoke_token(state.db, token_id) do
       {:ok, external_id} ->
-        state = notify_listeners(state, :tokens, {:token, external_id, nil})
+        state = Effects.emit(state, %TokenRevoked{token: external_id})
         {:reply, {:ok, external_id}, state}
 
       error ->
@@ -553,16 +292,16 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:get_token, external_id}, _from, state) do
+  defp dispatch_call({:get_token, external_id}, state) do
     result = Principals.get_token_by_external_id(state.db, external_id)
     {:reply, result, state}
   end
 
   # Workspace management
 
-  def handle_call({:create_workspace, name, base_external_id, access}, _from, state) do
-    with :ok <- check_operator_access(access, name),
-         {:ok, base_id} <- resolve_optional_workspace(state, base_external_id) do
+  defp dispatch_call({:create_workspace, name, base_external_id, access}, state) do
+    with :ok <- Permissions.check_operator_access(access, name),
+         {:ok, base_id} <- Permissions.resolve_optional_workspace(state, base_external_id) do
       case Workspaces.create_workspace(state.db, name, base_id, access[:principal_id]) do
         {:ok, workspace_id, workspace} ->
           base_external_id =
@@ -579,17 +318,12 @@ defmodule Coflux.Orchestration.Server do
             |> put_in([Access.key(:workspace_names), workspace.name], workspace_id)
             |> put_in([Access.key(:workspace_external_ids), workspace.external_id], workspace_id)
             |> put_in([Access.key(:pools), workspace_id], %{})
-            |> notify_listeners(
-              :workspaces,
-              {:workspace, workspace_id,
-               %{
-                 name: workspace.name,
-                 base_external_id: base_external_id,
-                 state: workspace.state,
-                 external_id: workspace.external_id
-               }}
-            )
-            |> flush_notifications()
+            |> Effects.emit(%WorkspaceCreated{
+              workspace: workspace.external_id,
+              name: workspace.name,
+              base: base_external_id,
+              state: workspace.state
+            })
 
           {:reply, {:ok, workspace_id, workspace.external_id}, state}
 
@@ -602,10 +336,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:update_workspace, workspace_external_id, updates, access}, _from, state) do
-    with {:ok, workspace_id} <- resolve_workspace_external_id(state, workspace_external_id),
-         :ok <- check_operator_access(access, state.workspaces[workspace_id].name),
-         :ok <- check_rename_allowed(access, updates[:name]) do
+  defp dispatch_call({:update_workspace, workspace_external_id, updates, access}, state) do
+    with {:ok, workspace_id} <-
+           Permissions.resolve_workspace_external_id(state, workspace_external_id),
+         :ok <- Permissions.check_operator_access(access, state.workspaces[workspace_id].name),
+         :ok <- Permissions.check_rename_allowed(access, updates[:name]) do
       # TODO: shut down/update pools
       case Workspaces.update_workspace(state.db, workspace_id, updates, access[:principal_id]) do
         {:ok, workspace} ->
@@ -628,17 +363,12 @@ defmodule Coflux.Orchestration.Server do
               |> Map.delete(original_name)
               |> Map.put(workspace.name, workspace_id)
             end)
-            |> notify_listeners(
-              :workspaces,
-              {:workspace, workspace_id,
-               %{
-                 name: workspace.name,
-                 base_external_id: base_external_id,
-                 state: workspace.state,
-                 external_id: workspace.external_id
-               }}
-            )
-            |> flush_notifications()
+            |> Effects.emit(%WorkspaceUpdated{
+              workspace: workspace.external_id,
+              name: workspace.name,
+              base: base_external_id,
+              state: workspace.state
+            })
 
           send(self(), :tick)
 
@@ -654,16 +384,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:pause_workspace, workspace_external_id, access}, _from, state) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call({:pause_workspace, workspace_external_id, access}, state) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:ok, workspace_id, _} ->
         case Workspaces.pause_workspace(state.db, workspace_id, access[:principal_id]) do
           :ok ->
             state =
               state
               |> put_in([Access.key(:workspaces), workspace_id, Access.key(:state)], :paused)
-              |> notify_listeners(:workspaces, {:state, workspace_external_id, :paused})
-              |> flush_notifications()
+              |> Effects.emit(%WorkspaceStateChanged{
+                workspace: workspace_external_id,
+                state: :paused
+              })
 
             {:reply, :ok, state}
         end
@@ -673,16 +405,18 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:resume_workspace, workspace_external_id, access}, _from, state) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call({:resume_workspace, workspace_external_id, access}, state) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:ok, workspace_id, _} ->
         case Workspaces.resume_workspace(state.db, workspace_id, access[:principal_id]) do
           :ok ->
             state =
               state
               |> put_in([Access.key(:workspaces), workspace_id, Access.key(:state)], :active)
-              |> notify_listeners(:workspaces, {:state, workspace_external_id, :active})
-              |> flush_notifications()
+              |> Effects.emit(%WorkspaceStateChanged{
+                workspace: workspace_external_id,
+                state: :active
+              })
 
             send(self(), :tick)
 
@@ -694,8 +428,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:archive_workspace, workspace_external_id, access}, _from, state) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call({:archive_workspace, workspace_external_id, access}, state) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:ok, workspace_id, _} ->
         case Workspaces.archive_workspace(state.db, workspace_id, access[:principal_id]) do
           :ok ->
@@ -712,14 +446,14 @@ defmodule Coflux.Orchestration.Server do
                     state
                   end
 
-                remove_session(state, session_id)
+                Fleet.remove_session(state, session_id)
               end)
 
             state =
               case Runs.get_pending_executions_for_workspace(state.db, workspace_id) do
                 {:ok, executions} ->
                   Enum.reduce(executions, state, fn {execution_id, _run_id, module}, state ->
-                    case record_and_notify_result(
+                    case Lifecycle.record_and_notify_result(
                            state,
                            execution_id,
                            :cancelled,
@@ -735,15 +469,23 @@ defmodule Coflux.Orchestration.Server do
               state.workers
               |> Enum.reduce(state, fn {worker_id, worker}, state ->
                 if worker.workspace_id == workspace_id && worker.state == :active do
-                  update_worker_state(state, worker_id, :draining, workspace_id, worker.pool_name)
+                  Fleet.update_worker_state(
+                    state,
+                    worker_id,
+                    :draining,
+                    workspace_id,
+                    worker.pool_name
+                  )
                 else
                   state
                 end
               end)
               |> put_in([Access.key(:workspaces), workspace_id, Access.key(:state)], :archived)
-              |> notify_listeners(:workspaces, {:state, workspace_external_id, :archived})
-              |> flush_notifications()
-              |> maybe_schedule_idle_shutdown()
+              |> Effects.emit(%WorkspaceStateChanged{
+                workspace: workspace_external_id,
+                state: :archived
+              })
+              |> Listeners.maybe_schedule_idle_shutdown()
 
             {:reply, :ok, state}
 
@@ -756,8 +498,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:get_pools, workspace_external_id}, _from, state) do
-    with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id) do
+  defp dispatch_call({:get_pools, workspace_external_id}, state) do
+    with {:ok, workspace_id, _} <- Permissions.require_workspace(state, workspace_external_id) do
       case Workspaces.get_workspace_pools(state.db, workspace_id) do
         {:ok, pools, hash} ->
           {:reply, {:ok, pools, hash}, state}
@@ -768,13 +510,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:update_pools, workspace_external_id, desired_pools, expected_hash, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:update_pools, workspace_external_id, desired_pools, expected_hash, access},
+         state
+       ) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       case Workspaces.update_pools(
              state.db,
              workspace_id,
@@ -789,14 +530,20 @@ defmodule Coflux.Orchestration.Server do
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
               if worker.state == :active &&
                    MapSet.member?(changed_pool_names, worker.pool_name) do
-                update_worker_state(state, worker_id, :draining, workspace_id, worker.pool_name)
+                Fleet.update_worker_state(
+                  state,
+                  worker_id,
+                  :draining,
+                  workspace_id,
+                  worker.pool_name
+                )
               else
                 state
               end
             end)
 
           # Update in-memory pools (reload from DB to include :id and :state)
-          ws_ext_id = workspace_external_id(state, workspace_id)
+          ws_ext_id = State.workspace_external_id(state, workspace_id)
 
           {:ok, updated_pools, _hash} =
             Workspaces.get_workspace_pools(state.db, workspace_id)
@@ -809,12 +556,8 @@ defmodule Coflux.Orchestration.Server do
             Enum.reduce(changed_pool_names, state, fn name, state ->
               pool = Map.get(updated_pools, name)
 
-              state
-              |> notify_listeners({:pool, ws_ext_id, name}, {:updated, pool})
-              |> notify_listeners({:pools, ws_ext_id}, {:pool, name, pool})
+              Effects.emit(state, %PoolUpdated{workspace: ws_ext_id, pool: name, definition: pool})
             end)
-
-          state = flush_notifications(state)
 
           {:reply, :ok, state}
 
@@ -827,13 +570,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:create_pool, workspace_external_id, pool_name, pool, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:create_pool, workspace_external_id, pool_name, pool, access},
+         state
+       ) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       case Workspaces.create_pool(
              state.db,
              workspace_id,
@@ -845,15 +587,13 @@ defmodule Coflux.Orchestration.Server do
           {:ok, updated_pools, _hash} =
             Workspaces.get_workspace_pools(state.db, workspace_id)
 
-          ws_ext_id = workspace_external_id(state, workspace_id)
+          ws_ext_id = State.workspace_external_id(state, workspace_id)
           pool = Map.get(updated_pools, pool_name)
 
           state =
             state
             |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
-            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
-            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
-            |> flush_notifications()
+            |> Effects.emit(%PoolUpdated{workspace: ws_ext_id, pool: pool_name, definition: pool})
 
           {:reply, :ok, state}
 
@@ -866,13 +606,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:update_pool, workspace_external_id, pool_name, pool_patch, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:update_pool, workspace_external_id, pool_name, pool_patch, access},
+         state
+       ) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       case Workspaces.update_pool(
              state.db,
              workspace_id,
@@ -885,7 +624,7 @@ defmodule Coflux.Orchestration.Server do
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
               if worker.state == :active && worker.pool_name == pool_name do
-                update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
+                Fleet.update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
               else
                 state
               end
@@ -895,15 +634,13 @@ defmodule Coflux.Orchestration.Server do
           {:ok, updated_pools, _hash} =
             Workspaces.get_workspace_pools(state.db, workspace_id)
 
-          ws_ext_id = workspace_external_id(state, workspace_id)
+          ws_ext_id = State.workspace_external_id(state, workspace_id)
           pool = Map.get(updated_pools, pool_name)
 
           state =
             state
             |> put_in([Access.key(:pools), Access.key(workspace_id, %{})], updated_pools)
-            |> notify_listeners({:pool, ws_ext_id, pool_name}, {:updated, pool})
-            |> notify_listeners({:pools, ws_ext_id}, {:pool, pool_name, pool})
-            |> flush_notifications()
+            |> Effects.emit(%PoolUpdated{workspace: ws_ext_id, pool: pool_name, definition: pool})
 
           {:reply, :ok, state}
 
@@ -919,9 +656,9 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:disable_pool, workspace_external_id, pool_name, access}, _from, state) do
+  defp dispatch_call({:disable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       :ok = Workspaces.disable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
@@ -930,15 +667,11 @@ defmodule Coflux.Orchestration.Server do
           [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
           :disabled
         )
-        |> notify_listeners(
-          {:pool, workspace_external_id, pool_name},
-          {:state, :disabled}
-        )
-        |> notify_listeners(
-          {:pools, workspace_external_id},
-          {:pool_state, pool_name, :disabled}
-        )
-        |> flush_notifications()
+        |> Effects.emit(%PoolStateChanged{
+          workspace: workspace_external_id,
+          pool: pool_name,
+          state: :disabled
+        })
 
       send(self(), :tick)
 
@@ -949,9 +682,9 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:enable_pool, workspace_external_id, pool_name, access}, _from, state) do
+  defp dispatch_call({:enable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       :ok = Workspaces.enable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
@@ -960,15 +693,11 @@ defmodule Coflux.Orchestration.Server do
           [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
           :active
         )
-        |> notify_listeners(
-          {:pool, workspace_external_id, pool_name},
-          {:state, :active}
-        )
-        |> notify_listeners(
-          {:pools, workspace_external_id},
-          {:pool_state, pool_name, :active}
-        )
-        |> flush_notifications()
+        |> Effects.emit(%PoolStateChanged{
+          workspace: workspace_external_id,
+          pool: pool_name,
+          state: :active
+        })
 
       send(self(), :tick)
 
@@ -979,21 +708,20 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:stop_worker, workspace_external_id, worker_external_id, access}, _from, state) do
+  defp dispatch_call({:stop_worker, workspace_external_id, worker_external_id, access}, state) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access),
-         {:ok, worker_id} <- resolve_worker_external_id(state, worker_external_id),
-         {:ok, worker} <- lookup_worker(state, worker_id, workspace_id) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         {:ok, worker_id} <- Fleet.resolve_worker_external_id(state, worker_external_id),
+         {:ok, worker} <- Fleet.lookup_worker(state, worker_id, workspace_id) do
       state =
         state
-        |> update_worker_state(
+        |> Fleet.update_worker_state(
           worker_id,
           :draining,
           workspace_id,
           worker.pool_name,
           access[:principal_id]
         )
-        |> flush_notifications()
 
       send(self(), :tick)
 
@@ -1004,25 +732,23 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:resume_worker, workspace_external_id, worker_external_id, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:resume_worker, workspace_external_id, worker_external_id, access},
+         state
+       ) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access),
-         {:ok, worker_id} <- resolve_worker_external_id(state, worker_external_id),
-         {:ok, worker} <- lookup_worker(state, worker_id, workspace_id) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         {:ok, worker_id} <- Fleet.resolve_worker_external_id(state, worker_external_id),
+         {:ok, worker} <- Fleet.lookup_worker(state, worker_id, workspace_id) do
       state =
         state
-        |> update_worker_state(
+        |> Fleet.update_worker_state(
           worker_id,
           :active,
           workspace_id,
           worker.pool_name,
           access[:principal_id]
         )
-        |> flush_notifications()
 
       send(self(), :tick)
 
@@ -1033,12 +759,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:register_manifests, workspace_external_id, manifests, access},
-        _from,
-        state
-      ) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call(
+         {:register_manifests, workspace_external_id, manifests, access},
+         state
+       ) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:error, error} ->
         {:reply, {:error, error}, state}
 
@@ -1050,70 +775,49 @@ defmodule Coflux.Orchestration.Server do
                access[:principal_id]
              ) do
           :ok ->
-            ws_ext_id = workspace_external_id(state, workspace_id)
+            ws_ext_id = State.workspace_external_id(state, workspace_id)
 
+            # A module registered with no workflows is stored as archived.
             state =
               manifests
               |> Enum.reduce(state, fn {module, workflows}, state ->
-                Enum.reduce(workflows, state, fn {target_name, target}, state ->
-                  notify_listeners(
-                    state,
-                    {:workflow, module, target_name, ws_ext_id},
-                    {:target, target}
-                  )
-                end)
+                if workflows && map_size(workflows) > 0 do
+                  Effects.emit(state, %ManifestRegistered{
+                    workspace: ws_ext_id,
+                    module: module,
+                    workflows: workflows
+                  })
+                else
+                  Effects.emit(state, %ModuleArchived{workspace: ws_ext_id, module: module})
+                end
               end)
-              |> notify_listeners(
-                {:modules, ws_ext_id},
-                {:manifests, manifests}
-              )
-              |> notify_listeners(
-                {:manifests, ws_ext_id},
-                {:manifests, manifests}
-              )
-              |> notify_listeners(
-                {:targets, ws_ext_id},
-                {:manifests,
-                 Map.new(manifests, fn {module_name, workflows} ->
-                   {module_name, MapSet.new(Map.keys(workflows))}
-                 end)}
-              )
-              |> flush_notifications()
 
             {:reply, :ok, state}
         end
     end
   end
 
-  def handle_call({:archive_module, workspace_external_id, module_name, access}, _from, state) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call({:archive_module, workspace_external_id, module_name, access}, state) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:error, error} ->
         {:reply, {:error, error}, state}
 
       {:ok, workspace_id, _} ->
         case Manifests.archive_module(state.db, workspace_id, module_name, access[:principal_id]) do
           :ok ->
-            ws_ext_id = workspace_external_id(state, workspace_id)
+            ws_ext_id = State.workspace_external_id(state, workspace_id)
 
             state =
               state
-              |> notify_listeners(
-                {:modules, ws_ext_id},
-                {:manifest, module_name, nil}
-              )
-              |> notify_listeners(
-                {:manifests, ws_ext_id},
-                {:manifest, module_name, nil}
-              )
-              |> flush_notifications()
+              |> Effects.emit(%ModuleArchived{workspace: ws_ext_id, module: module_name})
 
             {:reply, :ok, state}
         end
     end
   end
 
-  def handle_call({:get_manifests, workspace_external_id}, _from, state) do
-    case require_workspace(state, workspace_external_id) do
+  defp dispatch_call({:get_manifests, workspace_external_id}, state) do
+    case Permissions.require_workspace(state, workspace_external_id) do
       {:error, error} ->
         {:reply, {:error, error}, state}
 
@@ -1123,20 +827,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:subscribe_manifests, workspace_external_id, pid}, _from, state) do
-    case require_workspace(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id, _} ->
-        {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
-        {:ok, ref, state} = add_listener(state, {:manifests, workspace_external_id}, pid)
-        {:reply, {:ok, manifests, ref}, state}
-    end
-  end
-
-  def handle_call({:get_workflow, workspace_external_id, module, target_name}, _from, state) do
-    with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id),
+  defp dispatch_call({:get_workflow, workspace_external_id, module, target_name}, state) do
+    with {:ok, workspace_id, _} <- Permissions.require_workspace(state, workspace_external_id),
          {:ok, workflow} <-
            Manifests.get_latest_workflow(state.db, workspace_id, module, target_name) do
       {:reply, {:ok, workflow}, state}
@@ -1146,7 +838,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:create_session, workspace_external_id, access, opts}, _from, state) do
+  defp dispatch_call({:create_session, workspace_external_id, access, opts}, state) do
     provides = Keyword.get(opts, :provides, %{})
     accepts = Keyword.get(opts, :accepts, %{})
     activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
@@ -1155,7 +847,7 @@ defmodule Coflux.Orchestration.Server do
       Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
 
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
         accepts: accepts,
@@ -1191,8 +883,8 @@ defmodule Coflux.Orchestration.Server do
             state
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
-            |> schedule_session_expiry(session_id, activation_timeout)
-            |> maybe_schedule_idle_shutdown()
+            |> Fleet.schedule_session_expiry(session_id, activation_timeout)
+            |> Listeners.maybe_schedule_idle_shutdown()
 
           {:reply, {:ok, token}, state}
       end
@@ -1202,11 +894,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:verify_session, token}, _from, state) do
+  defp dispatch_call({:verify_session, token}, state) do
     with {:ok, external_id, secret} <- Sessions.parse_token(token),
          {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
          session = Map.fetch!(state.sessions, session_id),
-         :ok <- verify_session_secret(secret, session.secret_hash) do
+         :ok <- Permissions.verify_session_secret(secret, session.secret_hash) do
       workspace = Map.fetch!(state.workspaces, session.workspace_id)
       {:reply, {:ok, %{type: :session, workspaces: [workspace.name], principal_id: nil}}, state}
     else
@@ -1214,13 +906,13 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:resume_session, token, workspace_external_id, pid}, _from, state) do
+  defp dispatch_call({:resume_session, token, workspace_external_id, pid}, state) do
     with {:ok, external_id, secret} <- Sessions.parse_token(token),
          {:ok, session_id} <- Map.fetch(state.session_ids, external_id),
          session = Map.fetch!(state.sessions, session_id),
-         :ok <- verify_session_secret(secret, session.secret_hash),
-         {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id),
-         :ok <- require_workspace_match(session.workspace_id, workspace_id) do
+         :ok <- Permissions.verify_session_secret(secret, session.secret_hash),
+         {:ok, workspace_id, _} <- Permissions.require_workspace(state, workspace_external_id),
+         :ok <- Permissions.require_workspace_match(session.workspace_id, workspace_id) do
       activated_at =
         if is_nil(session.activated_at) do
           {:ok, now} = Sessions.activate_session(state.db, session_id)
@@ -1230,7 +922,7 @@ defmodule Coflux.Orchestration.Server do
         end
 
       # Cancel any pending expiry (activation or reconnection)
-      state = cancel_session_expiry(state, session_id)
+      state = Fleet.cancel_session_expiry(state, session_id)
 
       state =
         if session.connection do
@@ -1256,12 +948,7 @@ defmodule Coflux.Orchestration.Server do
           &Map.merge(&1, %{connection: ref, queue: [], activated_at: activated_at})
         )
 
-      state =
-        notify_listeners(
-          state,
-          {:sessions, workspace_external_id(state, session.workspace_id)},
-          {:session, session.external_id, build_session_data(state, session)}
-        )
+      state = Effects.emit(state, Fleet.session_event(state, session))
 
       state =
         case session.worker_id && Map.fetch(state.workers, session.worker_id) do
@@ -1284,7 +971,6 @@ defmodule Coflux.Orchestration.Server do
 
       send(self(), :tick)
 
-      state = flush_notifications(state)
       {:reply, {:ok, external_id, external_execution_ids}, state}
     else
       :error ->
@@ -1301,14 +987,14 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:declare_targets, external_id, targets, concurrency}, _from, state) do
+  defp dispatch_call({:declare_targets, external_id, targets, concurrency}, state) do
     session_id = Map.fetch!(state.session_ids, external_id)
 
     now = System.os_time(:millisecond)
 
     state =
       state
-      |> assign_targets(targets, session_id)
+      |> Fleet.assign_targets(targets, session_id)
       |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
       |> put_in([Access.key(:sessions), session_id, :last_idle_at], now)
 
@@ -1316,18 +1002,14 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       state
-      |> notify_listeners(
-        {:sessions, workspace_external_id(state, session.workspace_id)},
-        {:session, session.external_id, build_session_data(state, session)}
-      )
-      |> flush_notifications()
+      |> Effects.emit(Fleet.session_event(state, session))
 
     send(self(), :tick)
 
     {:reply, :ok, state}
   end
 
-  def handle_call({:session_draining, external_id}, _from, state) do
+  defp dispatch_call({:session_draining, external_id}, state) do
     case Map.fetch(state.session_ids, external_id) do
       {:ok, session_id} ->
         state = put_in(state, [Access.key(:sessions), session_id, :draining], true)
@@ -1335,11 +1017,7 @@ defmodule Coflux.Orchestration.Server do
 
         state =
           state
-          |> notify_listeners(
-            {:sessions, workspace_external_id(state, session.workspace_id)},
-            {:session, session.external_id, build_session_data(state, session)}
-          )
-          |> flush_notifications()
+          |> Effects.emit(Fleet.session_event(state, session))
 
         {:reply, :ok, state}
 
@@ -1348,19 +1026,20 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:start_run, module, target_name, type, arguments, access, opts}, _from, state) do
+  defp dispatch_call({:start_run, module, target_name, type, arguments, access, opts}, state) do
     workspace_external_id = Keyword.get(opts, :workspace)
 
-    with {:ok, workspace_id, _} <- require_workspace(state, workspace_external_id, access),
+    with {:ok, workspace_id, _} <-
+           Permissions.require_workspace(state, workspace_external_id, access),
          :ok <- validate_values_assets(state.db, arguments),
          {:ok, catalog_sequence} <-
-           resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)) do
+           CatalogFlow.resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)) do
       client_key = Keyword.get(opts, :idempotency_key)
-      ws_ext_id = workspace_external_id(state, workspace_id)
+      ws_ext_id = State.workspace_external_id(state, workspace_id)
 
-      case maybe_find_idempotent_run(state, client_key, ws_ext_id) do
+      case Archives.maybe_find_idempotent_run(state, client_key, ws_ext_id) do
         {:hit, ext_run_id, step_number, attempt} ->
-          execution_external_id = execution_external_id(ext_run_id, step_number, attempt)
+          execution_external_id = Ids.execution(ext_run_id, step_number, attempt)
           {:reply, {:ok, ext_run_id, step_number, execution_external_id}, state}
 
         :miss ->
@@ -1378,7 +1057,7 @@ defmodule Coflux.Orchestration.Server do
             end
 
           {:ok, external_run_id, step_number, _execution_id, state} =
-            schedule_run(
+            Scheduling.schedule_run(
               state,
               module,
               target_name,
@@ -1388,11 +1067,9 @@ defmodule Coflux.Orchestration.Server do
               Keyword.put(opts, :created_by, access[:principal_id])
             )
 
-          execution_external_id = execution_external_id(external_run_id, step_number, 1)
+          execution_external_id = Ids.execution(external_run_id, step_number, 1)
 
           send(self(), :tick)
-          state = flush_notifications(state)
-
           {:reply, {:ok, external_run_id, step_number, execution_external_id}, state}
       end
     else
@@ -1401,18 +1078,17 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:schedule_step, parent_external_id, module, target_name, type, arguments, opts},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:schedule_step, parent_external_id, module, target_name, type, arguments, opts},
+         state
+       ) do
     parent_id = Map.fetch!(state.execution_ids, parent_external_id)
     {:ok, parent_run_id} = Runs.get_execution_run_id(state.db, parent_id)
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, parent_id)
     {:ok, run} = Runs.get_run_by_id(state.db, parent_run_id)
 
-    cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
-    arguments = Enum.map(arguments, &normalize_value(&1))
+    cache_workspace_ids = Permissions.get_cache_workspace_ids(state, workspace_id)
+    arguments = Enum.map(arguments, &Values.normalize(&1))
 
     # Inherit run-level memo if the step doesn't specify its own
     opts =
@@ -1455,13 +1131,14 @@ defmodule Coflux.Orchestration.Server do
             wait_for = Keyword.get(opts, :wait_for) || []
 
             {pending_dependencies, _group} =
-              pending = compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
+              pending =
+              Dependencies.compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
 
-            state = register_pending_dependencies(state, execution_id, pending)
+            state = Dependencies.register_pending_dependencies(state, execution_id, pending)
 
             {state, pending_dependencies,
-             build_argument_dependencies(state.db, step_id, wait_for),
-             unresolved_dependency_ids(state.db, execution_id)}
+             Dependencies.build_argument_dependencies(state.db, step_id, wait_for),
+             Dependencies.unresolved_dependency_ids(state.db, execution_id)}
           else
             {state, MapSet.new(), %{}, MapSet.new()}
           end
@@ -1476,33 +1153,26 @@ defmodule Coflux.Orchestration.Server do
         execute_after = if delay > 0, do: created_at + delay
         step_requires = Keyword.get(opts, :requires) || %{}
 
-        run_requires =
-          if run.requires_tag_set_id do
-            case TagSets.get_tag_set(state.db, run.requires_tag_set_id) do
-              {:ok, tag_set} -> tag_set
-            end
-          else
-            %{}
-          end
+        run_requires = Resolve.tag_set(state.db, run.requires_tag_set_id)
 
         requires =
           run_requires
           |> Map.merge(step_requires)
           |> Map.reject(fn {_key, values} -> values == [] end)
 
-        execution_external_id = execution_external_id(run.external_id, step_number, attempt)
+        execution_external_id = Ids.execution(run.external_id, step_number, attempt)
 
         parent_execution_external_id =
           if parent_id do
             {:ok, {r, s, a}} = Runs.get_execution_key(state.db, parent_id)
-            execution_external_id(r, s, a)
+            Ids.execution(r, s, a)
           end
 
-        ws_ext_id = workspace_external_id(state, workspace_id)
+        ws_ext_id = State.workspace_external_id(state, workspace_id)
 
         state =
           if !memo_hit do
-            arguments = Enum.map(arguments, &build_value(&1, state.db))
+            arguments = Enum.map(arguments, &Resolve.value(state.db, &1))
 
             recurrent = Keyword.get(opts, :recurrent, false)
 
@@ -1510,39 +1180,62 @@ defmodule Coflux.Orchestration.Server do
               Checkpoints.get_effective(
                 state.db,
                 step_id,
-                get_workspace_chain(state, workspace_id),
+                State.workspace_chain(state, workspace_id),
                 attempt
               )
 
+            {root_module, root_target} =
+              State.get_run_workflow(state, run.external_id) ||
+                raise "run_workflows missing entry for run #{run.external_id}"
+
             state
-            |> notify_listeners(
-              {:run, run.external_id},
-              {:step, step_number,
-               %{
-                 module: module,
-                 target: target_name,
-                 type: type,
-                 parent_id: parent_execution_external_id,
-                 cache_config: cache,
-                 cache_key: cache_key,
-                 memo_key: memo_key,
-                 concurrency_key: concurrency_key,
-                 concurrency_limit: concurrency_limit,
-                 group_key: group_key,
-                 group_limit: group_limit,
-                 retries: retries,
-                 recurrent: recurrent,
-                 timeout: timeout,
-                 created_at: created_at,
-                 arguments: arguments,
-                 requires: step_requires
-               }, ws_ext_id}
-            )
-            |> notify_listeners(
-              {:run, run.external_id},
-              {:execution, step_number, attempt, execution_external_id, ws_ext_id, created_at,
-               execute_after, argument_dependencies, nil,
-               enrich_checkpoints(checkpoints, state.db), unresolved_dependencies}
+            |> Effects.emit(%StepCreated{
+              run: run.external_id,
+              step: step_number,
+              module: module,
+              target: target_name,
+              type: type,
+              parent: parent_execution_external_id,
+              cache_config: cache,
+              cache_key: cache_key,
+              memo_key: memo_key,
+              concurrency_key: concurrency_key,
+              concurrency_limit: concurrency_limit,
+              group_key: group_key,
+              group_limit: group_limit,
+              retries: retries,
+              recurrent: recurrent,
+              timeout: timeout,
+              created_at: created_at,
+              requires: step_requires
+            })
+            |> Effects.emit(%StepArguments{
+              run: run.external_id,
+              step: step_number,
+              arguments: arguments
+            })
+            |> Effects.emit(%ExecutionScheduled{
+              execution: execution_external_id,
+              run: run.external_id,
+              step: step_number,
+              attempt: attempt,
+              workspace: ws_ext_id,
+              module: module,
+              target: target_name,
+              type: type,
+              root_module: root_module,
+              root_target: root_target,
+              execute_after: execute_after,
+              created_at: created_at,
+              created_by: nil,
+              requires: requires
+            })
+            |> Scheduling.emit_execution_detail(
+              run.external_id,
+              execution_external_id,
+              argument_dependencies,
+              Resolve.checkpoints(state.db, checkpoints),
+              unresolved_dependencies
             )
           else
             state
@@ -1550,40 +1243,36 @@ defmodule Coflux.Orchestration.Server do
 
         state =
           if child_added do
-            notify_listeners(
-              state,
-              {:run, run.external_id},
-              {:child, parent_execution_external_id, {step_number, attempt, group_id}}
-            )
+            Effects.emit(state, %ChildLinked{
+              run: run.external_id,
+              parent: parent_execution_external_id,
+              step: step_number,
+              attempt: attempt,
+              group: group_id
+            })
           else
             state
           end
 
         state =
           if !memo_hit do
-            execute_at = execute_after || created_at
-
             {root_module, root_target} =
-              get_run_workflow(state, run.external_id) ||
+              State.get_run_workflow(state, run.external_id) ||
                 raise "run_workflows missing entry for run #{run.external_id}"
 
             state =
               state
-              |> track_run_execution(run.external_id, execution_id, root_module, root_target)
-              |> notify_listeners(
-                {:modules, ws_ext_id},
-                {:scheduled, {root_module, root_target}, run.external_id, execution_external_id,
-                 execute_at}
+              |> State.track_run_execution(
+                run.external_id,
+                execution_id,
+                root_module,
+                root_target
               )
-              |> notify_listeners(
-                {:workflow, root_module, root_target, ws_ext_id},
-                {:scheduled, run.external_id, execution_external_id}
-              )
-              |> notify_listeners(
-                {:queue, ws_ext_id},
-                {:scheduled, execution_external_id, module, target_name, run.external_id,
-                 step_number, attempt, execute_after, created_at,
-                 queue_dependencies(state.db, pending_dependencies), requires}
+              |> Scheduling.emit_waiting(
+                execution_external_id,
+                run.external_id,
+                ws_ext_id,
+                Gates.describe(state.db, pending_dependencies)
               )
 
             send(self(), :tick)
@@ -1593,18 +1282,10 @@ defmodule Coflux.Orchestration.Server do
             state
           end
 
-        state =
-          state
-          |> notify_listeners(
-            {:targets, ws_ext_id},
-            {:step, module, target_name, type, run.external_id, step_number, attempt}
-          )
-          |> flush_notifications()
-
         # Return extended metadata for log references
         execution_metadata = %{
           run_id: run.external_id,
-          step_id: "#{run.external_id}:#{step_number}",
+          step_id: Ids.step(run.external_id, step_number),
           step_number: step_number,
           attempt: attempt,
           module: module,
@@ -1616,11 +1297,10 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:register_group, parent_external_id, group_id, name, concurrency},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:register_group, parent_external_id, group_id, name, concurrency},
+         state
+       ) do
     parent_id = Map.fetch!(state.execution_ids, parent_external_id)
     {:ok, {run_external_id}} = Runs.get_external_run_id_for_execution(state.db, parent_id)
 
@@ -1628,24 +1308,26 @@ defmodule Coflux.Orchestration.Server do
       :ok ->
         state =
           state
-          |> notify_listeners(
-            {:run, run_external_id},
-            {:group, parent_external_id, group_id, name, concurrency}
-          )
-          |> flush_notifications()
+          |> Effects.emit(%GroupCreated{
+            run: run_external_id,
+            execution: parent_external_id,
+            group: group_id,
+            name: name,
+            concurrency: concurrency
+          })
 
         {:reply, :ok, state}
     end
   end
 
-  def handle_call({:rerun_step, step_id, workspace_external_id, access, opts}, _from, state) do
-    with {:ok, run_external_id, step_number} <- parse_step_id(step_id),
+  defp dispatch_call({:rerun_step, step_id, workspace_external_id, access, opts}, state) do
+    with {:ok, run_external_id, step_number} <- Ids.parse_step(step_id),
          {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access),
+           Permissions.require_workspace(state, workspace_external_id, access),
          {:ok, catalog_sequence} <-
-           resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)),
+           CatalogFlow.resolve_catalog_option(state, workspace_id, Keyword.get(opts, :catalog)),
          {:ok, run} when not is_nil(run) <-
-           ensure_run_in_active_epoch(state, run_external_id),
+           Archives.ensure_run_in_active_epoch(state, run_external_id),
          {:ok, step} when not is_nil(step) <-
            Runs.get_step_by_number(state.db, run.id, step_number) do
       base_execution_id =
@@ -1661,22 +1343,24 @@ defmodule Coflux.Orchestration.Server do
         Runs.get_workspace_id_for_execution(state.db, base_execution_id)
 
       if base_workspace_id == workspace_id ||
-           is_workspace_ancestor?(state, base_workspace_id, workspace_id) do
+           Permissions.is_workspace_ancestor?(state, base_workspace_id, workspace_id) do
         # A live attempt is cancelled and its streams closed, so the new
         # attempt starts fresh. A pending successor of a suspended attempt
         # never produced anything, so its cancellation leaves the paused
         # streams open and the new attempt continues them.
-        state = cancel_active_step_executions(state, step.id, workspace_id, streams: :registered)
+        state =
+          Cancellation.cancel_active_step_executions(state, step.id, workspace_id,
+            streams: :registered
+          )
 
         {:ok, _execution_id, attempt, state} =
-          rerun_step(state, step, workspace_id,
+          Scheduling.rerun_step(state, step, workspace_id,
             created_by: access[:principal_id],
             catalog_sequence: catalog_sequence
           )
 
-        execution_external_id = execution_external_id(run_external_id, step_number, attempt)
+        execution_external_id = Ids.execution(run_external_id, step_number, attempt)
 
-        state = flush_notifications(state)
         {:reply, {:ok, execution_external_id, attempt}, state}
       else
         {:reply, {:error, :workspace_invalid}, state}
@@ -1692,21 +1376,19 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:cancel_execution, workspace_external_id, execution_external_id, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:cancel_execution, workspace_external_id, execution_external_id, access},
+         state
+       ) do
     with {:ok, workspace_id, _} <-
-           require_workspace(state, workspace_external_id, access),
+           Permissions.require_workspace(state, workspace_external_id, access),
          {:ok, run_ext_id, step_number, attempt} <-
-           parse_execution_external_id(execution_external_id),
+           Ids.parse_execution(execution_external_id),
          {:ok, {execution_id}} <-
            Runs.get_execution_id(state.db, run_ext_id, step_number, attempt) do
-      active_id = resolve_active_execution(state.db, execution_id)
+      active_id = Cancellation.resolve_active_execution(state.db, execution_id)
 
-      state = do_cancel_execution(state, active_id, workspace_id)
-      state = flush_notifications(state)
+      state = Cancellation.do_cancel_execution(state, active_id, workspace_id)
       {:reply, :ok, state}
     else
       {:error, :invalid_format} ->
@@ -1726,23 +1408,21 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:cancel, handles, workspace_external_id, _from_execution_external_id},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:cancel, handles, workspace_external_id, _from_execution_external_id},
+         state
+       ) do
     case Map.fetch(state.workspace_external_ids, workspace_external_id) do
       :error ->
         {:reply, {:error, :workspace_not_found}, state}
 
       {:ok, workspace_id} ->
-        if Enum.all?(handles, &cancellable_handle?/1) do
+        if Enum.all?(handles, &Cancellation.cancellable_handle?/1) do
           state =
             Enum.reduce(handles, state, fn handle, state ->
-              cancel_handle(state, handle, workspace_id)
+              Cancellation.cancel_handle(state, handle, workspace_id)
             end)
 
-          state = flush_notifications(state)
           {:reply, :ok, state}
         else
           {:reply, {:error, :invalid_handle}, state}
@@ -1750,11 +1430,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:execution_started, _external_execution_id, _metadata}, _from, state) do
+  defp dispatch_call({:execution_started, _external_execution_id, _metadata}, state) do
     {:reply, :ok, state}
   end
 
-  def handle_call({:define_metric, external_execution_id, key, definition}, _from, state) do
+  defp dispatch_call({:define_metric, external_execution_id, key, definition}, state) do
     state =
       case Map.fetch(state.execution_ids, external_execution_id) do
         {:ok, execution_id} ->
@@ -1765,11 +1445,12 @@ defmodule Coflux.Orchestration.Server do
             {:ok, run_id} ->
               case Runs.get_run_by_id(state.db, run_id) do
                 {:ok, run} ->
-                  notify_listeners(
-                    state,
-                    {:run, run.external_id},
-                    {:metric_defined, external_execution_id, key, definition}
-                  )
+                  Effects.emit(state, %MetricDefined{
+                    run: run.external_id,
+                    execution: external_execution_id,
+                    key: key,
+                    definition: Scheduling.metric_definition(definition)
+                  })
 
                 _ ->
                   state
@@ -1786,7 +1467,7 @@ defmodule Coflux.Orchestration.Server do
     {:reply, :ok, state}
   end
 
-  def handle_call({:record_heartbeats, executions, external_session_id}, _from, state) do
+  defp dispatch_call({:record_heartbeats, executions, external_session_id}, state) do
     # TODO: handle execution statuses?
     case Map.fetch(state.session_ids, external_session_id) do
       {:ok, session_id} ->
@@ -1819,8 +1500,8 @@ defmodule Coflux.Orchestration.Server do
               {:ok, false} ->
                 # Server-detected abandonment. No worker will send
                 # notify_terminated for this execution.
-                {:ok, state} = process_result(state, execution_id, :abandoned)
-                complete_execution(state, execution_id)
+                {:ok, state} = Lifecycle.process_result(state, execution_id, :abandoned)
+                Lifecycle.complete_execution(state, execution_id)
 
               {:ok, true} ->
                 state
@@ -1843,7 +1524,7 @@ defmodule Coflux.Orchestration.Server do
                     state
 
                   {:ok, true} ->
-                    send_session(state, session_id, {:abort, ext_id})
+                    Effects.command(state, session_id, Commands.abort(ext_id))
                 end
 
               :error ->
@@ -1872,12 +1553,11 @@ defmodule Coflux.Orchestration.Server do
 
         state =
           state
-          |> notify_listeners(
-            {:sessions, workspace_external_id(state, session.workspace_id)},
-            {:executing, session.external_id,
-             session.starting |> MapSet.union(session.executing) |> Enum.count()}
-          )
-          |> flush_notifications()
+          |> Effects.emit(%SessionExecuting{
+            workspace: State.workspace_external_id(state, session.workspace_id),
+            session: session.external_id,
+            executing: session.starting |> MapSet.union(session.executing) |> Enum.count()
+          })
 
         {:reply, :ok, state}
 
@@ -1886,7 +1566,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:notify_terminated, external_execution_ids}, _from, state) do
+  defp dispatch_call({:notify_terminated, external_execution_ids}, state) do
     now = System.os_time(:millisecond)
 
     state =
@@ -1900,8 +1580,8 @@ defmodule Coflux.Orchestration.Server do
           case Map.fetch(state.execution_ids, ext_id) do
             {:ok, execution_id} ->
               state
-              |> complete_execution(execution_id)
-              |> drop_execution_subscriptions(execution_id)
+              |> Lifecycle.complete_execution(execution_id)
+              |> StreamDelivery.drop_execution_subscriptions(execution_id)
 
             :error ->
               state
@@ -1911,7 +1591,7 @@ defmodule Coflux.Orchestration.Server do
         state = Map.update!(state, :execution_ids, &Map.delete(&1, ext_id))
 
         # Remove from session's starting/executing (using external IDs directly)
-        case find_session_for_execution(state, ext_id) do
+        case State.session_for_execution(state, ext_id) do
           {:ok, session_id} ->
             state =
               update_in(state.sessions[session_id], fn session ->
@@ -1933,36 +1613,34 @@ defmodule Coflux.Orchestration.Server do
             session = Map.fetch!(state.sessions, session_id)
             executing = session.starting |> MapSet.union(session.executing) |> Enum.count()
 
-            notify_listeners(
-              state,
-              {:sessions, workspace_external_id(state, session.workspace_id)},
-              {:executing, session.external_id, executing}
-            )
+            Effects.emit(state, %SessionExecuting{
+              workspace: State.workspace_external_id(state, session.workspace_id),
+              session: session.external_id,
+              executing: executing
+            })
 
           :error ->
             state
         end
       end)
-      |> flush_notifications()
 
     send(self(), :tick)
 
     {:reply, :ok, state}
   end
 
-  def handle_call({:record_result, execution_external_id, result}, _from, state) do
+  defp dispatch_call({:record_result, execution_external_id, result}, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
-        {result, abort?} = refuse_invalid_catalog_wait(result)
+        {result, abort?} = CatalogFlow.refuse_invalid_catalog_wait(result)
 
-        case process_result(state, execution_id, result) do
+        case Lifecycle.process_result(state, execution_id, result) do
           {:ok, state} ->
             state =
               if abort?,
-                do: abort_execution(state, execution_external_id),
+                do: Cancellation.abort_execution(state, execution_external_id),
                 else: state
 
-            state = flush_notifications(state)
             {:reply, :ok, state}
         end
 
@@ -1971,7 +1649,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:set_checkpoints, execution_external_id, set, reset}, _from, state) do
+  defp dispatch_call({:set_checkpoints, execution_external_id, set, reset}, state) do
     case Map.fetch(state.execution_ids, execution_external_id) do
       {:ok, execution_id} ->
         # Reject writes from an execution the server has already finalised. A
@@ -1987,14 +1665,14 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {step_id, workspace_id, attempt}} =
               Runs.get_execution_location(state.db, execution_id)
 
-            set = Map.new(set, fn {name, value} -> {name, normalize_value(value)} end)
+            set = Map.new(set, fn {name, value} -> {name, Values.normalize(value)} end)
 
             {:ok, _updated_at} =
               Checkpoints.apply_delta(
                 state.db,
                 execution_id,
                 step_id,
-                get_workspace_chain(state, workspace_id),
+                State.workspace_chain(state, workspace_id),
                 attempt,
                 set,
                 reset
@@ -2007,18 +1685,18 @@ defmodule Coflux.Orchestration.Server do
             {:ok, checkpoints} =
               Checkpoints.get_effective_for_execution(state.db, execution_id)
 
-            checkpoints = enrich_checkpoints(checkpoints, state.db)
+            checkpoints = Resolve.checkpoints(state.db, checkpoints)
 
             {:ok, {run_external_id, _step_number, _attempt}} =
               Runs.get_execution_key(state.db, execution_id)
 
             state =
               state
-              |> notify_listeners(
-                {:run, run_external_id},
-                {:checkpoints, execution_external_id, checkpoints}
-              )
-              |> flush_notifications()
+              |> Effects.emit(%CheckpointsSet{
+                run: run_external_id,
+                execution: execution_external_id,
+                checkpoints: checkpoints
+              })
 
             {:reply, :ok, state}
         end
@@ -2032,12 +1710,11 @@ defmodule Coflux.Orchestration.Server do
   # whether that continues a paused stream of the step — one left open by a
   # suspended execution — or opens a new one, and replies with the stream's
   # id, its step index and the head it should sequence from.
-  def handle_call(
-        {:register_stream, execution_external_id, position, buffer, timeout_ms,
-         session_external_id},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:register_stream, execution_external_id, position, buffer, timeout_ms,
+          session_external_id},
+         state
+       ) do
     with {:ok, execution_id} <-
            Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
          {:ok, false} <- Results.has_completion?(state.db, execution_id) do
@@ -2058,7 +1735,7 @@ defmodule Coflux.Orchestration.Server do
       {:ok, stream} = Streams.get_stream(state.db, registration.id)
 
       external_id =
-        stream_external_id(stream.run_external_id, stream.step_number, stream.index)
+        Ids.stream(stream.run_external_id, stream.step_number, stream.index)
 
       state =
         if registration.created_at do
@@ -2068,19 +1745,24 @@ defmodule Coflux.Orchestration.Server do
           internal_session_id = Map.get(state.session_ids, session_external_id)
 
           state
-          |> init_stream_producer(
+          |> StreamDelivery.init_stream_producer(
             stream,
             execution_external_id,
             buffer,
             registration.head,
             internal_session_id
           )
-          |> notify_stream_registered(stream, execution_id, registration, buffer, timeout_ms)
+          |> StreamDelivery.notify_stream_registered(
+            stream,
+            execution_id,
+            registration,
+            buffer,
+            timeout_ms
+          )
           # Lockstep (buffer=0) stays paused until a consumer attaches; a
           # larger buffer lets the producer pre-warm. A resuming producer
           # picks up whatever demand its subscribers have already built.
-          |> refresh_stream_demand(stream.id)
-          |> flush_notifications()
+          |> StreamDelivery.refresh_stream_demand(stream.id)
         else
           # The same execution registering the same position again —
           # idempotent, nothing new to announce.
@@ -2094,17 +1776,16 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:append_stream_item, execution_external_id, index, sequence, value},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:append_stream_item, execution_external_id, index, sequence, value},
+         state
+       ) do
     # Appends are refused once the execution has a completion: after a
     # suspend the resuming execution owns the stream, and a still-alive
     # predecessor must not interleave with it.
     with {:ok, execution_id} <-
            Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
-         {:ok, stream_id} <- resolve_step_stream(state.db, execution_id, index),
+         {:ok, stream_id} <- StreamDelivery.resolve_step_stream(state.db, execution_id, index),
          {:ok, false} <- Results.has_completion?(state.db, execution_id),
          {:ok, created_at} <-
            Streams.append_item(
@@ -2112,25 +1793,30 @@ defmodule Coflux.Orchestration.Server do
              stream_id,
              execution_id,
              sequence,
-             normalize_value(value)
+             Values.normalize(value)
            ) do
       # If we came out of a server restart with no in-memory producer
       # state for this stream, rebuild it now from the persisted config so
       # subsequent consumer advances can refresh demand. The appending
       # session is the producer.
       producer_session_id =
-        case find_session_for_execution(state, execution_external_id) do
+        case State.session_for_execution(state, execution_external_id) do
           {:ok, sid} -> sid
           :error -> nil
         end
 
       state =
         state
-        |> ensure_stream_producer(stream_id, producer_session_id)
-        |> push_stream_item(stream_id, sequence, value)
-        |> notify_stream_item_appended(stream_id, execution_id, sequence, value, created_at)
-        |> update_dependencies_on_stream(stream_id, sequence)
-        |> flush_notifications()
+        |> StreamDelivery.ensure_stream_producer(stream_id, producer_session_id)
+        |> StreamDelivery.push_stream_item(stream_id, sequence, value)
+        |> StreamDelivery.notify_stream_item_appended(
+          stream_id,
+          execution_id,
+          sequence,
+          value,
+          created_at
+        )
+        |> Dependencies.update_dependencies_on_stream(stream_id, sequence)
 
       {:reply, :ok, state}
     else
@@ -2139,10 +1825,10 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:close_stream, execution_external_id, index, close_spec}, _from, state) do
+  defp dispatch_call({:close_stream, execution_external_id, index, close_spec}, state) do
     with {:ok, execution_id} <-
            Map.fetch(state.execution_ids, execution_external_id) |> ok_or(:not_found),
-         {:ok, stream_id} <- resolve_step_stream(state.db, execution_id, index),
+         {:ok, stream_id} <- StreamDelivery.resolve_step_stream(state.db, execution_id, index),
          {:ok, false} <- Results.has_completion?(state.db, execution_id) do
       {spec, reason, error} =
         case close_spec do
@@ -2160,11 +1846,16 @@ defmodule Coflux.Orchestration.Server do
         {:ok, closed_at} ->
           state =
             state
-            |> push_stream_closed(stream_id, reason, error)
-            |> notify_stream_closed(stream_id, execution_id, reason, error, closed_at)
-            |> update_dependencies_on_stream(stream_id, :closed)
-            |> drop_stream_producer(stream_id)
-            |> flush_notifications()
+            |> StreamDelivery.push_stream_closed(stream_id, reason, error)
+            |> StreamDelivery.notify_stream_closed(
+              stream_id,
+              execution_id,
+              reason,
+              error,
+              closed_at
+            )
+            |> Dependencies.update_dependencies_on_stream(stream_id, :closed)
+            |> StreamDelivery.drop_stream_producer(stream_id)
 
           {:reply, :ok, state}
 
@@ -2177,12 +1868,11 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call(
-        {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
-         stream_external_id, from_sequence, stride, prefetch, progress},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:subscribe_stream, session_external_id, subscription_id, consumer_execution_external_id,
+          stream_external_id, from_sequence, stride, prefetch, progress},
+         state
+       ) do
     with {:ok, _session_id} <-
            Map.fetch(state.session_ids, session_external_id)
            |> ok_or(:session_not_found),
@@ -2191,7 +1881,7 @@ defmodule Coflux.Orchestration.Server do
            |> ok_or(:consumer_not_found),
          # The stream's run may have been rotated into an older epoch —
          # resolving by id copies it forward if so.
-         {:ok, stream_id} <- resolve_stream_id(state, stream_external_id),
+         {:ok, stream_id} <- Archives.resolve_stream_id(state, stream_external_id),
          key = {consumer_execution_id, subscription_id},
          false <- Map.has_key?(state.stream_subscriptions, key) do
       # `progress` is nil for a fresh subscribe and carries the CLI's
@@ -2239,19 +1929,24 @@ defmodule Coflux.Orchestration.Server do
       # Post-restart recovery: producer state may be missing. The
       # producer's session isn't necessarily the one the subscribe came
       # from — look it up from the stream's current producer.
-      state = ensure_stream_producer(state, stream_id, producer_session_id(state, stream_id))
+      state =
+        StreamDelivery.ensure_stream_producer(
+          state,
+          stream_id,
+          StreamDelivery.producer_session_id(state, stream_id)
+        )
 
       # First subscriber (or a later one whose cursor exceeds the prior
       # max) may unblock the producer — recompute demand before pushing
       # backlog so any delivered items keep the credit maths honest.
-      state = refresh_stream_demand(state, stream_id)
+      state = StreamDelivery.refresh_stream_demand(state, stream_id)
 
       # If the stream has already closed, record that as pending first so
       # the pump can emit it — but only once the backlog it's allowed to
       # send has actually been delivered. Pushing the closure eagerly
       # would land it ahead of a credit-limited backlog.
-      state = mark_closed_if_closed(state, key)
-      state = pump_subscription(state, key)
+      state = StreamDelivery.mark_closed_if_closed(state, key)
+      state = StreamDelivery.pump_subscription(state, key)
 
       # Record the subscribe as a lineage edge (consumer -> stream). Done
       # unconditionally on subscribe, independent of whether items end up
@@ -2270,14 +1965,14 @@ defmodule Coflux.Orchestration.Server do
         Streams.get_stream_ref(state.db, stream_ref_id)
 
       state =
-        notify_listeners(
-          state,
-          {:run, run_external_id},
-          {:stream_dependency, consumer_execution_external_id,
-           stream_external_id(stream_run_ext_id, step_number, index), module, target, false}
-        )
-
-      state = flush_notifications(state)
+        Effects.emit(state, %StreamDependencyRecorded{
+          run: run_external_id,
+          execution: consumer_execution_external_id,
+          stream: Ids.stream(stream_run_ext_id, step_number, index),
+          module: module,
+          target: target,
+          pending: false
+        })
 
       {:reply, :ok, state}
     else
@@ -2296,11 +1991,10 @@ defmodule Coflux.Orchestration.Server do
   # Acking does two things: frees credit (allowing the pump to deliver
   # more), and advances the watermark the producer's buffer is measured
   # against.
-  def handle_call(
-        {:ack_stream, consumer_execution_external_id, subscription_id, count, sequence},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:ack_stream, consumer_execution_external_id, subscription_id, count, sequence},
+         state
+       ) do
     with {:ok, consumer_execution_id} <-
            Map.fetch(state.execution_ids, consumer_execution_external_id),
          key = {consumer_execution_id, subscription_id},
@@ -2317,38 +2011,37 @@ defmodule Coflux.Orchestration.Server do
           &%{&1 | acked_count: acked_count, acked_seq: acked_seq}
         )
 
-      state = pump_subscription(state, key)
-      state = refresh_stream_demand(state, sub.stream_id)
+      state = StreamDelivery.pump_subscription(state, key)
+      state = StreamDelivery.refresh_stream_demand(state, sub.stream_id)
 
-      {:reply, :ok, flush_notifications(state)}
+      {:reply, :ok, state}
     else
       :error -> {:reply, :ok, state}
     end
   end
 
-  def handle_call(
-        {:unsubscribe_stream, session_external_id, consumer_execution_external_id,
-         subscription_id},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:unsubscribe_stream, session_external_id, consumer_execution_external_id,
+          subscription_id},
+         state
+       ) do
     with {:ok, _session_id} <- Map.fetch(state.session_ids, session_external_id),
          {:ok, consumer_execution_id} <-
            Map.fetch(state.execution_ids, consumer_execution_external_id) do
-      {:reply, :ok, drop_subscription(state, {consumer_execution_id, subscription_id})}
+      {:reply, :ok,
+       StreamDelivery.drop_subscription(state, {consumer_execution_id, subscription_id})}
     else
       :error ->
         {:reply, :ok, state}
     end
   end
 
-  def handle_call(
-        {:select, handles, from_execution_external_id, timeout_ms, suspend, cancel_remaining,
-         request_id},
-        _from,
-        state
-      ) do
-    case resolve_internal_execution_id(state, from_execution_external_id) do
+  defp dispatch_call(
+         {:select, handles, from_execution_external_id, timeout_ms, suspend, cancel_remaining,
+          request_id},
+         state
+       ) do
+    case Archives.resolve_internal_execution_id(state, from_execution_external_id) do
       {:error, :not_found} ->
         {:reply, {:error, :execution_not_found}, state}
 
@@ -2357,7 +2050,7 @@ defmodule Coflux.Orchestration.Server do
         # Each entry is {:ok, status} or {:error, reason}.
         {entries, state} =
           Enum.map_reduce(handles, state, fn handle, state ->
-            process_select_handle(
+            Waiters.process_select_handle(
               state,
               handle,
               from_execution_id,
@@ -2367,7 +2060,6 @@ defmodule Coflux.Orchestration.Server do
 
         case Enum.find(entries, &match?({:error, _}, &1)) do
           {:error, reason} ->
-            state = flush_notifications(state)
             {:reply, {:error, reason}, state}
 
           nil ->
@@ -2385,7 +2077,7 @@ defmodule Coflux.Orchestration.Server do
                 {:resolved, result} = Enum.at(statuses, resolved_index)
 
                 state =
-                  maybe_cancel_remaining(
+                  Waiters.maybe_cancel_remaining(
                     state,
                     statuses,
                     resolved_index,
@@ -2393,7 +2085,6 @@ defmodule Coflux.Orchestration.Server do
                     from_execution_external_id
                   )
 
-                state = flush_notifications(state)
                 {:reply, {:ok, {resolved_index, result}}, state}
 
               timeout_ms == 0 && suspend ->
@@ -2401,17 +2092,15 @@ defmodule Coflux.Orchestration.Server do
                   Enum.map(statuses, fn {:pending, _waiting_key, dep_key} -> dep_key end)
 
                 {:ok, state} =
-                  process_result(
+                  Lifecycle.process_result(
                     state,
                     from_execution_id,
                     {:suspended, nil, dependency_keys}
                   )
 
-                state = flush_notifications(state)
                 {:reply, {:ok, :suspended}, state}
 
               timeout_ms == 0 ->
-                state = flush_notifications(state)
                 {:reply, {:ok, :timeout}, state}
 
               true ->
@@ -2444,19 +2133,18 @@ defmodule Coflux.Orchestration.Server do
 
                 state =
                   if timeout_ms do
-                    reschedule_expire_waiters(state)
+                    Waiters.reschedule_expire_waiters(state)
                   else
                     state
                   end
 
-                state = flush_notifications(state)
                 {:reply, :wait, state}
             end
         end
     end
   end
 
-  def handle_call({:put_asset, execution_external_id, name, entries}, _from, state) do
+  defp dispatch_call({:put_asset, execution_external_id, name, entries}, state) do
     execution_id = Map.fetch!(state.execution_ids, execution_external_id)
     {:ok, {run_external_id}} = Runs.get_external_run_id_for_execution(state.db, execution_id)
 
@@ -2467,11 +2155,12 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       state
-      |> notify_listeners(
-        {:run, run_external_id},
-        {:asset, execution_external_id, external_id, {asset_name, total_count, total_size, entry}}
-      )
-      |> flush_notifications()
+      |> Effects.emit(%AssetPut{
+        run: run_external_id,
+        execution: execution_external_id,
+        asset: external_id,
+        summary: {asset_name, total_count, total_size, entry}
+      })
 
     asset_metadata = %{
       name: asset_name,
@@ -2487,8 +2176,8 @@ defmodule Coflux.Orchestration.Server do
   # execution to record it against, so nothing is notified — the asset only
   # becomes visible once something references it (a catalog publish, a run
   # argument).
-  def handle_call({:create_asset, workspace_external_id, name, entries, access}, _from, state) do
-    case require_workspace(state, workspace_external_id, access) do
+  defp dispatch_call({:create_asset, workspace_external_id, name, entries, access}, state) do
+    case Permissions.require_workspace(state, workspace_external_id, access) do
       {:ok, _workspace_id, _workspace} ->
         {:ok, _asset_id, external_id, asset_name, total_count, total_size, _entry} =
           Assets.get_or_create_asset(state.db, name, entries)
@@ -2508,28 +2197,27 @@ defmodule Coflux.Orchestration.Server do
 
   # --- Catalog ---
 
-  def handle_call(
-        {:catalog_publish, execution_external_id, path, value},
-        _from,
-        state
-      ) do
-    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_external_id),
+  defp dispatch_call(
+         {:catalog_publish, execution_external_id, path, value},
+         state
+       ) do
+    with {:ok, execution_id} <-
+           Archives.resolve_internal_execution_id(state, execution_external_id),
          :ok <- Catalog.validate_path(path),
          :ok <- validate_value_assets(state.db, value) do
       {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-      chain = get_workspace_chain(state, workspace_id)
+      chain = State.workspace_chain(state, workspace_id)
       {:ok, ref_id} = Runs.create_execution_ref_for(state.db, execution_id)
-      {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+      {:ok, value_id} = Values.get_or_create_value(state.db, Values.normalize(value))
 
       {:ok, version, created?} =
         Catalog.publish(state.db, path, workspace_id, chain, value_id, ref_id, nil)
 
       state =
         if created?,
-          do: notify_catalog_version(state, version, execution_external_id),
+          do: CatalogFlow.notify_catalog_version(state, version),
           else: state
 
-      state = flush_notifications(state)
       {:reply, {:ok, version.number}, state}
     else
       {:error, :not_found} -> {:reply, {:error, :execution_not_found}, state}
@@ -2537,18 +2225,21 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:catalog_get, execution_external_id, path, number}, _from, state) do
-    with {:ok, execution_id} <- resolve_internal_execution_id(state, execution_external_id),
+  defp dispatch_call({:catalog_get, execution_external_id, path, number}, state) do
+    with {:ok, execution_id} <-
+           Archives.resolve_internal_execution_id(state, execution_external_id),
          :ok <- Catalog.validate_path(path) do
-      case lookup_catalog_version(state, execution_id, path, number) do
+      case CatalogFlow.lookup_catalog_version(state, execution_id, path, number) do
         {:ok, nil} ->
           {:reply, {:ok, nil}, state}
 
         {:ok, version} ->
-          state = record_catalog_read(state, execution_id, execution_external_id, version)
+          state =
+            CatalogFlow.record_catalog_read(state, execution_id, execution_external_id, version)
+
           {:ok, value} = Values.get_value_by_id(state.db, version.value_id)
-          reply = %{number: version.number, value: build_value(value, state.db)}
-          {:reply, {:ok, reply}, flush_notifications(state)}
+          reply = %{number: version.number, value: Resolve.value(state.db, value)}
+          {:reply, {:ok, reply}, state}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -2559,24 +2250,25 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:catalog_list, workspace_external_id, prefix}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
+  defp dispatch_call({:catalog_list, workspace_external_id, prefix}, state) do
+    case Permissions.resolve_workspace_external_id(state, workspace_external_id) do
       {:ok, workspace_id} ->
-        chain = get_workspace_chain(state, workspace_id)
+        chain = State.workspace_chain(state, workspace_id)
         {:ok, versions} = Catalog.list_heads(state.db, chain, prefix)
-        {:reply, {:ok, Enum.map(versions, &build_catalog_version(state.db, &1))}, state}
+        {:reply, {:ok, Enum.map(versions, &Resolve.catalog_version(state.db, &1))}, state}
 
       {:error, error} ->
         {:reply, {:error, error}, state}
     end
   end
 
-  def handle_call({:catalog_versions, workspace_external_id, path, limit, before}, _from, state) do
-    with {:ok, workspace_id} <- resolve_workspace_external_id(state, workspace_external_id),
+  defp dispatch_call({:catalog_versions, workspace_external_id, path, limit, before}, state) do
+    with {:ok, workspace_id} <-
+           Permissions.resolve_workspace_external_id(state, workspace_external_id),
          :ok <- Catalog.validate_path(path) do
-      chain = get_workspace_chain(state, workspace_id)
+      chain = State.workspace_chain(state, workspace_id)
       {:ok, versions} = Catalog.list_versions(state.db, path, chain, limit, before)
-      {:reply, {:ok, Enum.map(versions, &build_catalog_version(state.db, &1))}, state}
+      {:reply, {:ok, Enum.map(versions, &Resolve.catalog_version(state.db, &1))}, state}
     else
       {:error, error} -> {:reply, {:error, error}, state}
     end
@@ -2584,16 +2276,15 @@ defmodule Coflux.Orchestration.Server do
 
   # A publish from outside a run — the API or CLI — attributed to a
   # principal rather than an execution.
-  def handle_call(
-        {:publish_catalog, workspace_external_id, path, value, access},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:publish_catalog, workspace_external_id, path, value, access},
+         state
+       ) do
     with {:ok, workspace_id, _workspace} <-
-           require_workspace(state, workspace_external_id, access),
+           Permissions.require_workspace(state, workspace_external_id, access),
          :ok <- Catalog.validate_path(path),
          :ok <- validate_value_assets(state.db, value) do
-      chain = get_workspace_chain(state, workspace_id)
+      chain = State.workspace_chain(state, workspace_id)
 
       created_by =
         case access do
@@ -2601,39 +2292,19 @@ defmodule Coflux.Orchestration.Server do
           _ -> nil
         end
 
-      {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+      {:ok, value_id} = Values.get_or_create_value(state.db, Values.normalize(value))
 
       {:ok, version, created?} =
         Catalog.publish(state.db, path, workspace_id, chain, value_id, nil, created_by)
 
-      state = if created?, do: notify_catalog_version(state, version, nil), else: state
-      state = flush_notifications(state)
-      {:reply, {:ok, build_catalog_version(state.db, version), created?}, state}
+      state = if created?, do: CatalogFlow.notify_catalog_version(state, version), else: state
+      {:reply, {:ok, Resolve.catalog_version(state.db, version), created?}, state}
     else
       {:error, error} -> {:reply, {:error, error}, state}
     end
   end
 
-  def handle_call({:subscribe_catalog, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:ok, workspace_id} ->
-        {:ok, ref, state} = add_listener(state, {:catalog, workspace_external_id}, pid)
-        chain = get_workspace_chain(state, workspace_id)
-        {:ok, versions} = Catalog.list_heads(state.db, chain, nil)
-
-        heads =
-          Map.new(versions, fn version ->
-            {version.path, build_catalog_version(state.db, version)}
-          end)
-
-        {:reply, {:ok, heads, ref}, state}
-
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  def handle_call({:get_asset, asset_external_id, from_execution_external_id}, _from, state) do
+  defp dispatch_call({:get_asset, asset_external_id, from_execution_external_id}, state) do
     case Assets.get_asset_by_external_id(state.db, asset_external_id) do
       {:ok, asset_id, name, entries} ->
         state =
@@ -2645,19 +2316,19 @@ defmodule Coflux.Orchestration.Server do
               Runs.get_external_run_id_for_execution(state.db, from_execution_id)
 
             {^asset_external_id, asset_name, total_count, total_size, entry} =
-              resolve_asset(state.db, asset_id)
+              Resolve.asset(state.db, asset_id)
 
-            notify_listeners(
-              state,
-              {:run, run_external_id},
-              {:asset_dependency, from_execution_external_id, asset_external_id,
-               {asset_name, total_count, total_size, entry}, false}
-            )
+            Effects.emit(state, %AssetDependencyRecorded{
+              run: run_external_id,
+              execution: from_execution_external_id,
+              asset: asset_external_id,
+              summary: {asset_name, total_count, total_size, entry},
+              pending: false
+            })
           else
             state
           end
 
-        state = flush_notifications(state)
         {:reply, {:ok, name, entries}, state}
 
       {:error, :not_found} ->
@@ -2667,17 +2338,16 @@ defmodule Coflux.Orchestration.Server do
 
   # --- Input management ---
 
-  def handle_call(
-        {:submit_input, execution_external_id, template, placeholders, schema_json, key, title,
-         actions, initial, requires},
-        _from,
-        state
-      ) do
+  defp dispatch_call(
+         {:submit_input, execution_external_id, template, placeholders, schema_json, key, title,
+          actions, initial, requires},
+         state
+       ) do
     execution_id = Map.fetch!(state.execution_ids, execution_external_id)
     {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
     {:ok, run_id} = Runs.get_run_id_for_execution(state.db, execution_id)
 
-    case validate_and_prepare_input(state, schema_json, initial) do
+    case InputFlow.validate_and_prepare_input(state, schema_json, initial) do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
 
@@ -2687,7 +2357,7 @@ defmodule Coflux.Orchestration.Server do
         # Get-or-create placeholder values
         placeholder_value_ids =
           Enum.map(placeholders, fn {placeholder, value} ->
-            {:ok, value_id} = Values.get_or_create_value(state.db, normalize_value(value))
+            {:ok, value_id} = Values.get_or_create_value(state.db, Values.normalize(value))
             {placeholder, value_id}
           end)
 
@@ -2702,7 +2372,7 @@ defmodule Coflux.Orchestration.Server do
           end
 
         # Check for existing input by key (run-scoped, workspace-ancestry-aware)
-        case find_or_create_input(
+        case InputFlow.find_or_create_input(
                state,
                key,
                run_id,
@@ -2723,23 +2393,23 @@ defmodule Coflux.Orchestration.Server do
             {:ok, {run_external_id}} =
               Runs.get_external_run_id_for_execution(state.db, execution_id)
 
-            input_ext_id = input_external_id(run_external_id, input_number)
+            input_ext_id = Ids.input(run_external_id, input_number)
 
             state =
-              notify_listeners(
-                state,
-                {:run, run_external_id},
-                {:input_submitted, execution_external_id, input_ext_id, stored_title}
-              )
+              Effects.emit(state, %InputSubmitted{
+                run: run_external_id,
+                execution: execution_external_id,
+                input: input_ext_id,
+                title: stored_title
+              })
 
-            state = flush_notifications(state)
             {:reply, {:ok, input_ext_id}, state}
         end
     end
   end
 
-  def handle_call({:respond_input, input_external_id, value, access}, _from, state) do
-    case find_and_copy_input_from_archives(state, input_external_id) do
+  defp dispatch_call({:respond_input, input_external_id, value, access}, state) do
+    case Archives.find_and_copy_input_from_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2747,7 +2417,7 @@ defmodule Coflux.Orchestration.Server do
        {input_id, workspace_id, _key, _prompt_id, schema_id, _title, _actions, _initial,
         _requires_tag_set_id, _created_at, _run_id}} ->
         # Validate response against schema if one exists
-        with :ok <- validate_input_response(state, schema_id, value) do
+        with :ok <- InputFlow.validate_input_response(state, schema_id, value) do
           now = System.system_time(:millisecond)
 
           created_by =
@@ -2771,39 +2441,31 @@ defmodule Coflux.Orchestration.Server do
               # in the tuple format so compose_value handles inputs and
               # executions uniformly.
               state =
-                notify_select_waiters(
+                Waiters.notify_select_waiters(
                   state,
                   {:input, input_external_id},
                   {:value, {:raw, value, []}}
                 )
 
               # Resolve input dependency for any suspended executions waiting on this input
-              state = update_dependencies_on_input(state, input_id)
+              state = Dependencies.update_dependencies_on_input(state, input_id)
 
               # Notify run topic
               {:ok, run_external_id, _input_number} =
-                parse_input_external_id(input_external_id)
+                Ids.parse_input(input_external_id)
 
-              ws_ext_id = workspace_external_id(state, workspace_id)
+              ws_ext_id = State.workspace_external_id(state, workspace_id)
 
-              response = build_input_response(state.db, input_id)
+              response = InputFlow.build_input_response(state.db, input_id)
 
               state =
                 state
-                |> notify_listeners(
-                  {:run, run_external_id},
-                  {:input_response, input_external_id, :value}
-                )
-                |> notify_dependent_runs(input_id, input_external_id, :value, run_external_id)
-                |> notify_listeners(
-                  {:inputs, ws_ext_id},
-                  {:input_responded, input_external_id, now}
-                )
-                |> notify_listeners(
-                  {:input, input_external_id},
-                  {:response, response}
-                )
-                |> flush_notifications()
+                |> Effects.emit(%InputResponded{
+                  run: run_external_id,
+                  workspace: ws_ext_id,
+                  input: input_external_id,
+                  response: response
+                })
 
               {:reply, :ok, state}
 
@@ -2817,16 +2479,16 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:get_input, input_external_id}, _from, state) do
-    case read_input_from_active_or_archives(state, input_external_id) do
+  defp dispatch_call({:get_input, input_external_id}, state) do
+    case Archives.read_input_from_active_or_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
       {:ok,
-       {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id,
-        created_at}} ->
+       {db, input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
+        requires_tag_set_id, created_at}} ->
         details =
-          build_input_details(
+          InputFlow.build_input_details(
             db,
             input_id,
             key,
@@ -2843,64 +2505,8 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:subscribe_input, input_external_id, pid}, _from, state) do
-    case read_input_from_active_or_archives(state, input_external_id) do
-      {:ok, nil} ->
-        {:reply, {:error, :not_found}, state}
-
-      {:ok,
-       {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id,
-        created_at}} ->
-        {:ok, ref, state} = add_listener(state, {:input, input_external_id}, pid)
-
-        details =
-          build_input_details(
-            db,
-            input_id,
-            key,
-            prompt_id,
-            schema_id,
-            title,
-            actions,
-            initial,
-            requires_tag_set_id,
-            created_at
-          )
-
-        active = Inputs.has_active_dependency?(db, input_id)
-
-        {:reply, {:ok, Map.put(details, :active, active), ref}, state}
-    end
-  end
-
-  def handle_call({:subscribe_inputs, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        {:ok, ref, state} = add_listener(state, {:inputs, workspace_external_id}, pid)
-
-        {:ok, rows} = Inputs.get_inputs_for_workspace(state.db, workspace_id)
-
-        inputs =
-          Map.new(rows, fn {_id, run_ext_id, input_number, _workspace_id, _key, _prompt_id,
-                            _schema_id, created_at, title, requires_tag_set_id, _has_response} ->
-            {input_external_id(run_ext_id, input_number),
-             %{
-               runId: run_ext_id,
-               createdAt: created_at,
-               title: title,
-               requires: resolve_tag_set(state.db, requires_tag_set_id)
-             }}
-          end)
-
-        {:reply, {:ok, inputs, ref}, state}
-    end
-  end
-
-  def handle_call({:dismiss_input, input_external_id, access}, _from, state) do
-    case find_and_copy_input_from_archives(state, input_external_id) do
+  defp dispatch_call({:dismiss_input, input_external_id, access}, state) do
+    case Archives.find_and_copy_input_from_archives(state, input_external_id) do
       {:ok, nil} ->
         {:reply, {:error, :not_found}, state}
 
@@ -2926,35 +2532,27 @@ defmodule Coflux.Orchestration.Server do
           {:ok, true} ->
             # Notify select waiters for this input (dismissed)
             state =
-              notify_select_waiters(state, {:input, input_external_id}, :dismissed)
+              Waiters.notify_select_waiters(state, {:input, input_external_id}, :dismissed)
 
             # Resolve input dependency for any suspended executions waiting on this input
-            state = update_dependencies_on_input(state, input_id)
+            state = Dependencies.update_dependencies_on_input(state, input_id)
 
             # Notify topics
             {:ok, run_external_id, _input_number} =
-              parse_input_external_id(input_external_id)
+              Ids.parse_input(input_external_id)
 
-            ws_ext_id = workspace_external_id(state, workspace_id)
+            ws_ext_id = State.workspace_external_id(state, workspace_id)
 
-            response = build_input_response(state.db, input_id)
+            response = InputFlow.build_input_response(state.db, input_id)
 
             state =
               state
-              |> notify_listeners(
-                {:run, run_external_id},
-                {:input_response, input_external_id, :dismissed}
-              )
-              |> notify_dependent_runs(input_id, input_external_id, :dismissed, run_external_id)
-              |> notify_listeners(
-                {:inputs, ws_ext_id},
-                {:input_responded, input_external_id, now}
-              )
-              |> notify_listeners(
-                {:input, input_external_id},
-                {:response, response}
-              )
-              |> flush_notifications()
+              |> Effects.emit(%InputResponded{
+                run: run_external_id,
+                workspace: ws_ext_id,
+                input: input_external_id,
+                response: response
+              })
 
             {:reply, :ok, state}
 
@@ -2964,535 +2562,41 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_call({:subscribe_workspaces, pid}, _from, state) do
-    {:ok, ref, state} = add_listener(state, :workspaces, pid)
-
-    workspaces =
-      Map.new(state.workspaces, fn {workspace_id, workspace} ->
-        base_external_id =
-          if workspace.base_id do
-            case Map.fetch(state.workspaces, workspace.base_id) do
-              {:ok, base} -> base.external_id
-              :error -> nil
-            end
-          end
-
-        {workspace_id,
-         %{
-           name: workspace.name,
-           external_id: workspace.external_id,
-           base_id: workspace.base_id,
-           base_external_id: base_external_id,
-           state: workspace.state
-         }}
-      end)
-
-    {:reply, {:ok, workspaces, ref}, state}
-  end
-
-  def handle_call({:subscribe_modules, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        {:ok, manifests} = Manifests.get_latest_manifests(state.db, workspace_id)
-
-        # Get all active executions (both assigned and unassigned) with their root workflow
-        {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
-
-        active_runs = group_active_executions(active_executions)
-
-        {:ok, ref, state} =
-          add_listener(state, {:modules, workspace_external_id}, pid)
-
-        {:reply, {:ok, manifests, active_runs, ref}, state}
-    end
-  end
-
-  def handle_call({:subscribe_queue, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        {:ok, executions} = Runs.get_queue_executions(state.db, workspace_id)
-
-        # Resolve tag sets, de-duplicating by ID
-        tag_sets =
-          executions
-          |> Enum.flat_map(fn row -> [elem(row, 8), elem(row, 9)] end)
-          |> Enum.reject(&is_nil/1)
-          |> Enum.uniq()
-          |> Map.new(fn tag_set_id ->
-            {:ok, tag_set} = TagSets.get_tag_set(state.db, tag_set_id)
-            {tag_set_id, tag_set}
-          end)
-
-        # Build a map of execution_external_id -> [dependency] from the
-        # in-memory pending_dependencies (which uses internal IDs)
-        dependencies = build_queue_dependencies(state, workspace_id)
-
-        {:ok, ref, state} = add_listener(state, {:queue, workspace_external_id}, pid)
-        {:reply, {:ok, executions, tag_sets, dependencies, ref}, state}
-    end
-  end
-
-  def handle_call({:subscribe_pools, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        # TODO: include non-active pools that contain active workers
-        pools = Map.get(state.pools, workspace_id, %{})
-        {:ok, ref, state} = add_listener(state, {:pools, workspace_external_id}, pid)
-        {:reply, {:ok, pools, ref}, state}
-    end
-  end
-
-  def handle_call({:subscribe_pool, workspace_external_id, pool_name, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:ok, workspace_id} ->
-        pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
-        {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
-
-        if is_nil(pool) and pool_workers == [] do
-          {:reply, {:error, :not_found}, state}
-        else
-          # TODO: include 'active' workers that aren't in this (potentially limited) list
-
-          workers =
-            Map.new(
-              pool_workers,
-              fn {worker_id, worker_external_id, starting_at, started_at, start_error,
-                  stopping_at, stopped_at, stop_error, deactivated_at, error, logs,
-                  total_executions} ->
-                worker = Map.get(state.workers, worker_id)
-
-                session_external_id =
-                  if worker && worker.session_id do
-                    case Map.fetch(state.sessions, worker.session_id) do
-                      {:ok, session} -> session.external_id
-                      :error -> nil
-                    end
-                  end
-
-                # TODO: include pool_id?
-                {worker_external_id,
-                 %{
-                   starting_at: starting_at,
-                   started_at: started_at,
-                   start_error: start_error,
-                   stopping_at: stopping_at,
-                   stopped_at: stopped_at,
-                   stop_error: stop_error,
-                   deactivated_at: deactivated_at,
-                   error: error,
-                   logs: logs,
-                   state: if(worker, do: worker.state),
-                   session_external_id: session_external_id,
-                   total_executions: total_executions
-                 }}
-              end
-            )
-
-          {:ok, ref, state} = add_listener(state, {:pool, workspace_external_id, pool_name}, pid)
-          {:reply, {:ok, pool, workers, ref}, state}
-        end
-
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  def handle_call({:subscribe_sessions, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        sessions =
-          state.sessions
-          |> Enum.filter(fn {_, session} ->
-            session.workspace_id == workspace_id
-          end)
-          |> Map.new(fn {_session_id, session} ->
-            {session.external_id, build_session_data(state, session)}
-          end)
-
-        {:ok, ref, state} = add_listener(state, {:sessions, workspace_external_id}, pid)
-        {:reply, {:ok, sessions, ref}, state}
-    end
-  end
-
-  def handle_call(
-        {:subscribe_workflow, module, target_name, workspace_external_id, max_runs, pid},
-        _from,
-        state
-      ) do
-    with {:ok, workspace_id} <- resolve_workspace_external_id(state, workspace_external_id),
-         {:ok, workflow} <-
-           Manifests.get_latest_workflow(state.db, workspace_id, module, target_name),
-         {:ok, instruction} <-
-           if(workflow && workflow.instruction_id,
-             do: Manifests.get_instruction(state.db, workflow.instruction_id),
-             else: {:ok, nil}
-           ) do
-      runs =
-        get_target_runs_across_epochs(
-          state,
-          module,
-          target_name,
-          :workflow,
-          workspace_id,
-          max_runs
-        )
-
-      if is_nil(workflow) and runs == [] do
-        {:reply, {:error, :not_found}, state}
-      else
-        active_runs =
-          get_active_workflow_runs(state, module, target_name, workspace_id)
-
-        {:ok, ref, state} =
-          add_listener(state, {:workflow, module, target_name, workspace_external_id}, pid)
-
-        {:reply, {:ok, workflow, instruction, runs, active_runs, ref}, state}
-      end
-    else
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  def handle_call({:subscribe_run, external_run_id, pid}, _from, state) do
-    case find_run(state, external_run_id, &build_run_structure/2) do
-      {:ok, {run, parent, steps}} ->
-        {:ok, ref, state} = add_listener(state, {:run, run.external_id}, pid)
-        {:reply, {:ok, run, parent, steps, ref}, state}
-
-      :not_found ->
-        {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  def handle_call({:get_run_details, external_run_id, request}, _from, state) do
-    case find_run(state, external_run_id, &build_run_details(&1, &2, request)) do
-      {:ok, details} -> {:reply, {:ok, details}, state}
-      :not_found -> {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  def handle_call({:subscribe_stream_topic, stream_external_id, pid}, _from, state) do
-    case build_stream_topic_initial(state, stream_external_id) do
-      {:ok, initial} ->
-        {:ok, ref, state} = add_listener(state, {:stream, stream_external_id}, pid)
-
-        {:reply, {:ok, initial, ref}, state}
+  defp dispatch_call({:subscribe, key, opts, pid}, state) do
+    case Snapshots.snapshot(state, key, opts) do
+      {:ok, events} ->
+        {:ok, ref, state} = Listeners.add_listener(state, key, pid)
+        {:reply, {:ok, events, ref}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_call({:subscribe_targets, workspace_external_id, pid}, _from, state) do
-    case resolve_workspace_external_id(state, workspace_external_id) do
-      {:error, error} ->
-        {:reply, {:error, error}, state}
-
-      {:ok, workspace_id} ->
-        # TODO: indicate which are archived
-        {:ok, workflows} = Manifests.get_all_workflows_for_workspace(state.db, workspace_id)
-
-        {:ok, steps} = Runs.get_steps_for_workspace(state.db, workspace_id)
-
-        result =
-          Enum.reduce(workflows, %{}, fn {module_name, target_names}, result ->
-            Enum.reduce(target_names, result, fn target_name, result ->
-              put_in(
-                result,
-                [Access.key(module_name, %{}), target_name],
-                {:workflow, nil}
-              )
-            end)
-          end)
-
-        result =
-          Enum.reduce(
-            steps,
-            result,
-            fn {module_name, target_name, target_type, run_external_id, step_number, attempt},
-               result ->
-              put_in(
-                result,
-                [Access.key(module_name, %{}), target_name],
-                {target_type, {run_external_id, step_number, attempt}}
-              )
-            end
-          )
-
-        {:ok, ref, state} = add_listener(state, {:targets, workspace_external_id}, pid)
-        {:reply, {:ok, result, ref}, state}
+  defp dispatch_call({:get_run_details, external_run_id, request}, state) do
+    case Archives.find_run(state, external_run_id, &Snapshots.build_run_details(&1, &2, request)) do
+      {:ok, details} -> {:reply, {:ok, details}, state}
+      :not_found -> {:reply, {:error, :not_found}, state}
     end
   end
 
-  def handle_call(:rotate_epoch, _from, state) do
-    state = do_rotate_epoch(state)
+  defp dispatch_call(:rotate_epoch, state) do
+    state = Rotation.do_rotate_epoch(state)
     {:reply, :ok, state}
   end
 
-  # Producer-side backpressure state for a stream, (re)initialised on
-  # every registration. A resuming execution replaces the entry left by
-  # the suspended one: the session changes, and its credit starts at the
-  # head it was told to sequence from.
-  defp init_stream_producer(state, stream, _execution_external_id, nil, _head, _session_id) do
-    # buffer=nil means the producer has opted out of backpressure — no
-    # tracking required on the server side. It'll emit freely and the
-    # adapter's driver never waits. Drop anything a previous producer of
-    # the stream left behind.
-    drop_stream_producer(state, stream.id)
-  end
-
-  defp init_stream_producer(state, stream, execution_external_id, buffer, head, session_id)
-       when is_integer(buffer) and buffer >= 0 do
-    put_in(state.stream_producers[stream.id], %{
-      buffer: buffer,
-      demand_granted: head + 1,
-      base: head,
-      session_id: session_id,
-      execution_external_id: execution_external_id,
-      index: stream.index
-    })
-  end
-
-  # Recompute the target demand for one stream and, if it's grown,
-  # send a delta grant to the producer's session.
-  #
-  # Formula:
-  #   target = watermark + buffer + (1 if has_subscribers else 0)
-  #
-  # `watermark` is the *slowest* subscriber's acknowledged position, so
-  # `buffer` means what it claims: how far ahead of actual consumption
-  # the producer may run. Measuring against the fastest subscriber (or
-  # against delivery rather than acknowledgement) would let the producer
-  # run arbitrarily far ahead of a slow consumer, which is the thing the
-  # budget exists to prevent.
-  #
-  # The +1 on subscriber presence is what makes buffer=0 lockstep rather
-  # than deadlock: the consumer needs one item in hand before it can ack
-  # anything.
-  #
-  # With no subscribers the watermark is 0, so a producer may pre-warm up
-  # to `buffer` items before anyone attaches.
-  #
-  # demand_granted is monotonic; if the target drops (e.g. a slower
-  # consumer joined, pulling the minimum down) we don't claw back —
-  # future grants just wait until consumption passes the old high-water
-  # mark. The target *rising* does have to be noticed, though, which is
-  # why drop_subscription refreshes: losing the slowest subscriber
-  # raises the minimum, and nothing else would recompute it.
-  defp refresh_stream_demand(state, stream_id) do
-    case Map.fetch(state.stream_producers, stream_id) do
-      :error ->
-        state
-
-      {:ok, %{session_id: nil}} ->
-        # Producer's session is gone — typically because the producer
-        # execution has long since terminated and we rebuilt its in-memory
-        # state for a late subscriber. There's nothing to grant demand to;
-        # the stream is durable in the DB and backlog reads don't consume
-        # credits.
-        state
-
-      {:ok, producer} ->
-        # The producer's stream_producers entry can outlive its session
-        # (e.g. a subscription is dropped during that session's teardown).
-        # send_session would raise on the missing session, so treat that
-        # like session_id: nil above.
-        if not Map.has_key?(state.sessions, producer.session_id) do
-          state
-        else
-          refresh_stream_demand_for(state, stream_id, producer)
-        end
-    end
-  end
-
-  defp refresh_stream_demand_for(state, stream_id, producer) do
-    target =
-      if has_stream_subscribers?(state, stream_id) do
-        slowest_ack_watermark(state, stream_id) + producer.buffer + 1
-      else
-        # Nobody attached: pre-warm `buffer` items past where the stream
-        # stood when this producer registered. A fresh stream warms from
-        # the start; one resumed after a suspend warms from its head,
-        # rather than being held to a budget its predecessor already used.
-        Map.get(producer, :base, -1) + 1 + producer.buffer
-      end
-
-    # A consumer suspended waiting on a sequence has no subscription to
-    # ack through, and only comes back once that item exists. Its wait is
-    # demand for it — otherwise a lockstep producer is never granted the
-    # credit that would wake its own consumer, and the two wait on each
-    # other forever.
-    target =
-      case highest_waited_sequence(state, stream_id) do
-        nil -> target
-        sequence -> max(target, sequence + 1)
-      end
-
-    delta = target - producer.demand_granted
-
-    if delta > 0 do
-      state
-      |> put_in([Access.key(:stream_producers), stream_id, :demand_granted], target)
-      |> send_session(
-        producer.session_id,
-        {:stream_demand, producer.execution_external_id, producer.index, delta}
-      )
-    else
-      state
-    end
-  end
-
-  defp highest_waited_sequence(state, stream_id) do
-    state.stream_dependency_keys
-    |> Map.get(stream_id, MapSet.new())
-    |> Enum.map(fn {:stream, _stream_id, sequence} -> sequence end)
-    |> Enum.max(fn -> nil end)
-  end
-
-  defp has_stream_subscribers?(state, stream_id) do
-    case Map.get(state.stream_subscribers, stream_id) do
-      nil -> false
-      set -> MapSet.size(set) > 0
-    end
-  end
-
-  defp slowest_ack_watermark(state, stream_id) do
-    watermarks =
-      state.stream_subscribers
-      |> Map.get(stream_id, MapSet.new())
-      |> Enum.flat_map(fn sub_key ->
-        case Map.get(state.stream_subscriptions, sub_key) do
-          nil -> []
-          sub -> [ack_watermark(sub)]
-        end
-      end)
-
-    case watermarks do
-      [] -> 0
-      watermarks -> Enum.min(watermarks)
-    end
-  end
-
-  # How far this subscriber has got, in sequence space.
-  #
-  # With nothing outstanding, the consumer has processed (or been
-  # stride-skipped past) everything below `cursor` — that's the honest
-  # position, and it's what keeps a stride subscriber from stalling the
-  # producer over sequences it will never be sent.
-  #
-  # Otherwise the oldest unacked item sits at or above `acked_seq + 1`.
-  # Using that is conservative: it can understate progress when delivery
-  # is sparse, which errs towards producing less rather than more.
-  defp ack_watermark(%{delivered: delivered, acked_count: acked_count, cursor: cursor})
-       when delivered == acked_count,
-       do: cursor
-
-  defp ack_watermark(%{acked_seq: acked_seq}), do: acked_seq + 1
-
-  defp drop_stream_producer(state, stream_id) do
-    Map.update!(state, :stream_producers, &Map.delete(&1, stream_id))
-  end
-
-  # Lazily rebuild stream_producer state from the DB if it's missing.
-  # Used after server restart — in-memory producer state is gone but
-  # the registration still has the config. We rebuild on first append or
-  # subscribe for a given stream, recovering flow control.
-  #
-  # ``session_id`` is the internal id of the producer's current session;
-  # supply ``nil`` if not known, in which case demand grants will be
-  # deferred until the session is resolvable.
-  defp ensure_stream_producer(state, stream_id, session_id) do
-    if Map.has_key?(state.stream_producers, stream_id) do
-      state
-    else
-      case Streams.get_config(state.db, stream_id) do
-        {:ok, {nil, _timeout_ms}} ->
-          # Stream opted out of backpressure; nothing to track.
-          state
-
-        {:ok, {buffer, _timeout_ms}} when is_integer(buffer) ->
-          # Reconstruct state. demand_granted starts at items already
-          # produced — we assume earlier-us granted enough for those,
-          # and rely on the producer having kept its local credit
-          # counter consistent.
-          {:ok, head} = Streams.get_stream_head(state.db, stream_id)
-          {:ok, stream} = Streams.get_stream(state.db, stream_id)
-
-          put_in(state.stream_producers[stream_id], %{
-            buffer: buffer,
-            demand_granted: head + 1,
-            session_id: session_id,
-            execution_external_id: producer_external_id(state.db, stream_id),
-            index: stream.index
-          })
-
-        {:error, :not_found} ->
-          state
-      end
-    end
-  end
-
-  # External id of the stream's current producer (its latest registrant),
-  # or nil if it has none.
-  defp producer_external_id(db, stream_id) do
-    with {:ok, execution_id} <- Streams.get_producer(db, stream_id),
-         {:ok, {r, s, a}} <- Runs.get_execution_key(db, execution_id) do
-      execution_external_id(r, s, a)
-    else
-      _ -> nil
-    end
-  end
-
-  # The session the stream's current producer is running on, if it's live.
-  defp producer_session_id(state, stream_id) do
-    case producer_external_id(state.db, stream_id) do
-      nil ->
-        nil
-
-      ext_id ->
-        case find_session_for_execution(state, ext_id) do
-          {:ok, sid} -> sid
-          :error -> nil
-        end
-    end
-  end
-
-  # The stream a producer means by `index`: the one with that step index
-  # on the producer's own step.
-  defp resolve_step_stream(db, execution_id, index) do
-    {:ok, {step_id, _workspace_id, _attempt}} = Runs.get_execution_location(db, execution_id)
-
-    case Streams.get_stream_by_step_index(db, step_id, index) do
-      {:ok, stream_id} -> {:ok, stream_id}
-      {:error, :not_found} -> {:error, :not_registered}
-    end
-  end
-
-  def handle_cast({:unsubscribe, ref}, state) do
+  defp dispatch_cast({:unsubscribe, ref}, state) do
     Process.demonitor(ref, [:flush])
 
     state =
       state
-      |> remove_listener(ref)
-      |> maybe_schedule_idle_shutdown()
+      |> Listeners.remove_listener(ref)
+      |> Listeners.maybe_schedule_idle_shutdown()
 
     {:noreply, state}
   end
 
-  def handle_info(:expire_sessions, state) do
+  defp dispatch_info(:expire_sessions, state) do
     now = System.os_time(:millisecond)
 
     {expired, remaining} =
@@ -3506,7 +2610,7 @@ defmodule Coflux.Orchestration.Server do
         # Only remove if still disconnected (connected sessions shouldn't be in expiries)
         case Map.fetch(state.sessions, session_id) do
           {:ok, session} when is_nil(session.connection) ->
-            remove_session(state, session_id)
+            Fleet.remove_session(state, session_id)
 
           _ ->
             state
@@ -3515,14 +2619,13 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       state
-      |> reschedule_expire_sessions_timer()
-      |> flush_notifications()
-      |> maybe_schedule_idle_shutdown()
+      |> Fleet.reschedule_expire_sessions_timer()
+      |> Listeners.maybe_schedule_idle_shutdown()
 
     {:noreply, state}
   end
 
-  def handle_info({:idle_shutdown, ref}, state) do
+  defp dispatch_info({:idle_shutdown, ref}, state) do
     case state.idle_timer do
       {_timer, ^ref} ->
         if Enum.empty?(state.sessions) and Enum.empty?(state.listeners) do
@@ -3538,12 +2641,12 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
-  def handle_info(:check_rotation, state) do
+  defp dispatch_info(:check_rotation, state) do
     db_size = Epochs.active_db_size(state.epochs)
 
     state =
       if db_size >= @rotation_size_threshold_bytes do
-        do_rotate_epoch(state)
+        Rotation.do_rotate_epoch(state)
       else
         state
       end
@@ -3552,702 +2655,11 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, state}
   end
 
-  def handle_info(:tick, state) do
-    state =
-      if state.tick_timer do
-        Process.cancel_timer(state.tick_timer)
-        Map.put(state, :tick_timer, nil)
-      else
-        state
-      end
-
-    {:ok, executions} = Runs.get_unassigned_executions(state.db)
-
-    executions =
-      Enum.filter(executions, fn execution ->
-        state.workspaces[execution.workspace_id].state == :active
-      end)
-
-    now = System.os_time(:millisecond)
-
-    {executions_due, executions_future, executions_defer} =
-      split_executions(executions, now)
-
-    state =
-      executions_defer
-      |> Enum.reverse()
-      |> Enum.reduce(state, fn {execution_id, defer_id, _run_id, module}, state ->
-        case record_and_notify_result(
-               state,
-               execution_id,
-               {:deferred, defer_id},
-               module
-             ) do
-          {:ok, state} -> state
-          {:error, :already_recorded} -> state
-        end
-      end)
-
-    tag_sets =
-      executions_due
-      |> Enum.flat_map(&[&1.requires_tag_set_id, &1.run_requires_tag_set_id])
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.reduce(%{}, fn tag_set_id, tag_sets ->
-        case TagSets.get_tag_set(state.db, tag_set_id) do
-          {:ok, tag_set} -> Map.put(tag_sets, tag_set_id, tag_set)
-        end
-      end)
-
-    cache_configs =
-      executions_due
-      |> Enum.map(& &1.cache_config_id)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.reduce(%{}, fn cache_config_id, cache_configs ->
-        case CacheConfigs.get_cache_config(state.db, cache_config_id) do
-          {:ok, cache_config} -> Map.put(cache_configs, cache_config_id, cache_config)
-        end
-      end)
-
-    {state, assigned, unassigned, _counts, gated_now} =
-      Enum.reduce(
-        executions_due,
-        {state, [], [], concurrency_held_counts(state), %{}},
-        fn
-          execution, {state, assigned, unassigned, counts, gated} ->
-            # TODO: support caching for other attempts?
-            cached_result =
-              if execution.attempt == 1 && execution.cache_config_id do
-                cache_workspace_ids = get_cache_workspace_ids(state, execution.workspace_id)
-                cache = Map.fetch!(cache_configs, execution.cache_config_id)
-                recorded_after = if cache.max_age, do: now - cache.max_age, else: 0
-
-                find_cached_execution_across_epochs(
-                  state,
-                  cache_workspace_ids,
-                  execution.step_id,
-                  execution.cache_key,
-                  recorded_after
-                )
-              end
-
-            if cached_result do
-              result =
-                case cached_result do
-                  {:in_epoch, cached_execution_id} ->
-                    {:cached, cached_execution_id}
-
-                  {:resolved, ref_id, value} ->
-                    {:cached, ref_id, value}
-                end
-
-              # Cache hit during scheduling — server-only, no worker runs this
-              # execution. Write results + completion together.
-              {:ok, state} = process_result(state, execution.execution_id, result)
-              state = complete_execution(state, execution.execution_id)
-
-              {state, assigned, unassigned, counts, gated}
-            else
-              # Skip executions whose dependencies haven't resolved yet
-              has_pending = Map.has_key?(state.pending_dependencies, execution.execution_id)
-
-              if has_pending do
-                {state, assigned, unassigned, counts, gated}
-              else
-                requires =
-                  effective_requires(
-                    tag_sets,
-                    execution.run_requires_tag_set_id,
-                    execution.requires_tag_set_id
-                  )
-
-                if execution.type == :task || !execution.parent_id do
-                  # Checked before a session is chosen, so a gated execution
-                  # never occupies a worker slot — and, by staying out of
-                  # `unassigned`, never triggers a pool launch either.
-                  case concurrency_gate(state, counts, execution) do
-                    gate when gate != [] ->
-                      {state, assigned, unassigned, counts,
-                       Map.put(gated, execution.execution_id, gate)}
-
-                    [] ->
-                      case choose_session(state, execution, requires) do
-                        nil ->
-                          {state, assigned, [execution | unassigned], counts, gated}
-
-                        session_id ->
-                          {:ok, assigned_at} =
-                            Runs.assign_execution(state.db, execution.execution_id, session_id)
-
-                          {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
-
-                          # Enrich arguments with resolved references (asset/execution metadata)
-                          enriched_arguments = Enum.map(arguments, &build_value(&1, state.db))
-
-                          # Checkpoints travel with the execute message in the same
-                          # wire form as arguments, and are handled the same way
-                          # end-to-end — including the worker downloading any
-                          # blob-backed value before the adapter starts. Bounded by
-                          # this execution's own attempt, so it sees what it started
-                          # with rather than anything a stale writer lands later.
-                          {:ok, checkpoints} =
-                            Checkpoints.get_effective(
-                              state.db,
-                              execution.step_id,
-                              get_workspace_chain(state, execution.workspace_id),
-                              execution.attempt
-                            )
-
-                          enriched_checkpoints = enrich_checkpoints(checkpoints, state.db)
-
-                          workspace_external_id =
-                            state.workspaces[execution.workspace_id].external_id
-
-                          execution_external_id =
-                            execution_external_id(
-                              execution.run_external_id,
-                              execution.step_number,
-                              execution.attempt
-                            )
-
-                          state =
-                            state
-                            |> put_in(
-                              [Access.key(:execution_ids), execution_external_id],
-                              execution.execution_id
-                            )
-                            |> update_in(
-                              [Access.key(:sessions), session_id, :starting],
-                              &MapSet.put(&1, execution_external_id)
-                            )
-                            |> update_in(
-                              [Access.key(:sessions), session_id, :total_executions],
-                              &(&1 + 1)
-                            )
-                            |> send_session(
-                              session_id,
-                              {:execute, execution_external_id, execution.module,
-                               execution.target, enriched_arguments, execution.run_external_id,
-                               workspace_external_id, execution.timeout,
-                               build_streams_config(
-                                 execution.streams_buffer,
-                                 execution.streams_timeout_ms
-                               ), enriched_checkpoints}
-                            )
-
-                          # Notify sessions topic of updated total
-                          session = Map.fetch!(state.sessions, session_id)
-
-                          state =
-                            notify_listeners(
-                              state,
-                              {:sessions, workspace_external_id},
-                              {:executions, session.external_id, session.total_executions}
-                            )
-
-                          state =
-                            if session.worker_id do
-                              worker = Map.get(state.workers, session.worker_id)
-
-                              if worker do
-                                notify_listeners(
-                                  state,
-                                  {:pool, workspace_external_id, worker.pool_name},
-                                  {:worker_executions, worker.external_id,
-                                   session.total_executions}
-                                )
-                              else
-                                state
-                              end
-                            else
-                              state
-                            end
-
-                          state = grant_concurrency_permit(state, execution)
-                          counts = increment_concurrency_count(counts, execution)
-
-                          {state, [{execution, assigned_at} | assigned], unassigned, counts,
-                           gated}
-                      end
-                  end
-                else
-                  {:ok, arguments} = Runs.get_step_arguments(state.db, execution.step_id)
-
-                  state =
-                    case schedule_run(
-                           state,
-                           execution.module,
-                           execution.target,
-                           execution.type,
-                           arguments,
-                           execution.workspace_id,
-                           parent_id: execution.execution_id,
-                           cache:
-                             if(execution.cache_config_id,
-                               do: Map.fetch!(cache_configs, execution.cache_config_id)
-                             ),
-                           retries:
-                             if(execution.retry_limit == -1 || execution.retry_limit > 0,
-                               do: %{
-                                 limit:
-                                   if(execution.retry_limit == -1,
-                                     do: nil,
-                                     else: execution.retry_limit
-                                   ),
-                                 backoff_min: execution.retry_backoff_min,
-                                 backoff_max: execution.retry_backoff_max
-                               }
-                             ),
-                           requires: requires,
-                           # The spawning execution never takes a permit (no
-                           # worker runs it); the gate moves to the spawned
-                           # run's own initial step. Passed as the already-
-                           # built key because the step stores the key, not
-                           # the params it was derived from — the arguments
-                           # are the same, so it's the same key either way.
-                           concurrency_key: execution.concurrency_key,
-                           concurrency_limit: execution.concurrency_limit,
-                           group_key: execution.group_key,
-                           group_limit: execution.group_limit
-                         ) do
-                      {:ok, _external_run_id, _external_step_id, spawned_execution_id, state} ->
-                        {:ok, state} =
-                          process_result(
-                            state,
-                            execution.execution_id,
-                            {:spawned, spawned_execution_id}
-                          )
-
-                        state
-                    end
-
-                  {state, assigned, unassigned, counts, gated}
-                end
-              end
-            end
-        end
-      )
-
-    state = update_concurrency_gates(state, gated_now)
-
-    state =
-      assigned
-      |> Enum.group_by(fn {execution, _assigned_at} -> execution.run_external_id end)
-      |> Enum.reduce(state, fn {run_external_id, executions}, state ->
-        assigned_map =
-          Map.new(executions, fn {execution, assigned_at} ->
-            ext_id =
-              execution_external_id(
-                execution.run_external_id,
-                execution.step_number,
-                execution.attempt
-              )
-
-            {ext_id, assigned_at}
-          end)
-
-        notify_listeners(state, {:run, run_external_id}, {:assigned, assigned_map})
-      end)
-
-    # Group by workspace, then by root workflow (for :modules topic notifications)
-    assigned_by_workflow =
-      assigned
-      |> Enum.group_by(fn {execution, _} -> execution.workspace_id end)
-      |> Map.new(fn {workspace_id, executions} ->
-        {workspace_id,
-         executions
-         |> Enum.group_by(
-           fn {execution, _} ->
-             get_run_workflow(state, execution.run_external_id) ||
-               raise "run_workflows missing entry for run #{execution.run_external_id}"
-           end,
-           fn {execution, _} ->
-             {execution.run_external_id,
-              execution_external_id(
-                execution.run_external_id,
-                execution.step_number,
-                execution.attempt
-              )}
-           end
-         )}
-      end)
-
-    state =
-      Enum.reduce(assigned_by_workflow, state, fn {workspace_id, workflow_executions}, state ->
-        ws_ext_id = workspace_external_id(state, workspace_id)
-
-        all_ext_ids =
-          workflow_executions
-          |> Map.values()
-          |> List.flatten()
-          |> Enum.map(&elem(&1, 1))
-          |> MapSet.new()
-
-        queue_executions =
-          Enum.reduce(assigned, %{}, fn {execution, assigned_at}, acc ->
-            ext_id =
-              execution_external_id(
-                execution.run_external_id,
-                execution.step_number,
-                execution.attempt
-              )
-
-            if MapSet.member?(all_ext_ids, ext_id) do
-              Map.put(acc, ext_id, assigned_at)
-            else
-              acc
-            end
-          end)
-
-        state
-        |> notify_listeners(
-          {:modules, ws_ext_id},
-          {:assigned, workflow_executions}
-        )
-        |> then(fn state ->
-          Enum.reduce(workflow_executions, state, fn {{root_module, root_target}, executions},
-                                                     state ->
-            notify_listeners(
-              state,
-              {:workflow, root_module, root_target, ws_ext_id},
-              {:assigned, executions}
-            )
-          end)
-        end)
-        |> notify_listeners(
-          {:queue, ws_ext_id},
-          {:assigned, queue_executions}
-        )
-      end)
-
-    state =
-      if Enum.any?(unassigned) do
-        # Track the most recent worker creation per pool, and which pools
-        # already have a worker that isn't ready to accept work.  We skip
-        # launching for pools that have a worker still pending activation
-        # or that activated but hasn't registered any targets yet (e.g.
-        # due to a misconfigured command or working directory).
-        {latest_pool_launch_at, pools_with_pending_worker} =
-          state.workers
-          |> Map.values()
-          |> Enum.reduce({%{}, MapSet.new()}, fn worker, {latest, pending} ->
-            latest =
-              Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
-
-            pending =
-              with session_id when not is_nil(session_id) <- worker.session_id,
-                   {:ok, session} <- Map.fetch(state.sessions, session_id),
-                   false <- session.activated_at != nil and Enum.any?(session.targets) do
-                MapSet.put(pending, worker.pool_id)
-              else
-                _ -> pending
-              end
-
-            {latest, pending}
-          end)
-
-        unassigned
-        |> Enum.group_by(& &1.workspace_id)
-        |> Enum.reduce(state, fn {workspace_id, executions}, state ->
-          executions
-          |> Enum.map(fn execution ->
-            requires =
-              effective_requires(
-                tag_sets,
-                execution.run_requires_tag_set_id,
-                execution.requires_tag_set_id
-              )
-
-            choose_pool(state, execution, requires)
-          end)
-          |> Enum.reject(&is_nil/1)
-          |> Enum.uniq()
-          |> Enum.reject(&MapSet.member?(pools_with_pending_worker, &1))
-          |> Enum.filter(&(now - Map.get(latest_pool_launch_at, &1, 0) > 10_000))
-          |> Enum.reduce(state, fn pool_id, state ->
-            case Workers.create_worker(state.db, pool_id) do
-              {:ok, worker_id, worker_external_id, created_at} ->
-                {pool_name, pool} =
-                  Enum.find(
-                    Map.get(state.pools, workspace_id, %{}),
-                    &(elem(&1, 1).id == pool_id)
-                  )
-
-                # Create a session for the pool-launched worker
-                activation_timeout =
-                  Map.get(pool, :activation_timeout, @default_activation_timeout_ms)
-
-                reconnection_timeout =
-                  Map.get(pool, :reconnection_timeout, @default_reconnection_timeout_ms)
-
-                pool_accepts = Map.get(pool, :accepts, %{})
-
-                session_opts = [
-                  provides: pool.provides,
-                  accepts: pool_accepts,
-                  activation_timeout: activation_timeout,
-                  reconnection_timeout: reconnection_timeout
-                ]
-
-                {:ok, session_id, external_id, token, secret_hash, session_now} =
-                  Sessions.create_session(state.db, workspace_id, worker_id, session_opts)
-
-                session = %{
-                  external_id: external_id,
-                  secret_hash: secret_hash,
-                  connection: nil,
-                  targets: %{},
-                  queue: [],
-                  starting: MapSet.new(),
-                  executing: MapSet.new(),
-                  concurrency: 0,
-                  draining: false,
-                  workspace_id: workspace_id,
-                  provides: pool.provides,
-                  accepts: pool_accepts,
-                  worker_id: worker_id,
-                  last_idle_at: session_now,
-                  activated_at: nil,
-                  activation_timeout: activation_timeout,
-                  reconnection_timeout: reconnection_timeout,
-                  total_executions: 0
-                }
-
-                state
-                |> put_in([Access.key(:sessions), session_id], session)
-                |> put_in([Access.key(:session_ids), external_id], session_id)
-                |> schedule_session_expiry(session_id, activation_timeout)
-                |> maybe_schedule_idle_shutdown()
-                |> call_launcher(
-                  pool.launcher,
-                  :launch,
-                  [
-                    build_launcher_env(state, workspace_id, token, pool.launcher),
-                    pool.modules,
-                    pool.launcher,
-                    %{pool_name: pool_name}
-                  ],
-                  fn state, result ->
-                    {data, error} =
-                      case result do
-                        {:ok, {:ok, data}} -> {data, nil}
-                        {:ok, {:error, error}} -> {nil, error}
-                        :error -> {nil, "launch_crashed"}
-                      end
-
-                    {:ok, started_at} =
-                      Workers.create_worker_launch_result(state.db, worker_id, data, error)
-
-                    state =
-                      state
-                      |> put_in([Access.key(:workers), worker_id, Access.key(:data)], data)
-                      |> notify_listeners(
-                        {:pool, workspace_external_id(state, workspace_id), pool_name},
-                        {:launch_result, worker_external_id, started_at, error}
-                      )
-
-                    state =
-                      if error do
-                        deactivate_worker(state, worker_id, error)
-                      else
-                        state
-                      end
-
-                    flush_notifications(state)
-                  end
-                )
-                |> put_in([Access.key(:workers), worker_id], %{
-                  external_id: worker_external_id,
-                  created_at: created_at,
-                  pool_id: pool_id,
-                  pool_name: pool_name,
-                  workspace_id: workspace_id,
-                  state: :active,
-                  data: nil,
-                  session_id: session_id,
-                  stop_id: nil,
-                  last_poll_at: nil
-                })
-                |> put_in([Access.key(:worker_external_ids), worker_external_id], worker_id)
-                |> notify_listeners(
-                  {:pool, workspace_external_id(state, workspace_id), pool_name},
-                  {:worker, worker_id, worker_external_id, created_at, external_id}
-                )
-            end
-          end)
-        end)
-      else
-        state
-      end
-
-    next_execute_after =
-      executions_future
-      |> Enum.map(& &1.execute_after)
-      |> Enum.min(fn -> nil end)
-
-    state =
-      state.workers
-      |> Enum.filter(fn {_worker_id, worker} ->
-        # TODO: don't poll if a poll is in progress?
-        if worker.data do
-          if is_nil(worker.last_poll_at) do
-            true
-          else
-            connection =
-              if worker.session_id && Map.has_key?(state.sessions, worker.session_id),
-                do: state.sessions[worker.session_id].connection
-
-            interval_ms =
-              if connection,
-                do: @connected_worker_poll_interval_ms,
-                else: @disconnected_worker_poll_interval_ms
-
-            now - worker.last_poll_at > interval_ms
-          end
-        else
-          false
-        end
-      end)
-      |> Enum.reduce(state, fn {worker_id, worker}, state ->
-        {:ok, launcher} = Workspaces.get_launcher_for_pool(state.db, worker.pool_id)
-
-        state
-        |> call_launcher(launcher, :poll, [worker.data], fn state, result ->
-          case result do
-            {:ok, {:ok, true}} ->
-              state
-
-            {:ok, {:ok, false, error, logs}} ->
-              deactivate_worker(state, worker_id, error, logs)
-
-            {:ok, {:error, _reason}} ->
-              deactivate_worker(state, worker_id, "poll_error")
-
-            :error ->
-              # TODO: ?
-              state
-          end
-        end)
-        |> put_in([Access.key(:workers), worker_id, :last_poll_at], now)
-      end)
-
-    state =
-      state.workers
-      |> Enum.group_by(fn {_, worker} -> worker.pool_name end)
-      |> Enum.flat_map(fn {_pool_name, workers} ->
-        # TODO: consider min/max pool size
-        Enum.filter(workers, fn {_worker_id, worker} ->
-          # TODO: better way to check launched than checking existence of data?
-          if worker.state == :active && worker.session_id && worker.data do
-            session = Map.fetch!(state.sessions, worker.session_id)
-            idle_time = now - session.last_idle_at
-
-            if Enum.empty?(session.starting) && Enum.empty?(session.executing) &&
-                 idle_time >= @worker_idle_timeout_ms do
-              true
-            end
-          end
-        end)
-      end)
-      |> Enum.reduce(state, fn {worker_id, worker}, state ->
-        update_worker_state(state, worker_id, :draining, worker.workspace_id, worker.pool_name)
-      end)
-
-    state =
-      state.workers
-      |> Enum.filter(fn {_worker_id, worker} ->
-        if worker.session_id do
-          if worker.state == :draining && worker.data && !worker.stop_id do
-            session = Map.fetch!(state.sessions, worker.session_id)
-            Enum.empty?(session.starting) && Enum.empty?(session.executing)
-          end
-        else
-          !is_nil(worker.data)
-        end
-      end)
-      |> Enum.reduce(state, fn {worker_id, worker}, state ->
-        {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
-        {:ok, launcher} = Workspaces.get_launcher_for_pool(state.db, worker.pool_id)
-
-        state =
-          state
-          |> put_in([Access.key(:workers), worker_id, :stop_id], worker_stop_id)
-          |> notify_listeners(
-            {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-            {:worker_stopping, worker.external_id, stopping_at}
-          )
-
-        call_launcher(state, launcher, :stop, [worker.data], fn state, result ->
-          case result do
-            {:ok, :ok} ->
-              {:ok, stopped_at} =
-                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
-
-              state
-              |> notify_listeners(
-                {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-                {:worker_stop_result, worker.external_id, stopped_at, nil}
-              )
-
-            {:ok, {:error, _reason}} ->
-              # Stop failed (e.g. connection refused) — treat as stopped
-              {:ok, stopped_at} =
-                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
-
-              state
-              |> notify_listeners(
-                {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-                {:worker_stop_result, worker.external_id, stopped_at, nil}
-              )
-
-            :error ->
-              # TODO: get error details
-              error = %{}
-
-              {:ok, _} =
-                Workers.create_worker_stop_result(state.db, worker_stop_id, error)
-
-              state =
-                notify_listeners(
-                  state,
-                  {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-                  {:worker_stop_result, worker.external_id, nil, error}
-                )
-
-              # TODO: unset 'stop_id' of worker in state? (so it can be retried? but somehow limit rate?)
-              state
-          end
-        end)
-      end)
-
-    delay_ms =
-      [
-        if(next_execute_after, do: trunc(next_execute_after) - System.os_time(:millisecond)),
-        if(state.workers, do: 5_000)
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.min(fn -> nil end)
-
-    state =
-      if delay_ms do
-        if delay_ms > 0 do
-          timer = Process.send_after(self(), :tick, delay_ms)
-          Map.put(state, :tick_timer, timer)
-        else
-          send(self(), :tick)
-          state
-        end
-      else
-        state
-      end
-
-    state = flush_notifications(state)
-
-    {:noreply, state}
+  defp dispatch_info(:tick, state) do
+    {:noreply, Scheduler.tick(state)}
   end
 
-  def handle_info(:expire_waiters, state) do
+  defp dispatch_info(:expire_waiters, state) do
     now = System.monotonic_time(:millisecond)
 
     # Collect expired select waiters. Each waiter is registered under multiple
@@ -4280,16 +2692,16 @@ defmodule Coflux.Orchestration.Server do
     state =
       Enum.reduce(to_timeout, state, fn entry, state ->
         Enum.reduce(entry.keys, state, fn key, state ->
-          remove_waiter_from_key(state, key, entry.request_id)
+          Waiters.remove_waiter_from_key(state, key, entry.request_id)
         end)
       end)
 
     # Send timeout responses to poll waiters
     state =
       Enum.reduce(to_timeout, state, fn entry, state ->
-        case find_session_for_execution(state, entry.from_ext_id) do
+        case State.session_for_execution(state, entry.from_ext_id) do
           {:ok, session_id} ->
-            send_session(state, session_id, {:result, entry.request_id, :timeout})
+            Effects.command(state, session_id, Commands.result(entry.request_id, :timeout))
 
           :error ->
             state
@@ -4305,7 +2717,7 @@ defmodule Coflux.Orchestration.Server do
         dependency_keys =
           Enum.flat_map(entry.keys, fn
             {:input, input_ext_id} ->
-              with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_ext_id),
+              with {:ok, run_ext_id, input_number} <- Ids.parse_input(input_ext_id),
                    {:ok, id} <-
                      Inputs.get_input_id_by_run_and_number(state.db, run_ext_id, input_number) do
                 [{:input, id}]
@@ -4314,7 +2726,7 @@ defmodule Coflux.Orchestration.Server do
               end
 
             {:execution, dep_ext_id} ->
-              case resolve_internal_execution_id(state, dep_ext_id) do
+              case Archives.resolve_internal_execution_id(state, dep_ext_id) do
                 {:ok, id} -> [{:execution, id}]
                 {:error, :not_found} -> []
               end
@@ -4324,7 +2736,7 @@ defmodule Coflux.Orchestration.Server do
           end)
 
         {:ok, state} =
-          process_result(
+          Lifecycle.process_result(
             state,
             from_execution_id,
             {:suspended, nil, dependency_keys}
@@ -4335,17 +2747,16 @@ defmodule Coflux.Orchestration.Server do
 
     state =
       state
-      |> reschedule_expire_waiters()
-      |> flush_notifications()
+      |> Waiters.reschedule_expire_waiters()
 
     {:noreply, state}
   end
 
-  def handle_info(
-        {task_ref, {run_bloom, cache_bloom, idempotency_bloom}},
-        state
-      )
-      when task_ref == state.index_task do
+  defp dispatch_info(
+         {task_ref, {run_bloom, cache_bloom, idempotency_bloom}},
+         state
+       )
+       when task_ref == state.index_task do
     Process.demonitor(task_ref, [:flush])
     [epoch_id | rest] = state.index_queue
 
@@ -4362,15 +2773,15 @@ defmodule Coflux.Orchestration.Server do
     state =
       %{state | epoch_index: epoch_index, epochs: epochs, index_task: nil, index_queue: rest}
 
-    {:noreply, maybe_start_index_build(state)}
+    {:noreply, Rotation.maybe_start_index_build(state)}
   end
 
-  def handle_info({task_ref, result}, state) when is_map_key(state.launcher_tasks, task_ref) do
-    state = process_launcher_result(state, task_ref, {:ok, result})
+  defp dispatch_info({task_ref, result}, state) when is_map_key(state.launcher_tasks, task_ref) do
+    state = Fleet.process_launcher_result(state, task_ref, {:ok, result})
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+  defp dispatch_info({:DOWN, ref, :process, pid, _reason}, state) do
     cond do
       Map.has_key?(state.connections, ref) ->
         {{^pid, session_id}, state} = pop_in(state.connections[ref])
@@ -4385,11 +2796,12 @@ defmodule Coflux.Orchestration.Server do
                   [Access.key(:sessions), session_id],
                   &Map.put(&1, :connection, nil)
                 )
-                |> schedule_session_expiry(session_id, session.reconnection_timeout)
-                |> notify_listeners(
-                  {:sessions, workspace_external_id(state, session.workspace_id)},
-                  {:connected, session.external_id, false}
-                )
+                |> Fleet.schedule_session_expiry(session_id, session.reconnection_timeout)
+                |> Effects.emit(%SessionConnected{
+                  workspace: State.workspace_external_id(state, session.workspace_id),
+                  session: session.external_id,
+                  connected: false
+                })
 
               state
 
@@ -4397,20 +2809,18 @@ defmodule Coflux.Orchestration.Server do
               state
           end
 
-        state = flush_notifications(state)
-
         {:noreply, state}
 
       Map.has_key?(state.listeners, ref) ->
         state =
           state
-          |> remove_listener(ref)
-          |> maybe_schedule_idle_shutdown()
+          |> Listeners.remove_listener(ref)
+          |> Listeners.maybe_schedule_idle_shutdown()
 
         {:noreply, state}
 
       Map.has_key?(state.launcher_tasks, ref) ->
-        state = process_launcher_result(state, ref, :error)
+        state = Fleet.process_launcher_result(state, ref, :error)
         {:noreply, state}
 
       ref == state.index_task ->
@@ -4419,7 +2829,7 @@ defmodule Coflux.Orchestration.Server do
         [failed | rest] = state.index_queue
         Logger.warning("index build failed for epoch #{failed} in project #{state.project_id}")
         state = %{state | index_task: nil, index_queue: rest}
-        state = maybe_start_index_build(state)
+        state = Rotation.maybe_start_index_build(state)
         {:noreply, state}
 
       true ->
@@ -4427,6 +2837,7 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  @impl true
   def terminate(_reason, state) do
     if state.idle_timer do
       {timer, _ref} = state.idle_timer
@@ -4439,2443 +2850,6 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Private helper functions
-
-  # Follow the spawned result chain to find the currently-active execution.
-  # When execution A spawns B (which spawns C, etc.), we need to find the
-  # execution that doesn't yet have a result.
-  defp resolve_active_execution(db, execution_id) do
-    case Results.get_result(db, execution_id) do
-      {:ok, {{:spawned, successor_id}, _created_at, _completion_created_at, _created_by}} ->
-        resolve_active_execution(db, successor_id)
-
-      _ ->
-        execution_id
-    end
-  end
-
-  # Cancel a single execution: record :cancelled, abort if assigned, cancel descendants.
-  #
-  # `streams: :step` (the default) closes every open stream of the step in
-  # the workspace, so a consumer waiting on a paused stream is released when
-  # the pending successor is cancelled. `streams: :registered` closes only
-  # the streams the cancelled execution itself produced into — used by
-  # re-run, where cancelling a never-started successor must leave the
-  # paused stream for the new attempt to continue.
-  defp do_cancel_execution(state, execution_id, workspace_id, opts \\ []) do
-    # Write the completion row (kind = cancelled) and fire notifications.
-    # The result row is left untouched: if the worker already produced a
-    # value, it stays; otherwise nothing is recorded. UI shows "cancelled"
-    # via the completion kind, with any prior result visible in the
-    # sidebar.
-    state =
-      case record_and_notify_result(state, execution_id, :cancelled, nil, nil, opts) do
-        {:ok, state} -> state
-        {:error, :already_recorded} -> state
-        {:error, :already_completed} -> state
-      end
-
-    # Close any open streams so iterating consumers stop waiting. Any
-    # subsequent `append_item` from the producer will fail with `:closed`,
-    # signalling the worker to stop. Recorded as :lifecycle — consumers
-    # derive the ExecutionCancelled error from the recorded result.
-    state =
-      close_open_streams(state, execution_id, :lifecycle, Keyword.get(opts, :streams, :step))
-
-    state =
-      case Runs.get_execution_key(state.db, execution_id) do
-        {:ok, {r, s, a}} ->
-          abort_execution(state, execution_external_id(r, s, a))
-
-        {:error, :not_found} ->
-          state
-      end
-
-    cancel_descendants(state, execution_id, workspace_id)
-  end
-
-  # Only an execution or an input can be cancelled. A catalog entry is a
-  # select handle with nothing pending behind it, and anything else is
-  # malformed; a request naming either is refused before any handle in it
-  # is acted on, since cancellation is meant to be all-or-nothing.
-  defp cancellable_handle?(%{"type" => type, "id" => id})
-       when type in ["execution", "input"] and is_binary(id),
-       do: true
-
-  defp cancellable_handle?(_handle), do: false
-
-  # Dispatch a single handle cancellation. Used by the unified cancel RPC
-  # and by maybe_cancel_remaining on select.
-  defp cancel_handle(state, %{"type" => "execution", "id" => ext_id}, workspace_id) do
-    case resolve_internal_execution_id(state, ext_id) do
-      {:ok, execution_id} ->
-        active_id = resolve_active_execution(state.db, execution_id)
-        do_cancel_execution(state, active_id, workspace_id)
-
-      {:error, :not_found} ->
-        state
-    end
-  end
-
-  defp cancel_handle(state, %{"type" => "input", "id" => ext_id}, _workspace_id) do
-    do_cancel_input(state, ext_id)
-  end
-
-  # Mark an input as cancelled. Parallels dismiss_input but with a distinct
-  # terminal state; notifies select waiters with :cancelled, resumes any
-  # suspended executions, and notifies topic subscribers.
-  defp do_cancel_input(state, input_external_id) do
-    case find_and_copy_input_from_archives(state, input_external_id) do
-      {:ok, nil} ->
-        state
-
-      {:ok,
-       {input_id, workspace_id, _key, _prompt_id, _schema_id, _title, _actions, _initial,
-        _requires_tag_set_id, _created_at, _run_id}} ->
-        now = System.system_time(:millisecond)
-
-        case Inputs.record_input_response(
-               state.db,
-               input_id,
-               Inputs.type_cancelled(),
-               nil,
-               now,
-               nil
-             ) do
-          {:ok, true} ->
-            state =
-              notify_select_waiters(state, {:input, input_external_id}, :cancelled)
-
-            state = update_dependencies_on_input(state, input_id)
-
-            {:ok, run_external_id, _input_number} =
-              parse_input_external_id(input_external_id)
-
-            ws_ext_id = workspace_external_id(state, workspace_id)
-
-            response = build_input_response(state.db, input_id)
-
-            state
-            |> notify_listeners(
-              {:run, run_external_id},
-              {:input_response, input_external_id, :cancelled}
-            )
-            |> notify_dependent_runs(input_id, input_external_id, :cancelled, run_external_id)
-            |> notify_listeners(
-              {:inputs, ws_ext_id},
-              {:input_responded, input_external_id, now}
-            )
-            |> notify_listeners(
-              {:input, input_external_id},
-              {:response, response}
-            )
-
-          {:error, :already_responded} ->
-            state
-        end
-    end
-  end
-
-  # Cancel all active (unresolved) executions for a step in a workspace.
-  defp cancel_active_step_executions(state, step_id, workspace_id, opts) do
-    {:ok, active_execution_ids} =
-      Runs.get_active_execution_ids_for_step(state.db, step_id, workspace_id)
-
-    Enum.reduce(active_execution_ids, state, fn exec_id, state ->
-      do_cancel_execution(state, exec_id, workspace_id, opts)
-    end)
-  end
-
-  # Cancel all descendant executions of a given execution (excludes the
-  # execution itself). Follows both step parent-child links and spawned
-  # result chains via the recursive CTE in get_execution_descendants.
-  defp cancel_descendants(state, execution_id, workspace_id) do
-    {:ok, executions} = Runs.get_execution_descendants(state.db, execution_id)
-
-    executions
-    |> Enum.filter(fn {exec_id, _module, _assigned_at, _completed_at, exec_workspace_id} ->
-      exec_id != execution_id && exec_workspace_id == workspace_id
-    end)
-    |> Enum.reduce(state, fn {exec_id, _module, _assigned_at, completed_at, _}, state ->
-      if !completed_at do
-        do_cancel_execution(state, exec_id, workspace_id)
-      else
-        state
-      end
-    end)
-  end
-
-  defp require_workspace(state, workspace_external_id, access \\ nil) do
-    case Map.fetch(state.workspace_external_ids, workspace_external_id) do
-      {:ok, workspace_id} ->
-        workspace = Map.fetch!(state.workspaces, workspace_id)
-
-        cond do
-          workspace.state == :archived ->
-            {:error, :workspace_invalid}
-
-          access != nil and not operator?(access[:workspaces], workspace.name) ->
-            {:error, :forbidden}
-
-          true ->
-            {:ok, workspace_id, workspace}
-        end
-
-      :error ->
-        {:error, :workspace_invalid}
-    end
-  end
-
-  defp resolve_workspace_external_id(state, workspace_external_id) do
-    case Map.fetch(state.workspace_external_ids, workspace_external_id) do
-      {:ok, workspace_id} -> {:ok, workspace_id}
-      :error -> {:error, :workspace_invalid}
-    end
-  end
-
-  defp resolve_optional_workspace(_state, nil), do: {:ok, nil}
-
-  defp resolve_optional_workspace(state, external_id) do
-    case Map.fetch(state.workspace_external_ids, external_id) do
-      {:ok, workspace_id} -> {:ok, workspace_id}
-      :error -> {:error, %{base_id: "invalid"}}
-    end
-  end
-
-  defp operator?(:all, _workspace), do: true
-
-  defp operator?(patterns, workspace) do
-    Enum.any?(patterns, &workspace_matches?(workspace, &1))
-  end
-
-  defp workspace_matches?(_workspace, "*"), do: true
-  defp workspace_matches?(workspace, workspace), do: true
-
-  defp workspace_matches?(workspace, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
-    else
-      false
-    end
-  end
-
-  defp check_operator_access(nil, _name), do: :ok
-
-  defp check_operator_access(access, name) do
-    if operator?(access[:workspaces], name), do: :ok, else: {:error, :name_restricted}
-  end
-
-  defp check_rename_allowed(_access, nil), do: :ok
-  defp check_rename_allowed(nil, _name), do: :ok
-
-  defp check_rename_allowed(access, new_name) do
-    if operator?(access[:workspaces], new_name), do: :ok, else: {:error, :name_restricted}
-  end
-
-  defp verify_session_secret(secret, secret_hash) do
-    if Sessions.verify_secret(secret, secret_hash), do: :ok, else: {:error, :session_invalid}
-  end
-
-  defp require_workspace_match(workspace_id, expected_workspace_id) do
-    if workspace_id == expected_workspace_id, do: :ok, else: {:error, :workspace_mismatch}
-  end
-
-  defp is_workspace_ancestor?(state, maybe_ancestor_id, workspace_id) do
-    # TODO: avoid cycle?
-    workspace = Map.fetch!(state.workspaces, workspace_id)
-
-    cond do
-      !workspace.base_id ->
-        false
-
-      workspace.base_id == maybe_ancestor_id ->
-        true
-
-      true ->
-        is_workspace_ancestor?(state, maybe_ancestor_id, workspace.base_id)
-    end
-  end
-
-  # The workspace inheritance chain ordered nearest-first (the workspace
-  # itself, then its bases). Checkpoint reads walk this and stop at the first
-  # workspace that has any state, so the nearest scope wins outright.
-  defp get_workspace_chain(state, workspace_id, ids \\ []) do
-    workspace = Map.fetch!(state.workspaces, workspace_id)
-    ids = [workspace_id | ids]
-
-    if workspace.base_id do
-      get_workspace_chain(state, workspace.base_id, ids)
-    else
-      Enum.reverse(ids)
-    end
-  end
-
-  defp get_cache_workspace_ids(state, workspace_id, ids \\ []) do
-    workspace = Map.fetch!(state.workspaces, workspace_id)
-
-    if workspace.base_id do
-      get_cache_workspace_ids(state, workspace.base_id, [workspace_id | ids])
-    else
-      [workspace_id | ids]
-    end
-  end
-
-  defp resolve_worker_external_id(state, worker_external_id) do
-    case Map.fetch(state.worker_external_ids, worker_external_id) do
-      {:ok, worker_id} -> {:ok, worker_id}
-      :error -> {:error, :no_worker}
-    end
-  end
-
-  defp lookup_worker(state, worker_id, expected_workspace_id) do
-    if worker_id do
-      case Map.fetch(state.workers, worker_id) do
-        :error ->
-          {:error, :no_worker}
-
-        {:ok, worker} ->
-          if worker.workspace_id != expected_workspace_id do
-            {:error, :no_worker}
-          else
-            {:ok, worker}
-          end
-      end
-    else
-      {:ok, nil}
-    end
-  end
-
-  defp remove_session(state, session_id) do
-    {:ok, _} = Sessions.expire_session(state.db, session_id)
-    # Drop any stream subscriptions this session held — consumer has gone
-    # away, so there's no one to push to. Do this before popping the
-    # session from state.sessions since drop_session_subscriptions reads
-    # the session's live execution set.
-    state = drop_session_subscriptions(state, session_id)
-    {session, state} = pop_in(state.sessions[session_id])
-    state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
-
-    # starting/executing now contain external IDs - resolve to internal for process_result.
-    # Session removal means no more notify_terminated for these executions, so we
-    # write both results + completion here.
-    state =
-      session.executing
-      |> MapSet.union(session.starting)
-      |> Enum.reduce(state, fn ext_id, state ->
-        execution_id = Map.fetch!(state.execution_ids, ext_id)
-        {:ok, state} = process_result(state, execution_id, :abandoned)
-        complete_execution(state, execution_id)
-      end)
-      |> Map.update!(:targets, fn all_targets ->
-        Enum.reduce(
-          session.targets,
-          all_targets,
-          fn {module_name, module_targets}, all_targets ->
-            Enum.reduce(module_targets, all_targets, fn target_name, all_targets ->
-              module = Map.fetch!(all_targets, module_name)
-              target = Map.fetch!(module, target_name)
-              target = Map.update!(target, :session_ids, &MapSet.delete(&1, session_id))
-
-              if Enum.empty?(target.session_ids) do
-                module = Map.delete(module, target_name)
-
-                if Enum.empty?(module) do
-                  Map.delete(all_targets, module_name)
-                else
-                  Map.put(all_targets, module_name, module)
-                end
-              else
-                module = Map.put(module, target_name, target)
-                Map.put(all_targets, module_name, module)
-              end
-            end)
-          end
-        )
-      end)
-      |> Map.update!(:session_ids, &Map.delete(&1, session.external_id))
-      |> Map.update!(:waiting, fn waiting ->
-        # waiting keys are tagged tuples ({:execution, _} | {:input, _});
-        # each entry is a select waiter map keyed by from_ext_id (external).
-        waiting
-        |> Enum.map(fn {waiting_key, entries} ->
-          {waiting_key,
-           Enum.reject(entries, fn entry ->
-             MapSet.member?(session.starting, entry.from_ext_id) ||
-               MapSet.member?(session.executing, entry.from_ext_id)
-           end)}
-        end)
-        |> Enum.reject(fn {_waiting_key, entries} -> entries == [] end)
-        |> Map.new()
-      end)
-      |> notify_listeners(
-        {:sessions, workspace_external_id(state, session.workspace_id)},
-        {:session, session.external_id, nil}
-      )
-
-    state =
-      if session.worker_id do
-        case Map.fetch(state.workers, session.worker_id) do
-          {:ok, worker} ->
-            if is_nil(worker.data) do
-              # Worker never got a launch result — the launch was in-flight when
-              # the server crashed. Deactivate it so it doesn't sit forever.
-              deactivate_worker(state, session.worker_id, "launch_incomplete")
-            else
-              put_in(state, [Access.key(:workers), session.worker_id, :session_id], nil)
-            end
-
-          :error ->
-            state
-        end
-      else
-        state
-      end
-
-    state
-  end
-
-  defp split_executions(executions, now) do
-    {executions_due, executions_future, executions_defer, _} =
-      executions
-      |> Enum.reverse()
-      |> Enum.reduce(
-        {[], [], [], %{}},
-        fn execution, {due, future, defer, defer_keys} ->
-          defer_key =
-            execution.defer_key &&
-              {execution.module, execution.target, execution.workspace_id, execution.defer_key}
-
-          defer_id = defer_key && Map.get(defer_keys, defer_key)
-
-          if defer_id do
-            {due, future,
-             [{execution.execution_id, defer_id, execution.run_id, execution.module} | defer],
-             defer_keys}
-          else
-            defer_keys =
-              if defer_key do
-                Map.put(defer_keys, defer_key, execution.execution_id)
-              else
-                defer_keys
-              end
-
-            if is_nil(execution.execute_after) || execution.execute_after <= now do
-              {[execution | due], future, defer, defer_keys}
-            else
-              {due, [execution | future], defer, defer_keys}
-            end
-          end
-        end
-      )
-
-    {executions_due, executions_future, executions_defer}
-  end
-
-  defp schedule_run(state, module, target_name, type, arguments, workspace_id, opts) do
-    cache_workspace_ids = get_cache_workspace_ids(state, workspace_id)
-    created_by = Keyword.get(opts, :created_by)
-
-    case Runs.schedule_run(
-           state.db,
-           module,
-           target_name,
-           type,
-           arguments,
-           workspace_id,
-           cache_workspace_ids,
-           Keyword.put(opts, :created_by, created_by)
-         ) do
-      {:ok,
-       %{
-         step_id: step_id,
-         external_run_id: external_run_id,
-         step_number: step_number,
-         execution_id: execution_id,
-         attempt: attempt,
-         created_at: created_at
-       }} ->
-        delay = Keyword.get(opts, :delay, 0)
-        execute_after = if delay > 0, do: created_at + delay
-        execute_at = execute_after || created_at
-
-        principal =
-          case Principals.get_principal(state.db, created_by) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        execution_external_id =
-          execution_external_id(external_run_id, step_number, attempt)
-
-        ws_ext_id = workspace_external_id(state, workspace_id)
-
-        # Compute and register pending dependencies
-        wait_for = Keyword.get(opts, :wait_for) || []
-        requires = Keyword.get(opts, :requires) || %{}
-
-        {state, pending_dependencies} =
-          if step_id do
-            {pending_dependencies, _group} =
-              pending = compute_pending_dependencies(state.db, execution_id, wait_for, step_id)
-
-            state = register_pending_dependencies(state, execution_id, pending)
-
-            {state, pending_dependencies}
-          else
-            {state, MapSet.new()}
-          end
-
-        state =
-          state
-          |> put_in([Access.key(:execution_ids), execution_external_id], execution_id)
-          |> track_run_execution(external_run_id, execution_id, module, target_name)
-          |> notify_listeners(
-            {:workflow, module, target_name, ws_ext_id},
-            {:run, external_run_id, created_at, principal}
-          )
-          |> notify_listeners(
-            {:modules, ws_ext_id},
-            {:scheduled, {module, target_name}, external_run_id, execution_external_id,
-             execute_at}
-          )
-          |> notify_listeners(
-            {:workflow, module, target_name, ws_ext_id},
-            {:scheduled, external_run_id, execution_external_id}
-          )
-          |> notify_listeners(
-            {:queue, ws_ext_id},
-            {:scheduled, execution_external_id, module, target_name, external_run_id, step_number,
-             attempt, execute_after, created_at,
-             queue_dependencies(state.db, pending_dependencies), requires}
-          )
-          |> notify_listeners(
-            {:targets, ws_ext_id},
-            {:step, module, target_name, type, external_run_id, step_number, attempt}
-          )
-
-        {:ok, external_run_id, step_number, execution_id, state}
-    end
-  end
-
-  defp rerun_step(state, step, workspace_id, opts) do
-    execute_after = Keyword.get(opts, :execute_after, nil)
-    dependency_keys = Keyword.get(opts, :dependency_keys, [])
-    created_by = Keyword.get(opts, :created_by)
-    catalog_sequence = Keyword.get(opts, :catalog_sequence)
-
-    # Separate execution, input and stream dependencies.
-    #
-    # A stream wait arrives naming the stream externally, and is persisted
-    # against a *stream ref* — the same indirection subscription lineage
-    # uses, so the edge survives epoch rotation. A stream that can't be
-    # resolved is dropped rather than recorded: gating on it would strand
-    # the successor forever.
-    {exec_deps, input_deps, stream_waits, catalog_waits} =
-      Enum.reduce(dependency_keys, {[], [], [], []}, fn
-        {:execution, id}, {execs, inputs, streams, catalog} ->
-          {[id | execs], inputs, streams, catalog}
-
-        {:input, id}, {execs, inputs, streams, catalog} ->
-          {execs, [id | inputs], streams, catalog}
-
-        {:stream, external_id, sequence}, {execs, inputs, streams, catalog} ->
-          case resolve_stream_id(state, external_id) do
-            {:ok, stream_id} ->
-              case Streams.create_stream_ref_for(state.db, stream_id) do
-                {:ok, ref_id} -> {execs, inputs, [{ref_id, sequence} | streams], catalog}
-                {:error, :not_found} -> {execs, inputs, streams, catalog}
-              end
-
-            {:error, :not_found} ->
-              {execs, inputs, streams, catalog}
-          end
-
-        {:catalog, path, number}, {execs, inputs, streams, catalog} ->
-          {execs, inputs, streams, [{path, number} | catalog]}
-      end)
-
-    # Convert internal dependency execution IDs to execution_ref IDs
-    dependency_ref_ids =
-      Enum.map(exec_deps, fn dep_id ->
-        {:ok, ref_id} = Runs.create_execution_ref_for(state.db, dep_id)
-        ref_id
-      end)
-
-    # TODO: only get run if needed for notify?
-    {:ok, run} = Runs.get_run_by_id(state.db, step.run_id)
-
-    case Runs.rerun_step(
-           state.db,
-           step.id,
-           workspace_id,
-           execute_after,
-           dependency_ref_ids,
-           input_dependency_ids: input_deps,
-           stream_waits: stream_waits,
-           created_by: created_by,
-           catalog_sequence: catalog_sequence
-         ) do
-      {:ok, execution_id, attempt, created_at} ->
-        # A catalog wait is keyed by path rather than by a ref, so it is
-        # written directly. Before the gate is computed, since it reads
-        # these rows.
-        Enum.each(catalog_waits, fn {path, number} ->
-          :ok = Catalog.record_wait(state.db, execution_id, path, number)
-        end)
-
-        {run_module, run_target} =
-          case get_run_workflow(state, run.external_id) do
-            {_, _} = workflow ->
-              workflow
-
-            nil ->
-              {:ok, workflow} = Runs.get_run_target(state.db, run.id)
-              workflow
-          end
-
-        state = track_run_execution(state, run.external_id, execution_id, run_module, run_target)
-
-        execute_at = execute_after || created_at
-
-        principal =
-          case Principals.get_principal(state.db, created_by) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        dependencies =
-          Map.new(dependency_ref_ids, fn ref_id ->
-            {ext_id, _module, _target} = execution = resolve_execution_ref(state.db, ref_id)
-            {ext_id, {:result, execution}}
-          end)
-
-        # Compute and register pending dependencies
-        {pending_dependencies, _group} =
-          pending =
-          compute_pending_dependencies(state.db, execution_id, step.wait_for || [], step.id)
-
-        state = register_pending_dependencies(state, execution_id, pending)
-
-        dependencies =
-          Map.merge(
-            build_argument_dependencies(state.db, step.id, step.wait_for),
-            dependencies
-          )
-
-        unresolved_dependencies = unresolved_dependency_ids(state.db, execution_id)
-
-        step_requires =
-          if step.requires_tag_set_id do
-            {:ok, tag_set} = TagSets.get_tag_set(state.db, step.requires_tag_set_id)
-            tag_set
-          else
-            %{}
-          end
-
-        run_requires =
-          if run.requires_tag_set_id do
-            {:ok, tag_set} = TagSets.get_tag_set(state.db, run.requires_tag_set_id)
-            tag_set
-          else
-            %{}
-          end
-
-        requires =
-          run_requires
-          |> Map.merge(step_requires)
-          |> Map.reject(fn {_key, values} -> values == [] end)
-
-        execution_external_id =
-          execution_external_id(run.external_id, step.number, attempt)
-
-        ws_ext_id = workspace_external_id(state, workspace_id)
-
-        {:ok, checkpoints} =
-          Checkpoints.get_effective(
-            state.db,
-            step.id,
-            get_workspace_chain(state, workspace_id),
-            attempt
-          )
-
-        state =
-          state
-          |> put_in([Access.key(:execution_ids), execution_external_id], execution_id)
-          |> notify_listeners(
-            {:run, run.external_id},
-            {:execution, step.number, attempt, execution_external_id, ws_ext_id, created_at,
-             execute_after, dependencies, principal, enrich_checkpoints(checkpoints, state.db),
-             unresolved_dependencies}
-          )
-          |> notify_listeners(
-            {:modules, ws_ext_id},
-            {:scheduled, {run_module, run_target}, run.external_id, execution_external_id,
-             execute_at}
-          )
-          |> notify_listeners(
-            {:workflow, run_module, run_target, ws_ext_id},
-            {:scheduled, run.external_id, execution_external_id}
-          )
-          |> notify_listeners(
-            {:queue, ws_ext_id},
-            {:scheduled, execution_external_id, step.module, step.target, run.external_id,
-             step.number, attempt, execute_after, created_at,
-             queue_dependencies(state.db, pending_dependencies), requires}
-          )
-          |> notify_listeners(
-            {:targets, ws_ext_id},
-            {:step, step.module, step.target, step.type, run.external_id, step.number, attempt}
-          )
-
-        # Announce the stream waits `rerun_step` recorded. They are lineage
-        # edges against an execution that hasn't run yet, so without this
-        # nothing announces them until it subscribes — and it may never get
-        # that far. A topic opened later reads them from the snapshot.
-        state =
-          Enum.reduce(stream_waits, state, fn {stream_ref_id, _sequence}, state ->
-            {:ok, {stream_run_ext_id, stream_step_number, index, module, target}} =
-              Streams.get_stream_ref(state.db, stream_ref_id)
-
-            notify_listeners(
-              state,
-              {:run, run.external_id},
-              {:stream_dependency, execution_external_id,
-               stream_external_id(stream_run_ext_id, stream_step_number, index), module, target,
-               MapSet.member?(
-                 unresolved_dependencies,
-                 stream_external_id(stream_run_ext_id, stream_step_number, index)
-               )}
-            )
-          end)
-
-        state =
-          Enum.reduce(catalog_waits, state, fn {path, number}, state ->
-            notify_listeners(
-              state,
-              {:run, run.external_id},
-              {:catalog_wait, execution_external_id, path, number,
-               MapSet.member?(unresolved_dependencies, catalog_wait_key(path, number))}
-            )
-          end)
-
-        # Notify run topic about input dependencies for this execution
-        state =
-          Enum.reduce(input_deps, state, fn input_id, state ->
-            case Inputs.get_input_by_id(state.db, input_id) do
-              {:ok,
-               {run_ext_id, input_number, _key, _prompt_id, _schema_id, input_title, _actions,
-                _requires_tag_set_id, _created_at}} ->
-                input_ext_id = input_external_id(run_ext_id, input_number)
-
-                response_type =
-                  case Inputs.get_input_response(state.db, input_id) do
-                    {:ok, nil} -> nil
-                    {:ok, {:value, _, _, _}} -> :value
-                    {:ok, {:dismissed, _, _}} -> :dismissed
-                    {:ok, {:cancelled, _, _}} -> :cancelled
-                  end
-
-                notify_listeners(
-                  state,
-                  {:run, run.external_id},
-                  {:input_dependency, execution_external_id, input_ext_id, input_title,
-                   response_type, MapSet.member?(unresolved_dependencies, input_ext_id)}
-                )
-
-              _ ->
-                state
-            end
-          end)
-
-        principal =
-          case run.created_by do
-            %{type: type, external_id: external_id} -> %{type: type, external_id: external_id}
-            nil -> nil
-          end
-
-        state =
-          case step.type do
-            :workflow ->
-              notify_listeners(
-                state,
-                {:workflow, run_module, run_target, ws_ext_id},
-                {:run, run.external_id, run.created_at, principal}
-              )
-
-            _other ->
-              state
-          end
-
-        send(self(), :tick)
-
-        {:ok, execution_id, attempt, state}
-    end
-  end
-
-  defp result_retryable?(result) do
-    case result do
-      {:error, _, _, _, false} -> false
-      {:error, _, _, _, _} -> true
-      :abandoned -> true
-      :crashed -> true
-      :timeout -> true
-      _ -> false
-    end
-  end
-
-  defp workspace_external_id(state, workspace_id) do
-    state.workspaces[workspace_id].external_id
-  end
-
-  defp decode_input_response_type(nil), do: nil
-  defp decode_input_response_type(1), do: :value
-  defp decode_input_response_type(2), do: :dismissed
-  defp decode_input_response_type(3), do: :cancelled
-
-  defp build_input_response(db, input_id) do
-    case Inputs.get_input_response(db, input_id) do
-      {:ok, nil} ->
-        nil
-
-      {:ok, {:value, value, created_at, created_by_id}} ->
-        principal =
-          case Principals.get_principal(db, created_by_id) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        %{type: :value, value: value, created_at: created_at, created_by: principal}
-
-      {:ok, {:dismissed, created_at, created_by_id}} ->
-        principal =
-          case Principals.get_principal(db, created_by_id) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        %{type: :dismissed, value: nil, created_at: created_at, created_by: principal}
-
-      {:ok, {:cancelled, created_at, created_by_id}} ->
-        principal =
-          case Principals.get_principal(db, created_by_id) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        %{type: :cancelled, value: nil, created_at: created_at, created_by: principal}
-    end
-  end
-
-  defp build_input_details(
-         db,
-         input_id,
-         key,
-         prompt_id,
-         schema_id,
-         title,
-         actions,
-         initial,
-         requires_tag_set_id,
-         created_at
-       ) do
-    {:ok, template, placeholder_values} = Inputs.get_input_prompt(db, prompt_id)
-
-    schema =
-      if schema_id do
-        {:ok, s} = Inputs.get_input_schema(db, schema_id)
-        s
-      end
-
-    response = build_input_response(db, input_id)
-
-    parsed_actions =
-      if actions do
-        Jason.decode!(actions)
-      end
-
-    resolved_placeholders =
-      Map.new(placeholder_values, fn {k, v} -> {k, build_value(v, db)} end)
-
-    requires = resolve_tag_set(db, requires_tag_set_id)
-
-    %{
-      key: key,
-      template: template,
-      placeholders: resolved_placeholders,
-      schema: schema,
-      initial: initial,
-      title: title,
-      actions: parsed_actions,
-      requires: requires,
-      created_at: created_at,
-      response: response
-    }
-  end
-
-  defp resolve_tag_set(_db, nil), do: %{}
-
-  defp resolve_tag_set(db, tag_set_id) do
-    case TagSets.get_tag_set(db, tag_set_id) do
-      {:ok, tag_set} -> tag_set
-    end
-  end
-
-  defp do_rotate_epoch(state) do
-    epoch_id = Epochs.next_epoch_id(state.epochs)
-
-    # Write placeholder entry to index first (null value)
-    epoch_index = Index.add_epoch(state.epoch_index, epoch_id, System.os_time(:millisecond))
-    :ok = Index.save(epoch_index)
-
-    # Live stream state (subscriptions, producers) is keyed by internal
-    # ids, which the copy below reassigns. Capture it by external id from
-    # the old database first, and rebuild it once the runs are copied.
-    stream_state = capture_stream_state(state)
-
-    # Now rotate
-    {:ok, new_epochs, old_db} = Epochs.rotate(state.epochs, epoch_id)
-    new_db = Epochs.active_db(new_epochs)
-
-    id_mappings = Epoch.copy_config(old_db, new_db)
-
-    state
-    |> Map.put(:epochs, new_epochs)
-    |> Map.put(:db, new_db)
-    |> Map.put(:epoch_index, epoch_index)
-    |> Map.update!(:index_queue, &(&1 ++ [epoch_id]))
-    |> remap_config_ids(id_mappings)
-    |> copy_in_flight_runs()
-    |> restore_stream_state(stream_state)
-    |> Map.put(:pending_dependencies, %{})
-    |> Map.put(:stream_dependency_keys, %{})
-    |> Map.put(:dependency_waiters, %{})
-    |> Map.put(:dependency_groups, %{})
-    |> initialize_pending_dependencies()
-    # Execution ids are reassigned by the copy, so the ledger is rebuilt
-    # against the new database rather than remapped.
-    |> Map.put(:concurrency_gated, %{})
-    |> load_concurrency_permits()
-    |> maybe_start_index_build()
-  end
-
-  # Everything in `stream_subscriptions` / `stream_subscribers` /
-  # `stream_producers` that names a stream or an execution by internal id,
-  # re-expressed by external id so it can be re-resolved after the copy.
-  defp capture_stream_state(state) do
-    subscriptions =
-      Enum.flat_map(state.stream_subscriptions, fn {{_consumer_id, subscription_id}, sub} ->
-        case stream_external_id_for(state.db, sub.stream_id) do
-          {:ok, stream_ext_id} ->
-            [{sub.consumer_execution_external_id, subscription_id, stream_ext_id, sub}]
-
-          _ ->
-            []
-        end
-      end)
-
-    producers =
-      Enum.flat_map(state.stream_producers, fn {stream_id, producer} ->
-        case stream_external_id_for(state.db, stream_id) do
-          {:ok, stream_ext_id} -> [{stream_ext_id, producer}]
-          _ -> []
-        end
-      end)
-
-    {subscriptions, producers}
-  end
-
-  # The inverse of capture_stream_state, against the new active database.
-  # Consumer executions are resolved through the rebuilt `execution_ids`;
-  # streams through resolve_stream_id, which copies a producer's run
-  # forward if it wasn't in flight (a finished producer whose consumer is
-  # still reading). Anything that can't be resolved is dropped, as it
-  # would have been before.
-  defp restore_stream_state(state, {subscriptions, producers}) do
-    state = %{
-      state
-      | stream_subscriptions: %{},
-        stream_subscribers: %{},
-        stream_producers: %{}
-    }
-
-    state =
-      Enum.reduce(subscriptions, state, fn {consumer_ext_id, subscription_id, stream_ext_id, sub},
-                                           state ->
-        with {:ok, consumer_id} <- Map.fetch(state.execution_ids, consumer_ext_id),
-             {:ok, stream_id} <- resolve_stream_id(state, stream_ext_id) do
-          key = {consumer_id, subscription_id}
-
-          state
-          |> put_in([Access.key(:stream_subscriptions), key], %{sub | stream_id: stream_id})
-          |> update_in(
-            [Access.key(:stream_subscribers), Access.key(stream_id, MapSet.new())],
-            &MapSet.put(&1, key)
-          )
-        else
-          _ -> state
-        end
-      end)
-
-    Enum.reduce(producers, state, fn {stream_ext_id, producer}, state ->
-      case resolve_stream_id(state, stream_ext_id) do
-        {:ok, stream_id} -> put_in(state.stream_producers[stream_id], producer)
-        _ -> state
-      end
-    end)
-  end
-
-  defp copy_in_flight_runs(state) do
-    # Collect all external execution IDs that sessions are currently tracking
-    in_flight_ext_ids =
-      state.sessions
-      |> Enum.flat_map(fn {_sid, session} ->
-        MapSet.to_list(session.executing) ++ MapSet.to_list(session.starting)
-      end)
-
-    # Extract unique run external IDs from the execution references
-    run_ext_ids =
-      in_flight_ext_ids
-      |> Enum.map(fn ext_id ->
-        {:ok, run_ext_id, _step, _attempt} = parse_execution_external_id(ext_id)
-        run_ext_id
-      end)
-      |> Enum.uniq()
-
-    # Copy each run from archives into the active epoch
-    Enum.each(run_ext_ids, fn run_ext_id ->
-      {:ok, _remap} = find_and_copy_run_from_archives(state, run_ext_id)
-    end)
-
-    # Repopulate execution_ids cache from the new active DB
-    execution_ids =
-      Map.new(in_flight_ext_ids, fn ext_id ->
-        {:ok, run_ext_id, step_num, attempt} = parse_execution_external_id(ext_id)
-        {:ok, {id}} = Runs.get_execution_id(state.db, run_ext_id, step_num, attempt)
-        {ext_id, id}
-      end)
-
-    %{state | execution_ids: execution_ids}
-  end
-
-  defp maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
-
-    task =
-      Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
-        {:ok, db} = Exqlite.Sqlite3.open(path)
-
-        try do
-          build_blooms_for_epoch(db)
-        after
-          Exqlite.Sqlite3.close(db)
-        end
-      end)
-
-    %{state | index_task: task.ref}
-  end
-
-  defp maybe_start_index_build(state), do: state
-
-  defp build_blooms_for_epoch(db) do
-    {:ok, run_ids} = Runs.get_all_run_external_ids(db)
-    runs = Bloom.new(max(100, length(run_ids)))
-    runs = Enum.reduce(run_ids, runs, &Bloom.add(&2, &1))
-
-    {:ok, cache_keys_list} = Runs.get_all_cache_keys(db)
-    cache_keys = Bloom.new(max(100, length(cache_keys_list)))
-    cache_keys = Enum.reduce(cache_keys_list, cache_keys, &Bloom.add(&2, &1))
-
-    {:ok, idemp_keys_list} = Runs.get_all_idempotency_keys(db)
-    idempotency_keys = Bloom.new(max(100, length(idemp_keys_list)))
-    idempotency_keys = Enum.reduce(idemp_keys_list, idempotency_keys, &Bloom.add(&2, &1))
-
-    {runs, cache_keys, idempotency_keys}
-  end
-
-  defp remap_config_ids(state, %{} = mappings) do
-    ws_map = Map.get(mappings, :workspace_ids, %{})
-    session_map = Map.get(mappings, :session_ids, %{})
-    worker_map = Map.get(mappings, :worker_ids, %{})
-    pool_map = Map.get(mappings, :pool_ids, %{})
-
-    # Remap workspaces: rekey map, update base_id values
-    workspaces =
-      Map.new(state.workspaces, fn {old_id, workspace} ->
-        new_id = Map.fetch!(ws_map, old_id)
-
-        new_base_id =
-          if workspace.base_id,
-            do: Map.fetch!(ws_map, workspace.base_id),
-            else: nil
-
-        {new_id, %{workspace | base_id: new_base_id}}
-      end)
-
-    # Remap workspace_names: values are workspace IDs
-    workspace_names =
-      Map.new(state.workspace_names, fn {name, old_id} ->
-        {name, Map.fetch!(ws_map, old_id)}
-      end)
-
-    # Remap workspace_external_ids: values are workspace IDs
-    workspace_external_ids =
-      Map.new(state.workspace_external_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.fetch!(ws_map, old_id)}
-      end)
-
-    # Remap pools: rekey by new workspace_id, pool values contain pool_definition_id etc.
-    pools =
-      Map.new(state.pools, fn {old_ws_id, ws_pools} ->
-        new_ws_id = Map.fetch!(ws_map, old_ws_id)
-
-        new_ws_pools =
-          Map.new(ws_pools, fn {pool_name, pool} ->
-            new_pool = %{pool | id: Map.fetch!(pool_map, pool.id)}
-            {pool_name, new_pool}
-          end)
-
-        {new_ws_id, new_ws_pools}
-      end)
-
-    # Remap workers: rekey map, update pool_id, workspace_id, session_id
-    workers =
-      Map.new(state.workers, fn {old_id, worker} ->
-        new_id = Map.fetch!(worker_map, old_id)
-
-        new_worker = %{
-          worker
-          | pool_id: Map.fetch!(pool_map, worker.pool_id),
-            workspace_id: Map.fetch!(ws_map, worker.workspace_id),
-            session_id:
-              if(worker.session_id,
-                do: Map.fetch!(session_map, worker.session_id),
-                else: nil
-              )
-        }
-
-        {new_id, new_worker}
-      end)
-
-    # Remap worker_external_ids: values are worker IDs
-    worker_external_ids =
-      Map.new(state.worker_external_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.fetch!(worker_map, old_id)}
-      end)
-
-    # Remap sessions: rekey map, update workspace_id, worker_id
-    sessions =
-      Map.new(state.sessions, fn {old_id, session} ->
-        new_id = Map.fetch!(session_map, old_id)
-
-        new_session = %{
-          session
-          | workspace_id: Map.fetch!(ws_map, session.workspace_id),
-            worker_id:
-              if(session.worker_id,
-                do: Map.fetch!(worker_map, session.worker_id),
-                else: nil
-              )
-        }
-
-        {new_id, new_session}
-      end)
-
-    # Remap session_ids: values are session IDs
-    session_ids =
-      Map.new(state.session_ids, fn {ext_id, old_id} ->
-        {ext_id, Map.fetch!(session_map, old_id)}
-      end)
-
-    # Remap session_expiries: rekey by new session_id
-    session_expiries =
-      Map.new(state.session_expiries, fn {old_id, expiry} ->
-        {Map.fetch!(session_map, old_id), expiry}
-      end)
-
-    # Remap connections: values contain session_id
-    connections =
-      Map.new(state.connections, fn {ref, {pid, old_session_id}} ->
-        {ref, {pid, Map.fetch!(session_map, old_session_id)}}
-      end)
-
-    # Remap targets: session_ids in MapSets
-    targets =
-      Map.new(state.targets, fn {module, module_targets} ->
-        new_module_targets =
-          Map.new(module_targets, fn {target_name, target} ->
-            new_session_ids =
-              MapSet.new(target.session_ids, fn old_sid ->
-                Map.fetch!(session_map, old_sid)
-              end)
-
-            {target_name, %{target | session_ids: new_session_ids}}
-          end)
-
-        {module, new_module_targets}
-      end)
-
-    %{
-      state
-      | workspaces: workspaces,
-        workspace_names: workspace_names,
-        workspace_external_ids: workspace_external_ids,
-        pools: pools,
-        workers: workers,
-        worker_external_ids: worker_external_ids,
-        sessions: sessions,
-        session_ids: session_ids,
-        session_expiries: session_expiries,
-        connections: connections,
-        targets: targets
-    }
-  end
-
-  defp resolve_internal_execution_id(state, external_id) do
-    case Map.fetch(state.execution_ids, external_id) do
-      {:ok, id} ->
-        {:ok, id}
-
-      :error ->
-        with {:ok, run_ext_id, step_num, attempt} <- parse_execution_external_id(external_id) do
-          # First check active epoch
-          case Runs.get_execution_id(state.db, run_ext_id, step_num, attempt) do
-            {:ok, {id}} when not is_nil(id) ->
-              {:ok, id}
-
-            _ ->
-              # Not in active epoch - search archived epochs and copy forward
-              case find_and_copy_run_from_archives(state, run_ext_id) do
-                {:ok, _remap} ->
-                  # Run was copied to active epoch, now resolve again
-                  case Runs.get_execution_id(state.db, run_ext_id, step_num, attempt) do
-                    {:ok, {id}} when not is_nil(id) -> {:ok, id}
-                    _ -> {:error, :not_found}
-                  end
-
-                :not_found ->
-                  {:error, :not_found}
-              end
-          end
-        else
-          _ -> {:error, :not_found}
-        end
-    end
-  end
-
-  # Groups rows from `Runs.get_active_run_workflows/2` by their root workflow,
-  # as `%{{module, target} => %{run_external_id => %{execution_external_id =>
-  # assigned?}}}` - what the workflow and modules topics need to report whether
-  # each run is queued or running.
-  defp group_active_executions(rows) do
-    Enum.reduce(rows, %{}, fn {run_ext_id, root_module, root_target, step_number, attempt,
-                               _execution_id, assigned},
-                              result ->
-      execution_ext_id = execution_external_id(run_ext_id, step_number, attempt)
-      key = {root_module, root_target}
-      assigned? = assigned == 1
-
-      Map.update(
-        result,
-        key,
-        %{run_ext_id => %{execution_ext_id => assigned?}},
-        fn runs ->
-          Map.update(
-            runs,
-            run_ext_id,
-            %{execution_ext_id => assigned?},
-            &Map.put(&1, execution_ext_id, assigned?)
-          )
-        end
-      )
-    end)
-  end
-
-  # In-flight executions of this workflow's runs, as
-  # `%{run_external_id => %{execution_external_id => assigned?}}` - what the
-  # workflow topic needs to report whether each run is queued or running.
-  # Only the live epoch is considered: a run in an archived epoch can't have
-  # anything still executing.
-  defp get_active_workflow_runs(state, module, target_name, workspace_id) do
-    {:ok, active_executions} = Runs.get_active_run_workflows(state.db, workspace_id)
-
-    active_executions
-    |> group_active_executions()
-    |> Map.get({module, target_name}, %{})
-  end
-
-  defp get_target_runs_across_epochs(state, module, target_name, type, workspace_id, limit) do
-    {:ok, live_runs} =
-      Runs.get_target_runs(state.db, module, target_name, type, workspace_id, limit)
-
-    runs = resolve_run_outcomes(state.db, live_runs)
-
-    if length(runs) < limit do
-      workspace_external_id = workspace_external_id(state, workspace_id)
-
-      unindexed_map =
-        state.epochs
-        |> Epochs.unindexed_dbs()
-        |> Map.new()
-
-      indexed_epoch_ids =
-        Index.indexed_epoch_ids(state.epoch_index, "runs")
-
-      # Merge unindexed + indexed epoch IDs, sort newest first, take depth limit
-      all_epoch_ids =
-        Map.keys(unindexed_map) ++ indexed_epoch_ids
-
-      archives =
-        all_epoch_ids
-        |> Enum.sort(:desc)
-        |> Enum.take(@target_runs_archive_depth)
-        |> Enum.map(fn epoch_id ->
-          case Map.fetch(unindexed_map, epoch_id) do
-            {:ok, db} -> {:open, db}
-            :error -> {:closed, epoch_id}
-          end
-        end)
-
-      seen = MapSet.new(runs, &elem(&1, 0))
-
-      archives
-      |> Enum.reduce_while({runs, seen}, fn archive, {acc, seen} ->
-        remaining = limit - length(acc)
-
-        archive_runs =
-          query_archive_target_runs(
-            state,
-            archive,
-            module,
-            target_name,
-            type,
-            workspace_external_id,
-            remaining
-          )
-
-        new_runs = Enum.reject(archive_runs, &MapSet.member?(seen, elem(&1, 0)))
-        new_seen = MapSet.union(seen, MapSet.new(new_runs, &elem(&1, 0)))
-        combined = acc ++ new_runs
-
-        if length(combined) >= limit do
-          {:halt, {Enum.take(combined, limit), new_seen}}
-        else
-          {:cont, {combined, new_seen}}
-        end
-      end)
-      |> elem(0)
-    else
-      runs
-    end
-  end
-
-  defp query_archive_target_runs(
-         _state,
-         {:open, db},
-         module,
-         target_name,
-         type,
-         workspace_external_id,
-         limit
-       ) do
-    do_query_archive_target_runs(db, module, target_name, type, workspace_external_id, limit)
-  end
-
-  defp query_archive_target_runs(
-         state,
-         {:closed, epoch_id},
-         module,
-         target_name,
-         type,
-         workspace_external_id,
-         limit
-       ) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
-
-    case Exqlite.Sqlite3.open(path) do
-      {:ok, db} ->
-        try do
-          do_query_archive_target_runs(
-            db,
-            module,
-            target_name,
-            type,
-            workspace_external_id,
-            limit
-          )
-        after
-          Exqlite.Sqlite3.close(db)
-        end
-
-      {:error, _} ->
-        []
-    end
-  end
-
-  # Swaps each run's initial execution id for the outcome it resolved to.
-  # Done per-database, since the completion (and any successor it handed off
-  # to) lives in the same epoch as the run.
-  defp resolve_run_outcomes(db, runs) do
-    Enum.map(runs, fn {external_id, created_at, user_ext_id, token_ext_id, initial_execution_id} ->
-      {external_id, created_at, user_ext_id, token_ext_id,
-       Results.run_outcome(db, initial_execution_id)}
-    end)
-  end
-
-  defp do_query_archive_target_runs(db, module, target_name, type, workspace_external_id, limit) do
-    case Workspaces.get_workspace_id(db, workspace_external_id) do
-      {:ok, workspace_id} when not is_nil(workspace_id) ->
-        {:ok, runs} =
-          Runs.get_target_runs(db, module, target_name, type, workspace_id, limit)
-
-        resolve_run_outcomes(db, runs)
-
-      {:ok, nil} ->
-        []
-    end
-  end
-
-  # Runs `fun.(db, run)` against the database the run lives in: the active
-  # epoch, or an archived one found through the epoch index.
-  defp find_run(state, external_run_id, fun) do
-    case Runs.get_run_by_external_id(state.db, external_run_id) do
-      {:ok, run} when not is_nil(run) ->
-        {:ok, fun.(state.db, run)}
-
-      {:ok, nil} ->
-        query_fn = fn archive_db ->
-          case Runs.get_run_by_external_id(archive_db, external_run_id) do
-            {:ok, run} when not is_nil(run) ->
-              {:found, fun.(archive_db, run)}
-
-            {:ok, nil} ->
-              :not_found
-          end
-        end
-
-        bloom_fn = fn epoch_index ->
-          Index.find_epochs(epoch_index, "runs", external_run_id)
-        end
-
-        case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> {:ok, result}
-          :not_found -> :not_found
-        end
-    end
-  end
-
-  # The run's structure: every step and attempt with its status, the links
-  # between them, and groups — but none of the per-execution detail
-  # (results, dependencies, checkpoints, assets, inputs, metrics) or the
-  # per-step arguments and streams. Those are loaded for the parts a topic
-  # shows, through `build_run_details/3`. Nothing here is resolved per
-  # execution: external ids come from the run, step number and attempt.
-  defp build_run_structure(db, run) do
-    parent =
-      if run.parent_ref_id do
-        resolve_execution_ref(db, run.parent_ref_id)
-      end
-
-    run = Map.put(run, :requires, get_tag_set(db, run.requires_tag_set_id))
-
-    {:ok, steps} = Runs.get_run_steps(db, run.id)
-    {:ok, run_executions} = Runs.get_run_executions(db, run.id)
-    {:ok, run_children} = Runs.get_run_children(db, run.id)
-    {:ok, groups} = Runs.get_groups_for_run(db, run.id)
-    {:ok, completions} = Results.get_run_completions(db, run.id)
-    {:ok, workspaces} = Workspaces.get_all_workspaces(db)
-
-    steps_by_id = Map.new(steps, &{&1.id, &1})
-
-    external_ids =
-      Map.new(run_executions, fn {execution_id, step_id, attempt, _, _, _, _, _, _} ->
-        {execution_id,
-         execution_external_id(run.external_id, Map.fetch!(steps_by_id, step_id).number, attempt)}
-      end)
-
-    groups_by_execution =
-      groups
-      |> Enum.group_by(&elem(&1, 0))
-      |> Map.new(fn {execution_id, rows} ->
-        {execution_id,
-         Map.new(rows, fn {_, group_id, name, concurrency} ->
-           {group_id, %{name: name, concurrency: concurrency}}
-         end)}
-      end)
-
-    executions_by_step = Enum.group_by(run_executions, &elem(&1, 1))
-    cache_configs = load_cache_configs(db, steps)
-
-    steps =
-      Map.new(steps, fn step ->
-        # A step's parent is an execution of this run, except for a step
-        # copied in from an archive, which is looked up.
-        parent_execution_external_id =
-          if step.parent_id do
-            Map.get_lazy(external_ids, step.parent_id, fn ->
-              {:ok, {r, s, a}} = Runs.get_execution_key(db, step.parent_id)
-              execution_external_id(r, s, a)
-            end)
-          end
-
-        executions =
-          executions_by_step
-          |> Map.get(step.id, [])
-          |> Map.new(fn {execution_id, _step_id, attempt, workspace_id, execute_after, created_at,
-                         assigned_at, created_by_user_ext_id, created_by_token_ext_id} ->
-            {completed_at, completion} =
-              case Map.get(completions, execution_id) do
-                nil ->
-                  {nil, nil}
-
-                {kind, successor, completion_at} ->
-                  {completion_at,
-                   %{kind: Atom.to_string(kind), successor: build_successor(successor)}}
-              end
-
-            {attempt,
-             %{
-               execution_id: Map.fetch!(external_ids, execution_id),
-               workspace_id: Map.fetch!(workspaces, workspace_id).external_id,
-               created_at: created_at,
-               created_by: build_created_by(created_by_user_ext_id, created_by_token_ext_id),
-               execute_after: execute_after,
-               assigned_at: assigned_at,
-               completed_at: completed_at,
-               completion: completion,
-               groups: Map.get(groups_by_execution, execution_id, %{}),
-               children: Map.get(run_children, execution_id, [])
-             }}
-          end)
-
-        {step.number,
-         %{
-           module: step.module,
-           target: step.target,
-           type: step.type,
-           parent_id: parent_execution_external_id,
-           cache_config:
-             if(step.cache_config_id, do: Map.fetch!(cache_configs, step.cache_config_id)),
-           cache_key: step.cache_key,
-           memo_key: step.memo_key,
-           concurrency_key: step.concurrency_key,
-           concurrency_limit: step.concurrency_limit,
-           group_key: step.group_key,
-           group_limit: step.group_limit,
-           retry_limit: step.retry_limit,
-           retry_backoff_min: step.retry_backoff_min,
-           retry_backoff_max: step.retry_backoff_max,
-           recurrent: step.recurrent,
-           timeout: step.timeout,
-           created_at: step.created_at,
-           requires: get_tag_set(db, step.requires_tag_set_id),
-           executions: executions
-         }}
-      end)
-
-    {run, parent, steps}
-  end
-
-  # The detail of the executions named by `{step number, attempt}`, and the
-  # arguments and streams of the named steps. The row scans are over the
-  # whole run (they're indexed by it and cheap); everything that resolves a
-  # value, ref or asset is done only for what was asked for.
-  defp build_run_details(db, run, %{executions: execution_keys, steps: step_numbers}) do
-    {:ok, steps} = Runs.get_run_steps(db, run.id)
-    {:ok, run_executions} = Runs.get_run_executions(db, run.id)
-    steps_by_id = Map.new(steps, &{&1.id, &1})
-    steps_by_number = Map.new(steps, &{&1.number, &1})
-
-    executions_by_key =
-      Map.new(run_executions, fn {execution_id, step_id, attempt, workspace_id, _, _, _, _, _} ->
-        {{Map.fetch!(steps_by_id, step_id).number, attempt}, {execution_id, workspace_id}}
-      end)
-
-    requested =
-      Enum.flat_map(execution_keys, fn {number, attempt} ->
-        case Map.fetch(executions_by_key, {number, attempt}) do
-          {:ok, {execution_id, workspace_id}} ->
-            [{execution_id, workspace_id, Map.fetch!(steps_by_number, number), attempt}]
-
-          :error ->
-            []
-        end
-      end)
-
-    requested_ids = MapSet.new(requested, &elem(&1, 0))
-    requested? = fn execution_id -> MapSet.member?(requested_ids, execution_id) end
-
-    executions =
-      if requested == [] do
-        %{}
-      else
-        {:ok, run_dependencies} = Runs.get_run_dependencies(db, run.id)
-        {:ok, run_stream_dependencies} = Streams.get_run_dependencies(db, run.id)
-        {:ok, run_metric_defs} = Runs.get_run_metric_definitions(db, run.id)
-        {:ok, run_input_deps} = Inputs.get_input_dependencies_for_run(db, run.id)
-        {:ok, run_submitted_inputs} = Inputs.get_submitted_inputs_for_run(db, run.id)
-        {:ok, run_asset_deps} = Runs.get_asset_dependencies_for_run(db, run.id)
-        {:ok, run_catalog_reads} = Catalog.get_reads_for_run(db, run.id)
-        {:ok, run_catalog_waits} = Catalog.get_waits_for_run(db, run.id)
-        {:ok, run_catalog_publishes} = Catalog.get_publishes_for_run(db, run.external_id)
-
-        # Resolving a checkpoint needs the workspace chain of the execution
-        # reading it. Resolved from `db` rather than `state` because this
-        # also runs against archived epochs, which remap workspace ids.
-        workspace_chains =
-          requested
-          |> Enum.map(&elem(&1, 1))
-          |> Enum.uniq()
-          |> Map.new(fn workspace_id ->
-            {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
-            {workspace_id, chain}
-          end)
-
-        submitted_inputs_by_execution =
-          run_submitted_inputs
-          |> Enum.filter(fn {execution_id, _, _, _, _} -> requested?.(execution_id) end)
-          |> Enum.group_by(
-            fn {execution_id, _run_ext_id, _input_number, _title, _response_type} ->
-              execution_id
-            end,
-            fn {_execution_id, run_ext_id, input_number, title, response_type} ->
-              {input_external_id(run_ext_id, input_number),
-               %{
-                 title: title,
-                 status: if(response_type, do: decode_input_response_type(response_type))
-               }}
-            end
-          )
-          |> Map.new(fn {execution_id, inputs} -> {execution_id, Map.new(inputs)} end)
-
-        input_deps_by_execution =
-          run_input_deps
-          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
-          |> Enum.group_by(
-            fn {execution_id, _run_ext_id, _input_number, _key, _prompt_id, _title, _created_at,
-                _response_type, _response_value, _responded_at, _created_by} ->
-              execution_id
-            end,
-            fn {_execution_id, run_ext_id, input_number, _key, _prompt_id, title, _created_at,
-                response_type, _response_value, _responded_at, _response_created_by} ->
-              {input_external_id(run_ext_id, input_number),
-               {:input, title, if(response_type, do: decode_input_response_type(response_type))}}
-            end
-          )
-          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-        asset_deps_by_execution =
-          run_asset_deps
-          |> Enum.filter(fn {execution_id, _asset_id} -> requested?.(execution_id) end)
-          |> Enum.group_by(
-            fn {execution_id, _asset_id} -> execution_id end,
-            fn {_execution_id, asset_id} ->
-              {external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
-              {external_id, {:asset, {name, total_count, total_size, entry}}}
-            end
-          )
-          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-        catalog_reads_by_execution =
-          run_catalog_reads
-          |> Enum.filter(fn {execution_id, _version} -> requested?.(execution_id) end)
-          |> Enum.group_by(
-            fn {execution_id, _version} -> execution_id end,
-            fn {_execution_id, version} ->
-              {catalog_version_key(version.path, version.number),
-               {:catalog, build_catalog_version(db, version)}}
-            end
-          )
-          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-        catalog_waits_by_execution =
-          run_catalog_waits
-          |> Enum.filter(fn {execution_id, _path, _number} -> requested?.(execution_id) end)
-          |> Enum.group_by(
-            fn {execution_id, _path, _number} -> execution_id end,
-            fn {_execution_id, path, number} ->
-              {catalog_wait_key(path, number), {:catalog_wait, path, number}}
-            end
-          )
-          |> Map.new(fn {execution_id, deps} -> {execution_id, Map.new(deps)} end)
-
-        # Publishes are recorded against the publishing execution's ref, so
-        # they come keyed by `{step number, attempt}` rather than by id.
-        requested_keys =
-          MapSet.new(requested, fn {_execution_id, _workspace_id, step, attempt} ->
-            {step.number, attempt}
-          end)
-
-        catalog_publishes_by_attempt =
-          run_catalog_publishes
-          |> Enum.filter(fn {key, _version} -> MapSet.member?(requested_keys, key) end)
-          |> Enum.group_by(
-            fn {key, _version} -> key end,
-            fn {_key, version} ->
-              {catalog_version_key(version.path, version.number),
-               build_catalog_version(db, version)}
-            end
-          )
-          |> Map.new(fn {key, versions} -> {key, Map.new(versions)} end)
-
-        metric_definitions_by_execution =
-          run_metric_defs
-          |> Enum.filter(fn row -> requested?.(elem(row, 0)) end)
-          |> Enum.group_by(
-            fn {execution_id, _, _, _, _, _, _, _, _, _, _} -> execution_id end,
-            fn {_, key, group, group_units, group_lower, group_upper, scale, units, progress,
-                lower, upper} ->
-              {key,
-               %{
-                 group: group,
-                 group_units: group_units,
-                 group_lower: group_lower,
-                 group_upper: group_upper,
-                 scale: scale,
-                 units: units,
-                 progress: progress == 1,
-                 lower: lower,
-                 upper: upper
-               }}
-            end
-          )
-          |> Map.new(fn {execution_id, defs} -> {execution_id, Map.new(defs)} end)
-
-        Map.new(requested, fn {execution_id, workspace_id, step, attempt} ->
-          {result, result_at, completed_at, result_created_by} =
-            case Results.get_result(db, execution_id) do
-              {:ok, {result, result_at, completion_at, created_by}} ->
-                {build_result(result, db), result_at, completion_at, created_by}
-
-              {:ok, nil} ->
-                {nil, nil, nil, nil}
-            end
-
-          {:ok, asset_ids} = Results.get_assets_for_execution(db, execution_id)
-
-          assets =
-            asset_ids
-            |> Enum.map(&resolve_asset(db, &1))
-            |> Map.new(fn {external_id, name, total_count, total_size, entry} ->
-              {external_id, {name, total_count, total_size, entry}}
-            end)
-
-          result_deps =
-            run_dependencies
-            |> Map.get(execution_id, [])
-            |> Map.new(fn dependency_ref_id ->
-              {ext_id, _module, _target} =
-                execution = resolve_execution_ref(db, dependency_ref_id)
-
-              {ext_id, {:result, execution}}
-            end)
-
-          stream_deps =
-            run_stream_dependencies
-            |> Map.get(execution_id, [])
-            |> Map.new(fn stream_ref_id ->
-              {:ok, {stream_run_ext_id, step_number, index, module, target}} =
-                Streams.get_stream_ref(db, stream_ref_id)
-
-              id = stream_external_id(stream_run_ext_id, step_number, index)
-              {id, {:stream, id, module, target}}
-            end)
-
-          dependencies =
-            [
-              build_argument_dependencies(db, step.id, step.wait_for),
-              result_deps,
-              stream_deps,
-              Map.get(input_deps_by_execution, execution_id, %{}),
-              Map.get(asset_deps_by_execution, execution_id, %{}),
-              Map.get(catalog_reads_by_execution, execution_id, %{}),
-              Map.get(catalog_waits_by_execution, execution_id, %{})
-            ]
-            |> Enum.reduce(%{}, &Map.merge(&2, &1))
-
-          # Nothing is outstanding for an execution that has finished: it
-          # isn't waiting on anything any more, whatever state its
-          # dependencies are in.
-          pending_dependencies =
-            if completed_at,
-              do: MapSet.new(),
-              else: unresolved_dependency_ids(db, execution_id)
-
-          {:ok, {checkpoints_before, checkpoints_after}} =
-            Checkpoints.get_execution_snapshots(
-              db,
-              execution_id,
-              step.id,
-              Map.fetch!(workspace_chains, workspace_id),
-              attempt
-            )
-
-          {execution_external_id(run.external_id, step.number, attempt),
-           %{
-             assets: assets,
-             published: Map.get(catalog_publishes_by_attempt, {step.number, attempt}, %{}),
-             dependencies: dependencies,
-             pending_dependencies: pending_dependencies,
-             inputs: Map.get(submitted_inputs_by_execution, execution_id, %{}),
-             result: result,
-             result_at: result_at,
-             result_created_by: result_created_by,
-             metric_definitions: Map.get(metric_definitions_by_execution, execution_id, %{}),
-             checkpoints: %{
-               before: enrich_checkpoints(checkpoints_before, db),
-               after: enrich_checkpoints(checkpoints_after, db)
-             }
-           }}
-        end)
-      end
-
-    requested_steps =
-      Enum.flat_map(step_numbers, fn number ->
-        case Map.fetch(steps_by_number, number) do
-          {:ok, step} -> [step]
-          :error -> []
-        end
-      end)
-
-    streams_by_step =
-      if requested_steps == [] do
-        %{}
-      else
-        {:ok, run_streams} = Streams.get_streams_for_run(db, run.id)
-        step_ids = MapSet.new(requested_steps, & &1.id)
-
-        run_streams
-        |> Enum.filter(&MapSet.member?(step_ids, &1.step_id))
-        |> then(&build_run_streams(db, &1))
-      end
-
-    step_details =
-      Map.new(requested_steps, fn step ->
-        {:ok, arguments} = Runs.get_step_arguments(db, step.id)
-
-        {step.number,
-         %{
-           arguments: Enum.map(arguments, &build_value(&1, db)),
-           streams: Map.get(streams_by_step, step.id, %{})
-         }}
-      end)
-
-    %{executions: executions, steps: step_details}
-  end
-
-  defp get_tag_set(_db, nil), do: %{}
-
-  defp get_tag_set(db, tag_set_id) do
-    case TagSets.get_tag_set(db, tag_set_id) do
-      {:ok, tag_set} -> tag_set
-    end
-  end
-
-  defp load_cache_configs(db, steps) do
-    steps
-    |> Enum.map(& &1.cache_config_id)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-    |> Map.new(fn cache_config_id ->
-      case CacheConfigs.get_cache_config(db, cache_config_id) do
-        {:ok, cache_config} -> {cache_config_id, cache_config}
-      end
-    end)
-  end
-
-  defp build_successor(nil), do: nil
-
-  defp build_successor({run_ext, step_number, attempt}) do
-    %{type: "execution", id: execution_external_id(run_ext, step_number, attempt)}
-  end
-
-  defp build_created_by(nil, nil), do: nil
-  defp build_created_by(user_ext_id, nil), do: %{type: "user", external_id: user_ext_id}
-  defp build_created_by(nil, token_ext_id), do: %{type: "token", external_id: token_ext_id}
-
-  defp ensure_run_in_active_epoch(state, run_external_id) do
-    case Runs.get_run_by_external_id(state.db, run_external_id) do
-      {:ok, run} when not is_nil(run) ->
-        {:ok, run}
-
-      {:ok, nil} ->
-        case find_and_copy_run_from_archives(state, run_external_id) do
-          {:ok, _remap} ->
-            Runs.get_run_by_external_id(state.db, run_external_id)
-
-          :not_found ->
-            {:ok, nil}
-        end
-    end
-  end
-
-  defp maybe_find_idempotent_run(_state, nil, _ws_ext_id), do: :miss
-
-  defp maybe_find_idempotent_run(state, client_key, ws_ext_id) do
-    hashed_key = Runs.build_idempotency_key(ws_ext_id, client_key)
-    created_after = System.os_time(:millisecond) - @idempotency_ttl_ms
-
-    # Tier 0: Check active epoch
-    case Runs.find_run_by_idempotency_key(state.db, hashed_key, created_after) do
-      {:ok, {ext_run_id, step_number, attempt}} ->
-        {:hit, ext_run_id, step_number, attempt}
-
-      {:ok, nil} ->
-        # Search archived epochs
-        query_fn = fn archive_db ->
-          case Runs.find_run_by_idempotency_key(archive_db, hashed_key, created_after) do
-            {:ok, {ext_run_id, step_number, attempt}} ->
-              {:found, {:hit, ext_run_id, step_number, attempt}}
-
-            {:ok, nil} ->
-              :not_found
-          end
-        end
-
-        bloom_fn = fn epoch_index ->
-          Index.find_epochs(epoch_index, "idempotency_keys", hashed_key, created_after)
-        end
-
-        case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> result
-          :not_found -> :miss
-        end
-    end
-  end
-
-  defp validate_and_prepare_input(state, schema_json, initial) do
-    with {:ok, schema_id} <- validate_and_get_schema(state, schema_json),
-         :ok <- validate_initial_value(initial, schema_json, schema_id) do
-      {:ok, schema_id}
-    end
-  end
-
-  defp validate_and_get_schema(_state, nil), do: {:ok, nil}
-
-  defp validate_and_get_schema(state, schema_json) do
-    case Coflux.JsonSchema.validate_schema(schema_json) do
-      :ok ->
-        {:ok, id} = Inputs.get_or_create_schema(state.db, schema_json)
-        {:ok, id}
-
-      {:error, reason} ->
-        {:error, {:invalid_schema, reason}}
-    end
-  end
-
-  defp validate_initial_value(nil, _schema_json, _schema_id), do: :ok
-
-  defp validate_initial_value(_initial, nil, _schema_id),
-    do: {:error, {:invalid_initial, "initial value requires a schema"}}
-
-  defp validate_initial_value(initial, schema_json, _schema_id) do
-    case Jason.decode(initial) do
-      {:ok, initial_value} ->
-        case Coflux.JsonSchema.validate_partial(initial_value, schema_json) do
-          :ok -> :ok
-          {:error, reason} -> {:error, {:invalid_initial, reason}}
-        end
-
-      {:error, _} ->
-        {:error, {:invalid_initial, "initial value is not valid JSON"}}
-    end
-  end
-
-  defp find_or_create_input(
-         state,
-         key,
-         run_id,
-         workspace_id,
-         execution_id,
-         prompt_id,
-         schema_id,
-         title,
-         actions,
-         initial,
-         requires_tag_set_id,
-         now
-       ) do
-    if key do
-      workspace_ids = get_cache_workspace_ids(state, workspace_id)
-
-      case Inputs.find_input_by_key(state.db, run_id, workspace_ids, key) do
-        {:ok,
-         {existing_id, existing_number, existing_prompt_id, existing_schema_id, existing_title,
-          _existing_actions, existing_requires_tag_set_id}} ->
-          if existing_prompt_id == prompt_id && existing_schema_id == schema_id &&
-               existing_requires_tag_set_id == requires_tag_set_id do
-            Inputs.record_execution_input(state.db, execution_id, existing_id, now)
-            {:ok, existing_number, existing_title, false}
-          else
-            {:error, :input_mismatch}
-          end
-
-        {:ok, nil} ->
-          {:ok, _id, input_number} =
-            Inputs.create_input(
-              state.db,
-              run_id,
-              execution_id,
-              workspace_id,
-              prompt_id,
-              schema_id,
-              key,
-              title,
-              actions,
-              initial,
-              requires_tag_set_id,
-              now
-            )
-
-          {:ok, input_number, title, true}
-      end
-    else
-      {:ok, _id, input_number} =
-        Inputs.create_input(
-          state.db,
-          run_id,
-          execution_id,
-          workspace_id,
-          prompt_id,
-          schema_id,
-          nil,
-          title,
-          actions,
-          initial,
-          requires_tag_set_id,
-          now
-        )
-
-      {:ok, input_number, title, true}
-    end
-  end
-
-  defp validate_input_response(_state, nil, _value), do: :ok
-
-  defp validate_input_response(state, schema_id, value) do
-    {:ok, schema_json} = Inputs.get_input_schema(state.db, schema_id)
-
-    case Coflux.JsonSchema.validate_value(value, schema_json) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  # Read-only: returns {db, input_id, key, prompt_id, schema_id, title, actions, initial, requires_tag_set_id, created_at}
-  # where `db` is the DB handle the data lives in (active or archive).
-  # Does NOT copy data to the active epoch.
-  defp read_input_from_active_or_archives(state, input_external_id) do
-    with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_external_id) do
-      case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
-        {:ok, nil} ->
-          query_fn = fn archive_db ->
-            case Inputs.get_input_by_run_and_number(archive_db, run_ext_id, input_number) do
-              {:ok, nil} ->
-                :not_found
-
-              {:ok,
-               {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
-                requires_tag_set_id, created_at, _run_id}} ->
-                {:found,
-                 {archive_db, input_id, key, prompt_id, schema_id, title, actions, initial,
-                  requires_tag_set_id, created_at}}
-            end
-          end
-
-          bloom_fn = fn epoch_index ->
-            Index.find_epochs(epoch_index, "runs", run_ext_id)
-          end
-
-          case search_archived_epochs(state, query_fn, bloom_fn) do
-            {:found, result} -> {:ok, result}
-            :not_found -> {:ok, nil}
-          end
-
-        {:ok,
-         {input_id, _workspace_id, key, prompt_id, schema_id, title, actions, initial,
-          requires_tag_set_id, created_at, _run_id}} ->
-          {:ok,
-           {state.db, input_id, key, prompt_id, schema_id, title, actions, initial,
-            requires_tag_set_id, created_at}}
-      end
-    else
-      :error -> {:ok, nil}
-    end
-  end
-
-  # Write path: copies the input to the active epoch if found in an archive.
-  # Returns the full input tuple from the active DB.
-  defp find_and_copy_input_from_archives(state, input_external_id) do
-    with {:ok, run_ext_id, input_number} <- parse_input_external_id(input_external_id) do
-      case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
-        {:ok, nil} ->
-          # Search archived epochs using the runs Bloom filter
-          query_fn = fn archive_db ->
-            case Inputs.get_input_by_run_and_number(archive_db, run_ext_id, input_number) do
-              {:ok, nil} ->
-                :not_found
-
-              {:ok, _result} ->
-                # Found in archive — copy the run to active epoch
-                {:ok, _remap} = Epoch.copy_run(archive_db, state.db, run_ext_id)
-
-                # Re-read from the active DB (now copied)
-                case Inputs.get_input_by_run_and_number(state.db, run_ext_id, input_number) do
-                  {:ok, nil} -> :not_found
-                  {:ok, active_result} -> {:found, active_result}
-                end
-            end
-          end
-
-          bloom_fn = fn epoch_index ->
-            Index.find_epochs(epoch_index, "runs", run_ext_id)
-          end
-
-          case search_archived_epochs(state, query_fn, bloom_fn) do
-            {:found, result} -> {:ok, result}
-            :not_found -> {:ok, nil}
-          end
-
-        result ->
-          result
-      end
-    else
-      :error -> {:ok, nil}
-    end
-  end
-
-  defp find_and_copy_run_from_archives(state, run_external_id) do
-    query_fn = fn archive_db ->
-      if Runs.run_exists?(archive_db, run_external_id) do
-        {:ok, remap} = Epoch.copy_run(archive_db, state.db, run_external_id)
-        {:found, {:ok, remap}}
-      else
-        :not_found
-      end
-    end
-
-    bloom_fn = fn epoch_index ->
-      Index.find_epochs(epoch_index, "runs", run_external_id)
-    end
-
-    case search_archived_epochs(state, query_fn, bloom_fn) do
-      {:found, result} -> result
-      :not_found -> :not_found
-    end
-  end
-
-  defp find_cached_execution_across_epochs(
-         state,
-         cache_workspace_ids,
-         step_id,
-         cache_key,
-         recorded_after
-       ) do
-    # Tier 0: Check active epoch
-    case Runs.find_cached_execution(
-           state.db,
-           cache_workspace_ids,
-           step_id,
-           cache_key,
-           recorded_after
-         ) do
-      {:ok, cached_execution_id} when not is_nil(cached_execution_id) ->
-        {:in_epoch, cached_execution_id}
-
-      {:ok, nil} ->
-        workspace_external_ids =
-          Enum.map(cache_workspace_ids, &workspace_external_id(state, &1))
-
-        query_fn = fn archive_db ->
-          archive_workspace_ids =
-            Enum.flat_map(workspace_external_ids, fn ext_id ->
-              case Workspaces.get_workspace_id(archive_db, ext_id) do
-                {:ok, id} when not is_nil(id) -> [id]
-                {:ok, nil} -> []
-              end
-            end)
-
-          if archive_workspace_ids == [] do
-            :not_found
-          else
-            case Runs.find_cached_execution(
-                   archive_db,
-                   archive_workspace_ids,
-                   nil,
-                   cache_key,
-                   recorded_after
-                 ) do
-              {:ok, archive_exec_id} when not is_nil(archive_exec_id) ->
-                # Instead of copying the entire run, resolve the result value
-                # from the archive and create an execution_ref
-                case resolve_result(archive_db, archive_exec_id) do
-                  {:ok, {:value, value}} ->
-                    # Create execution ref for the cached execution itself
-                    {:ok, {run_ext, step_num, attempt, module, target}} =
-                      Runs.get_run_by_execution(archive_db, archive_exec_id)
-
-                    {:ok, ref_id} =
-                      Runs.get_or_create_execution_ref(
-                        state.db,
-                        run_ext,
-                        step_num,
-                        attempt,
-                        module,
-                        target
-                      )
-
-                    {:found, {:resolved, ref_id, value}}
-
-                  {:ok, _other} ->
-                    :not_found
-
-                  {:pending, _} ->
-                    :not_found
-                end
-
-              {:ok, nil} ->
-                :not_found
-            end
-          end
-        end
-
-        bloom_fn = fn epoch_index ->
-          if is_binary(cache_key) do
-            Index.find_epochs(epoch_index, "cache_keys", cache_key)
-          else
-            []
-          end
-        end
-
-        case search_archived_epochs(state, query_fn, bloom_fn) do
-          {:found, result} -> result
-          :not_found -> nil
-        end
-    end
-  end
-
-  # Searches archived epochs across both tiers (unindexed, then indexed via Bloom).
-  # `query_fn` receives an archive DB handle and returns `{:found, result}` or `:not_found`.
-  # `bloom_fn` receives the epoch index and returns candidate epoch IDs.
-  # Query one archived epoch, treating an unreadable file as a miss.
-  #
-  # A corrupt archive opens cleanly — SQLite only reads the schema when a
-  # statement is prepared — so the failure lands inside the query, where
-  # `Store` matches on success. Without this, one bad file takes the
-  # project's orchestration server down on every lookup that reaches the
-  # archives, rather than costing that lookup one epoch's worth of rows.
-  defp query_epoch(state, epoch_id, archive_db, query_fn) do
-    query_fn.(archive_db)
-  rescue
-    error ->
-      Logger.error(
-        "Couldn't read archived epoch #{epoch_id} in project #{state.project_id}: " <>
-          Exception.message(error)
-      )
-
-      :not_found
-  end
-
-  defp search_archived_epochs(state, query_fn, bloom_fn) do
-    # Tier 1: Check unindexed DBs (always open, newest first)
-    unindexed = Epochs.unindexed_dbs(state.epochs)
-
-    result =
-      Enum.reduce_while(unindexed, :not_found, fn {epoch_id, archive_db}, :not_found ->
-        case query_epoch(state, epoch_id, archive_db, query_fn) do
-          {:found, _} = found -> {:halt, found}
-          :not_found -> {:cont, :not_found}
-        end
-      end)
-
-    case result do
-      {:found, _} ->
-        result
-
-      :not_found ->
-        # Tier 2: Consult Bloom index for indexed epochs, open/query/close on demand
-        unindexed_ids = MapSet.new(unindexed, fn {id, _db} -> id end)
-
-        candidate_epoch_ids =
-          bloom_fn.(state.epoch_index)
-          |> Enum.reject(&MapSet.member?(unindexed_ids, &1))
-
-        Enum.reduce_while(candidate_epoch_ids, :not_found, fn epoch_id, :not_found ->
-          path = Epochs.archive_path(state.epochs, epoch_id)
-
-          case Exqlite.Sqlite3.open(path) do
-            {:ok, archive_db} ->
-              try do
-                case query_epoch(state, epoch_id, archive_db, query_fn) do
-                  {:found, _} = found -> {:halt, found}
-                  :not_found -> {:cont, :not_found}
-                end
-              after
-                Exqlite.Sqlite3.close(archive_db)
-              end
-
-            {:error, _} ->
-              {:cont, :not_found}
-          end
-        end)
-    end
-  end
-
-  defp execution_external_id(run_external_id, step_number, attempt) do
-    "#{run_external_id}:#{step_number}:#{attempt}"
-  end
-
-  # Build the map passed to workers in the :execute message, describing
-  # the execution's default stream config. Returns nil when no config was
-  # set (NULL columns) — keeps the wire message compact for the common
-  # case. When a config exists, the buffer key is ALWAYS present (nil =
-  # unbounded, from the -1 column sentinel) so the adapter can distinguish
-  # an explicit opt-out of backpressure from an unset buffer.
-  defp build_streams_config(nil, nil), do: nil
-
-  defp build_streams_config(buffer, timeout_ms) do
-    map = %{buffer: if(buffer == -1, do: nil, else: buffer)}
-    if timeout_ms != nil, do: Map.put(map, :timeout_ms, timeout_ms), else: map
-  end
-
-  defp input_external_id(run_external_id, input_number) do
-    "#{run_external_id}/i#{input_number}"
-  end
-
-  defp parse_input_external_id(external_id) do
-    case String.split(external_id, "/i", parts: 2) do
-      [run_external_id, number_s] ->
-        case Integer.parse(number_s) do
-          {number, ""} -> {:ok, run_external_id, number}
-          _ -> :error
-        end
-
-      _ ->
-        :error
-    end
-  end
-
-  defp track_run_execution(state, run_ext_id, execution_id, root_module, root_target) do
-    Map.update!(state, :run_workflows, fn rw ->
-      Map.update(rw, run_ext_id, {root_module, root_target, MapSet.new([execution_id])}, fn {m, t,
-                                                                                             ids} ->
-        {m, t, MapSet.put(ids, execution_id)}
-      end)
-    end)
-  end
-
-  defp untrack_run_execution(state, run_ext_id, execution_id) do
-    case Map.fetch(state.run_workflows, run_ext_id) do
-      {:ok, {m, t, ids}} ->
-        remaining = MapSet.delete(ids, execution_id)
-
-        state =
-          if MapSet.size(remaining) == 0 do
-            Map.update!(state, :run_workflows, &Map.delete(&1, run_ext_id))
-          else
-            put_in(state, [Access.key(:run_workflows), run_ext_id], {m, t, remaining})
-          end
-
-        {{m, t}, state}
-
-      :error ->
-        {nil, state}
-    end
-  end
-
-  defp get_run_workflow(state, run_ext_id) do
-    case Map.fetch(state.run_workflows, run_ext_id) do
-      {:ok, {m, t, _}} -> {m, t}
-      :error -> nil
-    end
-  end
-
-  defp parse_execution_external_id(external_id) do
-    case String.split(external_id, ":") do
-      [run_external_id, step_number_s, attempt_s] ->
-        with {step_number, ""} <- Integer.parse(step_number_s),
-             {attempt, ""} <- Integer.parse(attempt_s) do
-          {:ok, run_external_id, step_number, attempt}
-        else
-          _ -> {:error, :invalid_format}
-        end
-
-      _ ->
-        {:error, :invalid_format}
-    end
-  end
-
-  defp stream_external_id(run_external_id, step_number, index) do
-    "#{run_external_id}:#{step_number}_#{index}"
-  end
-
-  # `<run>:<step>_<index>`. Run ids are alphanumeric and step numbers are
-  # integers, so the last `_` unambiguously separates the index.
-  defp parse_stream_external_id(id) when is_binary(id) do
-    case String.split(id, "_") do
-      parts when length(parts) >= 2 ->
-        {index_s, prefix_parts} = List.pop_at(parts, -1)
-
-        with {index, ""} when index >= 0 <- Integer.parse(index_s),
-             {:ok, run_external_id, step_number} <- parse_step_id(Enum.join(prefix_parts, "_")) do
-          {:ok, run_external_id, step_number, index}
-        else
-          _ -> {:error, :invalid_format}
-        end
-
-      _ ->
-        {:error, :invalid_format}
-    end
-  end
-
-  defp parse_stream_external_id(_), do: {:error, :invalid_format}
-
-  # Resolve a stream's external id to its row in the active epoch, copying
-  # its run forward from an archived epoch if that's where it lives.
-  defp resolve_stream_id(state, external_id) do
-    with {:ok, run_ext_id, step_number, index} <- parse_stream_external_id(external_id) do
-      case Streams.get_stream_id_by_key(state.db, run_ext_id, step_number, index) do
-        {:ok, id} ->
-          {:ok, id}
-
-        {:error, :not_found} ->
-          case find_and_copy_run_from_archives(state, run_ext_id) do
-            {:ok, _remap} ->
-              Streams.get_stream_id_by_key(state.db, run_ext_id, step_number, index)
-
-            :not_found ->
-              {:error, :not_found}
-          end
-      end
-    else
-      {:error, :invalid_format} -> {:error, :not_found}
-    end
-  end
-
-  defp parse_step_id(step_id) do
-    case String.split(step_id, ":", parts: 2) do
-      [run_external_id, step_number_s] ->
-        case Integer.parse(step_number_s) do
-          {step_number, ""} -> {:ok, run_external_id, step_number}
-          _ -> {:error, :invalid}
-        end
-
-      _ ->
-        {:error, :invalid}
-    end
-  end
-
-  defp resolve_execution(db, execution_id) do
-    {:ok, {external_run_id, step_number, step_attempt, module, target}} =
-      Runs.get_run_by_execution(db, execution_id)
-
-    {execution_external_id(external_run_id, step_number, step_attempt), module, target}
-  end
-
-  defp resolve_execution_ref(db, ref_id) do
-    {:ok, {run_ext, step_num, attempt, module, target}} = Runs.get_execution_ref(db, ref_id)
-    {execution_external_id(run_ext, step_num, attempt), module, target}
-  end
-
-  # --- Value helpers ---
 
   defp validate_values_assets(db, values) do
     Enum.reduce_while(values, :ok, fn value, :ok ->
@@ -6909,4000 +2883,6 @@ defmodule Coflux.Orchestration.Server do
 
   # --- Catalog helpers ---
 
-  # Resolves a version for an execution: by number, or the head as of the
-  # execution's snapshot when `number` is nil.
-  # The `catalog` option of `start_run` and `rerun_step`, as a snapshot:
-  # `"latest"` is the clock now; `"path@n"` is that version's place in the
-  # clock, so a run or attempt started from it sees the catalog as it was
-  # when that version was published. It has to exist and be visible from
-  # the workspace the run is in.
-  defp resolve_catalog_option(_state, _workspace_id, nil), do: {:ok, nil}
-
-  defp resolve_catalog_option(state, _workspace_id, "latest"),
-    do: Catalog.current_sequence(state.db)
-
-  defp resolve_catalog_option(state, workspace_id, ref) when is_binary(ref) do
-    with {:ok, path, number} <- parse_catalog_ref(ref),
-         {:ok, %{} = version} <- Catalog.get_version(state.db, path, number) do
-      if Catalog.visible?(version, get_workspace_chain(state, workspace_id)),
-        do: {:ok, version.id},
-        else: {:error, :catalog_invisible}
-    else
-      {:ok, nil} -> {:error, :catalog_not_found}
-      {:error, _} -> {:error, :catalog_invalid}
-    end
-  end
-
-  defp resolve_catalog_option(_state, _workspace_id, _other), do: {:error, :catalog_invalid}
-
-  # `path@n`. A path can't contain `@`, so the split is unambiguous.
-  defp parse_catalog_ref(ref) do
-    with [path, number] <- String.split(ref, "@"),
-         :ok <- Catalog.validate_path(path),
-         {n, ""} when n > 0 <- Integer.parse(number) do
-      {:ok, path, n}
-    else
-      _ -> {:error, :invalid}
-    end
-  end
-
-  defp lookup_catalog_version(state, execution_id, path, number) do
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-    chain = get_workspace_chain(state, workspace_id)
-
-    if number do
-      # A named version is an immutable reference, so the pin doesn't
-      # apply. A number is allocated once per path, so one published
-      # outside the caller's chain can never become visible.
-      case Catalog.get_version(state.db, path, number) do
-        {:ok, nil} ->
-          {:ok, nil}
-
-        {:ok, version} ->
-          if Catalog.visible?(version, chain),
-            do: {:ok, version},
-            else: {:error, :invisible}
-      end
-    else
-      {:ok, pin} = Catalog.get_pin(state.db, execution_id)
-
-      {:ok, {run_external_id}} =
-        Runs.get_external_run_id_for_execution(state.db, execution_id)
-
-      Catalog.get_head(state.db, path, chain, pin, run_external_id)
-    end
-  end
-
-  # A version as topics and the API see it, with its value resolved for
-  # rendering.
-  defp build_catalog_version(db, version) do
-    {:ok, value} = Values.get_value_by_id(db, version.value_id)
-
-    published_by =
-      if version.execution_ref_id do
-        {ext_id, _module, _target} = resolve_execution_ref(db, version.execution_ref_id)
-        ext_id
-      end
-
-    created_by =
-      case Principals.get_principal(db, version.created_by) do
-        {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-        {:ok, nil} -> nil
-      end
-
-    {:ok, workspace_external_id} =
-      Workspaces.get_workspace_external_id(db, version.workspace_id)
-
-    %{
-      path: version.path,
-      number: version.number,
-      sequence: version.id,
-      value: build_value(value, db),
-      created_at: version.created_at,
-      workspace_id: workspace_external_id,
-      published_by: published_by,
-      created_by: created_by
-    }
-  end
-
-  defp catalog_version_key(path, number), do: "#{path}@#{number}"
-
-  # A wait is for whatever comes after `number`, so it is keyed apart from a
-  # read of that version.
-  defp catalog_wait_key(path, number), do: "#{path}@#{number}+"
-
-  defp record_catalog_read(state, execution_id, execution_external_id, version) do
-    case Catalog.record_read(state.db, execution_id, version.id) do
-      {:ok, true} ->
-        {:ok, {run_external_id}} =
-          Runs.get_external_run_id_for_execution(state.db, execution_id)
-
-        notify_listeners(
-          state,
-          {:run, run_external_id},
-          {:catalog_read, execution_external_id, build_catalog_version(state.db, version)}
-        )
-
-      {:ok, false} ->
-        state
-    end
-  end
-
-  # A new version landed. Tell the publishing run, every workspace that can
-  # see it (its own and every descendant), and anything waiting on the path.
-  defp notify_catalog_version(state, version, publisher_execution_external_id) do
-    info = build_catalog_version(state.db, version)
-
-    state =
-      if publisher_execution_external_id do
-        {:ok, run_ext_id, _step, _attempt} =
-          parse_execution_external_id(publisher_execution_external_id)
-
-        notify_listeners(
-          state,
-          {:run, run_ext_id},
-          {:catalog_publish, publisher_execution_external_id, info}
-        )
-      else
-        state
-      end
-
-    state =
-      state.workspaces
-      |> Enum.filter(fn {workspace_id, _workspace} ->
-        version.workspace_id in get_workspace_chain(state, workspace_id)
-      end)
-      |> Enum.reduce(state, fn {_workspace_id, workspace}, state ->
-        notify_listeners(state, {:catalog, workspace.external_id}, {:catalog_version, info})
-      end)
-
-    wake_catalog_waiters(state, version)
-  end
-
-  # A version landed at `version.path`. Release every gated successor and
-  # serve every running select that was waiting on the path from a
-  # workspace that can see it. Both sets are keyed by path and position;
-  # the gates carry the waiter's workspace by internal id (they are rebuilt
-  # on rotation), the selects by external id (they are carried across it).
-  # Publishes are rare enough that scanning the keys beats keeping an index.
-  defp wake_catalog_waiters(state, version) do
-    woken? = fn path, number, workspace_id ->
-      path == version.path and number < version.number and
-        version.workspace_id in get_workspace_chain(state, workspace_id)
-    end
-
-    state =
-      state.dependency_waiters
-      |> Map.keys()
-      |> Enum.filter(fn
-        {:catalog, workspace_id, path, number} -> woken?.(path, number, workspace_id)
-        _key -> false
-      end)
-      |> Enum.reduce(state, &clear_dependency_key(&2, &1))
-
-    state.waiting
-    |> Map.keys()
-    |> Enum.flat_map(fn
-      {:catalog, workspace_external_id, path, number} = key ->
-        # A workspace is never removed, so the id resolves; the check is
-        # against the shape of the key, not its age.
-        case Map.fetch(state.workspace_external_ids, workspace_external_id) do
-          {:ok, workspace_id} ->
-            if woken?.(path, number, workspace_id), do: [{key, workspace_id}], else: []
-
-          :error ->
-            []
-        end
-
-      _key ->
-        []
-    end)
-    |> Enum.reduce(state, fn {{:catalog, _, path, number} = key, workspace_id}, state ->
-      chain = get_workspace_chain(state, workspace_id)
-      # Whatever is next from here — this version, unless one landed in
-      # between — is what the waiter gets, and is recorded as its read.
-      {:ok, next} = Catalog.get_next(state.db, path, chain, number)
-
-      state =
-        state.waiting
-        |> Map.get(key, [])
-        |> Enum.reduce(state, fn entry, state ->
-          case resolve_internal_execution_id(state, entry.from_ext_id) do
-            {:ok, execution_id} ->
-              record_catalog_read(state, execution_id, entry.from_ext_id, next)
-
-            {:error, :not_found} ->
-              state
-          end
-        end)
-
-      notify_select_waiters(state, key, {:value, {:raw, next.number, []}})
-    end)
-  end
-
-  defp resolve_asset(db, asset_id) do
-    case Assets.get_asset_summary(db, asset_id) do
-      {:ok, external_id, name, total_count, total_size, entry} ->
-        {external_id, name, total_count, total_size, entry}
-    end
-  end
-
-  defp resolve_references(db, references) do
-    Enum.map(references, fn
-      {:fragment, format, blob_key, size, metadata} ->
-        {:fragment, format, blob_key, size, metadata}
-
-      {:execution, run_ext, step_num, attempt} ->
-        ext_id = execution_external_id(run_ext, step_num, attempt)
-
-        {module, target} =
-          case Runs.get_module_target(db, run_ext, step_num, attempt) do
-            {:ok, {m, t}} -> {m, t}
-            {:ok, nil} -> {nil, nil}
-          end
-
-        {:execution, ext_id, {module, target}}
-
-      {:asset, external_id} ->
-        {:ok, asset_id} = Assets.get_asset_id(db, external_id)
-        {^external_id, name, total_count, total_size, entry} = resolve_asset(db, asset_id)
-        {:asset, external_id, {name, total_count, total_size, entry}}
-
-      {:input, external_id} ->
-        {:input, external_id}
-    end)
-  end
-
-  defp normalize_references(references) do
-    Enum.map(references, fn
-      {:execution, execution_external_id} ->
-        {:ok, run_ext, step_num, attempt} =
-          parse_execution_external_id(execution_external_id)
-
-        {:execution, run_ext, step_num, attempt}
-
-      {:input, external_id} ->
-        {:input, external_id}
-
-      ref ->
-        ref
-    end)
-  end
-
-  defp normalize_value({:raw, data, refs}),
-    do: {:raw, data, normalize_references(refs)}
-
-  defp normalize_value({:blob, key, size, refs}),
-    do: {:blob, key, size, normalize_references(refs)}
-
-  # Checkpoint values carry references (assets, executions, inputs) in the
-  # same form as arguments, so they need the same resolution before going out
-  # to a worker or a topic.
-  defp enrich_checkpoints(checkpoints, db) do
-    Map.new(checkpoints, fn {name, value} -> {name, build_value(value, db)} end)
-  end
-
-  defp build_value(value, db) do
-    case value do
-      {:raw, data, references} ->
-        {:raw, data, resolve_references(db, references)}
-
-      {:blob, key, size, references} ->
-        {:blob, key, size, resolve_references(db, references)}
-    end
-  end
-
-  defp is_result_final?(result) do
-    case result do
-      {:error, _, _, _, retry_id, _retryable} -> is_nil(retry_id)
-      {:error, _, _, _, retry_id} -> is_nil(retry_id)
-      {:value, _} -> true
-      {:abandoned, retry_id} -> is_nil(retry_id)
-      {:crashed, retry_id} -> is_nil(retry_id)
-      :cancelled -> true
-      {:timeout, retry_id} -> is_nil(retry_id)
-      {:suspended, _} -> false
-      {:recurred, _} -> false
-      {:deferred, _} -> false
-      {:cached, _} -> false
-      {:spawned, _} -> false
-      # Resolved ref forms are final (value is already resolved)
-      {:deferred, _, _} -> true
-      {:cached, _, _} -> true
-      {:spawned, _, _} -> true
-    end
-  end
-
-  defp build_result(result, db) do
-    case result do
-      {:error, type, message, frames, retry_id, retryable} ->
-        retry = if retry_id, do: resolve_execution(db, retry_id)
-        {:error, type, message, frames, retry, retryable}
-
-      {:error, type, message, frames, retry_id} ->
-        retry = if retry_id, do: resolve_execution(db, retry_id)
-        {:error, type, message, frames, retry}
-
-      {:value, value} ->
-        {:value, build_value(value, db)}
-
-      {:abandoned, retry_id} ->
-        retry = if retry_id, do: resolve_execution(db, retry_id)
-        {:abandoned, retry}
-
-      {:crashed, retry_id} ->
-        retry = if retry_id, do: resolve_execution(db, retry_id)
-        {:crashed, retry}
-
-      :cancelled ->
-        :cancelled
-
-      {:timeout, retry_id} ->
-        retry = if retry_id, do: resolve_execution(db, retry_id)
-        {:timeout, retry}
-
-      {:suspended, successor_id} ->
-        successor = if successor_id, do: resolve_execution(db, successor_id)
-        {:suspended, successor}
-
-      {:recurred, successor_id} ->
-        successor = if successor_id, do: resolve_execution(db, successor_id)
-        {:recurred, successor}
-
-      # In-flight successor (successor_id is an internal execution ID)
-      {type, execution_id}
-      when type in [:deferred, :cached, :spawned] and is_integer(execution_id) ->
-        execution_result =
-          case resolve_result(db, execution_id) do
-            {:ok, execution_result} -> execution_result
-            {:pending, _execution_id} -> nil
-          end
-
-        {type, resolve_execution(db, execution_id), build_result(execution_result, db)}
-
-      # Resolved ref form (ref_id + value)
-      {type, ref_id, value} when type in [:deferred, :cached, :spawned] ->
-        execution_metadata = resolve_execution_ref(db, ref_id)
-        resolved_value = build_value(value, db)
-        {type, execution_metadata, {:value, resolved_value}}
-
-      nil ->
-        nil
-    end
-  end
-
-  # Write the results row (with successor info baked in) and fire
-  # result-time notifications: wake waiters, update dependencies, send the
-  # Studio :result event carrying the result tuple and result_at timestamp.
-  # The completion row is written later via complete_execution (triggered by
-  # notify_terminated for worker-involved cases, or by the server-initiated
-  # paths directly when no worker is involved).
-  # `opts[:streams]` selects which open streams an immediately-completing
-  # result closes (see `close_open_streams/4`): `:step` by default, or
-  # `:registered` when a re-run cancels a never-started successor and the
-  # paused streams must survive for the new attempt.
-  defp record_and_notify_result(
-         state,
-         execution_id,
-         result,
-         _module,
-         created_by \\ nil,
-         opts \\ []
-       ) do
-    result =
-      case result do
-        {:value, value} -> {:value, normalize_value(value)}
-        other -> other
-      end
-
-    case Results.record_result(state.db, execution_id, result, created_by) do
-      {:ok, timestamp} ->
-        state = fire_result_notifications(state, execution_id, result, timestamp, created_by)
-
-        # For result shapes that write the completion synchronously
-        # (cancelled / abandoned / timeout / deferred / cached / spawned /
-        # suspended / recurred), fire the completion-time notifications
-        # now — queue removal, run-topic `completion` update, waiter
-        # wake-ups. For value/error the completion is written later via
-        # complete_execution, which fires these itself.
-        #
-        # Terminal completions imply streams closed: any streams this
-        # execution left open are closed here (after the completion row is
-        # written, so derive_lifecycle_info resolves the real reason for
-        # live subscribers) — otherwise abandoned/timed-out producers leave
-        # consumers blocked forever waiting for a close that never comes.
-        state =
-          if writes_completion_immediately?(result) do
-            state
-            |> maybe_close_open_streams(result, execution_id, Keyword.get(opts, :streams, :step))
-            |> fire_completion_notification(execution_id, timestamp)
-          else
-            state
-          end
-
-        {:ok, state}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  # Which of the immediately-completing shapes should close the step's
-  # open streams. Deliberately the same set that derive_lifecycle_info
-  # can name — closing a stream whose reason we can't derive would push a
-  # nil reason, which consumers coerce to a clean "complete" and silently
-  # accept as a truncated stream.
-  #
-  # :deferred / :cached / :spawned never reach here with open streams
-  # (the execution was superseded before its body ran, so it appended
-  # nothing).
-  #
-  # :suspended is deliberately *not* included: a suspend pauses the
-  # step's streams, and the execution that resumes the step continues
-  # them, so consumers see one unbroken sequence. :recurred *is*
-  # included — a recurrent iteration finishing is a completion, and the
-  # next iteration opens its own streams.
-  defp maybe_close_open_streams(state, result, execution_id, scope) do
-    if closes_streams_on_completion?(result) do
-      close_open_streams(state, execution_id, :lifecycle, scope)
-    else
-      state
-    end
-  end
-
-  defp closes_streams_on_completion?(:cancelled), do: true
-  defp closes_streams_on_completion?({:abandoned, _}), do: true
-  defp closes_streams_on_completion?({:crashed, _}), do: true
-  defp closes_streams_on_completion?({:timeout, _}), do: true
-  defp closes_streams_on_completion?({:recurred, _}), do: true
-  defp closes_streams_on_completion?(_), do: false
-
-  defp writes_completion_immediately?(:cancelled), do: true
-  defp writes_completion_immediately?({:abandoned, _}), do: true
-  defp writes_completion_immediately?({:crashed, _}), do: true
-  defp writes_completion_immediately?({:timeout, _}), do: true
-  defp writes_completion_immediately?({:suspended, _}), do: true
-  defp writes_completion_immediately?({:recurred, _}), do: true
-  defp writes_completion_immediately?({:deferred, _}), do: true
-  defp writes_completion_immediately?({:deferred, _, _}), do: true
-  defp writes_completion_immediately?({:cached, _}), do: true
-  defp writes_completion_immediately?({:cached, _, _}), do: true
-  defp writes_completion_immediately?({:spawned, _}), do: true
-  defp writes_completion_immediately?({:spawned, _, _}), do: true
-  defp writes_completion_immediately?(_), do: false
-
-  defp fire_result_notifications(state, execution_id, result, result_at, created_by) do
-    {:ok, successors} = Runs.get_result_successors(state.db, execution_id)
-    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
-    execution_external_id = execution_external_id(r, s, a)
-
-    state =
-      state
-      |> notify_waiting(execution_id)
-      |> update_dependencies_on_result(execution_id)
-      |> unregister_pending_dependencies(execution_id)
-
-    # Cancellation after a value result was already recorded: the value
-    # stays authoritative for consumer resolution (a consumer that saw
-    # the value before the cancel must keep seeing it). The run-topic
-    # `:result` notification was already fired at value-record time, so
-    # re-firing it with `:cancelled` would clobber the value in the UI
-    # and in any dependent executions' nested result state. The
-    # `:completion` notification carries the cancelled status via its
-    # kind field, which is what the UI reads for the badge.
-    skip_topic_notifications =
-      result == :cancelled and has_value_result?(state.db, execution_id)
-
-    state =
-      if skip_topic_notifications do
-        state
-      else
-        final = is_result_final?(result)
-        built_result = build_result(result, state.db)
-
-        principal =
-          case Principals.get_principal(state.db, created_by) do
-            {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
-            {:ok, nil} -> nil
-          end
-
-        successors
-        |> Enum.reduce(state, fn {run_external_id, successor_id}, state ->
-          cond do
-            successor_id == execution_id ->
-              notify_listeners(
-                state,
-                {:run, run_external_id},
-                {:result, execution_external_id, built_result, result_at, principal}
-              )
-
-            final ->
-              {:ok, {r2, s2, a2}} = Runs.get_execution_key(state.db, successor_id)
-              successor_external_id = execution_external_id(r2, s2, a2)
-
-              notify_listeners(
-                state,
-                {:run, run_external_id},
-                # TODO: better name?
-                {:result_result, successor_external_id, built_result, result_at, principal}
-              )
-
-            true ->
-              state
-          end
-        end)
-      end
-
-    # TODO: only if there's an execution waiting for this result?
-    send(self(), :tick)
-
-    state
-  end
-
-  defp has_value_result?(db, execution_id) do
-    case Results.get_result_payload(db, execution_id) do
-      {:ok, {:value, _}} -> true
-      _ -> false
-    end
-  end
-
-  # Notify input-topic subscribers when any input this execution depended on
-  # has now become inactive. `has_active_dependency?` keys off the completion
-  # row, so this must run at completion time rather than result time —
-  # calling it any earlier would always see "still active".
-  defp notify_input_deactivations(state, execution_id) do
-    case Inputs.get_input_dependencies_for_execution(state.db, execution_id) do
-      {:ok, deps} ->
-        Enum.reduce(deps, state, fn {input_id, input_ws_id}, state ->
-          if Inputs.has_active_dependency?(state.db, input_id) do
-            state
-          else
-            {:ok, run_ext_id, input_number} =
-              Inputs.get_input_run_and_number(state.db, input_id)
-
-            input_ext_id = input_external_id(run_ext_id, input_number)
-            # Route :inputs topic notification to the INPUT's workspace
-            # (matching :input_dependency_active in the resolve_input
-            # handler) — these differ when an execution in a child
-            # workspace resolved an input created in a parent.
-            input_ws_ext_id = workspace_external_id(state, input_ws_id)
-
-            state
-            |> notify_listeners(
-              {:inputs, input_ws_ext_id},
-              {:input_dependency_inactive, input_ext_id}
-            )
-            |> notify_listeners(
-              {:input, input_ext_id},
-              {:active, false}
-            )
-          end
-        end)
-
-      _ ->
-        state
-    end
-  end
-
-  # Write the completion row and fire completion-time notifications. Called
-  # from notify_terminated (or the abandonment/crash paths). Decides any
-  # retry/successor from the persisted result row at this point rather than
-  # carrying a decision forward from result-record time — so the decision
-  # survives server restarts and epoch rotation.
-  defp complete_execution(state, execution_id) do
-    case Results.has_completion?(state.db, execution_id) do
-      {:ok, true} ->
-        state
-
-      {:ok, false} ->
-        case Results.get_result_payload(state.db, execution_id) do
-          {:ok, {:value, _}} ->
-            finalize_success_completion(state, execution_id)
-
-          {:ok, {:error, type, message, frames, retryable}} ->
-            finalize_error_completion(
-              state,
-              execution_id,
-              {type, message, frames, retryable}
-            )
-
-          {:ok, nil} ->
-            handle_crashed(state, execution_id)
-        end
-    end
-  end
-
-  # Value result + drain: dispatch on stream closure outcomes.
-  #   * any stream this execution closed `:errored` → `:stream_errored`
-  #     (retried)
-  #   * else any stream it closed `:timeout` → `:stream_timeout` (not
-  #     retried, not cacheable)
-  #   * else `:succeeded`
-  # `close_open_streams` runs first so any of the step's streams still
-  # open get a `:complete` row — the step finished, so they're done. That
-  # doesn't influence the dispatch; only the explicit `:errored` /
-  # `:timeout` reasons do.
-  defp finalize_success_completion(state, execution_id) do
-    # The adapter exits only once every stream it produces has closed, and
-    # its stream_close messages precede notify_terminated on the wire. So a
-    # stream this execution registered that is still open now means the
-    # process died mid-drain: a crash with a truncated stream, not a
-    # success with leftovers. (Paused streams from an earlier attempt are
-    # not this execution's registrations, and are closed below as usual.)
-    {:ok, still_producing} = Streams.get_open_stream_ids_for_execution(state.db, execution_id)
-
-    if still_producing == [] do
-      finalize_drained_completion(state, execution_id)
-    else
-      finalize_crashed_mid_drain(state, execution_id)
-    end
-  end
-
-  # Like handle_crashed, but the value result was already recorded and
-  # notified — only the completion (with the step's retry decision) and the
-  # stream closures are outstanding. Closing after the completion row is
-  # written lets derive_lifecycle_info report :crashed to consumers.
-  defp finalize_crashed_mid_drain(state, execution_id) do
-    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-    {retry_id, _recurred?, state} =
-      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
-
-    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
-      {:ok, completion_at} ->
-        state = close_open_streams(state, execution_id)
-        fire_completion_notification(state, execution_id, completion_at)
-
-      {:error, :already_completed} ->
-        state
-    end
-  end
-
-  defp finalize_drained_completion(state, execution_id) do
-    state = close_open_streams(state, execution_id, :complete)
-
-    {:ok, summary} = Streams.get_closure_summary_for_execution(state.db, execution_id)
-
-    cond do
-      not is_nil(summary.errored) ->
-        finalize_stream_errored_completion(state, execution_id, summary.errored)
-
-      summary.timed_out ->
-        finalize_stream_timeout_completion(state, execution_id)
-
-      true ->
-        case Results.record_completion(state.db, execution_id, :succeeded) do
-          {:ok, completion_at} ->
-            fire_completion_notification(state, execution_id, completion_at)
-
-          {:error, :already_completed} ->
-            state
-        end
-    end
-  end
-
-  # A stream owned by this execution closed with an error, but the function
-  # body returned a value. Promote to `:stream_errored`: drives the retry
-  # policy and excludes the execution from cache lookups. The value result
-  # stays untouched in `results` — the execution's "result" remains the
-  # value (the stream reference). The stream's error info is surfaced via
-  # the streams panel; the completion kind alone tells the UI to render
-  # this as a failure-with-value (mirrors `do_cancel_execution`).
-  defp finalize_stream_errored_completion(state, execution_id, error_id) do
-    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-    {:ok, {type, message, frames}} = Errors.get_by_id(state.db, error_id)
-
-    {retry_id, _recurred?, state} =
-      decide_and_create_successor(
-        state,
-        execution_id,
-        step,
-        workspace_id,
-        {:error, type, message, frames, nil}
-      )
-
-    case Results.record_completion(state.db, execution_id, :stream_errored,
-           successor_id: retry_id
-         ) do
-      {:ok, completion_at} ->
-        fire_completion_notification(state, execution_id, completion_at)
-
-      {:error, :already_completed} ->
-        state
-    end
-  end
-
-  # A stream owned by this execution closed via idle timeout. The execution
-  # itself succeeded; promote to `:stream_timeout` to exclude it from cache
-  # lookups (consumer-shaped cache contents would be wrong) without
-  # surfacing as a failure or triggering a retry.
-  defp finalize_stream_timeout_completion(state, execution_id) do
-    case Results.record_completion(state.db, execution_id, :stream_timeout) do
-      {:ok, completion_at} ->
-        fire_completion_notification(state, execution_id, completion_at)
-
-      {:error, :already_completed} ->
-        state
-    end
-  end
-
-  # Error result: decide retry now (so the successor decision lands on
-  # the persisted completion row, not in transient in-memory state) and
-  # re-fire the :result notification with the retry link filled in.
-  defp finalize_error_completion(state, execution_id, {type, message, frames, retryable}) do
-    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-    {retry_id, _recurred?, state} =
-      decide_and_create_successor(
-        state,
-        execution_id,
-        step,
-        workspace_id,
-        {:error, type, message, frames, retryable}
-      )
-
-    case Results.record_completion(state.db, execution_id, :errored, successor_id: retry_id) do
-      {:ok, completion_at} ->
-        # Close streams only after the completion row exists, so
-        # derive_lifecycle_info resolves the real reason (:errored, with
-        # the producer's error) for live subscribers — closing first
-        # would push a nil reason, which consumers coerce to a clean
-        # "complete" and silently accept the truncated stream.
-        state = close_open_streams(state, execution_id)
-
-        # Re-fire :result on the run topic so the error entry in the UI
-        # picks up the newly-created retry successor. We only need to do
-        # this when retry_id changed from nil (there was no successor at
-        # initial :result time) to something.
-        state =
-          if retry_id do
-            fire_result_notifications(
-              state,
-              execution_id,
-              {:error, type, message, frames, retry_id, retryable},
-              nil,
-              nil
-            )
-          else
-            state
-          end
-
-        fire_completion_notification(state, execution_id, completion_at)
-
-      {:error, :already_completed} ->
-        # A completion row already exists, so derive_lifecycle_info still
-        # resolves a real reason. Close streams here too — otherwise this
-        # branch strands every consumer of a stream the producer left
-        # open, waiting for a close that nothing else emits.
-        close_open_streams(state, execution_id)
-    end
-  end
-
-  # No results row exists for this execution but notify_terminated has
-  # arrived — the worker terminated without reporting. Decide retry, write
-  # completion (no results row), fire notifications.
-  defp handle_crashed(state, execution_id) do
-    {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-    # Decide retry as if this were an abandoned-like failure. result_retryable?
-    # treats :crashed as retryable so the step's retry policy applies.
-    {retry_id, _recurred?, state} =
-      decide_and_create_successor(state, execution_id, step, workspace_id, :crashed)
-
-    case Results.record_completion(state.db, execution_id, :crashed, successor_id: retry_id) do
-      {:ok, completion_at} ->
-        # Streams that had been appended to before the worker died need to
-        # be closed so consumers don't wait forever. Closed after the
-        # completion row is written so derive_lifecycle_info resolves the
-        # real reason (:crashed) for live subscribers, rather than a nil
-        # reason that consumers would coerce to a clean "complete".
-        state = close_open_streams(state, execution_id)
-
-        # Result-time notifications weren't fired (no results row was ever
-        # written), so fire them now alongside the completion notification.
-        state =
-          fire_result_notifications(state, execution_id, {:crashed, retry_id}, nil, nil)
-
-        fire_completion_notification(state, execution_id, completion_at)
-
-      {:error, :already_completed} ->
-        # As in finalize_error_completion: a completion row exists, so the
-        # reason is derivable and any streams the dead worker left open
-        # still need closing or their consumers wait forever.
-        close_open_streams(state, execution_id)
-    end
-  end
-
-  # Closes the step's open streams on behalf of `execution_id`, and pushes
-  # a `stream_closed` notification to every active subscriber. Streams
-  # already closed by the producer (clean or errored) are left untouched.
-  #
-  # `scope` picks which streams: `:step` (default) is every open stream
-  # of the execution's step in its workspace — including paused streams
-  # left by an earlier suspended attempt, which nothing else would close.
-  # `:registered` is only the streams this execution produced into; used
-  # when a re-run cancels a pending successor so the paused streams
-  # survive for the new attempt.
-  #
-  # `spec` is how the closure is recorded: `:lifecycle` (the reason is
-  # derived on read from the closing execution's completion), `:timeout`
-  # or `:complete`.
-  defp close_open_streams(state, execution_id, spec \\ :lifecycle, scope \\ :step) do
-    {:ok, stream_ids} =
-      case scope do
-        :step ->
-          {:ok, {step_id, workspace_id, _attempt}} =
-            Runs.get_execution_location(state.db, execution_id)
-
-          Streams.get_open_stream_ids_for_step(state.db, step_id, workspace_id)
-
-        :registered ->
-          Streams.get_open_stream_ids_for_execution(state.db, execution_id)
-      end
-
-    {push_reason, push_error} =
-      case spec do
-        :lifecycle -> derive_lifecycle_info(state.db, execution_id)
-        :timeout -> {:timeout, nil}
-        :complete -> {:complete, nil}
-      end
-
-    Enum.reduce(stream_ids, state, fn stream_id, state ->
-      case Streams.close_stream(state.db, stream_id, execution_id, spec) do
-        {:ok, closed_at} ->
-          state
-          |> push_stream_closed(stream_id, push_reason, push_error)
-          |> notify_stream_closed(stream_id, execution_id, push_reason, push_error, closed_at)
-          |> update_dependencies_on_stream(stream_id, :closed)
-          |> drop_stream_producer(stream_id)
-
-        {:error, :already_closed} ->
-          state
-      end
-    end)
-  end
-
-  # Streams for the run topic's initial state, grouped by step id:
-  # `%{step_id => %{index => entry}}`. Each entry is the same shape the
-  # `:stream_registered` / `:stream_closed` notifications build up, with
-  # `:lifecycle` closures resolved to their specific cause against the
-  # closing execution.
-  defp build_run_streams(db, run_streams) do
-    run_streams
-    |> Enum.group_by(& &1.step_id)
-    |> Map.new(fn {step_id, streams} ->
-      {step_id,
-       Map.new(streams, fn stream ->
-         {:ok, registrations} = Streams.get_registrations(db, stream.id)
-         {buffer, timeout_ms} = latest_registration_config(registrations)
-
-         {:ok, workspace_external_id} =
-           Workspaces.get_workspace_external_id(db, stream.workspace_id)
-
-         {reason, error, closed_by_attempt} =
-           if stream.closed_at do
-             {reason, error} =
-               resolve_closure_reason(db, stream.reason, stream.error, stream.closed_by)
-
-             {:ok, {_r, _s, attempt}} = Runs.get_execution_key(db, stream.closed_by)
-             {reason, error, attempt}
-           else
-             {nil, nil, nil}
-           end
-
-         {stream.index,
-          %{
-            id: stream_external_id(stream.run_external_id, stream.step_number, stream.index),
-            index: stream.index,
-            position: stream.position,
-            workspace_id: workspace_external_id,
-            buffer: buffer,
-            timeout_ms: timeout_ms,
-            opened_at: stream.created_at,
-            attempts: Enum.map(registrations, fn {_id, attempt, _b, _t, _c} -> attempt end),
-            closed_at: stream.closed_at,
-            closed_by: closed_by_attempt,
-            reason: reason,
-            error: error
-          }}
-       end)}
-    end)
-  end
-
-  defp latest_registration_config([]), do: {nil, nil}
-
-  defp latest_registration_config(registrations) do
-    {_id, _attempt, buffer, timeout_ms, _created_at} = List.last(registrations)
-    {buffer, timeout_ms}
-  end
-
-  # A `:lifecycle` closure's meaning comes from the closing execution's
-  # completion; any other reason is stored directly.
-  defp resolve_closure_reason(db, :lifecycle, _stored_error, closed_by),
-    do: derive_lifecycle_info(db, closed_by)
-
-  defp resolve_closure_reason(_db, reason, stored_error, _closed_by), do: {reason, stored_error}
-  # Derive a semantic reason + optional error for a lifecycle stream
-  # closure, from the execution's completion kind. Used when pushing
-  # closures to live consumers and when late subscribers attach to
-  # already-closed streams.
-  #
-  # Returns `{reason, error}` where:
-  #   * `reason` is `:cancelled | :abandoned | :crashed | :timeout |
-  #     :errored | nil` — the shape of the ending, not a fabricated
-  #     exception string. Clients (Python adapter, Studio) decide how
-  #     to represent each reason in their own idioms.
-  #   * `error` is non-nil only when `reason == :errored` — then it's
-  #     the producer's actual `{type, message, frames}`, propagated
-  #     so consumers see the same exception the producer raised.
-  #
-  # Keys off the completion kind directly (rather than the logical-result
-  # tuple) so cancelled-with-value — where `get_result` returns
-  # `{:value, _}` but the completion kind is `:cancelled` — still
-  # propagates the cancellation signal to stream consumers.
-  defp derive_lifecycle_info(db, execution_id) do
-    case Results.get_completion(db, execution_id) do
-      {:ok, {:cancelled, _, _, _, _}} ->
-        {:cancelled, nil}
-
-      {:ok, {:abandoned, _, _, _, _}} ->
-        {:abandoned, nil}
-
-      {:ok, {:crashed, _, _, _, _}} ->
-        {:crashed, nil}
-
-      {:ok, {:timeout, _, _, _, _}} ->
-        {:timeout, nil}
-
-      # The producer didn't fail — it finished a recurrent iteration, and
-      # the next iteration opens its own streams. Reported distinctly
-      # rather than as :abandoned so a truncated-by-recurrence stream
-      # doesn't read as a worker failure. (A suspend never closes a
-      # stream, so it never appears here.)
-      {:ok, {:recurred, _, _, _, _}} ->
-        {:recurred, nil}
-
-      {:ok, {:errored, _, _, _, _}} ->
-        # Error payload lives on the results row — pull it so consumers
-        # see the producer's actual exception.
-        case Results.get_result_payload(db, execution_id) do
-          {:ok, {:error, type, message, frames, _}} -> {:errored, {type, message, frames}}
-          _ -> {:errored, nil}
-        end
-
-      _ ->
-        {nil, nil}
-    end
-  end
-
-  defp fire_completion_notification(state, execution_id, completion_at) do
-    # Every completion funnels through here, whoever wrote it, so this is
-    # the one place a permit needs releasing. Suspension, retry backoff,
-    # recurrence, cancellation and abandonment all write a completion, so
-    # all of them release; the successor re-acquires when it's next
-    # admitted.
-    state = release_concurrency_permit(state, execution_id)
-
-    {:ok, {r, s, a}} = Runs.get_execution_key(state.db, execution_id)
-    execution_external_id = execution_external_id(r, s, a)
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-    ws_ext_id = workspace_external_id(state, workspace_id)
-
-    # Error results become resolvable only once the completion lands (the
-    # retry decision is on the completion). Any waiters parked at result
-    # time because the result was still pending need to be re-evaluated now.
-    state = notify_waiting(state, execution_id)
-
-    {kind, successor} =
-      case Results.get_completion(state.db, execution_id) do
-        {:ok, {kind_atom, successor_id, successor_ref_id, _, _}} ->
-          {kind_atom, build_completion_successor(state.db, successor_id, successor_ref_id)}
-
-        {:ok, nil} ->
-          {nil, nil}
-      end
-
-    state =
-      state
-      |> notify_listeners(
-        {:run, r},
-        {:completion, execution_external_id, kind, successor, completion_at}
-      )
-      # Queue / workflow-list bookkeeping is completion-driven: the
-      # execution is considered "done" for the queue and the module-level
-      # running-workflow tracker only once the completion is recorded.
-      # An execution with a value result but no completion (streams still
-      # draining) continues to show up as running.
-      |> then(fn state ->
-        case untrack_run_execution(state, r, execution_id) do
-          {{root_module, root_target}, state} ->
-            state
-            |> notify_listeners(
-              {:modules, ws_ext_id},
-              {:completed, {root_module, root_target}, r, execution_external_id}
-            )
-            |> notify_listeners(
-              {:workflow, root_module, root_target, ws_ext_id},
-              {:completed, r, execution_external_id}
-            )
-            |> notify_run_outcome(r, root_module, root_target, ws_ext_id, execution_id)
-
-          {nil, state} ->
-            state
-        end
-      end)
-      |> notify_listeners(
-        {:queue, ws_ext_id},
-        {:completed, execution_external_id}
-      )
-      |> notify_input_deactivations(execution_id)
-
-    state
-  end
-
-  # Tell the workflow topic how the run turned out. The run's outcome comes
-  # from its initial execution, so it can move either when that execution
-  # completes, or when a later one does - a handed-off (deferred/cached/
-  # spawned) initial execution resolves to its successor's outcome. Rather
-  # than tracking which executions the initial one handed off to, this
-  # recomputes whenever the run has nothing left in flight, plus whenever the
-  # initial execution itself completes.
-  defp notify_run_outcome(state, run_external_id, module, target, ws_ext_id, execution_id) do
-    {:ok, initial?} = Runs.initial_execution?(state.db, execution_id)
-    idle? = !Map.has_key?(state.run_workflows, run_external_id)
-
-    if initial? or idle? do
-      {:ok, initial_execution_id} = Runs.get_initial_execution_id(state.db, run_external_id)
-      outcome = Results.run_outcome(state.db, initial_execution_id)
-
-      notify_listeners(
-        state,
-        {:workflow, module, target, ws_ext_id},
-        {:outcome, run_external_id, outcome}
-      )
-    else
-      state
-    end
-  end
-
-  # Shape the successor on a completion for the run topic. Same-epoch
-  # integer ids get resolved to their external form; cross-epoch refs go
-  # out as their resolved run/step/attempt triple.
-  defp build_completion_successor(_db, nil, nil), do: nil
-
-  defp build_completion_successor(db, successor_id, nil) when is_integer(successor_id) do
-    case Runs.get_execution_key(db, successor_id) do
-      {:ok, {r, s, a}} -> %{type: "execution", id: execution_external_id(r, s, a)}
-      _ -> nil
-    end
-  end
-
-  defp build_completion_successor(db, nil, successor_ref_id) when is_integer(successor_ref_id) do
-    {ext_id, _module, _target} = resolve_execution_ref(db, successor_ref_id)
-    %{type: "execution", id: ext_id}
-  end
-
-  defp process_result(state, execution_id, result, created_by \\ nil) do
-    {:ok, has_result?} = Results.has_result?(state.db, execution_id)
-    {:ok, has_completion?} = Results.has_completion?(state.db, execution_id)
-
-    cond do
-      # Already completed (e.g. cancelled, then the session died before the
-      # worker acknowledged): nothing to record — proceeding would create a
-      # spurious retry and then trip the completions UNIQUE constraint.
-      has_completion? ->
-        {:ok, state}
-
-      has_result? ->
-        # Mid-drain: the value result is recorded and the completion is
-        # pending while the execution's streams drain.
-        cond do
-          # A wall-clock timeout here means the drain was cut short. Close
-          # the remaining open streams as :timeout so complete_execution
-          # promotes the completion to :stream_timeout — otherwise the
-          # kill would land as a clean :succeeded with silently truncated
-          # streams.
-          result == :timeout ->
-            {:ok, close_open_streams(state, execution_id, :timeout)}
-
-          # The worker's session went away mid-drain. The value stands, but
-          # whatever it was still producing into is truncated, so this is an
-          # abandonment, not a success: write the completion as :abandoned
-          # (with the step's retry decision, as for any abandoned execution)
-          # and close what it left open, so consumers see :abandoned rather
-          # than a clean "complete" — and the truncated run isn't cached.
-          result == :abandoned ->
-            {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-            {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-            {retry_id, _recurred?, state} =
-              decide_and_create_successor(state, execution_id, step, workspace_id, :abandoned)
-
-            case Results.record_completion(state.db, execution_id, :abandoned,
-                   successor_id: retry_id,
-                   created_by: created_by
-                 ) do
-              {:ok, completion_at} ->
-                state = close_open_streams(state, execution_id)
-                {:ok, fire_completion_notification(state, execution_id, completion_at)}
-
-              {:error, :already_completed} ->
-                {:ok, state}
-            end
-
-          # A generator-bodied producer suspends from inside its body,
-          # after its value (the stream handle) was recorded. Write the
-          # completion so the successor is scheduled and the streams stay
-          # paused for it. The run topic's `:result` isn't re-fired: the
-          # value stands, and the completion carries the suspension.
-          match?({:suspended, _, _}, result) ->
-            {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-            {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-            {successor_id, _recurred?, state} =
-              decide_and_create_successor(state, execution_id, step, workspace_id, result)
-
-            case Results.record_completion(state.db, execution_id, :suspended,
-                   successor_id: successor_id,
-                   created_by: created_by
-                 ) do
-              {:ok, completion_at} ->
-                {:ok, fire_completion_notification(state, execution_id, completion_at)}
-
-              {:error, :already_completed} ->
-                {:ok, state}
-            end
-
-          true ->
-            {:ok, state}
-        end
-
-      true ->
-        {:ok, step} = Runs.get_step_for_execution(state.db, execution_id)
-        {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-
-        # Retry decisions for error results are deferred to
-        # complete_execution — they need to survive server restart, and
-        # the error payload is already persisted on the results row so
-        # the decision can be reconstructed from there. Every other shape
-        # (value with recurrent → :recurred, suspended, abandoned, crashed,
-        # timeout) still needs its successor decided here so the
-        # compat-shim-written completion carries the correct link.
-        {retry_id, recurred?, state} =
-          if match?({:error, _, _, _, _}, result) do
-            {nil, false, state}
-          else
-            decide_and_create_successor(state, execution_id, step, workspace_id, result)
-          end
-
-        result = transform_result_with_successor(result, retry_id, recurred?)
-
-        state =
-          case record_and_notify_result(
-                 state,
-                 execution_id,
-                 result,
-                 step.module,
-                 created_by
-               ) do
-            {:ok, state} -> state
-            {:error, :already_recorded} -> state
-            {:error, :already_completed} -> state
-          end
-
-        # Cancel descendant executions for timeouts and cancellations
-        state =
-          if match?({:timeout, _}, result) or result == :cancelled do
-            cancel_descendants(state, execution_id, workspace_id)
-          else
-            state
-          end
-
-        {:ok, state}
-    end
-  end
-
-  # A suspend request can name a catalog path for the successor to be gated
-  # on. One that isn't a valid path can't gate anything, and an ungated
-  # successor would run at once and ask again, so the execution fails
-  # instead — as it would for any other request the server can't honour.
-  # Checked as the result arrives, so the rest of the pipeline sees an
-  # ordinary error. Returns the result to record, and whether the worker
-  # has to be told to stop the execution: one that has asked to suspend is
-  # waiting to be aborted, which a suspension does and an error wouldn't.
-  # The official adapter validates paths up front, so this is for others.
-  defp refuse_invalid_catalog_wait({:suspended, _execute_after, dependency_keys} = result) do
-    case Enum.find(dependency_keys, &match?({:catalog, _path}, &1)) do
-      {:catalog, path} ->
-        case Catalog.validate_path(path) do
-          :ok ->
-            {result, false}
-
-          {:error, :invalid_path} ->
-            message = "invalid catalog path: #{inspect(path)}"
-            {{:error, "InvalidCatalogPath", message, [], false}, true}
-        end
-
-      nil ->
-        {result, false}
-    end
-  end
-
-  defp refuse_invalid_catalog_wait(result), do: {result, false}
-
-  # A catalog wait from a suspend request names only the path. Its position
-  # is the suspending execution's own view of that path — the head as of
-  # its pin, plus its run's writes — so "newer" means newer than anything
-  # it could see, and its own publish can never wake it. (A wait from a
-  # suspended select already carries its position.) An invalid path was
-  # refused before the result was recorded; dropping one here rather than
-  # gating on it forever is only a backstop.
-  defp resolve_catalog_waits(state, execution_id, dependency_keys) do
-    Enum.flat_map(dependency_keys, fn
-      {:catalog, path} ->
-        case Catalog.validate_path(path) do
-          :ok ->
-            number =
-              case lookup_catalog_version(state, execution_id, path, nil) do
-                {:ok, nil} -> 0
-                {:ok, version} -> version.number
-              end
-
-            [{:catalog, path, number}]
-
-          {:error, :invalid_path} ->
-            []
-        end
-
-      other ->
-        [other]
-    end)
-  end
-
-  defp decide_and_create_successor(state, execution_id, step, workspace_id, result) do
-    execution_ext_id =
-      case Runs.get_execution_key(state.db, execution_id) do
-        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-        {:error, :not_found} -> nil
-      end
-
-    cond do
-      match?({:suspended, _, _}, result) ->
-        {:suspended, execute_after, dependency_keys} = result
-        dependency_keys = resolve_catalog_waits(state, execution_id, dependency_keys)
-
-        # TODO: limit the number of times a step can suspend? (or rate?)
-
-        {:ok, retry_id, _, state} =
-          rerun_step(state, step, workspace_id,
-            execute_after: execute_after,
-            dependency_keys: dependency_keys
-          )
-
-        state =
-          if execution_ext_id do
-            abort_execution(state, execution_ext_id)
-          else
-            state
-          end
-
-        {retry_id, false, state}
-
-      result_retryable?(result) && step.retry_limit == -1 ->
-        # Unlimited retries - random delay between min and max
-        delay_ms =
-          step.retry_backoff_min +
-            :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
-
-        execute_after = System.os_time(:millisecond) + delay_ms
-
-        {:ok, retry_id, _, state} =
-          rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-        {retry_id, false, state}
-
-      result_retryable?(result) && step.retry_limit > 0 ->
-        # Limited retries - check consecutive failures. Exclude the current
-        # execution so this works whether or not its completion has been
-        # written yet. Failure kinds are errored/abandoned/crashed/timeout —
-        # the same set the retry predicate uses.
-        {:ok, rows} =
-          Runs.get_step_completion_kinds(state.db, step.id, step.retry_limit + 2)
-
-        failure_kinds = Results.failure_kinds()
-
-        consecutive_failures =
-          rows
-          |> Enum.reject(fn {id, _kind} -> id == execution_id end)
-          |> Enum.take_while(fn {_id, kind} -> kind in failure_kinds end)
-          |> Enum.count()
-
-        if consecutive_failures < step.retry_limit do
-          # TODO: add jitter (within min/max delay)
-          delay_ms =
-            step.retry_backoff_min +
-              consecutive_failures / max(step.retry_limit - 1, 1) *
-                (step.retry_backoff_max - step.retry_backoff_min)
-
-          execute_after = System.os_time(:millisecond) + delay_ms
-
-          {:ok, retry_id, _, state} =
-            rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-          {retry_id, false, state}
-        else
-          {nil, false, state}
-        end
-
-      step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
-        # Null return from recurrent step: schedule next iteration via :recurred
-        execute_after =
-          if step.delay > 0 do
-            System.os_time(:millisecond) + step.delay
-          end
-
-        {:ok, retry_id, _, state} =
-          rerun_step(state, step, workspace_id, execute_after: execute_after)
-
-        {retry_id, true, state}
-
-      step.recurrent == 1 and match?({:value, _}, result) ->
-        # Non-null return from recurrent step: stop recurrence
-        {nil, false, state}
-
-      true ->
-        {nil, false, state}
-    end
-  end
-
-  defp transform_result_with_successor(result, retry_id, recurred?) do
-    case result do
-      {:error, type, message, frames, retryable} ->
-        {:error, type, message, frames, retry_id, retryable}
-
-      :abandoned ->
-        {:abandoned, retry_id}
-
-      :crashed ->
-        {:crashed, retry_id}
-
-      :timeout ->
-        {:timeout, retry_id}
-
-      {:suspended, _, _} ->
-        {:suspended, retry_id}
-
-      {:value, _} when recurred? ->
-        {:recurred, retry_id}
-
-      other ->
-        other
-    end
-  end
-
-  defp resolve_result(db, execution_id) do
-    # TODO: check execution exists?
-    case Results.get_result(db, execution_id) do
-      {:ok, nil} ->
-        {:pending, execution_id}
-
-      {:ok, {result, _created_at, completion_at, _created_by}} ->
-        case result do
-          # Error payload but no completion yet — retry decision hasn't been
-          # made. Treat as pending so the caller waits for the completion.
-          {:error, _, _, _, nil, _retryable} when is_nil(completion_at) ->
-            {:pending, execution_id}
-
-          {:error, _, _, _, execution_id, _retryable} when not is_nil(execution_id) ->
-            resolve_result(db, execution_id)
-
-          {:abandoned, execution_id} when not is_nil(execution_id) ->
-            resolve_result(db, execution_id)
-
-          {:crashed, execution_id} when not is_nil(execution_id) ->
-            resolve_result(db, execution_id)
-
-          {:timeout, execution_id} when not is_nil(execution_id) ->
-            resolve_result(db, execution_id)
-
-          # In-flight successor (follow chain)
-          {:deferred, execution_id} when is_integer(execution_id) ->
-            resolve_result(db, execution_id)
-
-          {:cached, execution_id} when is_integer(execution_id) ->
-            resolve_result(db, execution_id)
-
-          {:suspended, execution_id} ->
-            resolve_result(db, execution_id)
-
-          {:recurred, execution_id} ->
-            resolve_result(db, execution_id)
-
-          {:spawned, execution_id} when is_integer(execution_id) ->
-            resolve_result(db, execution_id)
-
-          # Resolved ref forms — value_id is already loaded, return directly
-          {:deferred, _ref_id, value} ->
-            {:ok, {:value, value}}
-
-          {:cached, _ref_id, value} ->
-            {:ok, {:value, value}}
-
-          {:spawned, _ref_id, value} ->
-            {:ok, {:value, value}}
-
-          other ->
-            {:ok, other}
-        end
-    end
-  end
-
-  defp assign_targets(state, targets, session_id) do
-    Enum.reduce(targets, state, fn {module, module_targets}, state ->
-      Enum.reduce(module_targets, state, fn {type, target_names}, state ->
-        Enum.reduce(target_names, state, fn target_name, state ->
-          state
-          |> update_in(
-            [
-              Access.key(:targets),
-              Access.key(module, %{}),
-              Access.key(target_name, %{type: nil, session_ids: MapSet.new()})
-            ],
-            fn target ->
-              target
-              |> Map.put(:type, type)
-              |> Map.update!(:session_ids, &MapSet.put(&1, session_id))
-            end
-          )
-          |> update_in(
-            [Access.key(:sessions), session_id, :targets, Access.key(module, MapSet.new())],
-            &MapSet.put(&1, target_name)
-          )
-        end)
-      end)
-    end)
-  end
-
-  defp add_listener(state, topic, pid) do
-    ref = Process.monitor(pid)
-
-    state =
-      state
-      |> put_in([Access.key(:listeners), ref], topic)
-      |> put_in([Access.key(:topics), Access.key(topic, %{}), ref], pid)
-      |> maybe_schedule_idle_shutdown()
-
-    {:ok, ref, state}
-  end
-
-  defp remove_listener(state, ref) do
-    case Map.fetch(state.listeners, ref) do
-      {:ok, topic} ->
-        state
-        |> Map.update!(:listeners, &Map.delete(&1, ref))
-        |> Map.update!(:topics, fn topics ->
-          MapUtils.delete_in(topics, [topic, ref])
-        end)
-    end
-  end
-
-  defp notify_dependent_runs(state, input_id, input_external_id, response_type, owner_run_ext_id) do
-    {:ok, rows} = Inputs.get_dependent_run_external_ids(state.db, input_id)
-
-    Enum.reduce(rows, state, fn {run_ext_id}, state ->
-      if run_ext_id == owner_run_ext_id do
-        # Already notified via the direct notification above
-        state
-      else
-        notify_listeners(
-          state,
-          {:run, run_ext_id},
-          {:input_response, input_external_id, response_type}
-        )
-      end
-    end)
-  end
-
-  defp notify_listeners(state, topic, payload) do
-    if Map.has_key?(state.topics, topic) do
-      update_in(state.notifications[topic], &[payload | &1 || []])
-    else
-      state
-    end
-  end
-
-  defp flush_notifications(state) do
-    Enum.each(state.notifications, fn {topic, notifications} ->
-      notifications = Enum.reverse(notifications)
-
-      state.topics
-      |> Map.get(topic, %{})
-      |> Enum.each(fn {ref, pid} ->
-        send(pid, {:topic, ref, notifications})
-      end)
-    end)
-
-    Map.put(state, :notifications, %{})
-  end
-
-  defp send_session(state, session_id, message) do
-    session = state.sessions[session_id]
-
-    if session.connection do
-      {pid, ^session_id} = state.connections[session.connection]
-      send(pid, message)
-      state
-    else
-      update_in(state.sessions[session_id].queue, &[message | &1])
-    end
-  end
-
-  defp session_at_capacity?(session) do
-    if session.concurrency != 0 do
-      load = MapSet.size(session.starting) + MapSet.size(session.executing)
-      load >= session.concurrency
-    else
-      false
-    end
-  end
-
-  defp session_active?(session, state) do
-    if session.worker_id do
-      worker = Map.fetch!(state.workers, session.worker_id)
-      worker.state == :active
-    else
-      true
-    end
-  end
-
-  defp session_pool_disabled?(session, state) do
-    if session.worker_id do
-      worker = Map.fetch!(state.workers, session.worker_id)
-      workspace_pools = Map.get(state.pools, session.workspace_id, %{})
-      pool = Map.get(workspace_pools, worker.pool_name)
-      pool != nil && Map.get(pool, :state, :active) == :disabled
-    else
-      false
-    end
-  end
-
-  defp has_requirements?(provides, requires) do
-    # TODO: case insensitive matching?
-    Enum.all?(requires, fn {key, requires_values} ->
-      (provides || %{})
-      |> Map.get(key, [])
-      |> Enum.any?(&(&1 in requires_values))
-    end)
-  end
-
-  defp merge_tag_sets(a, b) do
-    Map.merge(a || %{}, b || %{}, fn _key, v1, v2 -> Enum.uniq(v1 ++ v2) end)
-  end
-
-  # Merge run-level requires with step-level requires (child overrides per key).
-  defp effective_requires(tag_sets, run_requires_tag_set_id, step_requires_tag_set_id) do
-    run_requires =
-      if run_requires_tag_set_id,
-        do: Map.fetch!(tag_sets, run_requires_tag_set_id),
-        else: %{}
-
-    step_requires =
-      if step_requires_tag_set_id,
-        do: Map.fetch!(tag_sets, step_requires_tag_set_id),
-        else: %{}
-
-    run_requires
-    |> Map.merge(step_requires)
-    |> Map.reject(fn {_key, values} -> values == [] end)
-  end
-
-  defp satisfies_accepts?(accepts, requires) do
-    # Worker's accepts tags must all be present in the task's requires tags
-    Enum.all?(accepts || %{}, fn {key, accepts_values} ->
-      (requires || %{})
-      |> Map.get(key, [])
-      |> Enum.any?(&(&1 in accepts_values))
-    end)
-  end
-
-  # Build the session data map sent to the Sessions topic.
-  defp build_session_data(state, session) do
-    worker = session.worker_id && Map.get(state.workers, session.worker_id)
-
-    # Build targets as %{module => [target_name]} (session.targets values are MapSets)
-    targets =
-      Map.new(session.targets, fn {module, target_names} ->
-        {module, target_names |> MapSet.to_list() |> Enum.sort()}
-      end)
-
-    %{
-      connected: !is_nil(session.connection),
-      executing: session.starting |> MapSet.union(session.executing) |> Enum.count(),
-      concurrency: session.concurrency,
-      pool_name: if(worker, do: worker.pool_name),
-      targets: targets,
-      provides: session.provides,
-      accepts: session.accepts,
-      worker_state: if(worker, do: worker.state),
-      executions: session.total_executions
-    }
-  end
-
-  # The gates a queued execution is still waiting on, in a form the queue
-  # topic can render. Every kind is represented: the queue's answer to "why
-  # isn't this running?" is wrong if a gate it can't name is dropped, so an
-  # unresolvable one keeps its type and loses only its identifier.
-  defp queue_dependencies(db, pending_dependency_ids) do
-    Enum.map(pending_dependency_ids, fn
-      {:execution, dependency_id} ->
-        case Runs.get_execution_key(db, dependency_id) do
-          {:ok, {r, s, a}} -> %{type: "execution", executionId: execution_external_id(r, s, a)}
-          {:error, _} -> %{type: "execution", executionId: nil}
-        end
-
-      {:input, input_id} ->
-        case Inputs.get_input_run_and_number(db, input_id) do
-          {:ok, run_ext_id, number} ->
-            %{type: "input", inputId: input_external_id(run_ext_id, number)}
-
-          {:error, _} ->
-            %{type: "input", inputId: nil}
-        end
-
-      {:stream, stream_id, sequence} ->
-        case Streams.get_stream(db, stream_id) do
-          {:ok, stream} ->
-            %{
-              type: "stream",
-              stepId: "#{stream.run_external_id}:#{stream.step_number}",
-              index: stream.index,
-              module: stream.module,
-              target: stream.target,
-              sequence: sequence
-            }
-
-          {:error, :not_found} ->
-            %{
-              type: "stream",
-              stepId: nil,
-              index: nil,
-              module: nil,
-              target: nil,
-              sequence: sequence
-            }
-        end
-
-      {:catalog, _workspace_id, path, number} ->
-        %{type: "catalog", path: path, number: number}
-    end)
-  end
-
-  # Send a notification with the current pending dependencies for an execution.
-  # The queue gets the gates themselves, so it can say what an execution is
-  # waiting on; the run only needs to know which of the dependencies it
-  # already lists are still unresolved.
-  defp notify_pending_dependencies(state, execution_id, pending_dependency_ids) do
-    case Runs.get_execution_key(state.db, execution_id) do
-      {:ok, {r, s, a}} ->
-        execution_ext_id = execution_external_id(r, s, a)
-
-        dependencies = queue_dependencies(state.db, pending_dependency_ids)
-
-        {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, execution_id)
-        ws_ext_id = workspace_external_id(state, workspace_id)
-
-        state
-        |> notify_listeners(
-          {:queue, ws_ext_id},
-          {:dependencies, execution_ext_id, dependencies}
-        )
-        |> notify_listeners(
-          {:run, r},
-          {:pending_dependencies, execution_ext_id,
-           unresolved_dependency_ids(state.db, execution_id)}
-        )
-
-      {:error, _} ->
-        state
-    end
-  end
-
-  # Build a map of execution_external_id -> [dependency] for all pending
-  # executions in the given workspace, for the Queue topic snapshot.
-  defp build_queue_dependencies(state, workspace_id) do
-    # Gated executions belong here as much as blocked ones do — both are
-    # executions the queue is showing as not running for a reason.
-    execution_ids =
-      Enum.uniq(Map.keys(state.pending_dependencies) ++ Map.keys(state.concurrency_gated))
-
-    Enum.reduce(execution_ids, %{}, fn execution_id, acc ->
-      case Runs.get_workspace_id_for_execution(state.db, execution_id) do
-        {:ok, ^workspace_id} ->
-          case Runs.get_execution_key(state.db, execution_id) do
-            {:ok, {r, s, a}} ->
-              ext_id = execution_external_id(r, s, a)
-
-              Map.put(acc, ext_id, build_execution_queue_dependencies(state, execution_id))
-
-            {:error, _} ->
-              acc
-          end
-
-        _ ->
-          acc
-      end
-    end)
-  end
-
-  # Rebuild the concurrency ledger from the database: every execution with
-  # an assignment and no completion holds a permit for each key it declares.
-  defp load_concurrency_permits(state) do
-    {:ok, permits} = Runs.get_held_concurrency_permits(state.db)
-
-    Map.put(
-      state,
-      :concurrency_permits,
-      Map.new(permits, fn {execution_id, workspace_id, concurrency_key, group_key} ->
-        {execution_id,
-         %{
-           workspace_id: workspace_id,
-           keys: Enum.reject([concurrency_key, group_key], &is_nil/1)
-         }}
-      end)
-    )
-  end
-
-  # An execution can be subject to two limits at once: its task's (a blob
-  # key hashed from namespace and arguments) and its group's (a string
-  # naming the parent execution), so the two never collide in the counts.
-  # Each is judged against its own limit; admission needs room in all.
-  defp execution_requirements(execution) do
-    [
-      {:concurrency, execution.concurrency_key, execution.concurrency_limit},
-      {:group, execution.group_key, execution.group_limit}
-    ]
-    |> Enum.reject(fn {_type, key, limit} -> is_nil(key) or limit == 0 end)
-    |> Enum.map(fn {type, key, limit} -> %{type: type, key: key, limit: limit} end)
-  end
-
-  # The keys an execution holds while it runs — whichever of the two it
-  # declares. Empty for an execution under no limit, which never enters
-  # the ledger.
-  defp permit_keys(execution) do
-    Enum.reject([execution.concurrency_key, execution.group_key], &is_nil/1)
-  end
-
-  # Permits are counted per {workspace, key}. Workspaces are scheduled
-  # independently — each has its own workers, pools and defer keys — and
-  # inheritance only shares results, so a limit is scoped the same way: a
-  # derived workspace neither waits behind its base nor holds it up.
-  #
-  # %{{workspace_id, key} => count}, computed once per tick.
-  defp concurrency_held_counts(state) do
-    Enum.reduce(state.concurrency_permits, %{}, fn {_execution_id, permit}, counts ->
-      Enum.reduce(permit.keys, counts, fn key, counts ->
-        Map.update(counts, concurrency_scope(permit.workspace_id, key), 1, &(&1 + 1))
-      end)
-    end)
-  end
-
-  defp concurrency_scope(workspace_id, key), do: {workspace_id, key}
-
-  # Empty when the execution declares no limit, or when there's room under
-  # every limit it declares. Otherwise one queue-topic dependency map per
-  # limit that lacks room, each naming the current holders — so an
-  # execution gated on both its task and its group reports both, and
-  # neither is reserved while waiting on the other.
-  #
-  # The limit compared against is the execution's own, not the holders' —
-  # targets sharing a namespace may each declare a different one, and each
-  # is judged by what it asked for.
-  defp concurrency_gate(state, counts, execution) do
-    execution
-    |> execution_requirements()
-    |> Enum.reject(fn requirement ->
-      scope = concurrency_scope(execution.workspace_id, requirement.key)
-      Map.get(counts, scope, 0) < requirement.limit
-    end)
-    |> Enum.map(fn requirement ->
-      scope = concurrency_scope(execution.workspace_id, requirement.key)
-
-      holders =
-        state.concurrency_permits
-        |> Enum.filter(fn {_execution_id, permit} ->
-          requirement.key in permit.keys and
-            concurrency_scope(permit.workspace_id, requirement.key) == scope
-        end)
-        |> Enum.map(fn {holder_id, _permit} ->
-          case Runs.get_execution_key(state.db, holder_id) do
-            {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-            {:error, _} -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-
-      build_gate(requirement, holders)
-    end)
-  end
-
-  defp build_gate(%{type: :concurrency, key: key, limit: limit}, holders) do
-    %{type: "concurrency", key: build_concurrency_key(key), limit: limit, holders: holders}
-  end
-
-  # The group key is readable as it stands — "<parent execution>/<group>" —
-  # so it's sent verbatim, split into its parts for the queue's benefit.
-  # The group's name isn't carried: the run topic has it, and resolving it
-  # here would need a join the spawned-run case can't make.
-  defp build_gate(%{type: :group, key: key, limit: limit}, holders) do
-    [parent, group] = String.split(key, "/", parts: 2)
-
-    %{
-      type: "group",
-      key: key,
-      parent: parent,
-      group: String.to_integer(group),
-      limit: limit,
-      holders: holders
-    }
-  end
-
-  # Rendered like the run topic's cacheKey — a short hex prefix, enough to
-  # tell two pools apart at a glance.
-  defp build_concurrency_key(key) do
-    key |> Base.encode16(case: :lower) |> String.slice(0, 10)
-  end
-
-  defp grant_concurrency_permit(state, execution) do
-    case permit_keys(execution) do
-      [] ->
-        state
-
-      keys ->
-        put_in(state, [Access.key(:concurrency_permits), execution.execution_id], %{
-          workspace_id: execution.workspace_id,
-          keys: keys
-        })
-    end
-  end
-
-  # A no-op for an execution that never held one (never assigned, or
-  # declaring no limit), which is every completion but a holder's.
-  defp release_concurrency_permit(state, execution_id) do
-    if Map.has_key?(state.concurrency_permits, execution_id) do
-      # A completion that only frees a permit doesn't necessarily tick —
-      # the result-time tick has already happened by the time a draining
-      # execution completes — so whatever was gated on it would otherwise
-      # wait for the next unrelated tick.
-      send(self(), :tick)
-
-      state
-      |> Map.put(:concurrency_permits, Map.delete(state.concurrency_permits, execution_id))
-      |> Map.put(:concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
-    else
-      Map.put(state, :concurrency_gated, Map.delete(state.concurrency_gated, execution_id))
-    end
-  end
-
-  defp increment_concurrency_count(counts, execution) do
-    Enum.reduce(permit_keys(execution), counts, fn key, counts ->
-      Map.update(counts, concurrency_scope(execution.workspace_id, key), 1, &(&1 + 1))
-    end)
-  end
-
-  # Emit queue-topic dependency updates for executions that have just become
-  # gated, or have just stopped being. Transitions only — re-sending an
-  # unchanged gate every tick would be pure noise on a busy queue.
-  defp update_concurrency_gates(state, gated_now) do
-    changed =
-      Enum.uniq(Map.keys(gated_now) ++ Map.keys(state.concurrency_gated))
-      |> Enum.reject(&(Map.get(gated_now, &1) == Map.get(state.concurrency_gated, &1)))
-
-    state = Map.put(state, :concurrency_gated, gated_now)
-
-    Enum.reduce(changed, state, fn execution_id, state ->
-      notify_queue_dependencies(state, execution_id)
-    end)
-  end
-
-  # The queue's answer to "why isn't this running?": whatever the execution
-  # is waiting on, plus each concurrency gate that's holding it back.
-  defp notify_queue_dependencies(state, execution_id) do
-    with {:ok, {r, s, a}} <- Runs.get_execution_key(state.db, execution_id),
-         {:ok, workspace_id} <- Runs.get_workspace_id_for_execution(state.db, execution_id) do
-      notify_listeners(
-        state,
-        {:queue, workspace_external_id(state, workspace_id)},
-        {:dependencies, execution_external_id(r, s, a),
-         build_execution_queue_dependencies(state, execution_id)}
-      )
-    else
-      _ -> state
-    end
-  end
-
-  defp build_execution_queue_dependencies(state, execution_id) do
-    pending = Map.get(state.pending_dependencies, execution_id, MapSet.new())
-
-    queue_dependencies(state.db, pending) ++
-      Map.get(state.concurrency_gated, execution_id, [])
-  end
-
-  # Initialize pending_dependencies and dependency_waiters for all existing unassigned executions.
-  defp initialize_pending_dependencies(state) do
-    {:ok, executions} = Runs.get_unassigned_executions(state.db)
-
-    Enum.reduce(executions, state, fn execution, state ->
-      pending =
-        compute_pending_dependencies(
-          state.db,
-          execution.execution_id,
-          execution.wait_for,
-          execution.step_id
-        )
-
-      register_pending_dependencies(state, execution.execution_id, pending)
-    end)
-  end
-
-  # The execution references carried by the arguments named in `wait_for`,
-  # as {run_external_id, step_number, attempt}. These gate the execution
-  # before it ever runs, but live in the step's arguments rather than the
-  # dependency table, so nothing else surfaces them.
-  defp argument_reference_keys(db, step_id, wait_for) do
-    if wait_for && wait_for != [] do
-      {:ok, arguments} = Runs.get_step_arguments(db, step_id)
-
-      wait_for
-      |> Enum.flat_map(fn index ->
-        case Enum.at(arguments, index) do
-          {:raw, _, references} -> references
-          {:blob, _, _, references} -> references
-          nil -> []
-        end
-      end)
-      |> Enum.flat_map(fn
-        {:execution, run_ext, step_num, attempt} -> [{run_ext, step_num, attempt}]
-        _ -> []
-      end)
-      |> Enum.uniq()
-    else
-      []
-    end
-  end
-
-  # Those same references, shaped as run topic dependencies.
-  defp build_argument_dependencies(db, step_id, wait_for) do
-    db
-    |> argument_reference_keys(step_id, wait_for)
-    |> Map.new(fn {run_ext, step_num, attempt} ->
-      ext_id = execution_external_id(run_ext, step_num, attempt)
-
-      {module, target} =
-        case Runs.get_module_target(db, run_ext, step_num, attempt) do
-          {:ok, {m, t}} -> {m, t}
-          {:ok, nil} -> {nil, nil}
-        end
-
-      {ext_id, {:result, {ext_id, module, target}}}
-    end)
-  end
-
-  # Whether the execution these coordinates name has produced a result,
-  # following redirects (a suspend's successor, a spawn's target) the way
-  # the assignment gate does.
-  defp execution_result_pending?(db, run_ext, step_num, attempt) do
-    case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-      {:ok, {execution_id}} when not is_nil(execution_id) ->
-        match?({:pending, _}, resolve_result(db, execution_id))
-
-      _ ->
-        false
-    end
-  end
-
-  # Which of an execution's dependencies are still outstanding, keyed as the
-  # run topic's dependency map is. Related to `pending_dependencies` but not
-  # the same thing: that's the assignment gate, computed once and amended as
-  # dependencies clear, whereas this is re-derived per dependency for
-  # display. A completed execution reports nothing - it isn't waiting on
-  # anything any more, whatever state its dependencies are in.
-  #
-  # Same two classes as the gate: argument references are outstanding
-  # individually, and the recorded dependencies form an any-of group, so a
-  # single met member means none of them is outstanding.
-  defp unresolved_dependency_ids(db, execution_id) do
-    {:ok, step} = Runs.get_step_for_execution(db, execution_id)
-
-    argument_ids =
-      db
-      |> argument_reference_keys(step.id, step.wait_for)
-      |> Enum.filter(fn {run_ext, step_num, attempt} ->
-        execution_result_pending?(db, run_ext, step_num, attempt)
-      end)
-      |> MapSet.new(fn {run_ext, step_num, attempt} ->
-        execution_external_id(run_ext, step_num, attempt)
-      end)
-
-    result_members =
-      case Runs.get_result_dependencies(db, execution_id) do
-        {:ok, dependencies} ->
-          Enum.map(dependencies, fn {ref_id} ->
-            {:ok, {run_ext, step_num, attempt, _, _}} = Runs.get_execution_ref(db, ref_id)
-
-            {execution_external_id(run_ext, step_num, attempt),
-             execution_result_pending?(db, run_ext, step_num, attempt)}
-          end)
-      end
-
-    input_members =
-      case Runs.get_input_dependencies(db, execution_id) do
-        {:ok, deps} ->
-          Enum.map(deps, fn {input_id} ->
-            {:ok, run_ext, number} = Inputs.get_input_run_and_number(db, input_id)
-            {input_external_id(run_ext, number), !Inputs.is_input_responded?(db, input_id)}
-          end)
-      end
-
-    stream_members =
-      case Streams.get_wait_dependencies(db, execution_id) do
-        {:ok, waits} ->
-          Enum.map(waits, fn {stream_ref_id, sequence} ->
-            {:ok, {run_ext, step_number, index, _module, _target}} =
-              Streams.get_stream_ref(db, stream_ref_id)
-
-            pending? =
-              case resolve_stream_ref_id(db, stream_ref_id) do
-                {:ok, stream_id} -> !stream_reached?(db, stream_id, sequence)
-                {:error, :not_found} -> false
-              end
-
-            {stream_external_id(run_ext, step_number, index), pending?}
-          end)
-      end
-
-    catalog_members =
-      case Catalog.get_waits(db, execution_id) do
-        {:ok, []} ->
-          []
-
-        {:ok, waits} ->
-          {:ok, workspace_id} = Runs.get_workspace_id_for_execution(db, execution_id)
-          {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
-
-          Enum.map(waits, fn {path, number} ->
-            {catalog_wait_key(path, number),
-             match?({:ok, nil}, Catalog.get_next(db, path, chain, number))}
-          end)
-      end
-
-    members = result_members ++ input_members ++ stream_members ++ catalog_members
-
-    group_ids =
-      if Enum.any?(members, fn {_id, pending?} -> !pending? end),
-        do: MapSet.new(),
-        else: MapSet.new(members, fn {id, _pending?} -> id end)
-
-    MapSet.union(argument_ids, group_ids)
-  end
-
-  # Compute the set of dependency keys the given execution is waiting on.
-  #
-  # Two classes, combined as `all arguments AND any of the recorded group`:
-  #
-  #   * Argument references (`wait_for`) — every one must resolve before the
-  #     step's arguments make sense.
-  #   * Dependencies recorded on the execution row — result, input, stream
-  #     and catalog waits, which only a suspended select (or a suspended
-  #     stream consumer) writes. Select is first-wins, so the successor
-  #     wakes when ANY of them is met: if one already is, the whole group
-  #     is dropped here; otherwise every unmet one is registered and
-  #     `dependency_groups` remembers they go together.
-  #
-  # Returns `{pending, group}`: the keys to gate on, and the subset of them
-  # that form the any-of group.
-  defp compute_pending_dependencies(db, execution_id, wait_for, step_id) do
-    # Collect pending execution IDs from argument references
-    argument_dependencies =
-      if wait_for && wait_for != [] do
-        {:ok, arguments} = Runs.get_step_arguments(db, step_id)
-
-        wait_for
-        |> Enum.flat_map(fn index ->
-          case Enum.at(arguments, index) do
-            {:raw, _, references} -> references
-            {:blob, _, _, references} -> references
-            nil -> []
-          end
-        end)
-        |> collect_pending_execution_ids(db, MapSet.new())
-      else
-        MapSet.new()
-      end
-
-    # Each recorded dependency, as {:met | key}. A key is one still to wait
-    # for; :met is one that has already resolved, which is enough on its
-    # own to release the group.
-    result_dependencies =
-      case Runs.get_result_dependencies(db, execution_id) do
-        {:ok, dependencies} ->
-          Enum.map(dependencies, fn {dependency_ref_id} ->
-            {:ok, {run_ext, step_num, attempt, _, _}} =
-              Runs.get_execution_ref(db, dependency_ref_id)
-
-            case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-              {:ok, {dependency_execution_id}} when not is_nil(dependency_execution_id) ->
-                case resolve_result(db, dependency_execution_id) do
-                  {:ok, _} -> :met
-                  {:pending, pending_id} -> {:execution, pending_id}
-                end
-
-              _ ->
-                # Gone (a pruned epoch, say). Treated as met rather than
-                # stranding the execution.
-                :met
-            end
-          end)
-      end
-
-    input_dependencies =
-      case Runs.get_input_dependencies(db, execution_id) do
-        {:ok, deps} ->
-          Enum.map(deps, fn {input_id} ->
-            if Inputs.is_input_responded?(db, input_id), do: :met, else: {:input, input_id}
-          end)
-      end
-
-    # Only rows with a sequence are waits; the rest of the table is
-    # subscription lineage. This runs solely for executions that have not
-    # been assigned yet, which is what makes it safe for the sequence to
-    # stay on the row after the gate clears — a completed execution's row
-    # is never read back here.
-    stream_dependencies =
-      case Streams.get_wait_dependencies(db, execution_id) do
-        {:ok, waits} ->
-          Enum.map(waits, fn {stream_ref_id, sequence} ->
-            case resolve_stream_ref_id(db, stream_ref_id) do
-              {:ok, stream_id} ->
-                if stream_reached?(db, stream_id, sequence),
-                  do: :met,
-                  else: {:stream, stream_id, sequence}
-
-              {:error, :not_found} ->
-                :met
-            end
-          end)
-      end
-
-    # A catalog wait is met once the path, as seen from the execution's
-    # workspace chain, holds a version numbered above the one recorded.
-    catalog_dependencies =
-      case Catalog.get_waits(db, execution_id) do
-        {:ok, []} ->
-          []
-
-        {:ok, waits} ->
-          {:ok, workspace_id} = Runs.get_workspace_id_for_execution(db, execution_id)
-          {:ok, chain} = Workspaces.get_workspace_chain(db, workspace_id)
-
-          Enum.map(waits, fn {path, number} ->
-            case Catalog.get_next(db, path, chain, number) do
-              {:ok, nil} -> {:catalog, workspace_id, path, number}
-              {:ok, _version} -> :met
-            end
-          end)
-      end
-
-    recorded =
-      result_dependencies ++ input_dependencies ++ stream_dependencies ++ catalog_dependencies
-
-    group =
-      if Enum.any?(recorded, &(&1 == :met)),
-        do: MapSet.new(),
-        else: MapSet.new(recorded)
-
-    {MapSet.union(argument_dependencies, group), group}
-  end
-
-  # A stream wait is met once the stream holds the sequence, or can never
-  # hold it because it closed.
-  defp stream_reached?(db, stream_id, sequence) do
-    case Streams.get_head(db, stream_id) do
-      {:ok, head} -> head >= sequence || Streams.closed?(db, stream_id)
-    end
-  end
-
-  defp resolve_stream_ref_id(db, stream_ref_id) do
-    case Streams.get_stream_ref(db, stream_ref_id) do
-      {:ok, {run_external_id, step_number, index, _module, _target}} ->
-        Streams.get_stream_id_by_key(db, run_external_id, step_number, index)
-
-      {:error, :not_found} ->
-        {:error, :not_found}
-    end
-  end
-
-  # Walk references and collect tagged dependency keys that are still pending.
-  defp collect_pending_execution_ids(references, db, seen) do
-    Enum.reduce(references, MapSet.new(), fn
-      {:execution, run_ext, step_num, attempt}, acc ->
-        case Runs.get_execution_id(db, run_ext, step_num, attempt) do
-          {:ok, {execution_id}} when not is_nil(execution_id) ->
-            if MapSet.member?(seen, execution_id) do
-              acc
-            else
-              case resolve_result(db, execution_id) do
-                {:ok, {:value, value}} ->
-                  inner_refs =
-                    case value do
-                      {:raw, _, refs} -> refs
-                      {:blob, _, _, refs} -> refs
-                      _ -> []
-                    end
-
-                  inner_pending =
-                    collect_pending_execution_ids(
-                      inner_refs,
-                      db,
-                      MapSet.put(seen, execution_id)
-                    )
-
-                  MapSet.union(acc, inner_pending)
-
-                {:ok, _} ->
-                  acc
-
-                {:pending, pending_id} ->
-                  MapSet.put(acc, {:execution, pending_id})
-              end
-            end
-
-          _ ->
-            acc
-        end
-
-      {:fragment, _format, _blob_key, _size, _metadata}, acc ->
-        acc
-
-      {:asset, _external_id}, acc ->
-        acc
-
-      {:input, _external_id}, acc ->
-        acc
-    end)
-  end
-
-  # Register an execution's pending dependencies in state.
-  # Only adds entries if there are actual pending dependencies.
-  defp register_pending_dependencies(state, execution_id, {dependencies, group}) do
-    if MapSet.size(dependencies) == 0 do
-      state
-    else
-      state =
-        state
-        |> put_in([Access.key(:pending_dependencies), execution_id], dependencies)
-        |> then(fn state ->
-          if MapSet.size(group) > 0,
-            do: put_in(state, [Access.key(:dependency_groups), execution_id], group),
-            else: state
-        end)
-
-      Enum.reduce(dependencies, state, fn dependency_id, state ->
-        state
-        |> update_in(
-          [Access.key(:dependency_waiters), Access.key(dependency_id, MapSet.new())],
-          &MapSet.put(&1, execution_id)
-        )
-        |> index_stream_dependency(dependency_id)
-      end)
-    end
-  end
-
-  # Stream waits get a secondary index, keyed by stream. Appends are hot,
-  # and without it every appended item would have to scan the whole
-  # dependency_waiters map to find out whether anything was waiting; with
-  # it the check is one map lookup that almost always misses.
-  defp index_stream_dependency(state, {:stream, stream_id, _sequence} = key) do
-    was_waiting = stream_has_waiters?(state, stream_id)
-
-    state =
-      update_in(
-        state,
-        [Access.key(:stream_dependency_keys), Access.key(stream_id, MapSet.new())],
-        &MapSet.put(&1, key)
-      )
-
-    # First waiter: the producer's idle countdown stops. A consumer's nap
-    # is not the producer being idle — the mirror of the existing rule
-    # that a suspended producer's own pause doesn't count against it.
-    state = if was_waiting, do: state, else: set_stream_timer_paused(state, stream_id, true)
-
-    # The wait counts as demand (see refresh_stream_demand_for), and the
-    # producer may be blocked on exactly that.
-    refresh_stream_demand(state, stream_id)
-  end
-
-  defp index_stream_dependency(state, _key), do: state
-
-  defp unindex_stream_dependency(state, {:stream, stream_id, _sequence} = key) do
-    state =
-      update_in(
-        state,
-        [Access.key(:stream_dependency_keys), Access.key(stream_id, MapSet.new())],
-        &MapSet.delete(&1, key)
-      )
-
-    if MapSet.size(state.stream_dependency_keys[stream_id] || MapSet.new()) == 0 do
-      state
-      |> update_in([Access.key(:stream_dependency_keys)], &Map.delete(&1, stream_id))
-      |> set_stream_timer_paused(stream_id, false)
-    else
-      state
-    end
-  end
-
-  defp unindex_stream_dependency(state, _key), do: state
-
-  defp stream_has_waiters?(state, stream_id) do
-    MapSet.size(Map.get(state.stream_dependency_keys, stream_id, MapSet.new())) > 0
-  end
-
-  # Tell the producer's worker to stop or restart the stream's idle
-  # countdown. Enforcement is worker-side, so this is the only way to say
-  # it. A producer with no live session has no timer to pause.
-  #
-  # Deliberately resolved from the database rather than from
-  # `stream_producers`: that map only exists to track demand, so a stream
-  # with `buffer=nil` has no entry at all — and an unbuffered producer is
-  # exactly what you pair with a suspending consumer, so it is the case
-  # that most needs this. Infrequent enough for the lookup not to matter:
-  # once when the first waiter arrives, once when the last one clears.
-  defp set_stream_timer_paused(state, stream_id, paused) do
-    with execution_external_id when is_binary(execution_external_id) <-
-           producer_external_id(state.db, stream_id),
-         {:ok, session_id} <- find_session_for_execution(state, execution_external_id),
-         {:ok, stream} <- Streams.get_stream(state.db, stream_id) do
-      send_session(
-        state,
-        session_id,
-        {:stream_timer_pause, execution_external_id, stream.index, paused}
-      )
-    else
-      _ -> state
-    end
-  end
-
-  # Remove an execution from the dependency tracking (when assigned or completed).
-  defp unregister_pending_dependencies(state, execution_id) do
-    case Map.fetch(state.pending_dependencies, execution_id) do
-      {:ok, dependencies} ->
-        state =
-          Enum.reduce(dependencies, state, fn dependency_id, state ->
-            state =
-              update_in(
-                state,
-                [Access.key(:dependency_waiters), Access.key(dependency_id, MapSet.new())],
-                &MapSet.delete(&1, execution_id)
-              )
-
-            # Clean up empty waiter entries
-            if MapSet.size(state.dependency_waiters[dependency_id] || MapSet.new()) == 0 do
-              state
-              |> update_in(
-                [Access.key(:dependency_waiters)],
-                &Map.delete(&1, dependency_id)
-              )
-              |> unindex_stream_dependency(dependency_id)
-            else
-              state
-            end
-          end)
-
-        state
-        |> update_in([Access.key(:pending_dependencies)], &Map.delete(&1, execution_id))
-        |> update_in([Access.key(:dependency_groups)], &Map.delete(&1, execution_id))
-
-      :error ->
-        state
-    end
-  end
-
-  # Apply the removal of `dependency_key` from `waiter_id`'s pending set,
-  # with `new_pending` (a redirect's replacement keys, usually empty) taking
-  # its place. If the key belonged to the waiter's any-of group and nothing
-  # replaces it, the group is met: every other member is dropped too, and
-  # the execution is scheduled. A redirected member stays in the group under
-  # its new key.
-  defp remove_pending_dependency(state, waiter_id, dependency_key, new_pending) do
-    case Map.fetch(state.pending_dependencies, waiter_id) do
-      {:ok, current} ->
-        group = Map.get(state.dependency_groups, waiter_id, MapSet.new())
-        in_group? = MapSet.member?(group, dependency_key)
-
-        {updated, group} =
-          cond do
-            in_group? and MapSet.size(new_pending) == 0 ->
-              {MapSet.difference(MapSet.delete(current, dependency_key), group), MapSet.new()}
-
-            in_group? ->
-              {current |> MapSet.delete(dependency_key) |> MapSet.union(new_pending),
-               group |> MapSet.delete(dependency_key) |> MapSet.union(new_pending)}
-
-            true ->
-              {current |> MapSet.delete(dependency_key) |> MapSet.union(new_pending), group}
-          end
-
-        # Keys released along with the one that cleared no longer have this
-        # waiter behind them.
-        released = MapSet.difference(current, MapSet.put(updated, dependency_key))
-
-        state =
-          Enum.reduce(released, state, fn key, state ->
-            state
-            |> update_in(
-              [Access.key(:dependency_waiters), Access.key(key, MapSet.new())],
-              &MapSet.delete(&1, waiter_id)
-            )
-            |> then(fn state ->
-              if MapSet.size(state.dependency_waiters[key] || MapSet.new()) == 0 do
-                state
-                |> update_in([Access.key(:dependency_waiters)], &Map.delete(&1, key))
-                |> unindex_stream_dependency(key)
-              else
-                state
-              end
-            end)
-          end)
-
-        state =
-          Enum.reduce(new_pending, state, fn new_dep_key, state ->
-            state
-            |> update_in(
-              [Access.key(:dependency_waiters), Access.key(new_dep_key, MapSet.new())],
-              &MapSet.put(&1, waiter_id)
-            )
-            |> index_stream_dependency(new_dep_key)
-          end)
-
-        if MapSet.size(updated) == 0 do
-          send(self(), :tick)
-        end
-
-        state
-        |> then(fn state ->
-          if MapSet.size(updated) == 0 do
-            state
-            |> update_in([Access.key(:pending_dependencies)], &Map.delete(&1, waiter_id))
-            |> update_in([Access.key(:dependency_groups)], &Map.delete(&1, waiter_id))
-          else
-            state
-            |> put_in([Access.key(:pending_dependencies), waiter_id], updated)
-            |> then(fn state ->
-              if MapSet.size(group) > 0,
-                do: put_in(state, [Access.key(:dependency_groups), waiter_id], group),
-                else:
-                  update_in(state, [Access.key(:dependency_groups)], &Map.delete(&1, waiter_id))
-            end)
-          end
-        end)
-        |> notify_pending_dependencies(waiter_id, updated)
-
-      :error ->
-        state
-    end
-  end
-
-  # Called when a result is recorded for an execution. Updates dependency_waiters
-  # and pending_dependencies for any executions that were waiting on this one.
-  # Handles two cases:
-  # 1. Result redirects (spawned, deferred, etc.) — follows the chain to find
-  #    the new pending execution.
-  # 2. Result is a value containing inner execution references (wait_for
-  #    semantics) — extracts any still-pending references from the value.
-  defp update_dependencies_on_result(state, execution_id) do
-    dependency_key = {:execution, execution_id}
-
-    case Map.fetch(state.dependency_waiters, dependency_key) do
-      {:ok, waiters} ->
-        state =
-          update_in(
-            state,
-            [Access.key(:dependency_waiters)],
-            &Map.delete(&1, dependency_key)
-          )
-
-        # Determine new pending dependencies that replace this resolved one.
-        # This handles both redirect chains and inner value references.
-        new_pending =
-          case resolve_result(state.db, execution_id) do
-            {:pending, new_id} when new_id != execution_id ->
-              MapSet.new([{:execution, new_id}])
-
-            {:ok, {:value, value}} ->
-              # The result is a value — check for inner execution references
-              # that are still pending (needed for wait_for semantics).
-              inner_references =
-                case value do
-                  {:raw, _, references} -> references
-                  {:blob, _, _, references} -> references
-                  _ -> []
-                end
-
-              collect_pending_execution_ids(
-                inner_references,
-                state.db,
-                MapSet.new([execution_id])
-              )
-
-            _ ->
-              MapSet.new()
-          end
-
-        Enum.reduce(waiters, state, fn waiter_id, state ->
-          remove_pending_dependency(state, waiter_id, dependency_key, new_pending)
-        end)
-
-      :error ->
-        state
-    end
-  end
-
-  # Called when a stream gains an item, or closes. Wakes any execution that
-  # suspended mid-iteration and is gated on this stream.
-  #
-  # `head` is the highest sequence now available, or `:closed` — a closed
-  # stream will never reach the sequence anyone is still waiting for, so
-  # every waiter on it is released rather than stranded. The consumer
-  # re-subscribes at its checkpoint cursor and sees the closure.
-  defp update_dependencies_on_stream(state, stream_id, head) do
-    case Map.fetch(state.stream_dependency_keys, stream_id) do
-      {:ok, keys} ->
-        keys
-        |> Enum.filter(fn {:stream, _stream_id, sequence} ->
-          head == :closed || head >= sequence
-        end)
-        |> Enum.reduce(state, &clear_dependency_key(&2, &1))
-
-      :error ->
-        state
-    end
-  end
-
-  # Called when an input response is recorded. Resolves the {:input, id}
-  # dependency for any executions that were waiting on this input.
-  defp update_dependencies_on_input(state, input_id) do
-    clear_dependency_key(state, {:input, input_id})
-  end
-
-  # Drop one dependency key: forget its waiter set, and take the key out of
-  # each waiter's pending set, scheduling any execution that has nothing
-  # left to wait for.
-  defp clear_dependency_key(state, dependency_key) do
-    case Map.fetch(state.dependency_waiters, dependency_key) do
-      {:ok, waiters} ->
-        state =
-          state
-          |> update_in(
-            [Access.key(:dependency_waiters)],
-            &Map.delete(&1, dependency_key)
-          )
-          |> unindex_stream_dependency(dependency_key)
-
-        Enum.reduce(waiters, state, fn waiter_id, state ->
-          remove_pending_dependency(state, waiter_id, dependency_key, MapSet.new())
-        end)
-
-      :error ->
-        state
-    end
-  end
-
-  defp choose_session(state, execution, requires) do
-    target =
-      state.targets
-      |> Map.get(execution.module, %{})
-      |> Map.get(execution.target)
-
-    if target && target.type == execution.type do
-      session_ids =
-        Enum.filter(target.session_ids, fn session_id ->
-          session = Map.fetch!(state.sessions, session_id)
-
-          session.workspace_id == execution.workspace_id && session.connection &&
-            !Map.get(session, :draining, false) &&
-            !session_at_capacity?(session) &&
-            session_active?(session, state) &&
-            !session_pool_disabled?(session, state) &&
-            has_requirements?(merge_tag_sets(session.provides, session.accepts), requires) &&
-            satisfies_accepts?(session.accepts, requires)
-        end)
-
-      if Enum.any?(session_ids) do
-        # TODO: prioritise (based on 'cost'?)
-        Enum.random(session_ids)
-      end
-    end
-  end
-
-  defp choose_pool(state, execution, requires) do
-    pools =
-      state.pools
-      |> Map.get(execution.workspace_id, %{})
-      |> Map.filter(fn {_, pool} ->
-        Map.get(pool, :state, :active) != :disabled &&
-          pool.launcher && execution.module in pool.modules &&
-          has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
-          satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
-      end)
-
-    if Enum.any?(pools) do
-      pools |> Map.values() |> Enum.map(& &1.id) |> Enum.random()
-    end
-  end
-
-  defp reschedule_expire_waiters(state) do
-    if state.expire_waiters_timer do
-      Process.cancel_timer(state.expire_waiters_timer)
-    end
-
-    next_expire_at =
-      state.waiting
-      |> Map.values()
-      |> Enum.flat_map(fn entries ->
-        Enum.map(entries, & &1.expire_at)
-      end)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.min(fn -> nil end)
-
-    timer =
-      if next_expire_at do
-        Process.send_after(self(), :expire_waiters, next_expire_at, abs: true)
-      end
-
-    Map.put(state, :expire_waiters_timer, timer)
-  end
-
-  defp notify_waiting(state, execution_id) do
-    execution_ext_id =
-      case Runs.get_execution_key(state.db, execution_id) do
-        {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-        {:error, :not_found} -> nil
-      end
-
-    if execution_ext_id do
-      old_key = {:execution, execution_ext_id}
-
-      case Map.get(state.waiting, old_key) do
-        nil ->
-          state
-
-        _entries ->
-          case resolve_result(state.db, execution_id) do
-            {:pending, new_execution_id} ->
-              # Execution was replaced by a spawned one — migrate waiters from
-              # the old key to the new one, updating their keys lists.
-              new_ext_id =
-                case Runs.get_execution_key(state.db, new_execution_id) do
-                  {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-                end
-
-              new_key = {:execution, new_ext_id}
-              migrate_select_waiters(state, old_key, new_key)
-
-            {:ok, result} ->
-              result =
-                case result do
-                  {:value, value} -> {:value, build_value(value, state.db)}
-                  other -> other
-                end
-
-              notify_select_waiters(state, old_key, result)
-          end
-      end
-    else
-      state
-    end
-  end
-
-  # Process a single handle for select: record the dependency and determine
-  # current status. Returns one of:
-  #   {:ok, {:resolved, result}}
-  #       where result is {:value, _} | {:error, ...} | :cancelled | :dismissed | ...
-  #   {:ok, {:pending, waiting_key, dependency_key}}
-  #       waiting_key identifies this handle in state.waiting
-  #       dependency_key is used when suspending (for process_result)
-  #   {:error, reason}
-  defp process_select_handle(
-         state,
-         %{"type" => "execution", "id" => execution_external_id},
-         from_execution_id,
-         from_execution_external_id
-       ) do
-    case resolve_internal_execution_id(state, execution_external_id) do
-      {:error, :not_found} ->
-        {{:error, :not_found}, state}
-
-      {:ok, execution_id} ->
-        {:ok, dep_ref_id} = Runs.create_execution_ref_for(state.db, execution_id)
-        {:ok, id} = Runs.record_result_dependency(state.db, from_execution_id, dep_ref_id)
-
-        state =
-          if id do
-            {:ok, {run_external_id}} =
-              Runs.get_external_run_id_for_execution(state.db, from_execution_id)
-
-            {dep_ext_id, _module, _target} =
-              dependency = resolve_execution_ref(state.db, dep_ref_id)
-
-            notify_listeners(
-              state,
-              {:run, run_external_id},
-              {:result_dependency, from_execution_external_id, dep_ext_id, dependency,
-               match?({:pending, _}, resolve_result(state.db, execution_id))}
-            )
-          else
-            state
-          end
-
-        case resolve_result(state.db, execution_id) do
-          {:ok, result} ->
-            result =
-              case result do
-                {:value, value} -> {:value, build_value(value, state.db)}
-                other -> other
-              end
-
-            {{:ok, {:resolved, result}}, state}
-
-          {:pending, pending_execution_id} ->
-            pending_ext_id =
-              case Runs.get_execution_key(state.db, pending_execution_id) do
-                {:ok, {r, s, a}} -> execution_external_id(r, s, a)
-              end
-
-            {
-              {:ok, {:pending, {:execution, pending_ext_id}, {:execution, pending_execution_id}}},
-              state
-            }
-        end
-    end
-  end
-
-  # A stream handle asks one question: has the stream reached this
-  # sequence (or closed, so it never will)? A consumer can't answer it
-  # itself — its queue is fed asynchronously, so an empty one means
-  # "nothing has arrived yet", not "the stream has nothing".
-  #
-  # Resolving carries no value: the item reaches the consumer through the
-  # subscription it already holds. The answer only says "there is
-  # something, stop waiting".
-  defp process_select_handle(
-         state,
-         %{"type" => "stream", "id" => stream_external_id} = handle,
-         _from_execution_id,
-         _from_execution_external_id
-       ) do
-    sequence = Map.get(handle, "sequence", 0)
-
-    case resolve_stream_id(state, stream_external_id) do
-      {:error, :not_found} ->
-        {{:error, :not_found}, state}
-
-      {:ok, stream_id} ->
-        if stream_reached?(state.db, stream_id, sequence) do
-          {{:ok, {:resolved, :available}}, state}
-        else
-          {{:ok,
-            {:pending, {:stream, stream_external_id}, {:stream, stream_external_id, sequence}}},
-           state}
-        end
-    end
-  end
-
-  # A catalog handle asks for the first version at `path` numbered above a
-  # position, as seen from the caller's workspace, and resolves with that
-  # version's number (recorded as a read). Without an explicit `number`
-  # the position is the caller's own view of the path — the head as of its
-  # snapshot, plus its run's writes — so the wait means "anything newer
-  # than what `current()` gives me", and an execution's own publish never
-  # wakes it. Either way what comes *after* the position ignores the pin:
-  # this is the wait side, and seeing past the snapshot is the point.
-  #
-  # The waiting key carries the caller's workspace so a publish can check
-  # visibility per key — by external id, like every waiting key, since the
-  # map outlives an epoch rotation and internal ids don't. The dependency
-  # key recorded on a suspended successor doesn't need it, since the
-  # successor's workspace is known.
-  defp process_select_handle(
-         state,
-         %{"type" => "catalog", "path" => path} = handle,
-         from_execution_id,
-         from_execution_external_id
-       ) do
-    case Catalog.validate_path(path) do
-      :ok ->
-        number =
-          case Map.get(handle, "number") do
-            nil ->
-              case lookup_catalog_version(state, from_execution_id, path, nil) do
-                {:ok, nil} -> 0
-                {:ok, version} -> version.number
-              end
-
-            number ->
-              number
-          end
-
-        {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, from_execution_id)
-        chain = get_workspace_chain(state, workspace_id)
-
-        case Catalog.get_next(state.db, path, chain, number) do
-          {:ok, nil} ->
-            waiting_key = {:catalog, workspace_external_id(state, workspace_id), path, number}
-            {{:ok, {:pending, waiting_key, {:catalog, path, number}}}, state}
-
-          {:ok, version} ->
-            state =
-              record_catalog_read(state, from_execution_id, from_execution_external_id, version)
-
-            {{:ok, {:resolved, {:value, {:raw, version.number, []}}}}, state}
-        end
-
-      {:error, :invalid_path} ->
-        {{:error, :invalid_path}, state}
-    end
-  end
-
-  defp process_select_handle(
-         state,
-         %{"type" => "input", "id" => input_external_id},
-         from_execution_id,
-         from_execution_external_id
-       ) do
-    case find_and_copy_input_from_archives(state, input_external_id) do
-      {:ok, nil} ->
-        {{:error, :input_not_found}, state}
-
-      {:ok,
-       {input_id, workspace_id, _key, _prompt_id, _schema_id, title, _actions, _initial,
-        requires_tag_set_id, created_at, _run_id}} ->
-        now = System.system_time(:millisecond)
-        input_response = Inputs.get_input_response(state.db, input_id)
-
-        {:ok, is_new} =
-          Inputs.record_input_dependency(state.db, from_execution_id, input_id, now)
-
-        state =
-          if is_new do
-            {:ok, {run_external_id}} =
-              Runs.get_external_run_id_for_execution(state.db, from_execution_id)
-
-            response_type =
-              case input_response do
-                {:ok, nil} -> nil
-                {:ok, {:value, _, _, _}} -> :value
-                {:ok, {:dismissed, _, _}} -> :dismissed
-                {:ok, {:cancelled, _, _}} -> :cancelled
-              end
-
-            ws_ext_id = workspace_external_id(state, workspace_id)
-            requires = resolve_tag_set(state.db, requires_tag_set_id)
-
-            state
-            |> notify_listeners(
-              {:run, run_external_id},
-              {:input_dependency, from_execution_external_id, input_external_id, title,
-               response_type, is_nil(response_type)}
-            )
-            |> notify_listeners(
-              {:inputs, ws_ext_id},
-              {:input_dependency_active, input_external_id, run_external_id, created_at, title,
-               requires}
-            )
-            |> notify_listeners(
-              {:input, input_external_id},
-              {:active, true}
-            )
-          else
-            state
-          end
-
-        case input_response do
-          {:ok, nil} ->
-            {
-              {:ok, {:pending, {:input, input_external_id}, {:input, input_id}}},
-              state
-            }
-
-          {:ok, {:value, value, _created_at, _created_by}} ->
-            # Input values are raw decoded JSON; wrap in the value tuple format
-            # so compose_value treats them uniformly with execution values.
-            wrapped = {:raw, value, []}
-            {{:ok, {:resolved, {:value, wrapped}}}, state}
-
-          {:ok, {:dismissed, _created_at, _created_by}} ->
-            {{:ok, {:resolved, :dismissed}}, state}
-
-          {:ok, {:cancelled, _created_at, _created_by}} ->
-            {{:ok, {:resolved, :cancelled}}, state}
-        end
-    end
-  end
-
-  # When cancel_remaining is true and a handle resolves, cancel all
-  # non-winner handles (executions via do_cancel_execution, inputs by
-  # marking them cancelled).
-  defp maybe_cancel_remaining(state, _statuses, _winner_idx, false, _from_ext_id),
-    do: state
-
-  defp maybe_cancel_remaining(
-         state,
-         statuses,
-         winner_idx,
-         true,
-         from_execution_external_id
-       ) do
-    {:ok, from_execution_id} =
-      resolve_internal_execution_id(state, from_execution_external_id)
-
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, from_execution_id)
-
-    statuses
-    |> Enum.with_index()
-    |> Enum.reject(fn {_, idx} -> idx == winner_idx end)
-    |> Enum.reduce(state, fn
-      {{:pending, {:execution, ext_id}, _}, _idx}, state ->
-        cancel_handle(state, %{"type" => "execution", "id" => ext_id}, workspace_id)
-
-      {{:pending, {:input, ext_id}, _}, _idx}, state ->
-        cancel_handle(state, %{"type" => "input", "id" => ext_id}, workspace_id)
-
-      {_, _}, state ->
-        state
-    end)
-  end
-
-  # Pop all select waiters registered under `waiting_key` and serve each one
-  # with `result`. Removes the waiters from any other keys they're
-  # registered under and cancels remaining executions when requested.
-  defp notify_select_waiters(state, waiting_key, result) do
-    {entries, waiting} = Map.pop(state.waiting, waiting_key, [])
-    state = Map.put(state, :waiting, waiting)
-
-    state =
-      Enum.reduce(entries, state, fn entry, state ->
-        serve_select_entry(state, entry, waiting_key, result)
-      end)
-
-    reschedule_expire_waiters(state)
-  end
-
-  # Serve a single waiter entry: clean it up from its other registration
-  # keys, optionally cancel non-winner executions, and notify the waiter's
-  # session.
-  defp serve_select_entry(state, entry, winner_key, result) do
-    state =
-      entry.keys
-      |> Enum.reject(&(&1 == winner_key))
-      |> Enum.reduce(state, fn key, state ->
-        remove_waiter_from_key(state, key, entry.request_id)
-      end)
-
-    state =
-      if entry.cancel_remaining do
-        cancel_other_execution_keys(state, entry, winner_key)
-      else
-        state
-      end
-
-    case find_session_for_execution(state, entry.from_ext_id) do
-      {:ok, session_id} ->
-        send_session(
-          state,
-          session_id,
-          {:result, entry.request_id, {entry.handle_index, result}}
-        )
-
-      :error ->
-        state
-    end
-  end
-
-  defp remove_waiter_from_key(state, key, request_id) do
-    update_in(state, [Access.key(:waiting)], fn waiting ->
-      case Map.fetch(waiting, key) do
-        {:ok, entries} ->
-          remaining = Enum.reject(entries, &(&1.request_id == request_id))
-
-          if remaining == [] do
-            Map.delete(waiting, key)
-          else
-            Map.put(waiting, key, remaining)
-          end
-
-        :error ->
-          waiting
-      end
-    end)
-  end
-
-  defp cancel_other_execution_keys(state, entry, winner_key) do
-    {:ok, from_execution_id} =
-      resolve_internal_execution_id(state, entry.from_ext_id)
-
-    {:ok, workspace_id} = Runs.get_workspace_id_for_execution(state.db, from_execution_id)
-
-    entry.keys
-    |> Enum.reject(&(&1 == winner_key))
-    |> Enum.reduce(state, fn
-      {:execution, ext_id}, state ->
-        case resolve_internal_execution_id(state, ext_id) do
-          {:ok, execution_id} ->
-            do_cancel_execution(state, execution_id, workspace_id)
-
-          {:error, :not_found} ->
-            state
-        end
-
-      {:input, _}, state ->
-        state
-
-      {:catalog, _, _, _}, state ->
-        state
-    end)
-  end
-
-  # Move all waiters from `old_key` to `new_key`, updating each entry's
-  # `keys` list. Used when an execution is replaced by a spawned one.
-  defp migrate_select_waiters(state, old_key, new_key) do
-    {entries, waiting} = Map.pop(state.waiting, old_key, [])
-
-    migrated =
-      Enum.map(entries, fn entry ->
-        Map.update!(entry, :keys, fn keys ->
-          Enum.map(keys, fn
-            ^old_key -> new_key
-            other -> other
-          end)
-        end)
-      end)
-
-    waiting =
-      Map.update(waiting, new_key, migrated, &(&1 ++ migrated))
-
-    state = Map.put(state, :waiting, waiting)
-
-    # Also update other key entries that reference old_key in their keys list
-    # (waiters registered under multiple keys, one of which was old_key).
-    update_in(state, [Access.key(:waiting)], fn waiting ->
-      Map.new(waiting, fn {key, entries} ->
-        if key == new_key do
-          {key, entries}
-        else
-          updated =
-            Enum.map(entries, fn entry ->
-              if old_key in entry.keys do
-                Map.update!(entry, :keys, fn keys ->
-                  Enum.map(keys, fn
-                    ^old_key -> new_key
-                    other -> other
-                  end)
-                end)
-              else
-                entry
-              end
-            end)
-
-          {key, updated}
-        end
-      end)
-    end)
-  end
-
-  # Finds the session for an execution by external execution ID
-  defp find_session_for_execution(state, execution_ext_id) do
-    state.sessions
-    |> Map.keys()
-    |> Enum.find(fn session_id ->
-      session = Map.fetch!(state.sessions, session_id)
-
-      MapSet.member?(session.starting, execution_ext_id) or
-        MapSet.member?(session.executing, execution_ext_id)
-    end)
-    |> case do
-      nil -> :error
-      session_id -> {:ok, session_id}
-    end
-  end
-
-  # Clean up waiting map entries and pending requests for an execution,
-  # without sending an abort message to the worker.
-  defp cleanup_execution(state, execution_ext_id) do
-    # Remove all select waiters where this execution is the waiter, deduping
-    # by request_id since each waiter may be registered under multiple keys.
-    removed_by_request =
-      Enum.reduce(state.waiting, %{}, fn {_key, entries}, acc ->
-        Enum.reduce(entries, acc, fn entry, acc ->
-          if entry.from_ext_id == execution_ext_id do
-            Map.put_new(acc, entry.request_id, entry)
-          else
-            acc
-          end
-        end)
-      end)
-
-    state =
-      Map.update!(state, :waiting, fn waiting ->
-        waiting
-        |> Enum.map(fn {key, entries} ->
-          {key, Enum.reject(entries, &(&1.from_ext_id == execution_ext_id))}
-        end)
-        |> Enum.reject(fn {_key, entries} -> entries == [] end)
-        |> Map.new()
-      end)
-
-    # Send responses for any pending select requests so the worker doesn't
-    # hang waiting for a reply that will never come. Since the execution is
-    # being cleaned up (abort/suspend), we send :timeout to let the client
-    # know the wait is over — the process will be killed separately.
-    case find_session_for_execution(state, execution_ext_id) do
-      {:ok, session_id} ->
-        Enum.reduce(removed_by_request, state, fn {_, entry}, state ->
-          send_session(
-            state,
-            session_id,
-            {:result, entry.request_id, :timeout}
-          )
-        end)
-
-      :error ->
-        state
-    end
-  end
-
-  # --- Producer flow control ---
-  #
-  # Not yet wired. Implicit backpressure today: a slow consumer's WS push
-  # blocks the GenServer, which blocks append_item, which blocks the
-  # producer. That's usually enough. When a real use case surfaces for
-  # explicit pause/resume (e.g. an infinite producer with no subscribers
-  # filling disk), the hooks go here:
-  #   * On first subscriber for a stream: send_session(producer_session,
-  #     {:stream_resume, producer_exec_ext, index}).
-  #   * On last subscriber dropping: {:stream_pause, ...}.
-  # Dispatcher on the adapter side already routes notifications by method;
-  # the StreamDriver gets a per-stream Event to gate its next() calls.
-
-  # --- Stream topic notifications (for Studio subscribers) ---
-  # These flow through `notify_listeners` → the run topic and the
-  # per-stream `{:stream, stream_external_id}` inspection topic, distinct
-  # from the session-directed `push_stream_*` helpers which target
-  # subscribed consumer sessions' WebSockets.
-
-  # Bounded tail of items held by the stream inspection topic. Long
-  # streams don't need to materialise every item — the UI loads older
-  # items on demand.
-  @stream_topic_tail_size 200
-
-  # An execution registered on a stream: either opening it or resuming it
-  # after a suspend. The run topic keeps streams under their step, with
-  # the attempts that have produced into each.
-  defp notify_stream_registered(state, stream, execution_id, registration, buffer, timeout_ms) do
-    {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
-
-    {:ok, workspace_external_id} =
-      Workspaces.get_workspace_external_id(state.db, stream.workspace_id)
-
-    ext_id = stream_external_id(stream.run_external_id, stream.step_number, stream.index)
-
-    state =
-      notify_listeners(
-        state,
-        {:run, stream.run_external_id},
-        {:stream_registered, stream.step_number, stream.index,
-         %{
-           id: ext_id,
-           position: stream.position,
-           workspace_id: workspace_external_id,
-           attempt: attempt,
-           buffer: buffer,
-           timeout_ms: timeout_ms,
-           continued: registration.continued,
-           opened_at: stream.created_at
-         }}
-      )
-
-    notify_listeners(
-      state,
-      {:stream, ext_id},
-      {:registered, attempt, buffer, timeout_ms, registration.created_at}
-    )
-  end
-
-  defp notify_stream_item_appended(state, stream_id, execution_id, sequence, value, created_at) do
-    {:ok, ext_id} = stream_external_id_for(state.db, stream_id)
-    topic = {:stream, ext_id}
-
-    # Skip the build_value (which hits the DB to resolve refs) when the
-    # inspection topic has no active subscribers.
-    if Map.has_key?(state.topics, topic) do
-      {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
-      resolved = build_value(normalize_value(value), state.db)
-
-      notify_listeners(
-        state,
-        topic,
-        {:item_appended, sequence, resolved, attempt, created_at}
-      )
-    else
-      state
-    end
-  end
-
-  # Fire the stream-closed notification on run + stream topics. `reason`
-  # is a semantic atom from the full set (:complete / :errored /
-  # :cancelled / :abandoned / :crashed / :timeout / :recurred) — Studio
-  # renders each directly in UI-appropriate language, rather than
-  # displaying a fabricated exception type. `error` is non-nil only for
-  # :errored. `execution_id` is the execution that closed the stream.
-  defp notify_stream_closed(state, stream_id, execution_id, reason, error, closed_at) do
-    {:ok, stream} = Streams.get_stream(state.db, stream_id)
-    ext_id = stream_external_id(stream.run_external_id, stream.step_number, stream.index)
-    {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, execution_id)
-
-    encoded_error = encode_stream_error_summary(error)
-    reason_str = if reason, do: Atom.to_string(reason)
-
-    state =
-      notify_listeners(
-        state,
-        {:run, stream.run_external_id},
-        {:stream_closed, stream.step_number, stream.index, reason_str, encoded_error, attempt,
-         closed_at}
-      )
-
-    notify_listeners(
-      state,
-      {:stream, ext_id},
-      {:closed, reason_str, encoded_error, attempt, closed_at}
-    )
-  end
-
-  # Build the initial state for a newly-opened stream inspection topic:
-  # the step it belongs to, its config and producers, closure info (with
-  # lifecycle reasons already derived), a bounded tail of items, and the
-  # total item count.
-  defp build_stream_topic_initial(state, stream_external_id) do
-    with {:ok, stream_id} <- resolve_stream_id(state, stream_external_id),
-         {:ok, stream} <- Streams.get_stream(state.db, stream_id),
-         {:ok, registrations} <- Streams.get_registrations(state.db, stream_id),
-         {:ok, {items, total_count}} <-
-           Streams.get_stream_tail(state.db, stream_id, @stream_topic_tail_size) do
-      # Keep the tuple shape here — the topic module runs TopicUtils.build_value
-      # on each item's value to produce the JSON-encodable form, matching
-      # how live :item_appended notifications are handled.
-      resolved_items =
-        Enum.map(items, fn {sequence, value, attempt, created_at} ->
-          {sequence, build_value(value, state.db), attempt, created_at}
-        end)
-
-      {buffer, timeout_ms} = latest_registration_config(registrations)
-
-      {:ok, workspace_external_id} =
-        Workspaces.get_workspace_external_id(state.db, stream.workspace_id)
-
-      {:ok,
-       %{
-         id: stream_external_id,
-         step: %{
-           stepId: "#{stream.run_external_id}:#{stream.step_number}",
-           module: stream.module,
-           target: stream.target
-         },
-         workspaceId: workspace_external_id,
-         index: stream.index,
-         position: stream.position,
-         buffer: buffer,
-         timeoutMs: timeout_ms,
-         openedAt: stream.created_at,
-         attempts: Enum.map(registrations, fn {_id, attempt, _b, _t, _c} -> attempt end),
-         closure: build_stream_topic_closure(state, stream_id),
-         items: resolved_items,
-         totalCount: total_count,
-         tailSize: @stream_topic_tail_size
-       }}
-    else
-      {:error, _reason} -> {:error, :not_found}
-    end
-  end
-
-  defp build_stream_topic_closure(state, stream_id) do
-    case Streams.get_stream_closure(state.db, stream_id) do
-      {:ok, nil} ->
-        nil
-
-      {:ok, {reason, stored_error, closed_by, closed_at}} ->
-        # DB stores `:lifecycle` for closures driven by an execution
-        # ending; on read we resolve that to the specific cause
-        # (:cancelled / :abandoned / :crashed / :timeout / :errored /
-        # :recurred) so clients don't need to know about the internal
-        # bucket. `error` only accompanies a genuine :errored close.
-        {effective_reason, effective_error} =
-          resolve_closure_reason(state.db, reason, stored_error, closed_by)
-
-        {:ok, {_r, _s, attempt}} = Runs.get_execution_key(state.db, closed_by)
-
-        %{
-          reason: if(effective_reason, do: Atom.to_string(effective_reason)),
-          error: encode_stream_error_summary(effective_error),
-          attempt: attempt,
-          closedAt: closed_at
-        }
-    end
-  end
-
-  defp encode_stream_error_summary(nil), do: nil
-
-  defp encode_stream_error_summary({type, message, frames}) do
-    %{
-      type: type,
-      message: message,
-      frames:
-        Enum.map(frames, fn {file, line, name, code} ->
-          %{file: file, line: line, name: name, code: code}
-        end)
-    }
-  end
-
-  defp stream_external_id_for(db, stream_id) do
-    case Streams.get_stream(db, stream_id) do
-      {:ok, stream} ->
-        {:ok, stream_external_id(stream.run_external_id, stream.step_number, stream.index)}
-
-      err ->
-        err
-    end
-  end
-
-  # --- Stream subscription helpers ---
-
   defp ok_or({:ok, val}, _reason), do: {:ok, val}
   defp ok_or(:error, reason), do: {:error, reason}
-
-  # Does a `sequence` pass a subscription's stride? A stride is
-  # ``%{"start" => int, "stop" => int | nil, "step" => int}`` — the
-  # client composes any chain of slice/partition/stride calls into one
-  # before sending. `nil` means the trivial identity stride (everything).
-  defp stride_matches?(nil, _sequence), do: true
-
-  defp stride_matches?(%{"start" => start, "stop" => stop, "step" => step}, sequence) do
-    sequence >= start and
-      (stop == nil or sequence < stop) and
-      rem(sequence - start, step) == 0
-  end
-
-  # Is `cursor` past the stride's stop? Lets us close the subscription
-  # early once nothing more can match (i.e. the upper bound is finite
-  # and we've reached it).
-  defp stride_exhausted?(nil, _cursor), do: false
-
-  defp stride_exhausted?(%{"stop" => stop}, cursor) when is_integer(stop),
-    do: cursor >= stop
-
-  defp stride_exhausted?(_stride, _cursor), do: false
-
-  # Per-fetch page size when draining backlog for a newly subscribed
-  # consumer. Keeps any single DB read bounded and lets us push each page
-  # to the session before loading the next.
-  @backlog_page_size 1024
-
-  # How many more items may be sent to this subscriber before it has to
-  # acknowledge some. This is what bounds the consumer's in-memory queue;
-  # anything we hold back stays durable in the DB and goes out on the
-  # next pump.
-  defp available_credit(%{prefetch: prefetch, delivered: delivered, acked_count: acked_count}) do
-    prefetch - (delivered - acked_count)
-  end
-
-  # Deliver as much as credit allows, then settle any pending closure.
-  # Driven on subscribe, on ack (credit freed up), and after an append
-  # that couldn't be sent inline.
-  defp pump_subscription(state, key) do
-    state
-    |> push_backlog_page(key)
-    |> maybe_finish_subscription(key)
-  end
-
-  # Send items from the DB for a subscriber that's behind — either newly
-  # subscribed, or previously held back for want of credit. Pages the DB
-  # reads + session pushes so a very long stream doesn't materialise the
-  # entire tail in memory at once.
-  defp push_backlog_page(state, key) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error ->
-        state
-
-      {:ok, sub} ->
-        if available_credit(sub) <= 0 do
-          state
-        else
-          {:ok, items} =
-            Streams.get_stream_items(state.db, sub.stream_id, sub.cursor, @backlog_page_size)
-
-          if items == [] do
-            state
-          else
-            state = push_backlog_items(state, key, sub, items)
-
-            # Stop if the subscription was dropped (stride exhausted), if
-            # nothing in this page moved us forward, if we've run out of
-            # credit, or if the page was short (tail reached). Otherwise
-            # keep paging.
-            case Map.fetch(state.stream_subscriptions, key) do
-              :error ->
-                state
-
-              {:ok, next_sub} ->
-                cond do
-                  next_sub.cursor == sub.cursor -> state
-                  available_credit(next_sub) <= 0 -> state
-                  length(items) < @backlog_page_size -> state
-                  true -> push_backlog_page(state, key)
-                end
-            end
-          end
-        end
-    end
-  end
-
-  defp push_backlog_items(state, key, sub, items) do
-    {_consumer_execution_id, subscription_id} = key
-    credit = available_credit(sub)
-
-    # Walk the page in order, taking matching items until credit runs out.
-    # `advance_to` tracks how far the cursor may honestly move: past
-    # everything we've decided about, and no further. An item we had no
-    # credit for must be left for the next pump to re-read, so the cursor
-    # has to stop short of it — advancing past the whole page (as an
-    # unbounded push could) would silently drop it.
-    {selected, count, advance_to, exhausted} =
-      Enum.reduce_while(items, {[], 0, sub.cursor, false}, fn {sequence, value, _at},
-                                                              {acc, count, _advance, _exhausted} ->
-        cond do
-          stride_exhausted?(sub.stride, sequence) ->
-            {:halt, {acc, count, sequence, true}}
-
-          not stride_matches?(sub.stride, sequence) ->
-            # Skipped sequences cost no credit — advance past them freely,
-            # otherwise we'd re-fetch them forever.
-            {:cont, {acc, count, sequence + 1, false}}
-
-          count < credit ->
-            {:cont, {[{sequence, value} | acc], count + 1, sequence + 1, false}}
-
-          true ->
-            {:halt, {acc, count, sequence, false}}
-        end
-      end)
-
-    state =
-      if selected == [] do
-        state
-      else
-        resolved_items =
-          selected
-          |> Enum.reverse()
-          |> Enum.map(fn {sequence, value} -> [sequence, build_value(value, state.db)] end)
-
-        send_to_consumer(
-          state,
-          sub,
-          {:stream_items, sub.consumer_execution_external_id, subscription_id, resolved_items}
-        )
-      end
-
-    state =
-      update_in(
-        state.stream_subscriptions[key],
-        fn s -> %{s | cursor: advance_to, delivered: s.delivered + count} end
-      )
-
-    state =
-      if exhausted or stride_exhausted?(sub.stride, advance_to) do
-        # The stride has reached its stop — nothing more can match, so
-        # close now rather than leaving the consumer waiting for a close
-        # that would only arrive when the producer finishes. This is a
-        # "complete" outcome from their perspective: they've received
-        # everything that was addressed to them.
-        finish_subscription(state, key, "complete", nil)
-      else
-        state
-      end
-
-    # The push moved this consumer's cursor forward, which may have moved
-    # the slowest-subscriber watermark and unblocked the producer.
-    refresh_stream_demand(state, sub.stream_id)
-  end
-
-  # Resolve the consumer's current session and send, skipping if the
-  # execution is no longer live on any session (reconnect window, etc.).
-  defp send_to_consumer(state, sub, payload) do
-    case find_session_for_execution(state, sub.consumer_execution_external_id) do
-      {:ok, session_id} -> send_session(state, session_id, payload)
-      :error -> state
-    end
-  end
-
-  # Push a freshly-appended item to every subscriber of this stream.
-  #
-  # This is a fast path: it exists so the just-appended value can be sent
-  # straight from memory instead of being re-read from SQLite by the
-  # pump. That means it necessarily restates the delivery rules
-  # (stride skip, credit check, cursor advance, stride-exhaustion close)
-  # that push_backlog_items implements over a page of items.
-  #
-  # push_backlog_items is the authority on those rules. Any change to
-  # stride or credit semantics must be made there *and* mirrored here.
-  # Anything this path declines to send is left untouched and durable,
-  # so the pump re-reads it in order — declining is always safe.
-  defp push_stream_item(state, stream_id, sequence, value) do
-    subscribers = Map.get(state.stream_subscribers, stream_id, MapSet.new())
-
-    state =
-      Enum.reduce(subscribers, state, fn key, state ->
-        {_consumer_execution_id, subscription_id} = key
-        sub = Map.fetch!(state.stream_subscriptions, key)
-
-        cond do
-          sequence != sub.cursor ->
-            # Not the sequence this subscriber is waiting for — either it
-            # already has this one via the backlog, or it's behind and this
-            # item is ahead of its cursor. Either way the item is durable,
-            # so leave it for the pump to read in order.
-            state
-
-          not stride_matches?(sub.stride, sequence) ->
-            # Advance the cursor past non-matching sequences too (matching
-            # push_backlog_items' behaviour): demand grants are derived
-            # from subscriber positions, so leaving the cursor behind would
-            # permanently stall a bounded-buffer producer against a
-            # partition/slice consumer whose stride skips this sequence.
-            # Skipping costs no credit — nothing is delivered.
-            state =
-              update_in(
-                state.stream_subscriptions[key],
-                &Map.put(&1, :cursor, sequence + 1)
-              )
-
-            if stride_exhausted?(sub.stride, sequence + 1) do
-              finish_subscription(state, key, "complete", nil)
-            else
-              state
-            end
-
-          available_credit(sub) <= 0 ->
-            # Consumer's window is full. Hold the item back *without*
-            # advancing the cursor — it's already durable, and the next ack
-            # will pump it from the DB in order.
-            state
-
-          true ->
-            # Value came off the wire in parse form (ext-id refs, no metadata).
-            # Normalise + resolve to match the form the pump sends; the WS
-            # handler composes to wire JSON.
-            resolved = build_value(normalize_value(value), state.db)
-            item = [sequence, resolved]
-
-            state =
-              send_to_consumer(
-                state,
-                sub,
-                {:stream_items, sub.consumer_execution_external_id, subscription_id, [item]}
-              )
-
-            state =
-              update_in(
-                state.stream_subscriptions[key],
-                fn s -> %{s | cursor: sequence + 1, delivered: s.delivered + 1} end
-              )
-
-            # If the stride has reached its stop, close the subscription
-            # early — no more items will match. Treated as a "complete"
-            # close for the consumer (they got everything that was
-            # addressed to them).
-            if stride_exhausted?(sub.stride, sequence + 1) do
-              finish_subscription(state, key, "complete", nil)
-            else
-              state
-            end
-        end
-      end)
-
-    # Subscriber cursors may have advanced — recompute demand once per
-    # stream (cheaper than once per subscriber, same result).
-    refresh_stream_demand(state, stream_id)
-  end
-
-  # On close, tell every subscriber. `reason` is a semantic atom
-  # (`:complete | :errored | :cancelled | :abandoned | :crashed |
-  # :timeout`) — the client chooses how to represent each in its own
-  # idiom. `error` is non-nil only when `reason == :errored`, carrying
-  # the producer's actual `{type, message, frames}`.
-  #
-  # The closure is recorded as *pending* rather than sent immediately:
-  # with credit-gated delivery a subscriber may still be behind the
-  # stream head, and emitting the close now would land it ahead of the
-  # items the consumer hasn't been given room for yet. Each subscription
-  # emits its close once it has drained.
-  defp push_stream_closed(state, stream_id, reason, error) do
-    subscribers = Map.get(state.stream_subscribers, stream_id, MapSet.new())
-
-    reason_str = if reason, do: Atom.to_string(reason)
-    encoded_error = encode_stream_error(error)
-
-    # The stream is closed in the DB by the time we get here, so the head
-    # is final. Read it once and record it on each pending close rather
-    # than re-querying per subscriber per ack for the rest of the drain.
-    {:ok, head} = Streams.get_stream_head(state.db, stream_id)
-
-    Enum.reduce(subscribers, state, fn key, state ->
-      state
-      |> mark_pending_close(key, reason_str, encoded_error, head)
-      |> maybe_finish_subscription(key)
-    end)
-  end
-
-  # `head` is the stream's final sequence — safe to cache on the pending
-  # close because a stream only gets one closure and no item may be
-  # appended after it.
-  defp mark_pending_close(state, key, reason, error, head) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error -> state
-      {:ok, _} -> put_in(state.stream_subscriptions[key].pending_close, {reason, error, head})
-    end
-  end
-
-  # Emit a recorded closure, but only once the consumer has been sent
-  # everything it is going to get. Until then the close waits — the
-  # subscription stays alive so later acks can pump the remainder.
-  defp maybe_finish_subscription(state, key) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error ->
-        state
-
-      {:ok, %{pending_close: nil}} ->
-        state
-
-      {:ok, %{pending_close: {reason, error, head}} = sub} ->
-        if sub.cursor > head do
-          finish_subscription(state, key, reason, error)
-        else
-          state
-        end
-    end
-  end
-
-  # Send the terminal close for a subscription and drop it.
-  defp finish_subscription(state, key, reason, error) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error ->
-        state
-
-      {:ok, sub} ->
-        {_consumer_execution_id, subscription_id} = key
-
-        state
-        |> send_to_consumer(
-          sub,
-          {:stream_closed, sub.consumer_execution_external_id, subscription_id, reason, error}
-        )
-        |> drop_subscription(key)
-    end
-  end
-
-  # Wire encoding for the producer's actual error on an `:errored` close.
-  # Frames are included so consumers can reconstruct tracebacks for
-  # debuggability. Lifecycle reasons (:cancelled/:abandoned/...) don't
-  # go through this — they're conveyed as the reason atom alone.
-  defp encode_stream_error(nil), do: nil
-
-  defp encode_stream_error({type, message, frames}) do
-    %{
-      "type" => type,
-      "message" => message,
-      "frames" =>
-        Enum.map(frames, fn {file, line, name, code} ->
-          [file, line, name, code]
-        end)
-    }
-  end
-
-  # If a subscription attaches to an already-closed stream, record the
-  # closure as pending. The pump emits it once the backlog has been
-  # delivered — which, for a consumer whose prefetch is smaller than the
-  # backlog, takes several rounds of acks.
-  defp mark_closed_if_closed(state, key) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error ->
-        state
-
-      {:ok, sub} ->
-        do_mark_closed(state, sub, key)
-    end
-  end
-
-  defp do_mark_closed(state, sub, key) do
-    case Streams.get_stream_closure(state.db, sub.stream_id) do
-      {:ok, nil} ->
-        state
-
-      {:ok, {reason, stored_error, closed_by, _closed_at}} ->
-        # Resolve :lifecycle to the specific cause for the wire — same
-        # treatment as live closures so late subscribers don't get a
-        # less-informative signal than those attached at close time.
-        {effective_reason, effective_error} =
-          resolve_closure_reason(state.db, reason, stored_error, closed_by)
-
-        reason_str = if effective_reason, do: Atom.to_string(effective_reason)
-
-        # Already closed, so the head is final — see mark_pending_close.
-        {:ok, head} = Streams.get_stream_head(state.db, sub.stream_id)
-
-        mark_pending_close(
-          state,
-          key,
-          reason_str,
-          encode_stream_error(effective_error),
-          head
-        )
-    end
-  end
-
-  defp drop_subscription(state, key) do
-    case Map.fetch(state.stream_subscriptions, key) do
-      :error ->
-        state
-
-      {:ok, sub} ->
-        stream_key = sub.stream_id
-
-        state
-        |> Map.update!(:stream_subscriptions, &Map.delete(&1, key))
-        |> Map.update!(:stream_subscribers, fn m ->
-          case Map.get(m, stream_key) do
-            nil ->
-              m
-
-            subs ->
-              remaining = MapSet.delete(subs, key)
-
-              if MapSet.size(remaining) == 0 do
-                Map.delete(m, stream_key)
-              else
-                Map.put(m, stream_key, remaining)
-              end
-          end
-        end)
-        # Demand is measured against the *slowest* subscriber, so losing
-        # one can only raise the target — and if the departing subscriber
-        # was the slowest, this is the last chance to notice. The
-        # remaining subscribers may already have acked everything they'll
-        # ever ack, and a blocked producer appends nothing, so neither of
-        # the other refresh sites (ack_stream, push_stream_item) would
-        # fire again and the producer would wait forever.
-        |> refresh_stream_demand(stream_key)
-    end
-  end
-
-  # Drop every subscription held by the disconnected session's executions.
-  # Called just before the session is removed, so we can read its live
-  # execution set directly.
-  defp drop_session_subscriptions(state, session_id) do
-    session = Map.fetch!(state.sessions, session_id)
-
-    session.starting
-    |> MapSet.union(session.executing)
-    |> Enum.reduce(state, fn ext_id, state ->
-      case Map.fetch(state.execution_ids, ext_id) do
-        {:ok, execution_id} -> drop_execution_subscriptions(state, execution_id)
-        :error -> state
-      end
-    end)
-  end
-
-  # Drop every subscription owned by a terminated consumer execution so the
-  # server stops pushing items and the subscription map doesn't leak. Called
-  # from notify_terminated — by that point the consumer's generator iterator
-  # (and thus the subscription) is definitely gone.
-  defp drop_execution_subscriptions(state, consumer_execution_id) do
-    keys =
-      state.stream_subscriptions
-      |> Map.keys()
-      |> Enum.filter(fn {cons_id, _sub_id} -> cons_id == consumer_execution_id end)
-
-    Enum.reduce(keys, state, &drop_subscription(&2, &1))
-  end
-
-  # Clean up an execution's state and send an abort message to the worker.
-  # If the execution has already terminated (completion recorded), there's
-  # nothing to abort — skip silently. Only warn when an actively-running
-  # execution unexpectedly has no session.
-  defp abort_execution(state, execution_ext_id) do
-    state = cleanup_execution(state, execution_ext_id)
-
-    case find_session_for_execution(state, execution_ext_id) do
-      {:ok, session_id} ->
-        send_session(state, session_id, {:abort, execution_ext_id})
-
-      :error ->
-        already_completed? =
-          case Map.fetch(state.execution_ids, execution_ext_id) do
-            {:ok, execution_id} ->
-              case Results.has_completion?(state.db, execution_id) do
-                {:ok, done?} -> done?
-              end
-
-            :error ->
-              # No internal id mapped — execution is long gone (e.g.,
-              # cache rotation cleared the cache). Treat as terminated.
-              true
-          end
-
-        unless already_completed? do
-          Logger.warning("Couldn't locate session for execution #{execution_ext_id}. Ignoring.")
-        end
-
-        state
-    end
-  end
-
-  defp process_launcher_result(state, task_ref, result) do
-    callback = Map.fetch!(state.launcher_tasks, task_ref)
-
-    state
-    |> callback.(result)
-    |> Map.update!(:launcher_tasks, &Map.delete(&1, task_ref))
-  end
-
-  defp build_launcher_env(state, workspace_id, token, launcher) do
-    coflux_host = launcher[:server_host] || Coflux.Config.server_host(state.project_id)
-
-    base = %{
-      "COFLUX_HOST" => coflux_host,
-      "COFLUX_PROJECT" => state.project_id,
-      "COFLUX_WORKSPACE" => state.workspaces[workspace_id].name,
-      "COFLUX_SESSION" => token
-    }
-
-    base =
-      case Map.get(launcher, :adapter) do
-        nil -> base
-        adapter -> Map.put(base, "COFLUX_WORKER_ADAPTER", Enum.join(adapter, ","))
-      end
-
-    base =
-      case Map.get(launcher, :concurrency) do
-        nil -> base
-        concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
-      end
-
-    base =
-      case Map.get(launcher, :server_secure) do
-        nil -> base
-        true -> Map.put(base, "COFLUX_SECURE", "true")
-        false -> Map.put(base, "COFLUX_SECURE", "false")
-      end
-
-    case Map.get(launcher, :env) do
-      nil -> base
-      env -> Map.merge(base, env)
-    end
-  end
-
-  defp call_launcher(state, launcher, fun, args, callback) do
-    module =
-      case launcher.type do
-        :docker -> Coflux.DockerLauncher
-        :process -> Coflux.ProcessLauncher
-        :kubernetes -> Coflux.KubernetesLauncher
-      end
-
-    task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)
-
-    put_in(state, [Access.key(:launcher_tasks), task.ref], callback)
-  end
-
-  defp update_worker_state(
-         state,
-         worker_id,
-         worker_state,
-         workspace_id,
-         pool_name,
-         principal_id \\ nil
-       ) do
-    :ok = Workers.create_worker_state(state.db, worker_id, worker_state, principal_id)
-
-    worker = state.workers[worker_id]
-
-    state
-    |> put_in(
-      [Access.key(:workers), worker_id, :state],
-      worker_state
-    )
-    |> notify_listeners(
-      {:pool, workspace_external_id(state, workspace_id), pool_name},
-      {:worker_state, worker.external_id, worker_state}
-    )
-  end
-
-  defp deactivate_worker(state, worker_id, error, logs \\ nil) do
-    {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, error, logs)
-
-    {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
-
-    state = Map.update!(state, :worker_external_ids, &Map.delete(&1, worker.external_id))
-
-    # Expire the worker's session so it can't reconnect to a deactivated worker.
-    state =
-      if worker.session_id && Map.has_key?(state.sessions, worker.session_id) do
-        remove_session(state, worker.session_id)
-      else
-        state
-      end
-
-    notify_listeners(
-      state,
-      {:pool, workspace_external_id(state, worker.workspace_id), worker.pool_name},
-      {:worker_deactivated, worker.external_id, deactivated_at, error, logs}
-    )
-  end
-
-  defp schedule_session_expiry(state, session_id, timeout_ms) do
-    expiry_at = System.os_time(:millisecond) + timeout_ms
-    state = put_in(state.session_expiries[session_id], expiry_at)
-    reschedule_expire_sessions_timer(state)
-  end
-
-  defp cancel_session_expiry(state, session_id) do
-    state = Map.update!(state, :session_expiries, &Map.delete(&1, session_id))
-    reschedule_expire_sessions_timer(state)
-  end
-
-  defp reschedule_expire_sessions_timer(state) do
-    if state.expire_sessions_timer do
-      Process.cancel_timer(state.expire_sessions_timer)
-    end
-
-    case state.session_expiries |> Map.values() |> Enum.min(fn -> nil end) do
-      nil ->
-        %{state | expire_sessions_timer: nil}
-
-      next_expiry ->
-        delay = max(0, next_expiry - System.os_time(:millisecond))
-        timer = Process.send_after(self(), :expire_sessions, delay)
-        %{state | expire_sessions_timer: timer}
-    end
-  end
-
-  defp maybe_schedule_idle_shutdown(state) do
-    idle? = Enum.empty?(state.sessions) and Enum.empty?(state.listeners)
-
-    cond do
-      idle? and is_nil(state.idle_timer) ->
-        ref = make_ref()
-        timer = Process.send_after(self(), {:idle_shutdown, ref}, @idle_timeout_ms)
-        %{state | idle_timer: {timer, ref}}
-
-      not idle? and not is_nil(state.idle_timer) ->
-        {timer, _ref} = state.idle_timer
-        Process.cancel_timer(timer)
-        %{state | idle_timer: nil}
-
-      true ->
-        state
-    end
-  end
 end
