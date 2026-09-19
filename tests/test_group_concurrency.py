@@ -23,6 +23,40 @@ def assert_nothing_dispatched(ctx, timeout=1):
         ctx.executor.next_execute(timeout=timeout)
 
 
+def wait_for_single_gate(host, gate_type, timeout=30):
+    """Poll the queue topic until exactly one execution is gated, and
+    return ``(execution_id, gate)``.
+
+    Waits for a fact to become true rather than asserting that nothing
+    happened within some window. The gate is published, so there is no
+    need to infer it from an absence - and an absence would also be
+    produced by a worker that simply hasn't reconnected, which is exactly
+    what a restart makes likely.
+    """
+    deadline = time.monotonic() + timeout
+    queue = {}
+    while True:
+        try:
+            queue = cli.queue(host=host)
+        except Exception:
+            queue = {}  # server still coming back up
+
+        gated = {
+            execution_id: gates[0]
+            for execution_id, entry in queue.items()
+            if (gates := [d for d in entry["dependencies"] if d["type"] == gate_type])
+        }
+        if len(gated) == 1:
+            return next(iter(gated.items()))
+
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"expected exactly one {gate_type}-gated execution within "
+                f"{timeout}s; queue={queue}"
+            )
+        time.sleep(0.05)
+
+
 def register_group(ex, group_id=0, concurrency=None, name=None):
     ex.conn.send(
         register_group_notification(
@@ -439,19 +473,24 @@ def test_ledger_rebuilt_on_server_restart(isolated_server, tmp_path):
         time.sleep(0.5)
         server.start()
 
-        # The worker reconnects and reports the holder as still executing;
-        # the waiter must stay gated.
-        with pytest.raises(TimeoutError):
-            executor.next_execute(timeout=3)
+        # The group place is derived from the holder's
+        # assignment-without-completion and the group key on its step, so the
+        # rebuilt ledger is right as soon as the server is up - it does not
+        # depend on the worker having reconnected. Asserted by reading the
+        # gate rather than by watching for an absence of dispatch.
+        _, gate = wait_for_single_gate(host, "group")
+        assert gate["limit"] == 1
+        assert gate["parent"] == ex0.execution_id
+        assert gate["holders"] == [holder.execution_id]
 
         holder.conn.complete(holder.execution_id, value="first")
 
-        waiter = executor.next_execute(timeout=10)
+        waiter = executor.next_execute(timeout=30)
         assert waiter.arguments[0]["value"] == 2
         waiter.conn.complete(waiter.execution_id, value="second")
 
         ex0.conn.complete(ex0.execution_id, value="done")
-        assert poll_result(resp["runId"], host, timeout=20)["value"]["data"] == "done"
+        assert poll_result(resp["runId"], host, timeout=40)["value"]["data"] == "done"
 
 
 def test_memo_hit_not_counted(worker):

@@ -2123,45 +2123,6 @@ def test_stream_wait_already_satisfied_does_not_hold_the_successor(worker):
         prod_ex.conn.complete(prod_ex.execution_id, value="done")
 
 
-def test_suspended_consumer_does_not_time_out_the_producer(worker):
-    """A consumer's nap is not the producer being idle.
-
-    The mirror of the rule that a suspended *producer* isn't idle: while
-    every consumer of a stream is suspended waiting on it, the producer's
-    idle countdown is paused. Without this, a lockstep producer would be
-    force-closed by the very consumers waiting for it — they stop
-    acknowledging when they suspend, so it can't emit, so its idle window
-    runs out.
-    """
-    targets = [workflow("test", "producer"), workflow("test", "consumer")]
-
-    with worker(targets, concurrency=3) as ctx:
-        ctx.submit("test", "producer")
-        prod_ex = ctx.executor.next_execute()
-        stream = prod_ex.conn.stream_register(
-            prod_ex.execution_id, 0, buffer=None, timeout_ms=150
-        )
-        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 0, "v0")
-
-        _suspended_consumer(ctx, stream["id"], sequence=1)
-
-        # Well past the 150ms window. The countdown is paused, so no
-        # force-close arrives and the stream is still open to append.
-        with pytest.raises(TimeoutError):
-            prod_ex.conn.recv_push("stream_force_close", timeout=1.5)
-
-        prod_ex.conn.stream_append(prod_ex.execution_id, 0, 1, "v1")
-
-        # Appending released the waiter, which also restarts the countdown.
-        cons2 = ctx.executor.next_execute()
-        assert cons2.target == "consumer"
-        cons2.conn.complete(cons2.execution_id)
-
-        force = prod_ex.conn.recv_push("stream_force_close", timeout=2)
-        assert force["reason"] == "timeout"
-        prod_ex.conn.complete(prod_ex.execution_id)
-
-
 def test_stream_select_reports_whether_the_sequence_is_available(worker):
     """The consumer asks the server rather than trusting its own queue.
 

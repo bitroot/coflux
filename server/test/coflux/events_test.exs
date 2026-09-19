@@ -303,6 +303,65 @@ defmodule Coflux.EventsTest do
     assert rebuilt.concurrency_gated == %{}
   end
 
+  # The rule this protects: while every consumer of a stream is suspended
+  # waiting on it, the producer's idle countdown is paused. A consumer's
+  # nap is not the producer being idle - without this, a lockstep producer
+  # would be timed out by the very consumers waiting for it.
+  #
+  # Enforcement is worker-side, so the server's whole part is sending
+  # `stream_timer_pause`. That is asserted here directly: the test process
+  # is the session's connection, so commands for it arrive in this
+  # mailbox, and they are already delivered by the time the call that
+  # recorded them returns - hence `assert_received`, with no waiting and
+  # no clock anywhere in the test.
+  test "a suspended consumer pauses the producer's idle countdown", %{project: project} do
+    {:ok, _workspace_id, ws} = Orchestration.create_workspace(project, "default", nil)
+    {:ok, token} = Orchestration.create_session(project, ws)
+    {:ok, session, []} = Orchestration.resume_session(project, token, ws, self())
+
+    :ok =
+      Orchestration.declare_targets(
+        project,
+        session,
+        %{"test" => %{workflow: ["producer", "consumer"]}},
+        4
+      )
+
+    {:ok, _run, 1, producer} =
+      Orchestration.start_run(project, "test", "producer", :workflow, [], nil, workspace: ws)
+
+    # The producer has to be assigned before it has a session to be told
+    # anything: the pause is addressed to whoever is running it. Assignment
+    # happens on the scheduler pass that starting the run queued, so a
+    # round trip is taken first to be sure it has run.
+    {:ok, _} = Orchestration.get_workspaces(project)
+    assert_received {:execute, ^producer, "test", "producer", _, _, _, _, _, _}
+
+    {:ok, stream} = Orchestration.register_stream(project, producer, 0, nil, 150, session)
+
+    {:ok, _run, 1, consumer} =
+      Orchestration.start_run(project, "test", "consumer", :workflow, [], nil, workspace: ws)
+
+    {:ok, _} = Orchestration.get_workspaces(project)
+    assert_received {:execute, ^consumer, "test", "consumer", _, _, _, _, _, _}
+
+    # The consumer suspends waiting for the stream to reach sequence 0.
+    :ok =
+      Orchestration.record_result(
+        project,
+        consumer,
+        {:suspended, nil, [{:stream, stream.id, 0}]}
+      )
+
+    index = stream.index
+    assert_received {:stream_timer_pause, ^producer, ^index, true}
+
+    # Appending what it was waiting for releases the last waiter, and the
+    # countdown starts again.
+    :ok = Orchestration.append_stream_item(project, producer, index, 0, {:raw, "v0", []})
+    assert_received {:stream_timer_pause, ^producer, ^index, false}
+  end
+
   # The fan-out a result gets when other runs handed off to the execution
   # that produced it. Exercised across a server restart, because the runs
   # to notify have to be resolved from the database: the server's
