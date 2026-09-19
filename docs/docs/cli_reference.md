@@ -181,7 +181,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 | `pools disable <name>` | Disable a pool (drain workers) |
 | `pools enable <name>` | Re-enable a pool |
 | `pools launches <pool> [worker-id]` | View launched workers (`--watch`) |
-| `pools export` | Export pool configs as TOML (`-o`, `--only`, `--include-secrets`) |
+| `pools export` | Export pool configs as TOML (`-o`, `--only`) |
 | `pools import [file]` | Import pool configs from TOML or stdin. Declarative: pools absent from the file are deleted. Flags: `--dry-run`, `--yes`, `--only` |
 
 ### Pool creation flags
@@ -213,6 +213,14 @@ See [pools](./pools.md) for launcher-specific fields.
 | `tokens list` | List service tokens |
 | `tokens create` | Create a token (`--name`, `--workspaces`) |
 | `tokens revoke <id>` | Revoke a token |
+
+## `coflux secrets`
+
+| Command | Description |
+|---------|-------------|
+| `secrets set <name>` | Set a secret's value from stdin (`--from-env`, `--from-file`, `--scope`, `--global`) |
+| `secrets list` | List secrets (names, scopes and versions) |
+| `secrets delete <name>` | Delete a secret (`--scope`, `--global`) |
 
 ## `coflux inputs`
 

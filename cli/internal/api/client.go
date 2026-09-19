@@ -260,9 +260,8 @@ type GetPoolConfigsResult struct {
 }
 
 // GetPoolConfigs retrieves all pool configs for a workspace along with an ETag.
-// Secrets (such as a Kubernetes token) are redacted unless includeSecrets is set.
-func (c *Client) GetPoolConfigs(ctx context.Context, workspaceID string, includeSecrets bool) (*GetPoolConfigsResult, error) {
-	body := map[string]any{"workspaceId": workspaceID, "includeSecrets": includeSecrets}
+func (c *Client) GetPoolConfigs(ctx context.Context, workspaceID string) (*GetPoolConfigsResult, error) {
+	body := map[string]any{"workspaceId": workspaceID}
 	var pools map[string]map[string]any
 	headers, err := c.post(ctx, "/api/get_pools", body, &pools)
 	if err != nil {
@@ -366,6 +365,45 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 	}
 	_, err := c.post(ctx, "/api/revoke_token", body, nil)
 	return err
+}
+
+// Secrets API
+
+// SetSecretResult is what the server says about a secret it has set.
+type SetSecretResult struct {
+	Name    string `json:"name"`
+	Scope   string `json:"scope"`
+	Version int    `json:"version"`
+}
+
+// SetSecret sets a secret's value for a scope ("" for the whole project).
+func (c *Client) SetSecret(ctx context.Context, scope, name, value string) (*SetSecretResult, error) {
+	body := map[string]any{"name": name, "value": value, "scope": scope}
+	var result SetSecretResult
+	if _, err := c.post(ctx, "/api/set_secret", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DeleteSecret deletes a secret from a scope ("" for the whole project).
+func (c *Client) DeleteSecret(ctx context.Context, scope, name string) error {
+	body := map[string]any{"name": name, "scope": scope}
+	_, err := c.post(ctx, "/api/delete_secret", body, nil)
+	return err
+}
+
+// ListSecrets lists the project's secrets: names, scopes and versions.
+func (c *Client) ListSecrets(ctx context.Context) ([]map[string]any, error) {
+	var result map[string]map[string]any
+	if err := c.get(ctx, "/topics/secrets", nil, &result); err != nil {
+		return nil, err
+	}
+	secrets := make([]map[string]any, 0, len(result))
+	for _, secret := range result {
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
 }
 
 // RerunStepResult contains the IDs returned from re-running a step

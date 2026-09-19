@@ -514,72 +514,6 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                   |> put_in([Access.key(:session_ids), external_id], session_id)
                   |> Fleet.schedule_session_expiry(session_id, activation_timeout)
                   |> Listeners.maybe_schedule_idle_shutdown()
-                  |> Fleet.call_launcher(
-                    pool.launcher,
-                    :launch,
-                    [
-                      Fleet.build_launcher_env(state, workspace_id, token, pool.launcher),
-                      pool.modules,
-                      pool.launcher,
-                      %{pool_name: pool_name}
-                    ],
-                    fn state, result ->
-                      # A launcher can say more than a code about why a
-                      # launch failed - an API's own message, typically -
-                      # and that goes where a log tail would.
-                      {data, error, detail} =
-                        case result do
-                          {:ok, {:ok, data}} -> {data, nil, nil}
-                          {:ok, {:error, error}} -> {nil, error, nil}
-                          {:ok, {:error, error, detail}} -> {nil, error, detail}
-                          :error -> {nil, "launch_crashed", nil}
-                        end
-
-                      {:ok, started_at} =
-                        Workers.create_worker_launch_result(state.db, worker_id, data, error)
-
-                      state =
-                        Effects.emit(state, %WorkerLaunchResult{
-                          workspace: State.workspace_external_id(state, workspace_id),
-                          pool: pool_name,
-                          worker: worker_external_id,
-                          started_at: started_at,
-                          error: error
-                        })
-
-                      cond do
-                        error ->
-                          # Deactivating the worker pops it from state, and
-                          # with it the only record that this pool was ever
-                          # tried - so count the failure first, or the pool
-                          # relaunches on the very next pass.
-                          state
-                          |> record_pool_launch_failure(pool_id)
-                          |> Fleet.deactivate_worker(worker_id, error, detail)
-
-                        Map.has_key?(state.workers, worker_id) ->
-                          put_in(
-                            state,
-                            [Access.key(:workers), worker_id, Access.key(:data)],
-                            data
-                          )
-
-                        true ->
-                          # The worker was deactivated while its launch was
-                          # in flight. Nothing will ever connect to what was
-                          # just started, and this result is the only thing
-                          # that knows how to reach it, so stop it here
-                          # rather than leaking it.
-                          Fleet.call_launcher(
-                            state,
-                            pool.launcher,
-                            :stop,
-                            [data],
-                            fn state, _result -> state end
-                          )
-                      end
-                    end
-                  )
                   |> put_in([Access.key(:workers), worker_id], %{
                     external_id: worker_external_id,
                     created_at: created_at,
@@ -604,6 +538,15 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                     created_at: created_at,
                     session: external_id
                   })
+                  |> start_launch(
+                    workspace_id,
+                    pool_id,
+                    pool_name,
+                    pool,
+                    worker_id,
+                    worker_external_id,
+                    token
+                  )
               end
             end)
 
@@ -622,29 +565,37 @@ defmodule Coflux.Orchestration.Server.Scheduler do
       state.workers
       |> Enum.filter(fn {_worker_id, worker} -> poll_due?(state, worker, now) end)
       |> Enum.reduce(state, fn {worker_id, worker}, state ->
-        {:ok, launcher} = Workspaces.get_launcher_for_pool(state.db, worker.pool_id)
+        case worker_launcher(state, worker) do
+          {:ok, launcher} ->
+            state
+            |> Fleet.call_launcher(launcher, :poll, [worker.data, launcher], fn state, result ->
+              state = update_worker(state, worker_id, &%{&1 | polling: false})
 
-        state
-        |> Fleet.call_launcher(launcher, :poll, [worker.data], fn state, result ->
-          state = update_worker(state, worker_id, &%{&1 | polling: false})
+              case result do
+                {:ok, {:ok, true}} ->
+                  clear_poll_failures(state, worker_id)
 
-          case result do
-            {:ok, {:ok, true}} ->
-              clear_poll_failures(state, worker_id)
+                {:ok, {:ok, false, error, logs}} ->
+                  # The launcher knows the worker has gone, and this is the
+                  # only place its exit code and log tail come from.
+                  Fleet.deactivate_worker(state, worker_id, error, logs)
 
-            {:ok, {:ok, false, error, logs}} ->
-              # The launcher knows the worker has gone, and this is the
-              # only place its exit code and log tail come from.
-              Fleet.deactivate_worker(state, worker_id, error, logs)
+                {:ok, {:error, _reason}} ->
+                  record_poll_failure(state, worker_id)
 
-            {:ok, {:error, _reason}} ->
-              record_poll_failure(state, worker_id)
+                :error ->
+                  record_poll_failure(state, worker_id)
+              end
+            end)
+            |> update_worker(worker_id, &%{&1 | last_poll_at: now, polling: true})
 
-            :error ->
-              record_poll_failure(state, worker_id)
-          end
-        end)
-        |> update_worker(worker_id, &%{&1 | last_poll_at: now, polling: true})
+          # Nothing to ask the launcher with: a poll that couldn't be
+          # answered, and tolerated the same way.
+          {:error, _reason} ->
+            state
+            |> update_worker(worker_id, &%{&1 | last_poll_at: now})
+            |> record_poll_failure(worker_id)
+        end
       end)
 
     # A worker that connected but never said what it can run is broken
@@ -700,7 +651,6 @@ defmodule Coflux.Orchestration.Server.Scheduler do
       |> Enum.filter(fn {_worker_id, worker} -> stop_due?(state, worker, now) end)
       |> Enum.reduce(state, fn {worker_id, worker}, state ->
         {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
-        {:ok, launcher} = Workspaces.get_launcher_for_pool(state.db, worker.pool_id)
 
         state =
           state
@@ -712,27 +662,34 @@ defmodule Coflux.Orchestration.Server.Scheduler do
             stopping_at: stopping_at
           })
 
-        Fleet.call_launcher(state, launcher, :stop, [worker.data], fn state, result ->
-          case result do
-            {:ok, :ok} ->
-              {:ok, stopped_at} =
-                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
+        case worker_launcher(state, worker) do
+          {:ok, launcher} ->
+            Fleet.call_launcher(state, launcher, :stop, [worker.data, launcher], fn state,
+                                                                                    result ->
+              case result do
+                {:ok, :ok} ->
+                  {:ok, stopped_at} =
+                    Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
 
-              Effects.emit(state, %WorkerStopResult{
-                workspace: State.workspace_external_id(state, worker.workspace_id),
-                pool: worker.pool_name,
-                worker: worker.external_id,
-                stopped_at: stopped_at,
-                error: nil
-              })
+                  Effects.emit(state, %WorkerStopResult{
+                    workspace: State.workspace_external_id(state, worker.workspace_id),
+                    pool: worker.pool_name,
+                    worker: worker.external_id,
+                    stopped_at: stopped_at,
+                    error: nil
+                  })
 
-            {:ok, {:error, reason}} ->
-              record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
+                {:ok, {:error, reason}} ->
+                  record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
 
-            :error ->
-              record_stop_failure(state, worker_id, worker, worker_stop_id, "stop_crashed")
-          end
-        end)
+                :error ->
+                  record_stop_failure(state, worker_id, worker, worker_stop_id, "stop_crashed")
+              end
+            end)
+
+          {:error, reason} ->
+            record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
+        end
       end)
 
     # While any worker exists there are deadlines to sweep for - polls,
@@ -830,6 +787,150 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout]) do
       seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1000
       _ -> @default_worker_idle_timeout_ms
+    end
+  end
+
+  # Starts a worker's launch, with the pool's secrets resolved for the
+  # launcher to use. A secret that doesn't resolve fails the launch the
+  # way the launcher failing would, so the worker records what went wrong.
+  defp start_launch(
+         state,
+         workspace_id,
+         pool_id,
+         pool_name,
+         pool,
+         worker_id,
+         worker_external_id,
+         token
+       ) do
+    case resolve_launcher(state, workspace_id, pool.launcher) do
+      {:ok, launcher} ->
+        Fleet.call_launcher(
+          state,
+          launcher,
+          :launch,
+          [
+            Fleet.build_launcher_env(state, workspace_id, token, launcher),
+            pool.modules,
+            launcher,
+            %{pool_name: pool_name}
+          ],
+          launch_callback(
+            workspace_id,
+            pool_id,
+            pool_name,
+            worker_id,
+            worker_external_id,
+            launcher
+          )
+        )
+
+      {:error, error, detail} ->
+        callback =
+          launch_callback(workspace_id, pool_id, pool_name, worker_id, worker_external_id, nil)
+
+        callback.(state, {:ok, {:error, error, detail}})
+    end
+  end
+
+  defp launch_callback(workspace_id, pool_id, pool_name, worker_id, worker_external_id, launcher) do
+    fn state, result ->
+      # A launcher can say more than a code about why a
+      # launch failed - an API's own message, typically -
+      # and that goes where a log tail would.
+      {data, error, detail} =
+        case result do
+          {:ok, {:ok, data}} -> {data, nil, nil}
+          {:ok, {:error, error}} -> {nil, error, nil}
+          {:ok, {:error, error, detail}} -> {nil, error, detail}
+          :error -> {nil, "launch_crashed", nil}
+        end
+
+      {:ok, started_at} =
+        Workers.create_worker_launch_result(state.db, worker_id, data, error)
+
+      state =
+        Effects.emit(state, %WorkerLaunchResult{
+          workspace: State.workspace_external_id(state, workspace_id),
+          pool: pool_name,
+          worker: worker_external_id,
+          started_at: started_at,
+          error: error
+        })
+
+      cond do
+        error ->
+          # Deactivating the worker pops it from state, and
+          # with it the only record that this pool was ever
+          # tried - so count the failure first, or the pool
+          # relaunches on the very next pass.
+          state
+          |> record_pool_launch_failure(pool_id)
+          |> Fleet.deactivate_worker(worker_id, error, detail)
+
+        Map.has_key?(state.workers, worker_id) ->
+          put_in(
+            state,
+            [Access.key(:workers), worker_id, Access.key(:data)],
+            data
+          )
+
+        true ->
+          # The worker was deactivated while its launch was
+          # in flight. Nothing will ever connect to what was
+          # just started, and this result is the only thing
+          # that knows how to reach it, so stop it here
+          # rather than leaking it.
+          Fleet.call_launcher(
+            state,
+            launcher,
+            :stop,
+            [data, launcher],
+            fn state, _result -> state end
+          )
+      end
+    end
+  end
+
+  # The launcher config with its secrets' values, for one call and then
+  # forgotten. Failures are in the launcher's terms: a code for the
+  # worker, and what was wrong for its logs.
+  defp resolve_launcher(state, workspace_id, launcher) do
+    workspace_name = state.workspaces[workspace_id].name
+
+    case Coflux.Admin.Secrets.resolve_launcher(
+           state.admin_db,
+           state.project_id,
+           workspace_name,
+           launcher
+         ) do
+      {:ok, launcher} ->
+        {:ok, launcher}
+
+      {:error, {:secret_not_found, name}} ->
+        {:error, "launch_secret_missing", "secret not found: #{name}"}
+
+      {:error, {:secret_invalid, name}} ->
+        {:error, "launch_secret_invalid", "secret can't be used: #{name}"}
+
+      {:error, :no_secret} ->
+        {:error, "launch_secret_missing", "secrets need COFLUX_SECRET to be configured"}
+    end
+  end
+
+  # A worker's launcher config as its pool has it now, secrets resolved.
+  defp worker_launcher(state, worker) do
+    case Workspaces.get_launcher_for_pool(state.db, worker.pool_id) do
+      {:ok, nil} ->
+        {:error, :no_launcher}
+
+      {:ok, launcher} ->
+        Coflux.Admin.Secrets.resolve_launcher(
+          state.admin_db,
+          state.project_id,
+          state.workspaces[worker.workspace_id].name,
+          launcher
+        )
     end
   end
 
@@ -939,6 +1040,8 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   defp earliest(a, nil), do: a
   defp earliest(a, b), do: min(a, b)
 
+  defp to_error({:secret_not_found, name}), do: "secret_missing:#{name}"
+  defp to_error({:secret_invalid, name}), do: "secret_invalid:#{name}"
   defp to_error(reason) when is_binary(reason), do: reason
   defp to_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp to_error(reason), do: inspect(reason)

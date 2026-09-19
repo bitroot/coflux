@@ -60,15 +60,9 @@ defmodule Coflux.Topics.Pool do
         :process ->
           %{type: "process", directory: launcher.directory}
 
-        # `token` is deliberately absent: this shape is delivered to every
-        # subscriber of the topic, and the launcher's credentials are not
-        # part of what a pool looks like. `caCert` is a path on the
-        # server's host rather than a credential, so it stays. Everything
-        # else a pool is configured with belongs here too, or `pools get`
-        # shows less than `pools export` does.
-        # As above: the secret access key and session token are credentials,
-        # so they stay out. The key ID says which credentials without being
-        # one, and is how a pool's access is recognised, so it stays.
+        # Credentials are named, never held, so everything a pool is
+        # configured with belongs here: `pools get` shows exactly what
+        # `pools export` does.
         :ecs ->
           %{
             type: "ecs",
@@ -83,7 +77,7 @@ defmodule Coflux.Topics.Pool do
           |> maybe_put(:securityGroups, Map.get(launcher, :security_groups))
           |> maybe_put(:assignPublicIp, Map.get(launcher, :assign_public_ip))
           |> maybe_put(:platformVersion, Map.get(launcher, :platform_version))
-          |> maybe_put(:accessKeyId, Map.get(launcher, :access_key_id))
+          |> maybe_put(:credentialsSecret, Map.get(launcher, :credentials_secret))
           |> maybe_put(:endpoint, Map.get(launcher, :endpoint))
 
         :kubernetes ->
@@ -91,6 +85,7 @@ defmodule Coflux.Topics.Pool do
           |> maybe_put(:namespace, Map.get(launcher, :namespace))
           |> maybe_put(:apiServer, Map.get(launcher, :api_server))
           |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
+          |> maybe_put(:tokenSecret, Map.get(launcher, :token_secret))
           |> maybe_put(:caCert, Map.get(launcher, :ca_cert))
           |> maybe_put(:insecure, Map.get(launcher, :insecure))
           |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
@@ -112,6 +107,7 @@ defmodule Coflux.Topics.Pool do
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
     |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
     |> maybe_put(:env, Map.get(launcher, :env))
+    |> maybe_put(:envSecrets, Map.get(launcher, :env_secrets))
   end
 
   defp maybe_put(map, _key, nil), do: map

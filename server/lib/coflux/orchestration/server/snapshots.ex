@@ -51,6 +51,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     StreamClosed,
     StreamItemAppended,
     StreamRegistered,
+    SecretSet,
     TokenCreated,
     WorkerCreated,
     WorkerDeactivated,
@@ -205,6 +206,22 @@ defmodule Coflux.Orchestration.Server.Snapshots do
 
       {:ok, events}
     end
+  end
+
+  def load(state, :secrets, _opts) do
+    {:ok, secrets} = Coflux.Admin.Secrets.list(state.admin_db)
+
+    {:ok,
+     Enum.map(secrets, fn secret ->
+       %SecretSet{
+         scope: secret.scope,
+         name: secret.name,
+         version: secret.version,
+         created_at: secret.created_at,
+         updated_at: secret.updated_at,
+         updated_by: secret.updated_by
+       }
+     end)}
   end
 
   # Revoked tokens are absent: created-then-revoked folds to absence.

@@ -87,6 +87,8 @@ class ManagedServer:
             # is exercised against a stand-in for the API (support.ecs).
             "COFLUX_LAUNCHER_TYPES": "process,docker,kubernetes,ecs",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
+            # Signs service tokens and encrypts secrets.
+            "COFLUX_SECRET": "test-secret",
             "COFLUX_CLI_PATH": cli_path,
             **self._extra_env,
         }
@@ -118,6 +120,8 @@ class ManagedServer:
                 "COFLUX_REQUIRE_AUTH=false",
                 "-e",
                 f"COFLUX_SUPER_TOKEN_HASH={hashlib.sha256(SUPER_TOKEN.encode()).hexdigest()}",
+                "-e",
+                "COFLUX_SECRET=test-secret",
                 image,
             ],
             check=True,

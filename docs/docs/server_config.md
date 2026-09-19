@@ -24,7 +24,7 @@ This is a convenience wrapper around `docker run`. Docker must be installed and 
 | `--data-dir` | `./data` | Directory for persistent data |
 | `--no-auth` | `false` | Disable authentication |
 | `--super-token` or `--super-token-hash` | _(none)_ | Set a super token (plain text or pre-hashed SHA-256 hex) |
-| `--secret` | _(none)_ | Server secret for signing service tokens |
+| `--secret` | _(none)_ | Server secret, for signing service tokens and encrypting secrets |
 | `--team` | _(none)_ | Team IDs allowed for Studio auth (repeatable) |
 | `--launcher` | _(none)_ | Allowed launcher types (repeatable: `docker`, `process`, `kubernetes`, `ecs`) |
 | `--image` | _(auto)_ | Docker image to use |
@@ -65,7 +65,7 @@ The server is configured via environment variables. When using `coflux server`, 
 | `COFLUX_PUBLIC_HOST` | `localhost:PORT` | Public host (use `%` prefix for subdomain routing) |
 | `COFLUX_REQUIRE_AUTH` | `true` | Whether authentication is required |
 | `COFLUX_SUPER_TOKEN_HASH` | _(none)_ | SHA-256 hex hash of the super token |
-| `COFLUX_SECRET` | _(none)_ | Server secret for signing service tokens |
+| `COFLUX_SECRET` | _(none)_ | Server secret, for signing service tokens and encrypting secrets |
 | `COFLUX_STUDIO_TEAMS` | _(none)_ | Comma-separated team IDs for Studio auth |
 | `COFLUX_STUDIO_URL` | `https://studio.coflux.com` | Studio URL |
 | `COFLUX_DATA_DIR` | `./data` | Data directory path |
@@ -75,4 +75,4 @@ The server is configured via environment variables. When using `coflux server`, 
 
 ## Data storage
 
-The server stores data in the configured data directory. Each project gets its own set of SQLite databases. Orchestration, logs and metrics data is managed in rotating epochs, which allows the server to manage data growth without losing access to historical runs. An admin database holds service tokens, and isn't rotated.
+The server stores data in the configured data directory. Each project gets its own set of SQLite databases. Orchestration, logs and metrics data is managed in rotating epochs, which allows the server to manage data growth without losing access to historical runs. An admin database holds service tokens and secrets, and isn't rotated.

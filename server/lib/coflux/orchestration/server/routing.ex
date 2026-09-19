@@ -51,6 +51,8 @@ defmodule Coflux.Orchestration.Server.Routing do
     StreamDependencyRecorded,
     StreamItemAppended,
     StreamRegistered,
+    SecretDeleted,
+    SecretSet,
     TokenCreated,
     TokenRevoked,
     WorkerCreated,
@@ -244,6 +246,8 @@ defmodule Coflux.Orchestration.Server.Routing do
   def route(%WorkspaceStateChanged{}, _state), do: [:workspaces]
   def route(%TokenCreated{}, _state), do: [:tokens]
   def route(%TokenRevoked{}, _state), do: [:tokens]
+  def route(%SecretSet{}, _state), do: [:secrets]
+  def route(%SecretDeleted{}, _state), do: [:secrets]
 
   # ---------------------------------------------------------------------------
 

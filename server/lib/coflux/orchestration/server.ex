@@ -18,6 +18,8 @@ defmodule Coflux.Orchestration.Server do
     StepArguments,
     StepCreated,
     StreamDependencyRecorded,
+    SecretDeleted,
+    SecretSet,
     TokenCreated,
     TokenRevoked,
     WorkspaceCreated,
@@ -314,6 +316,44 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Secrets
+
+  defp dispatch_call({:set_secret, scope, name, value, access}, state) do
+    with :ok <- check_secret_scope_access(access, scope),
+         {:ok, secret} <-
+           Coflux.Admin.Secrets.set(
+             state.admin_db,
+             state.project_id,
+             scope,
+             name,
+             value,
+             principal_identity(state, access)
+           ) do
+      state =
+        Effects.emit(state, %SecretSet{
+          scope: secret.scope,
+          name: secret.name,
+          version: secret.version,
+          created_at: secret.created_at,
+          updated_at: secret.updated_at,
+          updated_by: secret.updated_by
+        })
+
+      {:reply, {:ok, secret}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp dispatch_call({:delete_secret, scope, name, access}, state) do
+    with :ok <- check_secret_scope_access(access, scope),
+         :ok <- Coflux.Admin.Secrets.delete(state.admin_db, scope, name) do
+      {:reply, :ok, Effects.emit(state, %SecretDeleted{scope: scope, name: name})}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   defp dispatch_call({:get_token, external_id}, state) do
     case Coflux.Admin.Tokens.get_token_by_external_id(state.admin_db, external_id) do
       {:ok, nil} ->
@@ -547,7 +587,14 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <-
+           Enum.reduce_while(desired_pools, :ok, fn {_name, pool}, :ok ->
+             case check_secret_references(state, workspace_id, pool[:launcher]) do
+               :ok -> {:cont, :ok}
+               error -> {:halt, error}
+             end
+           end) do
       case Workspaces.update_pools(
              state.db,
              workspace_id,
@@ -610,7 +657,8 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- check_secret_references(state, workspace_id, pool[:launcher]) do
       case Workspaces.create_pool(
              state.db,
              workspace_id,
@@ -646,7 +694,8 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- check_secret_references(state, workspace_id, pool_patch[:launcher]) do
       case Workspaces.update_pool(
              state.db,
              workspace_id,
@@ -2926,6 +2975,35 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # Private helper functions
+
+  # A secret in a scope is a secret for every workspace under it, so
+  # setting one takes operator access to the scope itself, and the project
+  # scope takes access to everything.
+  defp check_secret_scope_access(nil, _scope), do: :ok
+
+  defp check_secret_scope_access(access, "") do
+    if access[:workspaces] == :all, do: :ok, else: {:error, :forbidden}
+  end
+
+  defp check_secret_scope_access(access, scope) do
+    if Permissions.operator?(access[:workspaces], scope), do: :ok, else: {:error, :forbidden}
+  end
+
+  defp principal_identity(state, access) do
+    case Principals.get_principal(state.db, access && access[:principal_id]) do
+      {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+      {:ok, nil} -> nil
+    end
+  end
+
+  # A pool naming a secret its workspace can't see would never launch, so
+  # it is refused now rather than found out then.
+  defp check_secret_references(state, workspace_id, launcher) when is_map(launcher) do
+    workspace_name = state.workspaces[workspace_id].name
+    Coflux.Admin.Secrets.check_references(state.admin_db, workspace_name, launcher)
+  end
+
+  defp check_secret_references(_state, _workspace_id, _launcher), do: :ok
 
   defp validate_values_assets(db, values) do
     Enum.reduce_while(values, :ok, fn value, :ok ->

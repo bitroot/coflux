@@ -33,7 +33,7 @@ defmodule Coflux.DockerLauncher do
     end
   end
 
-  def stop(%{container: container_id, docker_conn: docker_conn}) do
+  def stop(%{container: container_id, docker_conn: docker_conn}, _config \\ nil) do
     case stop_container(docker_conn, container_id) do
       :ok ->
         case remove_container(docker_conn, container_id) do
@@ -49,7 +49,7 @@ defmodule Coflux.DockerLauncher do
     end
   end
 
-  def poll(%{container: container_id, docker_conn: docker_conn}) do
+  def poll(%{container: container_id, docker_conn: docker_conn}, _config \\ nil) do
     case inspect_container(docker_conn, container_id) do
       {:ok, result} ->
         state = result["State"]

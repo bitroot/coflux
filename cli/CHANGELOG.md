@@ -4,6 +4,7 @@ Enhancements:
 
 - Adds `--type ecs` support for `pools create` and `pools update`.
 - Adds the `idleTimeout` pool field, for how long a pool keeps an idle worker before stopping it.
+- Adds `secrets set`, `secrets list` and `secrets delete`. Pools refer to secrets by name (`tokenSecret`, `credentialsSecret`, `envSecrets`) instead of holding credentials, so `pools export` no longer needs `--include-secrets`.
 
 ## 0.12.0
 

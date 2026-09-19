@@ -16,9 +16,8 @@ defmodule Coflux.EcsLauncher do
   tail.
 
   Credentials are resolved on every call rather than kept with the task:
-  the ones the server finds in its surroundings rotate, and the static
-  ones a pool can be configured with are the only kind that are safe to
-  remember. See `Coflux.Launchers.AwsCredentials`.
+  from the secret the pool names, or failing that from the server's own
+  surroundings. See `Coflux.Launchers.AwsCredentials`.
   """
 
   import Coflux.Launchers.Utils, only: [truncate_bytes: 2]
@@ -55,19 +54,12 @@ defmodule Coflux.EcsLauncher do
     with {:ok, conn} <- build_conn(config),
          {:ok, container_name} <- resolve_container_name(conn, config),
          {:ok, task_arn} <- run_task(conn, config, container_name, env, modules, opts) do
-      data = %{
-        task_arn: task_arn,
-        cluster: Map.fetch!(config, :cluster),
-        container_name: container_name,
-        region: conn.region
-      }
-
-      data =
-        data
-        |> maybe_put(:endpoint, config[:endpoint])
-        |> maybe_put(:credentials, static_credentials(config))
-
-      {:ok, data}
+      {:ok,
+       %{
+         task_arn: task_arn,
+         cluster: Map.fetch!(config, :cluster),
+         container_name: container_name
+       }}
     else
       {:error, reason} ->
         case normalize_launch_error(reason) do
@@ -77,8 +69,8 @@ defmodule Coflux.EcsLauncher do
     end
   end
 
-  def stop(%{task_arn: task_arn, cluster: cluster} = data) do
-    with {:ok, conn} <- conn_from_data(data),
+  def stop(%{task_arn: task_arn, cluster: cluster}, config) do
+    with {:ok, conn} <- build_conn(config),
          {:ok, _body} <-
            ecs_request(conn, "StopTask", %{
              "cluster" => cluster,
@@ -97,8 +89,8 @@ defmodule Coflux.EcsLauncher do
     end
   end
 
-  def poll(%{task_arn: task_arn, cluster: cluster} = data) do
-    with {:ok, conn} <- conn_from_data(data),
+  def poll(%{task_arn: task_arn, cluster: cluster} = data, config) do
+    with {:ok, conn} <- build_conn(config),
          {:ok, body} <-
            ecs_request(conn, "DescribeTasks", %{"cluster" => cluster, "tasks" => [task_arn]}) do
       case body do
@@ -367,19 +359,6 @@ defmodule Coflux.EcsLauncher do
        %{
          region: region,
          endpoint: config[:endpoint] || default_endpoint(region),
-         credentials: credentials
-       }}
-    end
-  end
-
-  defp conn_from_data(data) do
-    region = Map.fetch!(data, :region)
-
-    with {:ok, credentials} <- AwsCredentials.resolve(data[:credentials]) do
-      {:ok,
-       %{
-         region: region,
-         endpoint: data[:endpoint] || default_endpoint(region),
          credentials: credentials
        }}
     end

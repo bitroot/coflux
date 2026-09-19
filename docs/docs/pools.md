@@ -68,25 +68,25 @@ coflux pools create mypool --type kubernetes \
   --modules myapp.workflows
 ```
 
-When the Coflux server runs inside Kubernetes, it automatically uses in-cluster authentication. For external servers, provide the API server URL and a bearer token:
+When the Coflux server runs inside Kubernetes, it automatically uses in-cluster authentication. For external servers, provide the API server URL and name a [secret](#secrets) holding a bearer token:
 
 ```bash
+coflux secrets set k8s-token < /path/to/token
+
 coflux pools create mypool --type kubernetes \
   --set image=myorg/myapp:latest \
   --set apiServer=https://my-cluster.example.com:6443 \
-  --set token="$(cat /path/to/token)" \
+  --set tokenSecret=k8s-token \
   --set serverHost=coflux.example.com:7777 \
   --modules myapp.workflows
 ```
-
-Note that the token is stored in the orchestration database.
 
 | Field | Description |
 |-------|-------------|
 | `image` | Container image to run |
 | `namespace` | Kubernetes namespace (default: `default`) |
 | `apiServer` | Kubernetes API server URL (default: in-cluster) |
-| `token` | Bearer token for API authentication |
+| `tokenSecret` | Name of the secret holding the bearer token |
 | `caCert` | Path, on the server's host, to a CA certificate file for TLS verification |
 | `insecure` | Skip TLS verification |
 | `serviceAccount` | Service account for launched pods |
@@ -132,14 +132,21 @@ Workers connect out to the server, so a task needs a route to it and
 nothing needs to reach the task: a public IP (`assignPublicIp`) in a
 public subnet, or a NAT gateway from a private one.
 
-Credentials are taken from the pool when `accessKeyId` and
-`secretAccessKey` are set (with `sessionToken` for temporary ones), and
-otherwise from the server's surroundings the way the AWS SDKs look:
-`AWS_ACCESS_KEY_ID` and friends in its environment, its ECS task role,
-or its EC2 instance profile. They need `ecs:RunTask`, `ecs:DescribeTasks`
-and `ecs:StopTask` on the cluster, `ecs:DescribeTaskDefinition` unless
-`containerName` is set, and `iam:PassRole` for the roles the task
-definition names.
+Credentials come from the [secret](#secrets) named by `credentialsSecret`,
+whose value is JSON in the shape the AWS CLI produces, so a profile's
+credentials can be stored directly:
+
+```bash
+aws configure export-credentials --profile sandbox | coflux secrets set aws-sandbox
+coflux pools update mypool --set credentialsSecret=aws-sandbox
+```
+
+Without one, credentials come from the server's surroundings the way the
+AWS SDKs look: `AWS_ACCESS_KEY_ID` and friends in its environment, its ECS
+task role, or its EC2 instance profile. Either way they need `ecs:RunTask`,
+`ecs:DescribeTasks` and `ecs:StopTask` on the cluster,
+`ecs:DescribeTaskDefinition` unless `containerName` is set, and
+`iam:PassRole` for the roles the task definition names.
 
 ECS doesn't expose container output through its API, so a worker's log
 tail isn't shown; a task that fails to start reports its reason in its
@@ -158,9 +165,7 @@ see what workers print.
 | `securityGroups` | Security group IDs for the task |
 | `assignPublicIp` | Give the task a public IP |
 | `platformVersion` | Fargate platform version |
-| `accessKeyId` | AWS access key ID |
-| `secretAccessKey` | AWS secret access key |
-| `sessionToken` | AWS session token, for temporary credentials |
+| `credentialsSecret` | Name of the secret holding AWS credentials as JSON (`AccessKeyId`, `SecretAccessKey`, optional `SessionToken`) |
 | `endpoint` | ECS API endpoint override (e.g. a VPC endpoint) |
 
 ### Common fields
@@ -178,6 +183,41 @@ These fields apply to all launcher types:
 | `adapter` | Adapter command |
 | `concurrency` | Maximum concurrent executions per worker |
 | `env` | Environment variables (e.g., `--set env.KEY=VALUE`) |
+| `envSecrets` | Environment variables set from secrets (e.g., `--set envSecrets.API_KEY=api-key`) |
+
+## Secrets
+
+Anything a pool needs that mustn't be written down — an API key for workers,
+a cluster token, cloud credentials — is a _secret_: stored by the server,
+encrypted, and referred to by name. A pool's configuration, `pools get`, and
+`pools export` only ever carry the name.
+
+The value is read from stdin, so it never appears on the command line:
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | coflux secrets set openai
+coflux pools update mypool --set envSecrets.OPENAI_API_KEY=openai
+```
+
+`--from-env` and `--from-file` read it from an environment variable or a file
+instead. `secrets list` shows names, scopes and versions, never values, and
+`secrets delete` removes one.
+
+A secret applies to a _scope_: a workspace name, or a prefix of one. A secret
+set for `development` applies to `development/joe`, and the nearest scope wins,
+so `development/joe` can override it. By default the scope is the current
+workspace; `--scope` names another, and `--global` applies it to every
+workspace. Scopes follow workspace names, not what a workspace inherits from:
+a workspace that inherits from `production` doesn't see production's secrets.
+
+Setting a secret takes operator access to its scope, and `--global` takes
+access to every workspace. Setting one again replaces its value and bumps its
+version; workers already running keep the value they were launched with.
+Values are encrypted with a key derived from `COFLUX_SECRET`, which must be
+configured for secrets to be used.
+
+A pool that names a secret its workspace can't see is refused when it is
+created, updated, or imported.
 
 ## Managing pools
 
@@ -222,14 +262,9 @@ coflux pools export --only mypool --only gpu-pool -o pools.toml
 coflux pools import pools.toml
 ```
 
-Launcher secrets — the Kubernetes `token`, and the ECS `secretAccessKey` and
-`sessionToken` — are redacted on export unless `--include-secrets` is given. Importing a redacted file is refused rather
-than silently clearing the secrets it omits, so use `--include-secrets` when the
-exported file is meant to be imported again:
-
-```bash
-coflux pools export --include-secrets -o pools.toml
-```
+Pools refer to secrets by name, so an export never contains a value. Import it
+somewhere else and the same secrets must exist there, or the import is refused
+with the names that are missing.
 
 ## Provides, accepts, and requires
 

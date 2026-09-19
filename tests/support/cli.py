@@ -19,7 +19,13 @@ def _build_env(env_vars=None):
 
 
 def _coflux(
-    *args, host=None, workspace="default", output="json", env_vars=None, timeout=30
+    *args,
+    host=None,
+    workspace="default",
+    output="json",
+    env_vars=None,
+    timeout=30,
+    input=None,
 ):
     cmd = [_COFLUX_BIN]
     if host:
@@ -36,6 +42,7 @@ def _coflux(
         env=_build_env(env_vars),
         check=True,
         timeout=timeout,
+        input=input,
     )
 
 
@@ -381,12 +388,33 @@ def pools_disable(name, host=None, workspace="default"):
     _coflux("pools", "disable", name, host=host, workspace=workspace, output=None)
 
 
-def pools_export(include_secrets=False, host=None, workspace="default"):
-    args = ["pools", "export"]
-    if include_secrets:
-        args.append("--include-secrets")
-    result = _coflux(*args, host=host, workspace=workspace, output=None)
+def pools_export(host=None, workspace="default"):
+    result = _coflux("pools", "export", host=host, workspace=workspace, output=None)
     return result.stdout
+
+
+def _secret_scope_args(scope, global_):
+    if global_:
+        return ["--global"]
+    if scope is not None:
+        return ["--scope", scope]
+    return []
+
+
+def secrets_set(name, value, scope=None, global_=False, host=None, workspace="default"):
+    """Set a secret, with the value on stdin as a user would give it."""
+    args = ["secrets", "set", name, *_secret_scope_args(scope, global_)]
+    _coflux(*args, host=host, workspace=workspace, output=None, input=value)
+
+
+def secrets_list(host=None, workspace="default"):
+    result = _coflux("secrets", "list", host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def secrets_delete(name, scope=None, global_=False, host=None, workspace="default"):
+    args = ["secrets", "delete", name, *_secret_scope_args(scope, global_)]
+    _coflux(*args, host=host, workspace=workspace, output=None)
 
 
 def pools_import(path, host=None, workspace="default"):

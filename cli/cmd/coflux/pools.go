@@ -191,6 +191,9 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if policy := getString(launcher, "imagePullPolicy"); policy != "" {
 			fmt.Printf("Image pull policy: %s\n", policy)
 		}
+		if secret := getString(launcher, "tokenSecret"); secret != "" {
+			fmt.Printf("Token secret: %s\n", secret)
+		}
 		if cluster := getString(launcher, "cluster"); cluster != "" {
 			fmt.Printf("Cluster: %s\n", cluster)
 		}
@@ -220,8 +223,8 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if version := getString(launcher, "platformVersion"); version != "" {
 			fmt.Printf("Platform version: %s\n", version)
 		}
-		if keyID := getString(launcher, "accessKeyId"); keyID != "" {
-			fmt.Printf("Access key ID: %s\n", keyID)
+		if secret := getString(launcher, "credentialsSecret"); secret != "" {
+			fmt.Printf("Credentials secret: %s\n", secret)
 		}
 		if endpoint := getString(launcher, "endpoint"); endpoint != "" {
 			fmt.Printf("Endpoint: %s\n", endpoint)
@@ -237,6 +240,12 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Environment:\n")
 			for k, v := range env {
 				fmt.Printf("  %s=%s\n", k, v)
+			}
+		}
+		if secrets, ok := launcher["envSecrets"].(map[string]any); ok && len(secrets) > 0 {
+			fmt.Printf("Secret environment:\n")
+			for k, v := range secrets {
+				fmt.Printf("  %s=<%s>\n", k, v)
 			}
 		}
 	}
@@ -628,7 +637,7 @@ var poolTopLevelFields = map[string]bool{
 var launcherFields = map[string]bool{
 	"image": true, "dockerHost": true, "networkMode": true, "directory": true,
 	"namespace": true, "serviceAccount": true, "apiServer": true,
-	"token": true, "caCert": true, "insecure": true,
+	"tokenSecret": true, "caCert": true, "insecure": true,
 	"imagePullPolicy": true, "nodeSelector": true, "tolerations": true,
 	"imagePullSecrets": true, "hostAliases": true, "resources": true,
 	"labels": true, "annotations": true, "activeDeadlineSeconds": true,
@@ -636,16 +645,16 @@ var launcherFields = map[string]bool{
 	"cluster": true, "taskDefinition": true, "region": true,
 	"containerName": true, "launchType": true, "capacityProvider": true,
 	"subnets": true, "securityGroups": true, "assignPublicIp": true,
-	"platformVersion": true, "accessKeyId": true, "secretAccessKey": true,
-	"sessionToken": true, "endpoint": true,
+	"platformVersion": true, "credentialsSecret": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
-	"concurrency": true, "env": true,
+	"concurrency": true, "env": true, "envSecrets": true,
 }
 
 // mapSubkeyFields lists launcher fields that support dotted sub-key access
 // (e.g. labels.team=ml, annotations.prometheus.io/scrape=true).
 var mapSubkeyFields = map[string]bool{
 	"env":          true,
+	"envSecrets":   true,
 	"labels":       true,
 	"annotations":  true,
 	"nodeSelector": true,
@@ -989,52 +998,24 @@ func runPoolsEnable(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// redactedSecret is what the server substitutes for a secret the caller
-// didn't ask for. It is deliberately not a usable value, so a config
-// exported without secrets can't be imported back over the real ones.
-const redactedSecret = "<redacted>"
-
-// redactedPools names the pools whose config still carries a redacted
-// secret, so both export and import can say which ones and why.
-func redactedPools(pools map[string]map[string]any) []string {
-	var names []string
-	for name, pool := range pools {
-		launcher, ok := pool["launcher"].(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, value := range launcher {
-			if s, ok := value.(string); ok && s == redactedSecret {
-				names = append(names, name)
-				break
-			}
-		}
-	}
-	sort.Strings(names)
-	return names
-}
-
 // pools export
 
 var poolsExportOutput string
 var poolsExportOnly []string
-var poolsExportIncludeSecrets bool
 
 var poolsExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export pool configuration",
 	Long: `Export all pool configurations for the workspace as TOML. Writes to stdout by default.
 
-Launcher secrets, such as a Kubernetes token or an AWS secret key, are redacted unless --include-secrets
-is given. A redacted file is refused by 'pools import', so it cannot silently clear
-the secrets it omits.`,
+Pools refer to secrets by name, so an export never contains a secret's value.
+Importing it elsewhere needs the same secrets to exist there.`,
 	RunE: runPoolsExport,
 }
 
 func init() {
 	poolsExportCmd.Flags().StringVarP(&poolsExportOutput, "output", "o", "", "Output file (default: stdout)")
 	poolsExportCmd.Flags().StringSliceVar(&poolsExportOnly, "only", nil, "Export only named pools")
-	poolsExportCmd.Flags().BoolVar(&poolsExportIncludeSecrets, "include-secrets", false, "Include launcher secrets (such as Kubernetes tokens or AWS secret keys) in the output")
 }
 
 func runPoolsExport(cmd *cobra.Command, args []string) error {
@@ -1053,7 +1034,7 @@ func runPoolsExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID, poolsExportIncludeSecrets)
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
 	if err != nil {
 		return err
 	}
@@ -1092,13 +1073,6 @@ func runPoolsExport(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Exported %d pool(s) to %s\n", len(pools), poolsExportOutput)
 	} else {
 		fmt.Print(buf.String())
-	}
-
-	// Better to hear this now than when an import is refused later.
-	if names := redactedPools(pools); len(names) > 0 {
-		fmt.Fprintf(os.Stderr,
-			"Warning: secrets were redacted for %s, so this is not a complete configuration and cannot be imported as-is.\nRe-run with --include-secrets to export it in full.\n",
-			strings.Join(names, ", "))
 	}
 
 	return nil
@@ -1177,12 +1151,6 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		desiredPools[name] = tomlPoolToAPI(pool)
 	}
 
-	if names := redactedPools(desiredPools); len(names) > 0 {
-		return fmt.Errorf(
-			"%s: secrets were redacted when this was exported, so importing it would clear them.\nRe-export with --include-secrets, or set the secret explicitly with: coflux pools update <pool> --set <field>=<value>",
-			strings.Join(names, ", "))
-	}
-
 	// Connect and get current state
 	workspace, err := requireWorkspace()
 	if err != nil {
@@ -1199,9 +1167,9 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// With secrets: out-of-scope pools are merged into the update below, so
-	// redacted values here would overwrite the real ones on the server.
-	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID, true)
+	// Out-of-scope pools are merged into the update below, so this needs
+	// the full current configuration.
+	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
 	if err != nil {
 		return err
 	}
@@ -1454,9 +1422,9 @@ var camelToSnake = map[string]string{
 	"securityGroups":        "security_groups",
 	"assignPublicIp":        "assign_public_ip",
 	"platformVersion":       "platform_version",
-	"accessKeyId":           "access_key_id",
-	"secretAccessKey":       "secret_access_key",
-	"sessionToken":          "session_token",
+	"tokenSecret":           "token_secret",
+	"credentialsSecret":     "credentials_secret",
+	"envSecrets":            "env_secrets",
 }
 
 var snakeToCamel map[string]string
@@ -1489,7 +1457,7 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 		}
 	}
 	if idleTimeout, ok := pool["idleTimeout"]; ok {
-		result["idle_timeout"] = idleTimeout
+		result["idle_timeout"] = tomlNumber(idleTimeout)
 	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
@@ -1504,15 +1472,25 @@ func apiLauncherToTOML(launcher map[string]any) map[string]any {
 		if snakeKey, ok := camelToSnake[k]; ok {
 			key = snakeKey
 		}
-		if key == "env" {
+		if key == "env" || key == "env_secrets" {
 			if m, ok := v.(map[string]any); ok {
 				result[key] = inlineMap{m}
 				continue
 			}
 		}
-		result[key] = v
+		result[key] = tomlNumber(v)
 	}
 	return result
+}
+
+// tomlNumber keeps a whole number whole in TOML. JSON numbers arrive as
+// float64, and every numeric pool field is an integer, so without this
+// a concurrency of 8 would be exported as 8.0.
+func tomlNumber(v any) any {
+	if f, ok := v.(float64); ok && f == float64(int64(f)) {
+		return int64(f)
+	}
+	return v
 }
 
 func tomlPoolToAPI(pool map[string]any) map[string]any {

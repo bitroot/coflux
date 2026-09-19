@@ -1,4 +1,13 @@
 defmodule Coflux.KubernetesLauncher do
+  @moduledoc """
+  Runs workers as Kubernetes Jobs.
+
+  What identifies a launched worker is its job's name and namespace. How
+  to reach the cluster comes from the pool's configuration on every call,
+  with the token resolved from the secret it names, so nothing that could
+  open the cluster is kept with the worker.
+  """
+
   import Coflux.Launchers.Utils, only: [truncate_bytes: 2]
 
   @log_tail_lines 20
@@ -88,14 +97,16 @@ defmodule Coflux.KubernetesLauncher do
 
     case k8s_request(conn, :post, path, json: job) do
       {:ok, %{"metadata" => %{"name" => name}}} ->
-        {:ok, %{job_name: name, namespace: namespace, k8s_conn: conn}}
+        {:ok, %{job_name: name, namespace: namespace}}
 
       {:error, reason} ->
         {:error, normalize_launch_error(reason)}
     end
   end
 
-  def stop(%{job_name: job_name, namespace: namespace, k8s_conn: conn}) do
+  def stop(%{job_name: job_name, namespace: namespace}, config) do
+    conn = build_conn(config)
+
     path =
       "/apis/batch/v1/namespaces/#{namespace}/jobs/#{job_name}?propagationPolicy=Background"
 
@@ -106,7 +117,8 @@ defmodule Coflux.KubernetesLauncher do
     end
   end
 
-  def poll(%{job_name: job_name, namespace: namespace, k8s_conn: conn}) do
+  def poll(%{job_name: job_name, namespace: namespace}, config) do
+    conn = build_conn(config)
     path = "/apis/batch/v1/namespaces/#{namespace}/jobs/#{job_name}"
 
     case k8s_request(conn, :get, path) do

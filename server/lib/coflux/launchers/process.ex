@@ -69,7 +69,7 @@ defmodule Coflux.ProcessLauncher do
     end
   end
 
-  def stop(data) do
+  def stop(data, _config \\ nil) do
     case resolve(data) do
       {:supervised, pid} ->
         GenServer.call(pid, :stop)
@@ -85,7 +85,7 @@ defmodule Coflux.ProcessLauncher do
     end
   end
 
-  def poll(data) do
+  def poll(data, _config \\ nil) do
     case resolve(data) do
       {:supervised, pid} ->
         case GenServer.call(pid, :status) do

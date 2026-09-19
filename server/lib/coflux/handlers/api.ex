@@ -6,11 +6,6 @@ defmodule Coflux.Handlers.Api do
 
   @max_parameters 20
 
-  # Stands in for a secret the caller didn't ask for. It is deliberately
-  # not a valid value: a config exported without secrets and imported
-  # again is refused rather than quietly clearing the real one.
-  @redacted_secret "<redacted>"
-
   @ecs_launch_types ["FARGATE", "EC2", "EXTERNAL"]
 
   # A directory upload arrives as one entry per file, so this bounds an
@@ -274,6 +269,7 @@ defmodule Coflux.Handlers.Api do
              ) do
           :ok -> :cowboy_req.reply(204, req)
           {:error, :already_exists} -> json_error_response(req, "already_exists", status: 409)
+          {:error, {:secrets_not_found, names}} -> secrets_not_found_response(req, names)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
@@ -300,6 +296,7 @@ defmodule Coflux.Handlers.Api do
           :ok -> :cowboy_req.reply(204, req)
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :type_change} -> json_error_response(req, "type_change", status: 409)
+          {:error, {:secrets_not_found, names}} -> secrets_not_found_response(req, names)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
@@ -356,19 +353,13 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["get_pools"], project_id, _access) do
-    case read_arguments(
-           req,
-           %{workspace_id: "workspaceId"},
-           %{include_secrets: {"includeSecrets", &parse_boolean(&1, optional: true)}}
-         ) do
+    case read_arguments(req, %{workspace_id: "workspaceId"}) do
       {:ok, arguments, req} ->
-        include_secrets = Map.get(arguments, :include_secrets) == true
-
         case Orchestration.get_pools(project_id, arguments.workspace_id) do
           {:ok, pools, hash} ->
             result =
               Map.new(pools, fn {name, pool} ->
-                {name, build_pool_config(pool, include_secrets)}
+                {name, build_pool_config(pool)}
               end)
 
             req = :cowboy_req.set_resp_header("etag", "\"#{hash}\"", req)
@@ -404,6 +395,9 @@ defmodule Coflux.Handlers.Api do
              ) do
           :ok ->
             :cowboy_req.reply(204, req)
+
+          {:error, {:secrets_not_found, names}} ->
+            secrets_not_found_response(req, names)
 
           {:error, :conflict} ->
             json_error_response(req, "conflict",
@@ -1014,6 +1008,67 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "POST", ["set_secret"], project_id, access) do
+    case read_arguments(
+           req,
+           %{
+             name: {"name", &parse_secret_name/1},
+             value: {"value", &parse_secret_value/1}
+           },
+           %{scope: {"scope", &parse_secret_scope/1}}
+         ) do
+      {:ok, arguments, req} ->
+        case Orchestration.set_secret(
+               project_id,
+               Map.get(arguments, :scope, ""),
+               arguments.name,
+               arguments.value,
+               access
+             ) do
+          {:ok, secret} ->
+            json_response(req, %{
+              "name" => secret.name,
+              "scope" => secret.scope,
+              "version" => secret.version
+            })
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :no_secret} ->
+            json_error_response(req, "bad_request",
+              details: %{message: "Secrets require COFLUX_SECRET to be configured"}
+            )
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["delete_secret"], project_id, access) do
+    case read_arguments(
+           req,
+           %{name: {"name", &parse_secret_name/1}},
+           %{scope: {"scope", &parse_secret_scope/1}}
+         ) do
+      {:ok, arguments, req} ->
+        case Orchestration.delete_secret(
+               project_id,
+               Map.get(arguments, :scope, ""),
+               arguments.name,
+               access
+             ) do
+          :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, "POST", ["revoke_token"], project_id, access) do
     case read_arguments(req, %{external_id: "externalId"}) do
       {:ok, arguments, req} ->
@@ -1222,7 +1277,7 @@ defmodule Coflux.Handlers.Api do
     namespace = Map.get(value, "namespace")
     service_account = Map.get(value, "serviceAccount")
     api_server = Map.get(value, "apiServer")
-    token = Map.get(value, "token")
+    token_secret = Map.get(value, "tokenSecret")
     ca_cert = Map.get(value, "caCert")
     insecure = Map.get(value, "insecure")
     image_pull_policy = Map.get(value, "imagePullPolicy")
@@ -1253,11 +1308,8 @@ defmodule Coflux.Handlers.Api do
       not is_nil(api_server) and (not is_binary(api_server) or String.length(api_server) > 500) ->
         {:error, :invalid}
 
-      not is_nil(token) and not is_binary(token) ->
+      not is_nil(token_secret) and not Coflux.Admin.Secrets.valid_name?(token_secret) ->
         {:error, :invalid}
-
-      token == @redacted_secret ->
-        {:error, :redacted}
 
       not is_nil(ca_cert) and not is_binary(ca_cert) ->
         {:error, :invalid}
@@ -1319,7 +1371,9 @@ defmodule Coflux.Handlers.Api do
         launcher =
           if api_server, do: Map.put(launcher, :api_server, api_server), else: launcher
 
-        launcher = if token, do: Map.put(launcher, :token, token), else: launcher
+        launcher =
+          if token_secret, do: Map.put(launcher, :token_secret, token_secret), else: launcher
+
         launcher = if ca_cert, do: Map.put(launcher, :ca_cert, ca_cert), else: launcher
 
         launcher =
@@ -1381,9 +1435,7 @@ defmodule Coflux.Handlers.Api do
     security_groups = wrap_list(Map.get(value, "securityGroups"))
     assign_public_ip = Map.get(value, "assignPublicIp")
     platform_version = Map.get(value, "platformVersion")
-    access_key_id = Map.get(value, "accessKeyId")
-    secret_access_key = Map.get(value, "secretAccessKey")
-    session_token = Map.get(value, "sessionToken")
+    credentials_secret = Map.get(value, "credentialsSecret")
     endpoint = Map.get(value, "endpoint")
 
     cond do
@@ -1425,28 +1477,8 @@ defmodule Coflux.Handlers.Api do
           (not is_binary(platform_version) or String.length(platform_version) > 50) ->
         {:error, :invalid}
 
-      not is_nil(access_key_id) and
-          (not is_binary(access_key_id) or String.length(access_key_id) > 128) ->
-        {:error, :invalid}
-
-      not is_nil(secret_access_key) and not is_binary(secret_access_key) ->
-        {:error, :invalid}
-
-      secret_access_key == @redacted_secret ->
-        {:error, :redacted}
-
-      not is_nil(session_token) and not is_binary(session_token) ->
-        {:error, :invalid}
-
-      session_token == @redacted_secret ->
-        {:error, :redacted}
-
-      # A key ID without its secret (or the reverse) can't sign anything,
-      # and a session token belongs to a key pair.
-      is_nil(access_key_id) != is_nil(secret_access_key) ->
-        {:error, :invalid}
-
-      not is_nil(session_token) and is_nil(access_key_id) ->
+      not is_nil(credentials_secret) and
+          not Coflux.Admin.Secrets.valid_name?(credentials_secret) ->
         {:error, :invalid}
 
       not is_nil(endpoint) and
@@ -1464,9 +1496,7 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value(:security_groups, security_groups)
           |> maybe_put_value(:assign_public_ip, if(assign_public_ip == true, do: true))
           |> maybe_put_value(:platform_version, platform_version)
-          |> maybe_put_value(:access_key_id, access_key_id)
-          |> maybe_put_value(:secret_access_key, secret_access_key)
-          |> maybe_put_value(:session_token, session_token)
+          |> maybe_put_value(:credentials_secret, credentials_secret)
           |> maybe_put_value(:endpoint, endpoint)
 
         {:ok, launcher}
@@ -1489,6 +1519,7 @@ defmodule Coflux.Handlers.Api do
     adapter = Map.get(value, "adapter")
     concurrency = Map.get(value, "concurrency")
     env = Map.get(value, "env")
+    env_secrets = Map.get(value, "envSecrets")
 
     cond do
       not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
@@ -1514,6 +1545,16 @@ defmodule Coflux.Handlers.Api do
           end) ->
         {:error, :invalid}
 
+      not is_nil(env_secrets) and not is_map(env_secrets) ->
+        {:error, :invalid}
+
+      not is_nil(env_secrets) and
+          Enum.any?(env_secrets, fn {k, v} ->
+            not is_binary(k) or String.starts_with?(k, "COFLUX_") or
+                not Coflux.Admin.Secrets.valid_name?(v)
+          end) ->
+        {:error, :invalid}
+
       true ->
         launcher =
           if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
@@ -1529,6 +1570,10 @@ defmodule Coflux.Handlers.Api do
           if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
 
         launcher = if env, do: Map.put(launcher, :env, env), else: launcher
+
+        launcher =
+          if env_secrets, do: Map.put(launcher, :env_secrets, env_secrets), else: launcher
+
         {:ok, launcher}
     end
   end
@@ -1582,8 +1627,7 @@ defmodule Coflux.Handlers.Api do
                   {:cont, {:ok, Map.put(result, name, pool)}}
 
                 # Keep why, against the pool it came from: "invalid" alone
-                # leaves the caller no idea which pool, or what to do about
-                # it - and `redacted` in particular has a specific remedy.
+                # leaves the caller no idea which pool.
                 {:error, error} ->
                   {:halt, {:error, %{name => error}}}
 
@@ -1601,11 +1645,7 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp secret_value(nil, _include_secrets), do: nil
-  defp secret_value(value, true), do: value
-  defp secret_value(_value, false), do: @redacted_secret
-
-  defp build_pool_config(pool, include_secrets) do
+  defp build_pool_config(pool) do
     provides = pool.provides
     accepts = Map.get(pool, :accepts, %{})
 
@@ -1616,13 +1656,13 @@ defmodule Coflux.Handlers.Api do
     config = maybe_put_value(config, "idleTimeout", Map.get(pool, :idle_timeout))
 
     if pool.launcher do
-      Map.put(config, "launcher", build_launcher_config(pool.launcher, include_secrets))
+      Map.put(config, "launcher", build_launcher_config(pool.launcher))
     else
       config
     end
   end
 
-  defp build_launcher_config(launcher, include_secrets) do
+  defp build_launcher_config(launcher) do
     type_fields =
       case launcher.type do
         :docker ->
@@ -1647,15 +1687,7 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("securityGroups", Map.get(launcher, :security_groups))
           |> maybe_put_value("assignPublicIp", Map.get(launcher, :assign_public_ip))
           |> maybe_put_value("platformVersion", Map.get(launcher, :platform_version))
-          |> maybe_put_value("accessKeyId", Map.get(launcher, :access_key_id))
-          |> maybe_put_value(
-            "secretAccessKey",
-            secret_value(Map.get(launcher, :secret_access_key), include_secrets)
-          )
-          |> maybe_put_value(
-            "sessionToken",
-            secret_value(Map.get(launcher, :session_token), include_secrets)
-          )
+          |> maybe_put_value("credentialsSecret", Map.get(launcher, :credentials_secret))
           |> maybe_put_value("endpoint", Map.get(launcher, :endpoint))
 
         :kubernetes ->
@@ -1663,7 +1695,7 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("namespace", Map.get(launcher, :namespace))
           |> maybe_put_value("apiServer", Map.get(launcher, :api_server))
           |> maybe_put_value("serviceAccount", Map.get(launcher, :service_account))
-          |> maybe_put_value("token", secret_value(Map.get(launcher, :token), include_secrets))
+          |> maybe_put_value("tokenSecret", Map.get(launcher, :token_secret))
           |> maybe_put_value("caCert", Map.get(launcher, :ca_cert))
           |> maybe_put_value("insecure", Map.get(launcher, :insecure))
           |> maybe_put_value("imagePullPolicy", Map.get(launcher, :image_pull_policy))
@@ -1685,6 +1717,23 @@ defmodule Coflux.Handlers.Api do
     |> maybe_put_value("adapter", Map.get(launcher, :adapter))
     |> maybe_put_value("concurrency", Map.get(launcher, :concurrency))
     |> maybe_put_value("env", Map.get(launcher, :env))
+    |> maybe_put_value("envSecrets", Map.get(launcher, :env_secrets))
+  end
+
+  defp parse_secret_name(value) do
+    if Coflux.Admin.Secrets.valid_name?(value), do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp parse_secret_scope(value) do
+    if Coflux.Admin.Secrets.valid_scope?(value), do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp parse_secret_value(value) do
+    if Coflux.Admin.Secrets.valid_value?(value), do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp secrets_not_found_response(req, names) do
+    json_error_response(req, "secrets_not_found", details: %{"secrets" => names})
   end
 
   defp maybe_put_value(map, _key, nil), do: map
@@ -1810,7 +1859,7 @@ defmodule Coflux.Handlers.Api do
       {"namespace", &is_binary/1},
       {"serviceAccount", &is_binary/1},
       {"apiServer", &is_binary/1},
-      {"token", &is_binary/1},
+      {"tokenSecret", &Coflux.Admin.Secrets.valid_name?/1},
       {"caCert", &is_binary/1},
       {"insecure", &is_boolean/1},
       {"imagePullPolicy", &(&1 in valid_pull_policies)},
@@ -1829,9 +1878,7 @@ defmodule Coflux.Handlers.Api do
       {"securityGroups", &(is_binary(&1) or is_string_list?(&1, 5))},
       {"assignPublicIp", &is_boolean/1},
       {"platformVersion", &is_binary/1},
-      {"accessKeyId", &is_binary/1},
-      {"secretAccessKey", &is_binary/1},
-      {"sessionToken", &is_binary/1},
+      {"credentialsSecret", &Coflux.Admin.Secrets.valid_name?/1},
       {"endpoint", &is_binary/1},
       {"serverHost", &is_binary/1},
       {"serverSecure", &is_boolean/1},
@@ -1842,6 +1889,14 @@ defmodule Coflux.Handlers.Api do
          is_map(v) and
            Enum.all?(v, fn {k, val} ->
              is_binary(k) and (is_binary(val) or is_nil(val)) and
+               not String.starts_with?(k, "COFLUX_")
+           end)
+       end},
+      {"envSecrets",
+       fn v ->
+         is_map(v) and
+           Enum.all?(v, fn {k, val} ->
+             is_binary(k) and (is_nil(val) or Coflux.Admin.Secrets.valid_name?(val)) and
                not String.starts_with?(k, "COFLUX_")
            end)
        end}
@@ -1856,7 +1911,7 @@ defmodule Coflux.Handlers.Api do
       "namespace" => :namespace,
       "serviceAccount" => :service_account,
       "apiServer" => :api_server,
-      "token" => :token,
+      "tokenSecret" => :token_secret,
       "caCert" => :ca_cert,
       "insecure" => :insecure,
       "imagePullPolicy" => :image_pull_policy,
@@ -1875,15 +1930,14 @@ defmodule Coflux.Handlers.Api do
       "securityGroups" => :security_groups,
       "assignPublicIp" => :assign_public_ip,
       "platformVersion" => :platform_version,
-      "accessKeyId" => :access_key_id,
-      "secretAccessKey" => :secret_access_key,
-      "sessionToken" => :session_token,
+      "credentialsSecret" => :credentials_secret,
       "endpoint" => :endpoint,
       "serverHost" => :server_host,
       "serverSecure" => :server_secure,
       "adapter" => :adapter,
       "concurrency" => :concurrency,
-      "env" => :env
+      "env" => :env,
+      "envSecrets" => :env_secrets
     }
 
     result =
@@ -1899,7 +1953,7 @@ defmodule Coflux.Handlers.Api do
             if validator.(field_value) do
               processed_value =
                 cond do
-                  json_key == "env" and is_map(field_value) ->
+                  json_key in ["env", "envSecrets"] and is_map(field_value) ->
                     Map.new(field_value, fn
                       {k, nil} -> {k, :unset}
                       {k, v} -> {k, v}

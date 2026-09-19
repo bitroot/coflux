@@ -87,6 +87,30 @@ class TestServiceTokens:
         token_server.restart(timeout=30)
         assert _discover(port, project_id, created["token"]) == (200, ["*"])
 
+    def test_setting_a_secret_takes_operator_access_to_its_scope(self, token_server):
+        """A token for 'development/*' can set a secret for a development
+        workspace, but not for the project or for production."""
+        port = token_server.port
+        project_id = f"tok-{uuid.uuid4().hex[:8]}"
+        restricted = _create(port, project_id, name="dev", workspaces=["development/*"])
+
+        def set_secret(scope):
+            try:
+                api_post(
+                    port,
+                    project_id,
+                    "set_secret",
+                    token=restricted["token"],
+                    body={"name": "key", "scope": scope, "value": "v"},
+                )
+                return 200
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        assert set_secret("development/joe") == 200
+        assert set_secret("") == 403
+        assert set_secret("production") == 403
+
     def test_only_the_creator_or_full_access_can_revoke(self, token_server):
         """Who created a token is kept with it, and resolved to a principal
         in whichever epoch asks - here, after a rotation."""

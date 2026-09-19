@@ -308,7 +308,7 @@ class TestCommonLauncherFields:
         assert "idleTimeout" not in pool["launcher"]
 
         exported = cli.pools_export(host=host)
-        assert "idle_timeout = 300" in exported
+        assert "idle_timeout = 300\n" in exported
 
         cli.pools_update("idle-pool", idle_timeout=0, host=host)
         assert cli.pools_get("idle-pool", host=host)["idleTimeout"] == 0
@@ -603,7 +603,11 @@ class TestPoolModules:
 
 
 class TestPoolSecrets:
-    def _create_kubernetes_pool(self, host, name="k8s-pool"):
+    """Pools name secrets; launchers get their values, and nothing else does."""
+
+    def _kubernetes_pool(
+        self, host, name="k8s-pool", token_secret="k8s-token", **kwargs
+    ):
         cli._coflux(
             "pools",
             "create",
@@ -613,56 +617,150 @@ class TestPoolSecrets:
             "--set",
             "image=myorg/worker:latest",
             "--set",
-            "token=super-secret-token",
+            f"tokenSecret={token_secret}",
             "--set",
             "apiServer=https://k8s.example.com",
             "--modules",
             "test",
             host=host,
             output=None,
+            **kwargs,
         )
 
-    def test_export_redacts_secrets_by_default(self, pool_env):
-        """An export doesn't put the cluster token on disk unasked."""
+    def test_secret_env_reaches_worker(self, pool_env):
+        """A secret named in envSecrets is in the worker's environment, and
+        its value shows up nowhere a pool is described."""
         host = pool_env["host"]
-        self._create_kubernetes_pool(host)
+        worker_dir = pool_env["worker_dir"]
+        executor = pool_env["executor"]
+        marker = str(worker_dir / "secret_marker.txt")
+        wrapper_script = str(worker_dir / "secret_wrapper.py")
+        manifest_path = pool_env["manifest_path"]
+        socket_path = pool_env["socket_path"]
+
+        with open(wrapper_script, "w") as f:
+            f.write(
+                "import os, sys, subprocess\n"
+                f"with open({marker!r}, 'w') as f:\n"
+                "    f.write(os.environ.get('TEST_SECRET', ''))\n"
+                "result = subprocess.run(\n"
+                f"    ['python3', {ADAPTER_SCRIPT!r}] + sys.argv[1:],\n"
+                "    stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr\n"
+                ")\n"
+                "sys.exit(result.returncode)\n"
+            )
+
+        with open(manifest_path, "w") as f:
+            json.dump(manifest([workflow("test", "check_env")]), f)
+
+        adapter = [
+            "python3",
+            wrapper_script,
+            "--manifest",
+            manifest_path,
+            "--socket",
+            socket_path,
+        ]
+
+        # Set for the current workspace, which is where the pool is.
+        cli.secrets_set("api-key", "s3cr3t-value", host=host)
+
+        cli.pools_create(
+            "secret-pool",
+            type="process",
+            modules=["test"],
+            process_dir=str(worker_dir),
+            adapter=adapter,
+            host=host,
+        )
+        cli._coflux(
+            "pools",
+            "update",
+            "secret-pool",
+            "--set",
+            "envSecrets.TEST_SECRET=api-key",
+            host=host,
+            output=None,
+        )
+        cli.manifests_register("test", adapter=",".join(adapter), host=host)
+
+        cli.submit("test/check_env", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        with open(marker) as f:
+            assert f.read() == "s3cr3t-value"
+
+        pool = cli.pools_get("secret-pool", host=host)
+        assert pool["launcher"]["envSecrets"] == {"TEST_SECRET": "api-key"}
+        assert "s3cr3t-value" not in json.dumps(pool)
+        assert "s3cr3t-value" not in cli.pools_export(host=host)
+
+    def test_missing_secret_is_refused(self, pool_env):
+        """A pool naming a secret that doesn't exist for its workspace is
+        refused when it's created or updated, naming the secret."""
+        host = pool_env["host"]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            self._kubernetes_pool(host, token_secret="nope")
+        assert "secrets_not_found" in exc_info.value.stderr
+        assert "nope" in exc_info.value.stderr
+
+        cli.secrets_set("k8s-token", "bearer", host=host)
+        self._kubernetes_pool(host)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli._coflux(
+                "pools",
+                "update",
+                "k8s-pool",
+                "--set",
+                "envSecrets.X=missing",
+                host=host,
+                output=None,
+            )
+        assert "secrets_not_found" in exc_info.value.stderr
+
+    def test_scope_follows_workspace_names(self, pool_env):
+        """A secret for 'development' serves 'development/joe' and not
+        'production', whatever the workspaces inherit from."""
+        host = pool_env["host"]
+        cli.secrets_set("k8s-token", "bearer", scope="development", host=host)
+
+        self._kubernetes_pool(host, workspace="development/joe")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            self._kubernetes_pool(host, workspace="production")
+        assert "secrets_not_found" in exc_info.value.stderr
+
+    def test_export_names_secrets(self, pool_env, tmp_path):
+        """An export carries the names, never the values, and imports back
+        as long as the secrets exist."""
+        host = pool_env["host"]
+        cli.secrets_set("k8s-token", "super-secret-token", host=host)
+        self._kubernetes_pool(host)
+        cli._coflux(
+            "pools",
+            "update",
+            "k8s-pool",
+            "--set",
+            "envSecrets.API_KEY=k8s-token",
+            host=host,
+            output=None,
+        )
 
         exported = cli.pools_export(host=host)
+        assert 'token_secret = "k8s-token"' in exported
+        assert "env_secrets = {" in exported
+        assert 'API_KEY = "k8s-token"' in exported
         assert "super-secret-token" not in exported
-        assert "<redacted>" in exported
-        # Everything that isn't a secret is still there.
-        assert "https://k8s.example.com" in exported
-
-    def test_export_with_secrets_round_trips(self, pool_env, tmp_path):
-        """--include-secrets gives a config that imports back unchanged."""
-        host = pool_env["host"]
-        self._create_kubernetes_pool(host)
-
-        exported = cli.pools_export(include_secrets=True, host=host)
-        assert "super-secret-token" in exported
 
         path = tmp_path / "pools.toml"
         path.write_text(exported)
         cli.pools_import(path, host=host)
 
-        again = cli.pools_export(include_secrets=True, host=host)
-        assert "super-secret-token" in again
-
-    def test_importing_a_redacted_export_is_refused(self, pool_env, tmp_path):
-        """A redacted export can't silently clear the secrets it omits."""
-        host = pool_env["host"]
-        self._create_kubernetes_pool(host)
-
-        path = tmp_path / "pools.toml"
-        path.write_text(cli.pools_export(host=host))
-
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            cli.pools_import(path, host=host)
-        assert "k8s-pool" in exc_info.value.stderr
-        assert "--include-secrets" in exc_info.value.stderr
-
-        # And the real token is untouched.
-        assert "super-secret-token" in cli.pools_export(include_secrets=True, host=host)
+        launcher = cli.pools_get("k8s-pool", host=host)["launcher"]
+        assert launcher["tokenSecret"] == "k8s-token"
+        assert launcher["envSecrets"] == {"API_KEY": "k8s-token"}
 
 
 # ---------------------------------------------------------------------------
@@ -707,14 +805,21 @@ def _setup_ecs_pool(ecs_env, targets, modules=None, pool_name="ecs-pool", sets=(
         "taskDefinition=worker-task",
         "region=us-east-1",
         f"endpoint={fake.endpoint}",
-        "accessKeyId=AKIATEST",
-        "secretAccessKey=test-secret-key",
+        "credentialsSecret=aws-test",
         'subnets=["subnet-1", "subnet-2"]',
         "securityGroups=sg-1",
         "assignPublicIp=true",
         f"adapter={json.dumps(adapter)}",
         *sets,
     ]
+    # In the shape `aws configure export-credentials` produces.
+    cli.secrets_set(
+        "aws-test",
+        json.dumps({"AccessKeyId": "AKIATEST", "SecretAccessKey": "test-secret-key"}),
+        global_=True,
+        host=host,
+    )
+
     args = ["pools", "create", pool_name, "--type", "ecs"]
     for field in fields:
         args.extend(["--set", field])
@@ -915,9 +1020,7 @@ class TestEcsLauncher:
         assert launcher["subnets"] == ["subnet-9"]
         assert launcher["securityGroups"] == ["sg-1"]
         assert launcher["assignPublicIp"] is True
-        # The key ID identifies the credentials; the secret stays out.
-        assert launcher["accessKeyId"] == "AKIATEST"
-        assert "secretAccessKey" not in launcher
+        assert launcher["credentialsSecret"] == "aws-test"
 
         cli._coflux(
             "pools",
@@ -932,32 +1035,20 @@ class TestEcsLauncher:
             "subnet-10"
         ]
 
-    def test_export_redacts_credentials(self, ecs_env, tmp_path):
-        """The secret key and session token are secrets; the key ID isn't."""
+    def test_export_names_the_credentials_secret(self, ecs_env, tmp_path):
+        """An export carries the secret's name, never its value, and
+        imports back while the secret exists."""
         host = ecs_env["host"]
-        _setup_ecs_pool(
-            ecs_env,
-            [workflow("test", "greet")],
-            sets=["sessionToken=test-session-token"],
-        )
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
 
         exported = cli.pools_export(host=host)
-        assert "test-secret-key" not in exported
-        assert "test-session-token" not in exported
-        assert 'secret_access_key = "<redacted>"' in exported
-        assert 'session_token = "<redacted>"' in exported
-        assert 'access_key_id = "AKIATEST"' in exported
+        assert 'credentials_secret = "aws-test"' in exported
         assert 'task_definition = "worker-task"' in exported
+        assert "test-secret-key" not in exported
+        assert "AKIATEST" not in exported
 
         path = tmp_path / "pools.toml"
         path.write_text(exported)
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            cli.pools_import(path, host=host)
-        assert "ecs-pool" in exc_info.value.stderr
-
-        with_secrets = cli.pools_export(include_secrets=True, host=host)
-        assert "test-secret-key" in with_secrets
-        assert "test-session-token" in with_secrets
-        path.write_text(with_secrets)
         cli.pools_import(path, host=host)
-        assert "test-secret-key" in cli.pools_export(include_secrets=True, host=host)
+        launcher = cli.pools_get("ecs-pool", host=host)["launcher"]
+        assert launcher["credentialsSecret"] == "aws-test"

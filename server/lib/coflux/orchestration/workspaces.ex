@@ -570,14 +570,15 @@ defmodule Coflux.Orchestration.Workspaces do
       {:ok, launcher_patch} ->
         existing_launcher = pool[:launcher] || %{}
 
-        # Apply each field from the patch, with special handling for :env merging
+        # Apply each field from the patch. The environment maps merge by
+        # key, so a patch can set or unset one variable.
         new_launcher =
           Enum.reduce(launcher_patch, existing_launcher, fn
-            {:env, :unset}, acc ->
-              Map.delete(acc, :env)
+            {key, :unset}, acc when key in [:env, :env_secrets] ->
+              Map.delete(acc, key)
 
-            {:env, env_patch}, acc when is_map(env_patch) ->
-              existing_env = Map.get(acc, :env, %{})
+            {key, env_patch}, acc when key in [:env, :env_secrets] and is_map(env_patch) ->
+              existing_env = Map.get(acc, key, %{})
 
               merged_env =
                 Enum.reduce(env_patch, existing_env, fn
@@ -586,9 +587,9 @@ defmodule Coflux.Orchestration.Workspaces do
                 end)
 
               if merged_env == %{} do
-                Map.delete(acc, :env)
+                Map.delete(acc, key)
               else
-                Map.put(acc, :env, merged_env)
+                Map.put(acc, key, merged_env)
               end
 
             {key, :unset}, acc ->
@@ -838,13 +839,15 @@ defmodule Coflux.Orchestration.Workspaces do
     # them back so that ProcessLauncher / build_launcher_env can use them
     # directly with String.to_charlist/1.
     config =
-      case Map.get(config, :env) do
-        env when is_map(env) and map_size(env) > 0 ->
-          Map.put(config, :env, Map.new(env, fn {k, v} -> {to_string(k), v} end))
+      Enum.reduce([:env, :env_secrets], config, fn key, config ->
+        case Map.get(config, key) do
+          map when is_map(map) and map_size(map) > 0 ->
+            Map.put(config, key, Map.new(map, fn {k, v} -> {to_string(k), v} end))
 
-        _ ->
-          config
-      end
+          _ ->
+            config
+        end
+      end)
 
     Map.put(config, :type, type)
   end
