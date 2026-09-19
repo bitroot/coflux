@@ -11,6 +11,8 @@ defmodule Coflux.Handlers.Api do
   # again is refused rather than quietly clearing the real one.
   @redacted_secret "<redacted>"
 
+  @ecs_launch_types ["FARGATE", "EC2", "EXTERNAL"]
+
   # A directory upload arrives as one entry per file, so this bounds an
   # accidental drop of a very large tree. Unlike the sizes, which the
   # client asserts, the count is something the server can see for itself.
@@ -1368,6 +1370,119 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_ecs_launcher(value) do
+    cluster = Map.get(value, "cluster")
+    task_definition = Map.get(value, "taskDefinition")
+    region = Map.get(value, "region")
+    container_name = Map.get(value, "containerName")
+    launch_type = Map.get(value, "launchType")
+    capacity_provider = Map.get(value, "capacityProvider")
+    subnets = wrap_list(Map.get(value, "subnets"))
+    security_groups = wrap_list(Map.get(value, "securityGroups"))
+    assign_public_ip = Map.get(value, "assignPublicIp")
+    platform_version = Map.get(value, "platformVersion")
+    access_key_id = Map.get(value, "accessKeyId")
+    secret_access_key = Map.get(value, "secretAccessKey")
+    session_token = Map.get(value, "sessionToken")
+    endpoint = Map.get(value, "endpoint")
+
+    cond do
+      not is_binary(cluster) or cluster == "" or String.length(cluster) > 255 ->
+        {:error, :invalid}
+
+      not is_binary(task_definition) or task_definition == "" or
+          String.length(task_definition) > 500 ->
+        {:error, :invalid}
+
+      not is_binary(region) or not Regex.match?(~r/^[a-z0-9-]{1,30}$/, region) ->
+        {:error, :invalid}
+
+      not is_nil(container_name) and
+          (not is_binary(container_name) or String.length(container_name) > 255) ->
+        {:error, :invalid}
+
+      not is_nil(launch_type) and launch_type not in @ecs_launch_types ->
+        {:error, :invalid}
+
+      not is_nil(capacity_provider) and
+          (not is_binary(capacity_provider) or String.length(capacity_provider) > 255) ->
+        {:error, :invalid}
+
+      # A capacity provider strategy decides the launch type itself.
+      not is_nil(launch_type) and not is_nil(capacity_provider) ->
+        {:error, :invalid}
+
+      not is_nil(subnets) and not is_string_list?(subnets, 16) ->
+        {:error, :invalid}
+
+      not is_nil(security_groups) and not is_string_list?(security_groups, 5) ->
+        {:error, :invalid}
+
+      not is_nil(assign_public_ip) and not is_boolean(assign_public_ip) ->
+        {:error, :invalid}
+
+      not is_nil(platform_version) and
+          (not is_binary(platform_version) or String.length(platform_version) > 50) ->
+        {:error, :invalid}
+
+      not is_nil(access_key_id) and
+          (not is_binary(access_key_id) or String.length(access_key_id) > 128) ->
+        {:error, :invalid}
+
+      not is_nil(secret_access_key) and not is_binary(secret_access_key) ->
+        {:error, :invalid}
+
+      secret_access_key == @redacted_secret ->
+        {:error, :redacted}
+
+      not is_nil(session_token) and not is_binary(session_token) ->
+        {:error, :invalid}
+
+      session_token == @redacted_secret ->
+        {:error, :redacted}
+
+      # A key ID without its secret (or the reverse) can't sign anything,
+      # and a session token belongs to a key pair.
+      is_nil(access_key_id) != is_nil(secret_access_key) ->
+        {:error, :invalid}
+
+      not is_nil(session_token) and is_nil(access_key_id) ->
+        {:error, :invalid}
+
+      not is_nil(endpoint) and
+          (not is_binary(endpoint) or String.length(endpoint) > 500 or
+             not String.starts_with?(endpoint, ["http://", "https://"])) ->
+        {:error, :invalid}
+
+      true ->
+        launcher =
+          %{type: :ecs, cluster: cluster, task_definition: task_definition, region: region}
+          |> maybe_put_value(:container_name, container_name)
+          |> maybe_put_value(:launch_type, launch_type)
+          |> maybe_put_value(:capacity_provider, capacity_provider)
+          |> maybe_put_value(:subnets, subnets)
+          |> maybe_put_value(:security_groups, security_groups)
+          |> maybe_put_value(:assign_public_ip, if(assign_public_ip == true, do: true))
+          |> maybe_put_value(:platform_version, platform_version)
+          |> maybe_put_value(:access_key_id, access_key_id)
+          |> maybe_put_value(:secret_access_key, secret_access_key)
+          |> maybe_put_value(:session_token, session_token)
+          |> maybe_put_value(:endpoint, endpoint)
+
+        {:ok, launcher}
+    end
+  end
+
+  # A single ID is accepted where a list is expected, so `--set
+  # subnets=subnet-1` works without JSON.
+  defp wrap_list(value) when is_binary(value), do: [value]
+  defp wrap_list(value), do: value
+
+  defp is_string_list?(value, max_length) do
+    is_list(value) and value != [] and length(value) <= max_length and
+      Enum.all?(value, &(is_binary(&1) and &1 != ""))
+  end
+
   defp parse_common_launcher_fields(launcher, value) do
     server_host = Map.get(value, "serverHost")
     server_secure = Map.get(value, "serverSecure")
@@ -1424,7 +1539,7 @@ defmodule Coflux.Handlers.Api do
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
-          {:ok, type} when type in ["docker", "process", "kubernetes"] ->
+          {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
             type_atom = String.to_existing_atom(type)
 
             if MapSet.member?(allowed, type_atom) do
@@ -1433,6 +1548,7 @@ defmodule Coflux.Handlers.Api do
                         "docker" -> parse_docker_launcher(value)
                         "process" -> parse_process_launcher(value)
                         "kubernetes" -> parse_kubernetes_launcher(value)
+                        "ecs" -> parse_ecs_launcher(value)
                       end) do
                 parse_common_launcher_fields(launcher, value)
               end
@@ -1515,6 +1631,31 @@ defmodule Coflux.Handlers.Api do
 
         :process ->
           %{"type" => "process", "directory" => launcher.directory}
+
+        :ecs ->
+          %{
+            "type" => "ecs",
+            "cluster" => launcher.cluster,
+            "taskDefinition" => launcher.task_definition,
+            "region" => launcher.region
+          }
+          |> maybe_put_value("containerName", Map.get(launcher, :container_name))
+          |> maybe_put_value("launchType", Map.get(launcher, :launch_type))
+          |> maybe_put_value("capacityProvider", Map.get(launcher, :capacity_provider))
+          |> maybe_put_value("subnets", Map.get(launcher, :subnets))
+          |> maybe_put_value("securityGroups", Map.get(launcher, :security_groups))
+          |> maybe_put_value("assignPublicIp", Map.get(launcher, :assign_public_ip))
+          |> maybe_put_value("platformVersion", Map.get(launcher, :platform_version))
+          |> maybe_put_value("accessKeyId", Map.get(launcher, :access_key_id))
+          |> maybe_put_value(
+            "secretAccessKey",
+            secret_value(Map.get(launcher, :secret_access_key), include_secrets)
+          )
+          |> maybe_put_value(
+            "sessionToken",
+            secret_value(Map.get(launcher, :session_token), include_secrets)
+          )
+          |> maybe_put_value("endpoint", Map.get(launcher, :endpoint))
 
         :kubernetes ->
           %{"type" => "kubernetes", "image" => launcher.image}
@@ -1629,7 +1770,7 @@ defmodule Coflux.Handlers.Api do
 
     # If "type" is present, validate it; otherwise this is patching an existing launcher
     case Map.fetch(value, "type") do
-      {:ok, type} when type in ["docker", "process", "kubernetes"] ->
+      {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
         type_atom = String.to_existing_atom(type)
 
         if MapSet.member?(allowed, type_atom) do
@@ -1671,6 +1812,20 @@ defmodule Coflux.Handlers.Api do
       {"imagePullSecrets", &is_list/1},
       {"hostAliases", &is_list/1},
       {"resources", &is_map/1},
+      {"cluster", &is_binary/1},
+      {"taskDefinition", &is_binary/1},
+      {"region", &is_binary/1},
+      {"containerName", &is_binary/1},
+      {"launchType", &(&1 in @ecs_launch_types)},
+      {"capacityProvider", &is_binary/1},
+      {"subnets", &(is_binary(&1) or is_string_list?(&1, 16))},
+      {"securityGroups", &(is_binary(&1) or is_string_list?(&1, 5))},
+      {"assignPublicIp", &is_boolean/1},
+      {"platformVersion", &is_binary/1},
+      {"accessKeyId", &is_binary/1},
+      {"secretAccessKey", &is_binary/1},
+      {"sessionToken", &is_binary/1},
+      {"endpoint", &is_binary/1},
       {"serverHost", &is_binary/1},
       {"serverSecure", &is_boolean/1},
       {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
@@ -1703,6 +1858,20 @@ defmodule Coflux.Handlers.Api do
       "imagePullSecrets" => :image_pull_secrets,
       "hostAliases" => :host_aliases,
       "resources" => :resources,
+      "cluster" => :cluster,
+      "taskDefinition" => :task_definition,
+      "region" => :region,
+      "containerName" => :container_name,
+      "launchType" => :launch_type,
+      "capacityProvider" => :capacity_provider,
+      "subnets" => :subnets,
+      "securityGroups" => :security_groups,
+      "assignPublicIp" => :assign_public_ip,
+      "platformVersion" => :platform_version,
+      "accessKeyId" => :access_key_id,
+      "secretAccessKey" => :secret_access_key,
+      "sessionToken" => :session_token,
+      "endpoint" => :endpoint,
       "serverHost" => :server_host,
       "serverSecure" => :server_secure,
       "adapter" => :adapter,
@@ -1722,13 +1891,18 @@ defmodule Coflux.Handlers.Api do
           {:ok, field_value} ->
             if validator.(field_value) do
               processed_value =
-                if json_key == "env" and is_map(field_value) do
-                  Map.new(field_value, fn
-                    {k, nil} -> {k, :unset}
-                    {k, v} -> {k, v}
-                  end)
-                else
-                  field_value
+                cond do
+                  json_key == "env" and is_map(field_value) ->
+                    Map.new(field_value, fn
+                      {k, nil} -> {k, :unset}
+                      {k, v} -> {k, v}
+                    end)
+
+                  json_key in ["subnets", "securityGroups"] ->
+                    wrap_list(field_value)
+
+                  true ->
+                    field_value
                 end
 
               {:cont, {:ok, Map.put(acc, atom_key, processed_value)}}

@@ -5,10 +5,13 @@ worker processes when executions are submitted for matching modules.
 """
 
 import json
+import os
 import subprocess
+import time
 
 import pytest
 from support import cli
+from support.ecs import FakeEcs
 from support.executor import Executor
 from support.helpers import ADAPTER_SCRIPT, poll_result
 from support.manifest import manifest, task, workflow
@@ -597,3 +600,301 @@ class TestPoolSecrets:
 
         # And the real token is untouched.
         assert "super-secret-token" in cli.pools_export(include_secrets=True, host=host)
+
+
+# ---------------------------------------------------------------------------
+# ECS launcher
+
+
+@pytest.fixture
+def ecs_env(pool_env):
+    """A pool environment with a stand-in for the ECS API (see support.ecs)."""
+    cli_path = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
+    fake = FakeEcs(cli_path, cwd=str(pool_env["worker_dir"]))
+    fake.start()
+    try:
+        yield {**pool_env, "ecs": fake}
+    finally:
+        fake.close()
+
+
+def _setup_ecs_pool(ecs_env, targets, modules=None, pool_name="ecs-pool", sets=()):
+    """Write the manifest and create an ECS pool pointed at the fake API.
+
+    ``sets`` are extra ``--set`` fields; a later one overrides a default.
+    """
+    modules = modules or ["test"]
+    host = ecs_env["host"]
+    fake = ecs_env["ecs"]
+
+    with open(ecs_env["manifest_path"], "w") as f:
+        json.dump(manifest(targets), f)
+
+    adapter = [
+        "python3",
+        ADAPTER_SCRIPT,
+        "--manifest",
+        ecs_env["manifest_path"],
+        "--socket",
+        ecs_env["socket_path"],
+    ]
+
+    fields = [
+        f"cluster={fake.cluster}",
+        "taskDefinition=worker-task",
+        "region=us-east-1",
+        f"endpoint={fake.endpoint}",
+        "accessKeyId=AKIATEST",
+        "secretAccessKey=test-secret-key",
+        'subnets=["subnet-1", "subnet-2"]',
+        "securityGroups=sg-1",
+        "assignPublicIp=true",
+        f"adapter={json.dumps(adapter)}",
+        *sets,
+    ]
+    args = ["pools", "create", pool_name, "--type", "ecs"]
+    for field in fields:
+        args.extend(["--set", field])
+    args.extend(["--modules", ",".join(modules)])
+    cli._coflux(*args, host=host, output=None)
+
+    cli.manifests_register(*modules, adapter=",".join(adapter), host=host)
+
+
+def _wait_for_worker(host, pool_name, predicate, timeout=30):
+    """Poll the pool's launches until a worker satisfies the predicate."""
+    deadline = time.time() + timeout
+    workers = {}
+    while time.time() < deadline:
+        workers = cli.pools_launches(pool_name, host=host)
+        for worker in workers.values():
+            if predicate(worker):
+                return worker
+        time.sleep(0.5)
+    raise TimeoutError(f"no worker matched within {timeout}s: {workers}")
+
+
+class TestEcsLauncher:
+    def test_runs_worker_as_task(self, ecs_env):
+        """A worker is a task run from the pool's task definition, with the
+        modules as its command and the connection details as its environment,
+        in a signed request."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_ecs_pool(ecs_env, targets)
+
+        resp = cli.submit("test/greet", '"world"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex.target == "greet"
+        assert ex.arguments[0]["value"] == "world"
+        ex.conn.complete(ex.execution_id, value="hello world")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["type"] == "value"
+        assert result["value"]["data"] == "hello world"
+
+        # Without a container named, the task definition says which to override.
+        assert len(fake.requests_for("DescribeTaskDefinition")) == 1
+
+        [(run_task, headers)] = fake.requests_for("RunTask")
+        assert run_task["cluster"] == fake.cluster
+        assert run_task["taskDefinition"] == "worker-task"
+        assert run_task["count"] == 1
+        assert run_task["launchType"] == "FARGATE"
+        assert run_task["startedBy"] == "coflux:ecs-pool"
+        assert run_task["networkConfiguration"] == {
+            "awsvpcConfiguration": {
+                "subnets": ["subnet-1", "subnet-2"],
+                "securityGroups": ["sg-1"],
+                "assignPublicIp": "ENABLED",
+            }
+        }
+        [override] = run_task["overrides"]["containerOverrides"]
+        assert override["name"] == fake.container_name
+        assert override["command"] == ["test"]
+        env = {e["name"]: e["value"] for e in override["environment"]}
+        assert env["COFLUX_HOST"] == host
+        assert env["COFLUX_WORKSPACE"] == "default"
+        assert env["COFLUX_SESSION"]
+
+        assert headers["content-type"] == "application/x-amz-json-1.1"
+        authorization = headers["authorization"]
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=AKIATEST/")
+        assert "/us-east-1/ecs/aws4_request" in authorization
+        assert "x-amz-date" in headers
+
+    def test_idle_worker_is_stopped(self, ecs_env):
+        """An idle worker's task is stopped, and a task stopped on request
+        isn't reported as having failed."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        [(stop_task, _)] = fake.wait_for("StopTask", timeout=30)
+        assert stop_task["cluster"] == fake.cluster
+        assert stop_task["task"] in fake.task_arns()
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+
+    def test_oom_killed_task_is_reported(self, ecs_env):
+        """A task that ECS stops for exceeding its memory is reported as
+        such, with the task's stopped reason in place of a log tail."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        # Mid-execution, so the worker isn't idle and stopped first.
+        executor.next_execute(timeout=_EXEC_TIMEOUT)
+
+        [arn] = fake.task_arns()
+        fake.kill_with_oom(arn)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None, timeout=45
+        )
+        assert worker["error"] == "oom_killed"
+        assert worker["logs"] == "Essential container in task exited"
+
+    def test_refused_launch_is_reported(self, ecs_env):
+        """A RunTask the API refuses fails the worker, with the API's own
+        message kept as the worker's logs."""
+        host = ecs_env["host"]
+        fake = ecs_env["ecs"]
+        fake.run_task_error = ("ClusterNotFoundException", "Cluster not found.")
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_cluster_not_found"
+        assert worker["logs"] == "Cluster not found."
+
+    def test_missing_task_definition_is_reported(self, ecs_env):
+        """The API doesn't say a task definition wasn't found, only that it
+        couldn't be described; the worker says which it means."""
+        host = ecs_env["host"]
+        fake = ecs_env["ecs"]
+        fake.task_definition_error = (
+            "ClientException",
+            "Unable to describe task definition.",
+        )
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_task_definition_not_found"
+        assert worker["logs"] == "Unable to describe task definition."
+
+    def test_capacity_provider_replaces_launch_type(self, ecs_env):
+        """A capacity provider is a strategy rather than a launch type, and a
+        named container isn't looked up."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(
+            ecs_env,
+            [workflow("test", "greet")],
+            sets=["capacityProvider=FARGATE_SPOT", "containerName=app"],
+        )
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        assert fake.requests_for("DescribeTaskDefinition") == []
+        [(run_task, _)] = fake.requests_for("RunTask")
+        assert "launchType" not in run_task
+        assert run_task["capacityProviderStrategy"] == [
+            {"capacityProvider": "FARGATE_SPOT", "weight": 1}
+        ]
+        assert run_task["overrides"]["containerOverrides"][0]["name"] == "app"
+
+    def test_launch_type_and_capacity_provider_are_exclusive(self, ecs_env):
+        with pytest.raises(subprocess.CalledProcessError):
+            _setup_ecs_pool(
+                ecs_env,
+                [workflow("test", "greet")],
+                sets=["launchType=EC2", "capacityProvider=FARGATE_SPOT"],
+            )
+
+    def test_single_ids_are_accepted_for_lists(self, ecs_env):
+        """A lone subnet or security group ID needn't be written as JSON."""
+        host = ecs_env["host"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")], sets=["subnets=subnet-9"])
+
+        launcher = cli.pools_get("ecs-pool", host=host)["launcher"]
+        assert launcher["type"] == "ecs"
+        assert launcher["subnets"] == ["subnet-9"]
+        assert launcher["securityGroups"] == ["sg-1"]
+        assert launcher["assignPublicIp"] is True
+        # The key ID identifies the credentials; the secret stays out.
+        assert launcher["accessKeyId"] == "AKIATEST"
+        assert "secretAccessKey" not in launcher
+
+        cli._coflux(
+            "pools",
+            "update",
+            "ecs-pool",
+            "--set",
+            "subnets=subnet-10",
+            host=host,
+            output=None,
+        )
+        assert cli.pools_get("ecs-pool", host=host)["launcher"]["subnets"] == [
+            "subnet-10"
+        ]
+
+    def test_export_redacts_credentials(self, ecs_env, tmp_path):
+        """The secret key and session token are secrets; the key ID isn't."""
+        host = ecs_env["host"]
+        _setup_ecs_pool(
+            ecs_env,
+            [workflow("test", "greet")],
+            sets=["sessionToken=test-session-token"],
+        )
+
+        exported = cli.pools_export(host=host)
+        assert "test-secret-key" not in exported
+        assert "test-session-token" not in exported
+        assert 'secret_access_key = "<redacted>"' in exported
+        assert 'session_token = "<redacted>"' in exported
+        assert 'access_key_id = "AKIATEST"' in exported
+        assert 'task_definition = "worker-task"' in exported
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_import(path, host=host)
+        assert "ecs-pool" in exc_info.value.stderr
+
+        with_secrets = cli.pools_export(include_secrets=True, host=host)
+        assert "test-secret-key" in with_secrets
+        assert "test-session-token" in with_secrets
+        path.write_text(with_secrets)
+        cli.pools_import(path, host=host)
+        assert "test-secret-key" in cli.pools_export(include_secrets=True, host=host)

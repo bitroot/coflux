@@ -65,6 +65,26 @@ defmodule Coflux.Topics.Pool do
         # server's host rather than a credential, so it stays. Everything
         # else a pool is configured with belongs here too, or `pools get`
         # shows less than `pools export` does.
+        # As above: the secret access key and session token are credentials,
+        # so they stay out. The key ID says which credentials without being
+        # one, and is how a pool's access is recognised, so it stays.
+        :ecs ->
+          %{
+            type: "ecs",
+            cluster: launcher.cluster,
+            taskDefinition: launcher.task_definition,
+            region: launcher.region
+          }
+          |> maybe_put(:containerName, Map.get(launcher, :container_name))
+          |> maybe_put(:launchType, Map.get(launcher, :launch_type))
+          |> maybe_put(:capacityProvider, Map.get(launcher, :capacity_provider))
+          |> maybe_put(:subnets, Map.get(launcher, :subnets))
+          |> maybe_put(:securityGroups, Map.get(launcher, :security_groups))
+          |> maybe_put(:assignPublicIp, Map.get(launcher, :assign_public_ip))
+          |> maybe_put(:platformVersion, Map.get(launcher, :platform_version))
+          |> maybe_put(:accessKeyId, Map.get(launcher, :access_key_id))
+          |> maybe_put(:endpoint, Map.get(launcher, :endpoint))
+
         :kubernetes ->
           %{type: "kubernetes", image: launcher.image}
           |> maybe_put(:namespace, Map.get(launcher, :namespace))

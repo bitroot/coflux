@@ -390,6 +390,7 @@ defmodule Coflux.Orchestration.Server.Fleet do
         :docker -> Coflux.DockerLauncher
         :process -> Coflux.ProcessLauncher
         :kubernetes -> Coflux.KubernetesLauncher
+        :ecs -> Coflux.EcsLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)

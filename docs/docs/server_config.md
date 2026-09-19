@@ -26,7 +26,7 @@ This is a convenience wrapper around `docker run`. Docker must be installed and 
 | `--super-token` or `--super-token-hash` | _(none)_ | Set a super token (plain text or pre-hashed SHA-256 hex) |
 | `--secret` | _(none)_ | Server secret for signing service tokens |
 | `--team` | _(none)_ | Team IDs allowed for Studio auth (repeatable) |
-| `--launcher` | _(none)_ | Allowed launcher types (repeatable, e.g. `docker`, `process`) |
+| `--launcher` | _(none)_ | Allowed launcher types (repeatable: `docker`, `process`, `kubernetes`, `ecs`) |
 | `--image` | _(auto)_ | Docker image to use |
 
 ## Projects
@@ -70,7 +70,7 @@ The server is configured via environment variables. When using `coflux server`, 
 | `COFLUX_STUDIO_URL` | `https://studio.coflux.com` | Studio URL |
 | `COFLUX_DATA_DIR` | `./data` | Data directory path |
 | `COFLUX_ALLOW_ORIGINS` | `https://studio.coflux.com` | Comma-separated CORS origins |
-| `COFLUX_LAUNCHER_TYPES` | _(none)_ | Allowed launcher types (e.g., `docker,process,kubernetes`) |
+| `COFLUX_LAUNCHER_TYPES` | _(none)_ | Allowed launcher types (e.g., `docker,process,kubernetes,ecs`) |
 | `COFLUX_CLI_PATH` | `coflux` | CLI binary path for process launcher |
 
 ## Data storage

@@ -137,7 +137,7 @@ Start a local server using Docker.
 | `--super-token-hash` | | | Pre-hashed super token (SHA-256 hex) |
 | `--secret` | | | Server secret for signing service tokens |
 | `--team` | | | Allowed team IDs for Studio auth |
-| `--launcher` | | | Allowed launcher types (`docker`, `process`, `kubernetes`) |
+| `--launcher` | | | Allowed launcher types (`docker`, `process`, `kubernetes`, `ecs`) |
 
 ## `coflux login` / `coflux logout`
 
@@ -188,7 +188,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 
 | Flag | Description |
 |------|-------------|
-| `--type` | Launcher type: `kubernetes`, `docker`, `process` (required) |
+| `--type` | Launcher type: `kubernetes`, `docker`, `process`, `ecs` (required) |
 | `--set` | Set a field (e.g., `--set image=myapp:latest`, `--set env.KEY=VALUE`) |
 | `--modules`, `-m` | Modules to host |
 | `--provides` | Features workers provide |

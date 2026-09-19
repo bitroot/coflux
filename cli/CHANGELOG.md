@@ -1,6 +1,8 @@
 ## 0.13.0
 
-No changes.
+Enhancements:
+
+- Adds `--type ecs` support for `pools create` and `pools update`.
 
 ## 0.12.0
 

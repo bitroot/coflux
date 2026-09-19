@@ -83,8 +83,9 @@ class ManagedServer:
             "COFLUX_PUBLIC_HOST": "%.localhost:" + str(self.port),
             "COFLUX_REQUIRE_AUTH": "false",
             # kubernetes is allowed so that its configuration can be
-            # exercised; storing a pool config contacts no cluster.
-            "COFLUX_LAUNCHER_TYPES": "process,docker,kubernetes",
+            # exercised; storing a pool config contacts no cluster. ecs
+            # is exercised against a stand-in for the API (support.ecs).
+            "COFLUX_LAUNCHER_TYPES": "process,docker,kubernetes,ecs",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
             "COFLUX_CLI_PATH": cli_path,
             **self._extra_env,

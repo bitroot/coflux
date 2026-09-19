@@ -102,6 +102,67 @@ Note that the token is stored in the orchestration database.
 | `volumes` | Kubernetes volume definitions |
 | `volumeMounts` | Volume mounts in container |
 
+#### ECS launcher
+
+:::note
+The ECS launcher is experimental — the API may change based on feedback.
+:::
+
+Launches workers as Amazon ECS tasks, on Fargate by default:
+
+```bash
+coflux pools create mypool --type ecs \
+  --set cluster=workers \
+  --set taskDefinition=myapp-worker \
+  --set region=eu-west-2 \
+  --set subnets='["subnet-0123", "subnet-4567"]' \
+  --set securityGroups=sg-0123 \
+  --set serverHost=coflux.example.com \
+  --modules myapp.workflows
+```
+
+The pool refers to an existing task definition, which is where the image,
+CPU and memory, IAM roles and log configuration are set. For each worker,
+one task is run from it, with the container's command overridden to the
+modules to host and its environment to the worker's connection details.
+So the container should run the Coflux worker with the modules left to
+the command — an `ENTRYPOINT` of `coflux worker --adapter ...`, say.
+
+Workers connect out to the server, so a task needs a route to it and
+nothing needs to reach the task: a public IP (`assignPublicIp`) in a
+public subnet, or a NAT gateway from a private one.
+
+Credentials are taken from the pool when `accessKeyId` and
+`secretAccessKey` are set (with `sessionToken` for temporary ones), and
+otherwise from the server's surroundings the way the AWS SDKs look:
+`AWS_ACCESS_KEY_ID` and friends in its environment, its ECS task role,
+or its EC2 instance profile. They need `ecs:RunTask`, `ecs:DescribeTasks`
+and `ecs:StopTask` on the cluster, `ecs:DescribeTaskDefinition` unless
+`containerName` is set, and `iam:PassRole` for the roles the task
+definition names.
+
+ECS doesn't expose container output through its API, so a worker's log
+tail isn't shown; a task that fails to start reports its reason in its
+place. Give the task definition a log configuration (`awslogs`, say) to
+see what workers print.
+
+| Field | Description |
+|-------|-------------|
+| `cluster` | ECS cluster name or ARN |
+| `taskDefinition` | Task definition family, `family:revision`, or ARN |
+| `region` | AWS region |
+| `containerName` | Container to override (default: the task definition's first) |
+| `launchType` | `FARGATE` (default), `EC2`, or `EXTERNAL` |
+| `capacityProvider` | Capacity provider to use instead of a launch type (e.g. `FARGATE_SPOT`) |
+| `subnets` | Subnet IDs for the task (required on Fargate) |
+| `securityGroups` | Security group IDs for the task |
+| `assignPublicIp` | Give the task a public IP |
+| `platformVersion` | Fargate platform version |
+| `accessKeyId` | AWS access key ID |
+| `secretAccessKey` | AWS secret access key |
+| `sessionToken` | AWS session token, for temporary credentials |
+| `endpoint` | ECS API endpoint override (e.g. a VPC endpoint) |
+
 ### Common fields
 
 These fields apply to all launcher types:
@@ -160,8 +221,8 @@ coflux pools export --only mypool --only gpu-pool -o pools.toml
 coflux pools import pools.toml
 ```
 
-Launcher secrets — currently the Kubernetes `token` — are redacted on export
-unless `--include-secrets` is given. Importing a redacted file is refused rather
+Launcher secrets — the Kubernetes `token`, and the ECS `secretAccessKey` and
+`sessionToken` — are redacted on export unless `--include-secrets` is given. Importing a redacted file is refused rather
 than silently clearing the secrets it omits, so use `--include-secrets` when the
 exported file is meant to be imported again:
 

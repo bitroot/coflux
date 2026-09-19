@@ -186,6 +186,41 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if policy := getString(launcher, "imagePullPolicy"); policy != "" {
 			fmt.Printf("Image pull policy: %s\n", policy)
 		}
+		if cluster := getString(launcher, "cluster"); cluster != "" {
+			fmt.Printf("Cluster: %s\n", cluster)
+		}
+		if taskDef := getString(launcher, "taskDefinition"); taskDef != "" {
+			fmt.Printf("Task definition: %s\n", taskDef)
+		}
+		if region := getString(launcher, "region"); region != "" {
+			fmt.Printf("Region: %s\n", region)
+		}
+		if container := getString(launcher, "containerName"); container != "" {
+			fmt.Printf("Container: %s\n", container)
+		}
+		if provider := getString(launcher, "capacityProvider"); provider != "" {
+			fmt.Printf("Capacity provider: %s\n", provider)
+		} else if launchType := getString(launcher, "launchType"); launchType != "" {
+			fmt.Printf("Launch type: %s\n", launchType)
+		}
+		if subnets := getStringSlice(launcher, "subnets"); len(subnets) > 0 {
+			fmt.Printf("Subnets: %s\n", strings.Join(subnets, ", "))
+		}
+		if groups := getStringSlice(launcher, "securityGroups"); len(groups) > 0 {
+			fmt.Printf("Security groups: %s\n", strings.Join(groups, ", "))
+		}
+		if publicIP, ok := launcher["assignPublicIp"].(bool); ok && publicIP {
+			fmt.Printf("Public IP: yes\n")
+		}
+		if version := getString(launcher, "platformVersion"); version != "" {
+			fmt.Printf("Platform version: %s\n", version)
+		}
+		if keyID := getString(launcher, "accessKeyId"); keyID != "" {
+			fmt.Printf("Access key ID: %s\n", keyID)
+		}
+		if endpoint := getString(launcher, "endpoint"); endpoint != "" {
+			fmt.Printf("Endpoint: %s\n", endpoint)
+		}
 		printServerHost(launcher)
 		if adapter := getStringSlice(launcher, "adapter"); len(adapter) > 0 {
 			fmt.Printf("Adapter: %s\n", strings.Join(adapter, " "))
@@ -514,14 +549,15 @@ var poolsCreateCmd = &cobra.Command{
 	Short: "Create a pool",
 	Long: `Create a new pool with the specified launcher type and configuration.
 
-Use --type to specify the launcher type (kubernetes, docker, or process).
+Use --type to specify the launcher type (kubernetes, docker, process, or ecs).
 Use --set to set field values. Values are parsed as JSON if valid, otherwise
 treated as strings.
 
 Examples:
   coflux pools create my-pool --type kubernetes --set image=foo:latest --set namespace=default
   coflux pools create my-pool --type docker --set image=myapp:v1 --modules mod1,mod2
-  coflux pools create my-pool --type process --set directory=/app --set concurrency=5`,
+  coflux pools create my-pool --type process --set directory=/app --set concurrency=5
+  coflux pools create my-pool --type ecs --set cluster=workers --set taskDefinition=myapp --set region=eu-west-2 --set subnets=subnet-1`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPoolsCreate,
 }
@@ -548,7 +584,7 @@ Examples:
 
 func init() {
 	// pools create flags
-	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process)")
+	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process, ecs)")
 	_ = poolsCreateCmd.MarkFlagRequired("type")
 	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
 	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted")
@@ -584,13 +620,18 @@ var poolTopLevelFields = map[string]bool{
 
 // launcherFields lists valid launcher field names.
 var launcherFields = map[string]bool{
-	"image": true, "dockerHost": true, "directory": true,
+	"image": true, "dockerHost": true, "networkMode": true, "directory": true,
 	"namespace": true, "serviceAccount": true, "apiServer": true,
 	"token": true, "caCert": true, "insecure": true,
 	"imagePullPolicy": true, "nodeSelector": true, "tolerations": true,
 	"imagePullSecrets": true, "hostAliases": true, "resources": true,
 	"labels": true, "annotations": true, "activeDeadlineSeconds": true,
 	"volumes": true, "volumeMounts": true,
+	"cluster": true, "taskDefinition": true, "region": true,
+	"containerName": true, "launchType": true, "capacityProvider": true,
+	"subnets": true, "securityGroups": true, "assignPublicIp": true,
+	"platformVersion": true, "accessKeyId": true, "secretAccessKey": true,
+	"sessionToken": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
 	"concurrency": true, "env": true,
 }
@@ -978,7 +1019,7 @@ var poolsExportCmd = &cobra.Command{
 	Short: "Export pool configuration",
 	Long: `Export all pool configurations for the workspace as TOML. Writes to stdout by default.
 
-Launcher secrets, such as a Kubernetes token, are redacted unless --include-secrets
+Launcher secrets, such as a Kubernetes token or an AWS secret key, are redacted unless --include-secrets
 is given. A redacted file is refused by 'pools import', so it cannot silently clear
 the secrets it omits.`,
 	RunE: runPoolsExport,
@@ -987,7 +1028,7 @@ the secrets it omits.`,
 func init() {
 	poolsExportCmd.Flags().StringVarP(&poolsExportOutput, "output", "o", "", "Output file (default: stdout)")
 	poolsExportCmd.Flags().StringSliceVar(&poolsExportOnly, "only", nil, "Export only named pools")
-	poolsExportCmd.Flags().BoolVar(&poolsExportIncludeSecrets, "include-secrets", false, "Include launcher secrets (such as Kubernetes tokens) in the output")
+	poolsExportCmd.Flags().BoolVar(&poolsExportIncludeSecrets, "include-secrets", false, "Include launcher secrets (such as Kubernetes tokens or AWS secret keys) in the output")
 }
 
 func runPoolsExport(cmd *cobra.Command, args []string) error {
@@ -1388,6 +1429,7 @@ func encodeInlineValue(buf *bytes.Buffer, v any) error {
 // camelCase to snake_case mapping for launcher fields
 var camelToSnake = map[string]string{
 	"dockerHost":            "docker_host",
+	"networkMode":           "network_mode",
 	"serverHost":            "server_host",
 	"serverSecure":          "server_secure",
 	"serviceAccount":        "service_account",
@@ -1399,6 +1441,16 @@ var camelToSnake = map[string]string{
 	"caCert":                "ca_cert",
 	"activeDeadlineSeconds": "active_deadline_seconds",
 	"volumeMounts":          "volume_mounts",
+	"taskDefinition":        "task_definition",
+	"containerName":         "container_name",
+	"launchType":            "launch_type",
+	"capacityProvider":      "capacity_provider",
+	"securityGroups":        "security_groups",
+	"assignPublicIp":        "assign_public_ip",
+	"platformVersion":       "platform_version",
+	"accessKeyId":           "access_key_id",
+	"secretAccessKey":       "secret_access_key",
+	"sessionToken":          "session_token",
 }
 
 var snakeToCamel map[string]string

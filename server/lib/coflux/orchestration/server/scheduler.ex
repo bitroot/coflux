@@ -523,11 +523,15 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                       %{pool_name: pool_name}
                     ],
                     fn state, result ->
-                      {data, error} =
+                      # A launcher can say more than a code about why a
+                      # launch failed - an API's own message, typically -
+                      # and that goes where a log tail would.
+                      {data, error, detail} =
                         case result do
-                          {:ok, {:ok, data}} -> {data, nil}
-                          {:ok, {:error, error}} -> {nil, error}
-                          :error -> {nil, "launch_crashed"}
+                          {:ok, {:ok, data}} -> {data, nil, nil}
+                          {:ok, {:error, error}} -> {nil, error, nil}
+                          {:ok, {:error, error, detail}} -> {nil, error, detail}
+                          :error -> {nil, "launch_crashed", nil}
                         end
 
                       {:ok, started_at} =
@@ -550,7 +554,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                           # relaunches on the very next pass.
                           state
                           |> record_pool_launch_failure(pool_id)
-                          |> Fleet.deactivate_worker(worker_id, error)
+                          |> Fleet.deactivate_worker(worker_id, error, detail)
 
                         Map.has_key?(state.workers, worker_id) ->
                           put_in(

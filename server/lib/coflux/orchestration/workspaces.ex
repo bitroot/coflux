@@ -998,6 +998,7 @@ defmodule Coflux.Orchestration.Workspaces do
       :process -> 0
       :docker -> 1
       :kubernetes -> 2
+      :ecs -> 3
     end
   end
 
@@ -1006,6 +1007,7 @@ defmodule Coflux.Orchestration.Workspaces do
       0 -> :process
       1 -> :docker
       2 -> :kubernetes
+      3 -> :ecs
     end
   end
 
