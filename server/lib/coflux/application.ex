@@ -47,6 +47,7 @@ defmodule Coflux.Application do
       Topics.Manifests,
       Topics.Tokens,
       Topics.Asset,
+      Topics.Catalog,
       Topics.Queue,
       Topics.Inputs,
       Topics.Input,

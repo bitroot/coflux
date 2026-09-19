@@ -33,6 +33,7 @@ Arguments are passed as JSON strings.
 |------|-------------|
 | `--no-wait` | Submit and exit without waiting for completion |
 | `--idempotency-key` | Deduplication key |
+| `--catalog` | Run as of a [catalog](./catalog.md) version (`path@n`): every execution in the run sees the catalog as it was then. `latest` pins the run to the catalog as of submission |
 | `--requires` | Override requires tags (can be repeated) |
 | `--no-requires` | Clear requires |
 | `--memo` / `--no-memo` | Override memoisation |
@@ -68,6 +69,7 @@ Re-run a step. Step ID format: `<run-id>:<step>`.
 | Flag | Description |
 |------|-------------|
 | `--no-wait` | Re-run and exit without waiting |
+| `--catalog` | The [catalog](./catalog.md) snapshot for the new attempt: a version (`path@n`) or `latest`. By default it sees what the previous attempt saw |
 
 ### `coflux runs cancel <execution-id>`
 
@@ -229,6 +231,17 @@ See [inputs](./inputs.md) for the workflow side of the API.
 |---------|-------------|
 | `assets inspect <id>` | List asset entries (`--match` to filter) |
 | `assets download <id>` | Download asset files (`--to`, `--match`, `--force`) |
+
+## `coflux catalog`
+
+| Command | Description |
+|---------|-------------|
+| `catalog list [prefix]` | Paths and their latest versions, optionally under a prefix |
+| `catalog inspect <path>` | The versions at a path, newest first (`--limit`, default 20, at most 500) |
+| `catalog get <path>[@<number>]` | Print the value at a path, or of a specific version |
+| `catalog publish <path> <json>` | Publish a JSON value at a path |
+| `catalog publish <path> --asset <asset-id>` | Publish an existing asset at a path |
+| `catalog download <path>[@<number>]` | Download the assets held by the value at a path; several restore into subdirectories by key (`--to`, `--match`, `--force`) |
 
 ## `coflux blobs`
 

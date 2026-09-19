@@ -414,7 +414,11 @@ class StreamDriver:
             # The handshake happens on the executor thread once every
             # driver has stopped, so that cleanup here (and in the other
             # generators) lands before the execution is finalised.
-            self._record_suspension(suspending.execute_after, suspending.stream_wait)
+            self._record_suspension(
+                suspending.execute_after,
+                suspending.stream_wait,
+                suspending.catalog_wait,
+            )
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
@@ -482,7 +486,11 @@ class StreamDriver:
             return
         except Suspending as suspending:
             # Suspended from inside the generator — see ``_run``.
-            self._record_suspension(suspending.execute_after, suspending.stream_wait)
+            self._record_suspension(
+                suspending.execute_after,
+                suspending.stream_wait,
+                suspending.catalog_wait,
+            )
             return
         except BaseException as e:  # noqa: BLE001 - we propagate all
             if self._is_force_closed(index):
@@ -524,6 +532,7 @@ class StreamDriver:
         self,
         execute_after: int | None,
         stream_wait: tuple[str, int] | None = None,
+        catalog_wait: str | None = None,
     ) -> None:
         """Note that a generator body asked to suspend, and stop the rest.
 
@@ -538,11 +547,13 @@ class StreamDriver:
         """
         with self._lock:
             if self._suspend_request is None:
-                self._suspend_request = (execute_after, stream_wait)
+                self._suspend_request = (execute_after, stream_wait, catalog_wait)
         # Outside the lock: close_all takes both _demand_cv and _lock.
         self.close_all()
 
-    def take_suspension(self) -> tuple[int | None, tuple[str, int] | None] | None:
+    def take_suspension(
+        self,
+    ) -> tuple[int | None, tuple[str, int] | None, str | None] | None:
         """Claim any recorded suspension request. See ``_record_suspension``."""
         with self._lock:
             request = self._suspend_request

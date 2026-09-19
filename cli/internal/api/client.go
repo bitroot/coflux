@@ -373,11 +373,16 @@ type RerunStepResult struct {
 	Attempt     int    `json:"attempt"`
 }
 
-// RerunStep triggers a re-run of an existing step
-func (c *Client) RerunStep(ctx context.Context, workspaceID, stepID string) (*RerunStepResult, error) {
+// RerunStep triggers a re-run of an existing step. catalog, when set, is
+// the catalog snapshot the new attempt runs against ("path@n" or "latest")
+// instead of the one it would inherit from the previous attempt.
+func (c *Client) RerunStep(ctx context.Context, workspaceID, stepID, catalog string) (*RerunStepResult, error) {
 	body := map[string]any{
 		"workspaceId": workspaceID,
 		"stepId":      stepID,
+	}
+	if catalog != "" {
+		body["catalog"] = catalog
 	}
 	var result RerunStepResult
 	if _, err := c.post(ctx, "/api/rerun_step", body, &result); err != nil {
@@ -394,6 +399,67 @@ func (c *Client) CancelExecution(ctx context.Context, workspaceID, executionID s
 	}
 	_, err := c.post(ctx, "/api/cancel_execution", body, nil)
 	return err
+}
+
+// Catalog API
+
+// GetCatalog lists the head of every catalog path visible from a workspace,
+// optionally under a path prefix.
+func (c *Client) GetCatalog(ctx context.Context, workspaceID, prefix string) ([]map[string]any, error) {
+	body := map[string]any{"workspaceId": workspaceID}
+	if prefix != "" {
+		body["prefix"] = prefix
+	}
+	var result struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	if _, err := c.post(ctx, "/api/get_catalog", body, &result); err != nil {
+		return nil, err
+	}
+	return result.Entries, nil
+}
+
+// GetCatalogVersions lists the versions at a path visible from the
+// workspace, newest first. A positive `before` bounds the listing to
+// numbers strictly below it, which is how a single version is looked up
+// (before = n+1, limit = 1) without paging through the newer ones.
+func (c *Client) GetCatalogVersions(ctx context.Context, workspaceID, path string, limit int, before int64) ([]map[string]any, error) {
+	body := map[string]any{"workspaceId": workspaceID, "path": path}
+	if limit > 0 {
+		body["limit"] = limit
+	}
+	if before > 0 {
+		body["before"] = before
+	}
+	var result struct {
+		Versions []map[string]any `json:"versions"`
+	}
+	if _, err := c.post(ctx, "/api/get_catalog_versions", body, &result); err != nil {
+		return nil, err
+	}
+	return result.Versions, nil
+}
+
+// PublishCatalogResult is the response to publish_catalog
+type PublishCatalogResult struct {
+	Version map[string]any `json:"version"`
+	Created bool           `json:"created"`
+}
+
+// PublishCatalog publishes a value at a catalog path. The argument takes
+// the same shape a submitted argument does: ["json", <document>] or
+// ["asset", <id>].
+func (c *Client) PublishCatalog(ctx context.Context, workspaceID, path string, argument []string) (*PublishCatalogResult, error) {
+	body := map[string]any{
+		"workspaceId": workspaceID,
+		"path":        path,
+		"argument":    argument,
+	}
+	var result PublishCatalogResult
+	if _, err := c.post(ctx, "/api/publish_catalog", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // GetInput retrieves details for a specific input

@@ -518,7 +518,8 @@ defmodule Coflux.Handlers.Api do
              memo: {"memo", &parse_boolean(&1, optional: true)},
              streams: {"streams", &parse_streams_config/1},
              concurrency: {"concurrency", &parse_concurrency/1},
-             idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)}
+             idempotency_key: {"idempotencyKey", &parse_string(&1, optional: true)},
+             catalog: {"catalog", &parse_string(&1, optional: true)}
            }
          ) do
       {:ok, arguments, req} ->
@@ -541,7 +542,8 @@ defmodule Coflux.Handlers.Api do
                memo: arguments[:memo],
                streams: arguments[:streams],
                concurrency: arguments[:concurrency],
-               idempotency_key: arguments[:idempotency_key]
+               idempotency_key: arguments[:idempotency_key],
+               catalog: arguments[:catalog]
              ) do
           {:ok, run_id, step_number, execution_external_id} ->
             json_response(req, %{
@@ -560,6 +562,12 @@ defmodule Coflux.Handlers.Api do
             json_error_response(req, "not_found",
               status: 404,
               details: %{"arguments" => "asset_unknown"}
+            )
+
+          {:error, reason}
+          when reason in [:catalog_invalid, :catalog_not_found, :catalog_invisible] ->
+            json_error_response(req, "bad_request",
+              details: %{"catalog" => catalog_error(reason)}
             )
         end
 
@@ -596,16 +604,21 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["rerun_step"], project_id, access) do
-    case read_arguments(req, %{
-           workspace_id: "workspaceId",
-           step_id: "stepId"
-         }) do
+    case read_arguments(
+           req,
+           %{
+             workspace_id: "workspaceId",
+             step_id: "stepId"
+           },
+           %{catalog: {"catalog", &parse_string(&1, optional: true)}}
+         ) do
       {:ok, arguments, req} ->
         case Orchestration.rerun_step(
                project_id,
                arguments.step_id,
                arguments.workspace_id,
-               access
+               access,
+               catalog: arguments[:catalog]
              ) do
           {:ok, execution_external_id, attempt} ->
             json_response(req, %{"executionId" => execution_external_id, "attempt" => attempt})
@@ -615,6 +628,12 @@ defmodule Coflux.Handlers.Api do
 
           {:error, :invalid} ->
             json_error_response(req, "bad_request", details: %{"stepId" => "invalid"})
+
+          {:error, reason}
+          when reason in [:catalog_invalid, :catalog_not_found, :catalog_invisible] ->
+            json_error_response(req, "bad_request",
+              details: %{"catalog" => catalog_error(reason)}
+            )
 
           {:error, :not_found} ->
             json_error_response(req, "not_found", status: 404)
@@ -760,6 +779,105 @@ defmodule Coflux.Handlers.Api do
               "totalCount" => metadata.total_count,
               "totalSize" => metadata.total_size
             })
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  # --- Catalog ---
+
+  defp handle(req, "POST", ["get_catalog"], project_id, _access) do
+    case read_arguments(req, %{workspace_id: "workspaceId"}, %{
+           prefix: {"prefix", &parse_string(&1, optional: true)}
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.catalog_list(project_id, arguments.workspace_id, arguments[:prefix]) do
+          {:ok, versions} ->
+            json_response(req, %{
+              "entries" => Enum.map(versions, &Coflux.TopicUtils.build_catalog_version/1)
+            })
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["get_catalog_versions"], project_id, _access) do
+    case read_arguments(req, %{workspace_id: "workspaceId", path: "path"}, %{
+           limit: {"limit", &parse_integer(&1, optional: true)},
+           before: {"before", &parse_integer(&1, optional: true)}
+         }) do
+      {:ok, arguments, req} ->
+        limit = min(arguments[:limit] || 50, 500)
+
+        case Orchestration.catalog_versions(
+               project_id,
+               arguments.workspace_id,
+               arguments.path,
+               limit,
+               arguments[:before]
+             ) do
+          {:ok, versions} ->
+            json_response(req, %{
+              "versions" => Enum.map(versions, &Coflux.TopicUtils.build_catalog_version/1)
+            })
+
+          {:error, :invalid_path} ->
+            json_error_response(req, "bad_request", details: %{"path" => "invalid"})
+
+          {:error, :workspace_invalid} ->
+            json_error_response(req, "not_found", status: 404)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  # Publishes either a JSON document (`value`, encoded the way a submitted
+  # argument is) or an existing asset (`assetId`) — exactly one of the two.
+  # Takes the same argument shape as `submit_workflow`, so one value editor
+  # feeds both.
+  defp handle(req, "POST", ["publish_catalog"], project_id, access) do
+    case read_arguments(req, %{
+           workspace_id: "workspaceId",
+           path: "path",
+           argument: {"argument", &parse_argument/1}
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.publish_catalog(
+               project_id,
+               arguments.workspace_id,
+               arguments.path,
+               arguments.argument,
+               access
+             ) do
+          {:ok, version, created?} ->
+            json_response(req, %{
+              "version" => Coflux.TopicUtils.build_catalog_version(version),
+              "created" => created?
+            })
+
+          {:error, :invalid_path} ->
+            json_error_response(req, "bad_request", details: %{"path" => "invalid"})
+
+          {:error, :asset_not_found} ->
+            json_error_response(req, "not_found",
+              status: 404,
+              details: %{"argument" => "asset_unknown"}
+            )
 
           {:error, :forbidden} ->
             json_error_response(req, "forbidden", status: 403)
@@ -1698,7 +1816,8 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # One value given from outside a run: a JSON document, encoded as a
+  # One value given from outside a run — an argument to a workflow, or
+  # something published to the catalog. A JSON document, encoded as a
   # string so that `null` is a value rather than an omission, or a
   # reference to an existing asset.
   defp parse_argument(["json", json]) do
@@ -1812,6 +1931,11 @@ defmodule Coflux.Handlers.Api do
       true -> {:error, :invalid}
     end
   end
+
+  # The `catalog` option names a snapshot as `path@n` (or `latest`).
+  defp catalog_error(:catalog_invalid), do: "invalid"
+  defp catalog_error(:catalog_not_found), do: "not_found"
+  defp catalog_error(:catalog_invisible), do: "invisible"
 
   defp parse_string(value, opts) do
     cond do

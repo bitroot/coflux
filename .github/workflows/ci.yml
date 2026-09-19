@@ -69,7 +69,7 @@ jobs:
 
       - name: Run adapter tests
         working-directory: adapters/python
-        run: uv run --with pytest pytest tests/
+        run: uv run --with pytest --with pydantic pytest tests/
 
       - name: Check version consistency
         shell: python3 {0}

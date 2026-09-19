@@ -141,7 +141,7 @@ def test_suspend_inside_the_generator_sends_no_close(harness):
     assert h.appends == [(0, 0, "a")]
     assert h.closes == []
     # Recorded for the executor to complete once every driver has stopped.
-    assert driver.take_suspension() == (1234, None)
+    assert driver.take_suspension() == (1234, None, None)
     # Claimed exactly once.
     assert driver.take_suspension() is None
 
@@ -170,7 +170,7 @@ def test_suspend_stops_sibling_generators(harness):
     driver.register(suspending(), buffer=None)
     driver.wait_all()
 
-    assert driver.take_suspension() == (None, None)
+    assert driver.take_suspension() == (None, None, None)
     # Neither stream was closed — both are paused for the resumed execution.
     assert h.closes == []
 

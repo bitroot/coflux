@@ -32,12 +32,13 @@ class WorkerContext:
         if response is not None:
             ex.conn.send(response)
 
-    def submit(self, module, target, *arguments, idempotency_key=None):
+    def submit(self, module, target, *arguments, idempotency_key=None, catalog=None):
         """Submit a workflow and return the parsed JSON response."""
         return cli.submit(
             f"{module}/{target}",
             *arguments,
             idempotency_key=idempotency_key,
+            catalog=catalog,
             host=self.host,
             workspace=self.workspace,
         )
@@ -98,9 +99,11 @@ class WorkerContext:
         """Get the queue topic snapshot for the workspace."""
         return cli.queue(host=self.host, workspace=self.workspace)
 
-    def rerun(self, step_id):
+    def rerun(self, step_id, catalog=None):
         """Re-run a step and return the parsed JSON response."""
-        return cli.runs_rerun(step_id, host=self.host, workspace=self.workspace)
+        return cli.runs_rerun(
+            step_id, catalog=catalog, host=self.host, workspace=self.workspace
+        )
 
     def cancel(self, execution_id):
         """Cancel an execution."""
@@ -144,6 +147,32 @@ class WorkerContext:
     def get_blob(self, key, output_path):
         """Download a blob by key to a file."""
         cli.blobs_get(key, output_path, host=self.host, workspace=self.workspace)
+
+    def catalog_list(self, prefix=None):
+        """The head of every catalog path visible from this workspace."""
+        return cli.catalog_list(prefix, host=self.host, workspace=self.workspace)
+
+    def catalog_inspect(self, path):
+        """The versions at a catalog path, newest first."""
+        return cli.catalog_inspect(path, host=self.host, workspace=self.workspace)
+
+    def catalog_publish(self, path, value=None, asset_id=None):
+        """Publish a JSON value, or an existing asset, at a path via the CLI."""
+        return cli.catalog_publish(
+            path,
+            value=value,
+            asset_id=asset_id,
+            host=self.host,
+            workspace=self.workspace,
+        )
+
+    def catalog_get(self, ref):
+        """The version at ``path`` or ``path@n``, with its value, via the CLI."""
+        return cli.catalog_get(ref, host=self.host, workspace=self.workspace)
+
+    def catalog_download(self, ref, dest_dir):
+        """Download the assets held at ``path`` or ``path@n`` via the CLI."""
+        cli.catalog_download(ref, dest_dir, host=self.host, workspace=self.workspace)
 
     def logs(
         self,

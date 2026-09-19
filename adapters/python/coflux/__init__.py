@@ -12,6 +12,7 @@ import typing as t
 from pathlib import Path
 
 from ._version import __version__
+from .catalog import Catalog
 from .checkpoint import Checkpoint, flush
 from .decorators import stub, task, workflow
 from .errors import (
@@ -22,6 +23,7 @@ from .errors import (
     ExecutionTerminated,
     ExecutionTimeout,
     InputDismissed,
+    RequestError,
     StreamSuperseded,
 )
 from .metric import Metric, MetricGroup, MetricScale, progress
@@ -58,6 +60,7 @@ __all__ = [  # noqa: RUF022
     "ExecutionCrashed",
     "StreamSuperseded",
     "InputDismissed",
+    "RequestError",
     "Input",
     "Metric",
     "MetricGroup",
@@ -72,6 +75,7 @@ __all__ = [  # noqa: RUF022
     "Asset",
     "AssetEntry",
     "AssetMetadata",
+    "Catalog",
     "Stream",
     "StreamIterator",
     "AsyncStreamIterator",
@@ -125,7 +129,7 @@ def suspense(timeout: float | None = None):
     return get_context().suspense(timeout)
 
 
-_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any]")
+_H = t.TypeVar("_H", bound="Execution[t.Any] | Input[t.Any] | Catalog[t.Any]")
 
 
 def select(
@@ -133,18 +137,24 @@ def select(
     *,
     cancel_remaining: bool = False,
 ) -> tuple[_H, list[_H]]:
-    """Wait for the first of one or more handles (executions/inputs) to resolve.
+    """Wait for the first of one or more handles to resolve.
 
     Args:
-        handles: Sequence of Execution and/or Input objects. Must be non-empty.
+        handles: Sequence of Execution, Input and/or Catalog handles.
+            Must be non-empty. A Catalog handle resolves when its path has
+            a version this execution hasn't seen — the first, on an empty
+            path — and the thing to do when it wins is call ``next()`` on
+            it.
         cancel_remaining: If True, cancel non-winner execution handles
-            atomically once a handle resolves. Input handles are left pending.
+            atomically once a handle resolves. Input handles are left
+            pending; a catalog handle has nothing to cancel.
 
     Returns:
         Tuple of ``(winner, remaining)`` where ``winner`` is the first handle
-        to resolve (call ``.result()`` to get its value or raise its error),
-        and ``remaining`` is the list of handles that did not win, in input
-        order.
+        to resolve — call ``.result()`` on an execution or input to get its
+        value or raise its error, or ``next()`` on a catalog handle to re-run
+        on the version it saw — and ``remaining`` is the list of handles
+        that did not win, in input order.
 
     Example:
         winner, remaining = cf.select([a.submit(), b.submit(), c.submit()])

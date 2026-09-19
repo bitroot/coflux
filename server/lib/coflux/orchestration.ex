@@ -154,10 +154,15 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:cancel, handles, workspace_id, from_execution_id})
   end
 
-  def rerun_step(project_id, step_id, workspace_id, access \\ nil) do
+  @doc """
+  Creates a new attempt of a step. Options: `:catalog` — `"path@n"` or
+  `"latest"` — chooses the catalog snapshot the attempt runs against,
+  instead of inheriting the previous attempt's.
+  """
+  def rerun_step(project_id, step_id, workspace_id, access \\ nil, opts \\ []) do
     call_server(
       project_id,
-      {:rerun_step, step_id, workspace_id, access}
+      {:rerun_step, step_id, workspace_id, access, opts}
     )
   end
 
@@ -282,6 +287,35 @@ defmodule Coflux.Orchestration do
 
   def get_asset(project_id, asset_id, from_execution_id \\ nil) do
     call_server(project_id, {:get_asset, asset_id, from_execution_id})
+  end
+
+  # Catalog. `catalog_publish` and `catalog_get` are the worker-facing
+  # calls, keyed by execution: reads resolve against the execution's
+  # snapshot and are recorded as lineage. The rest are workspace-scoped,
+  # for the API and Studio.
+
+  def catalog_publish(project_id, execution_id, path, value) do
+    call_server(project_id, {:catalog_publish, execution_id, path, value})
+  end
+
+  def catalog_get(project_id, execution_id, path, number \\ nil) do
+    call_server(project_id, {:catalog_get, execution_id, path, number})
+  end
+
+  def catalog_list(project_id, workspace_id, prefix \\ nil) do
+    call_server(project_id, {:catalog_list, workspace_id, prefix})
+  end
+
+  def catalog_versions(project_id, workspace_id, path, limit, before \\ nil) do
+    call_server(project_id, {:catalog_versions, workspace_id, path, limit, before})
+  end
+
+  def publish_catalog(project_id, workspace_id, path, value, access \\ nil) do
+    call_server(project_id, {:publish_catalog, workspace_id, path, value, access})
+  end
+
+  def subscribe_catalog(project_id, workspace_id, pid) do
+    call_server(project_id, {:subscribe_catalog, workspace_id, pid})
   end
 
   def subscribe_workspaces(project_id, pid) do

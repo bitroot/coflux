@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -223,13 +224,19 @@ func (e *Executor) WaitReady(ctx context.Context) error {
 	}
 }
 
+// ErrExecutorClosed is returned by Send once the executor's process has
+// been closed — by the server aborting the execution, a timeout, or the
+// process exiting — so callers can tell a reply that has nowhere to go
+// from a delivery failure.
+var ErrExecutorClosed = errors.New("executor is closed")
+
 // Send sends a message to the executor
 func (e *Executor) Send(msg any) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.closed {
-		return fmt.Errorf("executor is closed")
+		return ErrExecutorClosed
 	}
 
 	data, err := json.Marshal(msg)

@@ -613,6 +613,9 @@ defmodule Coflux.Handlers.Worker do
             :ok ->
               {[success_message(message["id"], nil)], state}
 
+            {:error, :invalid_handle} ->
+              {[error_message(message["id"], "invalid_handle")], state}
+
             {:error, :workspace_not_found} ->
               {[{:close, 4000, "workspace_mismatch"}], nil}
           end
@@ -624,14 +627,19 @@ defmodule Coflux.Handlers.Worker do
         [execution_id, execute_after | rest] = message["params"]
         # TODO: validate execute_after
 
-        # An optional stream to wait on: a consumer that suspended
-        # mid-iteration wants its successor held until the stream reaches
-        # the sequence it stopped at (or closes). Older adapters send two
-        # params and get the unconditional behaviour.
+        # An optional wait: a stream consumer that suspended mid-iteration
+        # wants its successor held until the stream reaches the sequence it
+        # stopped at (or closes); an execution that asked for a catalog
+        # path's next version wants it held until the path has one newer
+        # than it could see. Older adapters send two params and get the
+        # unconditional behaviour.
         dependencies =
           case rest do
             [%{"stream_id" => stream_id, "sequence" => sequence}] ->
               [{:stream, stream_id, sequence}]
+
+            [%{"path" => path}] ->
+              [{:catalog, path}]
 
             _ ->
               []
@@ -688,6 +696,9 @@ defmodule Coflux.Handlers.Worker do
 
             {:error, :input_not_found} ->
               {[error_message(message["id"], "input_not_found")], state}
+
+            {:error, error} when is_atom(error) ->
+              {[error_message(message["id"], Atom.to_string(error))], state}
           end
         else
           {[{:close, 4000, "execution_invalid"}], nil}
@@ -760,6 +771,51 @@ defmodule Coflux.Handlers.Worker do
           ]
 
           {[success_message(message["id"], result)], state}
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "catalog_publish" ->
+        [execution_id, path, value] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.catalog_publish(
+                 state.project_id,
+                 execution_id,
+                 path,
+                 parse_value(value)
+               ) do
+            {:ok, number} ->
+              {[success_message(message["id"], number)], state}
+
+            {:error, :execution_not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+
+            {:error, error} ->
+              {[error_message(message["id"], Atom.to_string(error))], state}
+          end
+        else
+          {[{:close, 4000, "execution_invalid"}], nil}
+        end
+
+      "catalog_get" ->
+        [execution_id, path, number] = message["params"]
+
+        if is_recognised_execution?(execution_id, state) do
+          case Orchestration.catalog_get(state.project_id, execution_id, path, number) do
+            {:ok, nil} ->
+              {[success_message(message["id"], nil)], state}
+
+            {:ok, %{number: number, value: value}} ->
+              reply = %{"number" => number, "value" => compose_value(value)}
+              {[success_message(message["id"], reply)], state}
+
+            {:error, :execution_not_found} ->
+              {[{:close, 4000, "execution_invalid"}], nil}
+
+            {:error, error} ->
+              {[error_message(message["id"], Atom.to_string(error))], state}
+          end
         else
           {[{:close, 4000, "execution_invalid"}], nil}
         end

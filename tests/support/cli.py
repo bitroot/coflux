@@ -39,10 +39,19 @@ def _coflux(
     )
 
 
-def submit(target, *arguments, idempotency_key=None, host=None, workspace="default"):
+def submit(
+    target,
+    *arguments,
+    idempotency_key=None,
+    catalog=None,
+    host=None,
+    workspace="default",
+):
     args = ["submit", "--no-wait"]
     if idempotency_key:
         args.extend(["--idempotency-key", idempotency_key])
+    if catalog:
+        args.extend(["--catalog", catalog])
     args.append(target)
     args.extend(arguments)
     result = _coflux(*args, host=host, workspace=workspace)
@@ -61,10 +70,12 @@ def runs_inspect(run_id, host=None, workspace="default"):
     return json.loads(result.stdout)
 
 
-def runs_rerun(step_id, host=None, workspace="default"):
-    result = _coflux(
-        "runs", "rerun", "--no-wait", step_id, host=host, workspace=workspace
-    )
+def runs_rerun(step_id, catalog=None, host=None, workspace="default"):
+    args = ["runs", "rerun", "--no-wait"]
+    if catalog:
+        args.extend(["--catalog", catalog])
+    args.append(step_id)
+    result = _coflux(*args, host=host, workspace=workspace)
     return json.loads(result.stdout)
 
 
@@ -132,6 +143,47 @@ def assets_download(asset_id, dest_dir, host=None, workspace="default"):
         "assets",
         "download",
         str(asset_id),
+        "--to",
+        dest_dir,
+        host=host,
+        workspace=workspace,
+        output=None,
+    )
+
+
+def catalog_list(prefix=None, host=None, workspace="default"):
+    args = ["catalog", "list"] + ([prefix] if prefix else [])
+    result = _coflux(*args, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def catalog_inspect(path, host=None, workspace="default"):
+    result = _coflux("catalog", "inspect", path, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def catalog_publish(path, value=None, asset_id=None, host=None, workspace="default"):
+    """Publish a JSON ``value`` or an existing asset (``asset_id``) at a path."""
+    args = ["catalog", "publish", path]
+    if asset_id is not None:
+        args.extend(["--asset", asset_id])
+    else:
+        args.append(json.dumps(value))
+    result = _coflux(*args, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def catalog_get(ref, host=None, workspace="default"):
+    """The version at ``path`` or ``path@n``, with its value, as JSON."""
+    result = _coflux("catalog", "get", ref, host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def catalog_download(ref, dest_dir, host=None, workspace="default"):
+    _coflux(
+        "catalog",
+        "download",
+        ref,
         "--to",
         dest_dir,
         host=host,

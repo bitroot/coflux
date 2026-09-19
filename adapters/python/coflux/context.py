@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from . import protocol
+from .catalog import Catalog
 from .dispatcher import get_dispatcher
 from .errors import (
     ExecutionAbandoned,
@@ -21,22 +22,68 @@ from .errors import (
     ExecutionCrashed,
     ExecutionTimeout,
     InputDismissed,
+    RequestError,
     Suspending,
     create_execution_error,
 )
-from .models import Asset, AssetEntry, AssetMetadata, Execution, Input
+from .models import (
+    Asset,
+    AssetEntry,
+    AssetMetadata,
+    Execution,
+    Input,
+)
 from .serialization import deserialize_value, serialize_value
 from .streams import StreamDriver
 from .target import Streams
 
 
+class _CatalogPosition:
+    """A wait for whatever comes after ``number`` at ``path``.
+
+    A ``Catalog`` handle in a select waits past whatever the execution
+    can see; this pins the position explicitly instead, for ``current()``
+    on an empty path, which waits on position 0.
+    """
+
+    def __init__(self, path: str, number: int):
+        self.path = path
+        self.number = number
+
+
 def _handle_key(handle: Any) -> tuple[str, str]:
-    """Composite cache key for an Execution/Input handle."""
+    """Composite cache key for a select handle."""
     if isinstance(handle, Execution):
         return ("execution", handle.id)
     if isinstance(handle, Input):
         return ("input", handle.id)
+    if isinstance(handle, Catalog):
+        return ("catalog", handle.path)
+    if isinstance(handle, _CatalogPosition):
+        return ("catalog", f"{handle.path}@{handle.number}")
     raise TypeError(f"Unsupported select handle type: {type(handle).__name__}")
+
+
+def _handle_wire(handle: Any) -> dict[str, Any]:
+    """A select handle as the CLI expects it."""
+    if isinstance(handle, Catalog):
+        # No position: the server waits past what this execution can see.
+        return {"type": "catalog", "path": handle.path}
+    if isinstance(handle, _CatalogPosition):
+        return {"type": "catalog", "path": handle.path, "number": handle.number}
+    kind, id_ = _handle_key(handle)
+    return {"type": kind, "id": id_}
+
+
+def _cacheable(key: tuple[str, str]) -> bool:
+    """Whether a resolved select response can be reused for the handle.
+
+    An execution or input resolves once and for all. A catalog wait
+    resolves against what has been published so far, which moves: the
+    handle stands for "a version this execution hasn't seen", so every
+    wait on it has to ask again.
+    """
+    return key[0] != "catalog"
 
 
 def _unwrap_response(
@@ -242,7 +289,8 @@ class ExecutorContext:
 
         On success, the winner's response is stored in this context's
         resolve cache so subsequent ``.result()`` / ``.poll()`` calls on the
-        handle can return without a round-trip.
+        handle can return without a round-trip — unless the winner is a
+        catalog entry, whose resolution isn't reusable (``_cacheable``).
 
         Args:
             handles: List of Execution or Input objects.
@@ -255,6 +303,29 @@ class ExecutorContext:
             The index in ``handles`` of the handle that resolved, or
             ``None`` on timeout.
         """
+        winner, _response = self._select(
+            handles,
+            suspend=suspend,
+            cancel_remaining=cancel_remaining,
+            timeout_ms=timeout_ms,
+        )
+        return winner
+
+    def _select(
+        self,
+        handles: list[Any],
+        *,
+        suspend: bool,
+        cancel_remaining: bool,
+        timeout_ms: int | None,
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """``select``, also handing back the winner's response.
+
+        A caller waiting on a single handle reads the value from what is
+        returned here rather than from the context, so a response that
+        isn't cached — a catalog wait's — never sits anywhere another
+        thread's wait could pick it up. ``(None, None)`` on timeout.
+        """
         if not handles:
             raise ValueError("select requires at least one handle")
 
@@ -265,7 +336,7 @@ class ExecutorContext:
 
         request_id = protocol.request_select(
             self.execution_id,
-            [{"type": k, "id": i} for k, i in map(_handle_key, handles)],
+            [_handle_wire(handle) for handle in handles],
             timeout_ms=timeout_ms,
             suspend=suspend,
             cancel_remaining=cancel_remaining,
@@ -274,15 +345,17 @@ class ExecutorContext:
         if response is None:
             # Server signals a wait timeout (nothing resolved before the
             # timeout expired) by returning a null result.
-            return None
+            return None, None
 
         winner = response.get("winner")
         if winner is None:
             raise RuntimeError(f"Unexpected select response: {response}")
 
-        with self._lock:
-            self._resolved[_handle_key(handles[winner])] = response
-        return winner
+        key = _handle_key(handles[winner])
+        if _cacheable(key):
+            with self._lock:
+                self._resolved[key] = response
+        return winner, response
 
     def resolve_handle(self, handle: Any) -> Any:
         """Block until ``handle`` resolves and return its value (or raise).
@@ -296,14 +369,15 @@ class ExecutorContext:
         with self._lock:
             cached = self._resolved.get(key)
         if cached is None:
-            if self.select([handle]) is None:
+            _winner, cached = self._select(
+                [handle], suspend=True, cancel_remaining=False, timeout_ms=None
+            )
+            if cached is None:
                 # The wait expired before the handle resolved. Only reachable
                 # from inside a `cf.suspense(timeout=...)` scope; otherwise the
                 # server either resolves or kills the process.
                 raise TimeoutError("timed out waiting for handle to resolve")
-            with self._lock:
-                cached = self._resolved[key]
-        return _unwrap_response(cached, handle._parser)
+        return _unwrap_response(cached, getattr(handle, "_parser", None))
 
     def poll_handle(
         self,
@@ -322,11 +396,57 @@ class ExecutorContext:
             cached = self._resolved.get(key)
         if cached is None:
             timeout_ms = int(timeout * 1000) if timeout else 0
-            if self.select([handle], suspend=False, timeout_ms=timeout_ms) is None:
+            _winner, cached = self._select(
+                [handle], suspend=False, cancel_remaining=False, timeout_ms=timeout_ms
+            )
+            if cached is None:
                 return default
-            with self._lock:
-                cached = self._resolved[key]
-        return _unwrap_response(cached, handle._parser)
+        return _unwrap_response(cached, getattr(handle, "_parser", None))
+
+    # --- Catalog ---
+
+    def catalog_publish(self, path: str, value: Any) -> int:
+        """Publish ``value`` at ``path``, serialised the way a result is,
+        and return the version's number. The path was validated by the
+        ``Catalog`` handle that holds it."""
+        request_id = protocol.request_catalog_publish(
+            self.execution_id, path, serialize_value(value)
+        )
+        return self._wait_response(request_id)["number"]
+
+    def catalog_current(self, path: str) -> Any:
+        """The value at ``path`` as of the snapshot, waiting for a first
+        publish."""
+        found = self._catalog_get(path, None)
+        if found is not None:
+            return deserialize_value(found["value"])
+        # Nothing there yet. Wait for anything at the path — position 0 —
+        # following the suspense rule like any other wait, then read what
+        # landed by number, since it is newer than the snapshot.
+        number = self.resolve_handle(_CatalogPosition(path, 0))
+        found = self._catalog_get(path, number)
+        if found is None:
+            raise RuntimeError(f"{path}@{number} landed but could not be read")
+        return deserialize_value(found["value"])
+
+    def catalog_next(self, path: str) -> NoReturn:
+        """Suspend until ``path`` has a version newer than this execution
+        can see.
+
+        The wait travels on the suspend request, the way a stream
+        consumer's does, so the server records the gate — at the
+        execution's own view of the path, which it knows — as part of the
+        same suspension. If a newer version already exists the gate is met
+        at once and the successor runs immediately.
+        """
+        self.suspend_execution(catalog_wait=path)
+
+    def _catalog_get(self, path: str, number: int | None) -> dict[str, Any] | None:
+        request_id = protocol.request_catalog_get(self.execution_id, path, number)
+        response = self._wait_response(request_id)
+        if response is None or response.get("version") is None:
+            return None
+        return response["version"]
 
     def get_asset_entries(self, asset_id: str) -> list[AssetEntry]:
         """Get all entries for an asset by ID."""
@@ -487,10 +607,17 @@ class ExecutorContext:
         input handle, it transitions to a terminal ``cancelled`` state
         (distinct from ``dismissed``) and any select waiters are notified.
 
-        Handles that are already resolved are silently skipped.
+        Handles that are already resolved are silently skipped. A catalog
+        entry is a select handle but not a cancellable one — nothing is
+        pending behind it — so passing one is a ``TypeError``.
         """
         if not handles:
             return
+        for handle in handles:
+            if isinstance(handle, (Catalog, _CatalogPosition)):
+                raise TypeError(
+                    f"cannot cancel {handle!r}: a catalog entry has nothing to cancel"
+                )
         request_id = protocol.request_cancel(
             self.execution_id,
             [{"type": k, "id": i} for k, i in map(_handle_key, handles)],
@@ -785,6 +912,7 @@ class ExecutorContext:
         self,
         delay: float | dt.timedelta | dt.datetime | None = None,
         stream_wait: tuple[str, int] | None = None,
+        catalog_wait: str | None = None,
     ) -> NoReturn:
         """Signal that this execution should suspend.
 
@@ -810,12 +938,13 @@ class ExecutorContext:
                 ).timestamp()
                 * 1000
             )
-        raise Suspending(execute_after, stream_wait)
+        raise Suspending(execute_after, stream_wait, catalog_wait)
 
     def finish_suspension(
         self,
         execute_after: int | None,
         stream_wait: tuple[str, int] | None = None,
+        catalog_wait: str | None = None,
     ) -> None:
         """Complete a suspension once the body has unwound. Never returns.
 
@@ -829,7 +958,9 @@ class ExecutorContext:
         them.
 
         ``stream_wait`` gates the successor on a stream reaching a
-        sequence, for a consumer that suspended partway through iterating.
+        sequence, for a consumer that suspended partway through iterating;
+        ``catalog_wait`` gates it on a catalog path having a version newer
+        than this execution could see, for a ``next()``.
         """
         try:
             self.close_streams()
@@ -838,7 +969,7 @@ class ExecutorContext:
             # Best-effort teardown — the suspension below is what matters.
             pass
         request_id = protocol.request_suspend(
-            self.execution_id, execute_after, stream_wait
+            self.execution_id, execute_after, stream_wait, catalog_wait
         )
         self._wait_response(request_id)
         # Suspension confirmed. Block until the server aborts this execution.
@@ -847,12 +978,12 @@ class ExecutorContext:
 
     def take_stream_suspension(
         self,
-    ) -> tuple[int | None, tuple[str, int] | None] | None:
+    ) -> tuple[int | None, tuple[str, int] | None, str | None] | None:
         """Claim a suspension requested from inside a generator body.
 
-        Returns ``(execute_after, stream_wait)`` — either of which may
-        itself be ``None`` — or ``None`` when no generator asked to
-        suspend. The executor checks this after its streams have drained.
+        Returns ``(execute_after, stream_wait, catalog_wait)`` — any of
+        which may itself be ``None`` — or ``None`` when no generator asked
+        to suspend. The executor checks this after its streams have drained.
         """
         return self._stream_driver.take_suspension()
 
@@ -892,7 +1023,7 @@ class ExecutorContext:
         """Extract the result from a response message, raising on error."""
         if msg.get("error"):
             error = msg["error"]
-            raise RuntimeError(f"{error['code']}: {error['message']}")
+            raise RequestError(error.get("code", ""), error.get("message", ""))
         return msg.get("result", {})
 
     def _wait_response(self, request_id: int) -> Any:

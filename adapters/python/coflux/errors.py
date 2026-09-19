@@ -29,12 +29,28 @@ class Suspending(BaseException):
         self,
         execute_after: int | None = None,
         stream_wait: tuple[str, int] | None = None,
+        catalog_wait: str | None = None,
     ):
         self.execute_after = execute_after
         # (stream_id, sequence) when the suspension is waiting on a stream
         # rather than the clock.
         self.stream_wait = stream_wait
+        # A catalog path when the suspension is waiting for that path to
+        # have a version newer than this execution could see.
+        self.catalog_wait = catalog_wait
         super().__init__("execution suspending")
+
+
+class RequestError(RuntimeError):
+    """A request the execution made was refused — a catalog read of a
+    version it can't see, say — rather than failing to reach the server.
+    The refusal's code (``invalid_path``, ``invisible``, ...) is ``.code``;
+    the message carries it too.
+    """
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(f"{code}: {message}")
 
 
 class ExecutionError(Exception):

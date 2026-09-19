@@ -1,5 +1,14 @@
 defmodule Coflux.Orchestration.Runs do
-  alias Coflux.Orchestration.{Models, Results, Values, TagSets, CacheConfigs, Utils, Streams}
+  alias Coflux.Orchestration.{
+    Models,
+    Results,
+    Values,
+    TagSets,
+    CacheConfigs,
+    Utils,
+    Streams,
+    Catalog
+  }
 
   import Coflux.Store
 
@@ -232,6 +241,7 @@ defmodule Coflux.Orchestration.Runs do
     {requires, opts} = Keyword.pop(opts, :requires)
     requires = requires || %{}
     memo = Keyword.get(opts, :memo)
+    catalog_sequence = Keyword.get(opts, :catalog_sequence)
     now = current_timestamp()
 
     # TODO: check that 'type' is :workflow?
@@ -251,7 +261,16 @@ defmodule Coflux.Orchestration.Runs do
         end
 
       {:ok, run_id, external_run_id} =
-        insert_run(db, parent_ref_id, idempotency_key, requires_tag_set_id, memo, now, created_by)
+        insert_run(
+          db,
+          parent_ref_id,
+          idempotency_key,
+          requires_tag_set_id,
+          memo,
+          catalog_sequence,
+          now,
+          created_by
+        )
 
       {:ok, schedule} =
         do_schedule_step(
@@ -623,22 +642,35 @@ defmodule Coflux.Orchestration.Runs do
     end
   end
 
-  def rerun_step(
-        db,
-        step_id,
-        workspace_id,
-        execute_after,
-        dependency_ref_ids,
-        input_dependency_ids \\ [],
-        stream_waits \\ [],
-        created_by \\ nil
-      ) do
+  @doc """
+  Creates the next attempt of a step.
+
+  Options: `:input_dependency_ids`, `:stream_waits` (`[{stream_ref_id,
+  sequence}]`), `:created_by`, and `:catalog_sequence` — a snapshot chosen
+  for this attempt, overriding the one it would otherwise inherit (see
+  `Catalog.resolve_pin/2`).
+  """
+  def rerun_step(db, step_id, workspace_id, execute_after, dependency_ref_ids, opts \\ []) do
+    input_dependency_ids = Keyword.get(opts, :input_dependency_ids, [])
+    stream_waits = Keyword.get(opts, :stream_waits, [])
+    created_by = Keyword.get(opts, :created_by)
+    catalog_sequence = Keyword.get(opts, :catalog_sequence)
+
     with_transaction(db, fn ->
       now = current_timestamp()
       {:ok, attempt} = get_next_execution_attempt(db, step_id)
 
       {:ok, execution_id} =
-        insert_execution(db, step_id, attempt, workspace_id, execute_after, now, created_by)
+        insert_execution(
+          db,
+          step_id,
+          attempt,
+          workspace_id,
+          execute_after,
+          now,
+          created_by,
+          catalog_sequence
+        )
 
       {:ok, _} =
         insert_many(
@@ -673,11 +705,17 @@ defmodule Coflux.Orchestration.Runs do
     with_transaction(db, fn ->
       now = current_timestamp()
 
+      # The execution's catalog snapshot is fixed here, for its whole life:
+      # inherited from the attempt before it, chosen for the run or the
+      # attempt, or the clock. See `Catalog.resolve_pin/2`.
+      {:ok, catalog_sequence} = Catalog.resolve_pin(db, execution_id)
+
       {:ok, _} =
         insert_one(db, :assignments, %{
           execution_id: execution_id,
           session_id: session_id,
-          created_at: now
+          created_at: now,
+          catalog_sequence: catalog_sequence
         })
 
       {:ok, now}
@@ -1434,6 +1472,7 @@ defmodule Coflux.Orchestration.Runs do
          idempotency_key,
          requires_tag_set_id,
          memo,
+         catalog_sequence,
          created_at,
          created_by
        ) do
@@ -1445,6 +1484,7 @@ defmodule Coflux.Orchestration.Runs do
                idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                requires_tag_set_id: requires_tag_set_id,
                memo: if(memo, do: 1),
+               catalog_sequence: catalog_sequence,
                created_at: created_at,
                created_by: created_by
              }) do
@@ -1557,13 +1597,15 @@ defmodule Coflux.Orchestration.Runs do
          workspace_id,
          execute_after,
          created_at,
-         created_by \\ nil
+         created_by \\ nil,
+         catalog_sequence \\ nil
        ) do
     insert_one(db, :executions, %{
       step_id: step_id,
       attempt: attempt,
       workspace_id: workspace_id,
       execute_after: execute_after,
+      catalog_sequence: catalog_sequence,
       created_at: created_at,
       created_by: created_by
     })

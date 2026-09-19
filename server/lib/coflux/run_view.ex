@@ -179,6 +179,7 @@ defmodule Coflux.RunView do
       groups: execution.groups,
       loaded: false,
       assets: %{},
+      published: %{},
       dependencies: %{},
       pending: MapSet.new(),
       inputs: %{},
@@ -201,6 +202,7 @@ defmodule Coflux.RunView do
       execution
       | loaded: true,
         assets: detail.assets,
+        published: Map.get(detail, :published, %{}),
         dependencies: detail.dependencies,
         pending: Map.get(detail, :pending_dependencies, MapSet.new()),
         inputs: Map.get(detail, :inputs, %{}),
@@ -595,6 +597,7 @@ defmodule Coflux.RunView do
       groups: %{},
       loaded: true,
       assets: %{},
+      published: %{},
       dependencies:
         Map.new(dependencies, fn {id, dependency} -> {id, tag_result(dependency)} end),
       pending: pending,
@@ -781,6 +784,38 @@ defmodule Coflux.RunView do
       execution
       |> put_dependency(asset_id, {:asset, asset})
       |> set_pending(asset_id, pending)
+    end)
+  end
+
+  # A version the execution published: keyed like a read (`path@number`).
+  def apply(view, {:catalog_publish, execution_id, version}) do
+    update_execution(view, execution_id, fn execution ->
+      key = Format.catalog_version_key(version.path, version.number)
+      %{execution | published: Map.put(execution.published, key, version)}
+    end)
+  end
+
+  # A version the execution resolved. Recorded once it has been read, so
+  # it's never pending.
+  def apply(view, {:catalog_read, execution_id, version}) do
+    update_execution(view, execution_id, fn execution ->
+      key = Format.catalog_version_key(version.path, version.number)
+
+      execution
+      |> put_dependency(key, {:catalog, version})
+      |> set_pending(key, false)
+    end)
+  end
+
+  # A path the execution suspended waiting on, for whatever follows
+  # `number`; keyed apart from a read of that version.
+  def apply(view, {:catalog_wait, execution_id, path, number, pending}) do
+    update_execution(view, execution_id, fn execution ->
+      key = Format.catalog_wait_key(path, number)
+
+      execution
+      |> put_dependency(key, {:catalog_wait, path, number})
+      |> set_pending(key, pending)
     end)
   end
 
@@ -1297,6 +1332,10 @@ defmodule Coflux.RunView do
         end),
       assets:
         Map.new(execution.assets, fn {asset_id, asset} -> {asset_id, Format.asset(asset)} end),
+      published:
+        Map.new(execution.published, fn {key, version} ->
+          {key, Format.catalog_version(version)}
+        end),
       dependencies: Format.dependencies(execution.dependencies, execution.pending),
       children:
         view

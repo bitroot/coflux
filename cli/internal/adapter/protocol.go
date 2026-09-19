@@ -127,12 +127,32 @@ type SelectResult struct {
 
 // SelectHandle identifies a single handle in a select call.
 type SelectHandle struct {
-	Type string `json:"type"` // "execution", "input" or "stream"
-	ID   string `json:"id"`
+	Type string `json:"type"` // "execution", "input", "stream" or "catalog"
+	ID   string `json:"id,omitempty"`
 	// Sequence is only meaningful for a "stream" handle: the absolute
 	// sequence the consumer is waiting for. Omitted for the others, which
 	// resolve on their own terms.
 	Sequence *int64 `json:"sequence,omitempty"`
+	// Path and Number are only meaningful for a "catalog" handle: it
+	// resolves with the first version at Path numbered above Number, as
+	// seen from the caller's workspace.
+	Path   *string `json:"path,omitempty"`
+	Number *int64  `json:"number,omitempty"`
+}
+
+// RequestError is a server-side refusal with a stable code, for the cases
+// the adapter distinguishes (a catalog version published outside the
+// caller's workspace, say) rather than merely reports.
+type RequestError struct {
+	Code    string
+	Message string
+}
+
+func (e *RequestError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return e.Code
 }
 
 // ReadyMessage is sent by executor when it's ready for work
@@ -267,6 +287,29 @@ type GetAssetResult struct {
 	Paths []string `json:"paths"`
 }
 
+// CatalogPublishParams for catalog_publish request. Value is serialised
+// the way a result is; the CLI uploads its fragments before forwarding.
+type CatalogPublishParams struct {
+	ExecutionID string `json:"execution_id"`
+	Path        string `json:"path"`
+	Value       *Value `json:"value"`
+}
+
+// CatalogGetParams for catalog_get request. Number nil asks for the latest
+// version as of the execution's snapshot; set, it names a version.
+type CatalogGetParams struct {
+	ExecutionID string `json:"execution_id"`
+	Path        string `json:"path"`
+	Number      *int64 `json:"number,omitempty"`
+}
+
+// CatalogGetResult is a version as the adapter sees it: its number and
+// its value.
+type CatalogGetResult struct {
+	Number int64  `json:"number"`
+	Value  *Value `json:"value"`
+}
+
 // SuspendParams for suspend request
 type SuspendParams struct {
 	ExecutionID  string `json:"execution_id"`
@@ -275,6 +318,10 @@ type SuspendParams struct {
 	// the given sequence (or closes) — a consumer that suspended partway
 	// through iterating, rather than one waiting on the clock.
 	StreamWait *StreamWait `json:"stream_wait,omitempty"`
+	// CatalogWait, when set, holds the successor until the catalog path has
+	// a version newer than the suspending execution could see — an
+	// execution that asked for the next version.
+	CatalogWait *CatalogWait `json:"catalog_wait,omitempty"`
 }
 
 // StreamWait names the stream and absolute sequence a suspended consumer
@@ -282,6 +329,13 @@ type SuspendParams struct {
 type StreamWait struct {
 	StreamID string `json:"stream_id"`
 	Sequence int64  `json:"sequence"`
+}
+
+// CatalogWait names the catalog path a suspended execution is waiting on.
+// The position to wait past is the execution's own view, which the server
+// knows, so only the path travels.
+type CatalogWait struct {
+	Path string `json:"path"`
 }
 
 // CancelParams for cancel request

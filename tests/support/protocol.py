@@ -142,6 +142,16 @@ def input_handle(input_id):
     return {"type": "input", "id": input_id}
 
 
+def catalog_handle(path, number=None):
+    """A select handle that resolves with the first version at ``path``
+    numbered above ``number``, as seen from the caller's workspace — or,
+    with no number, above whatever the caller can currently see."""
+    handle = {"type": "catalog", "path": path}
+    if number is not None:
+        handle["number"] = number
+    return handle
+
+
 _LEVEL_MAP = {
     "debug": 0,
     "stdout": 1,
@@ -199,16 +209,22 @@ def cancel_request(request_id, execution_id, handles):
     }
 
 
-def suspend_request(request_id, execution_id, execute_after=None, stream_wait=None):
+def suspend_request(
+    request_id, execution_id, execute_after=None, stream_wait=None, catalog_wait=None
+):
     """``stream_wait`` is a ``(stream_id, sequence)`` pair for a consumer
     that suspended mid-iteration: the successor is held until the stream
-    reaches that sequence, or closes."""
+    reaches that sequence, or closes. ``catalog_wait`` is a path: the
+    successor is held until it has a version newer than the suspending
+    execution could see."""
     params = {"execution_id": execution_id}
     if execute_after is not None:
         params["execute_after"] = execute_after
     if stream_wait is not None:
         stream_id, sequence = stream_wait
         params["stream_wait"] = {"stream_id": stream_id, "sequence": sequence}
+    if catalog_wait is not None:
+        params["catalog_wait"] = {"path": catalog_wait}
     return {"id": request_id, "method": "suspend", "params": params}
 
 
@@ -231,6 +247,35 @@ def get_asset_request(request_id, execution_id, asset_id):
             "asset_id": asset_id,
         },
     }
+
+
+def inline_value(value, references=None):
+    """A value in the adapter's wire form: encoded JSON data plus the
+    references it points at (``["asset", id]``, ``["execution", id]``...)."""
+    return {
+        "type": "inline",
+        "format": "json",
+        "value": value,
+        "references": references or [],
+    }
+
+
+def asset_value(asset_id):
+    """A value that is just an asset: one reference, pointed at."""
+    return inline_value({"type": "ref", "index": 0}, [["asset", asset_id]])
+
+
+def catalog_publish_request(request_id, execution_id, path, value):
+    """``value`` is in the adapter's wire form (see ``inline_value``)."""
+    params = {"execution_id": execution_id, "path": path, "value": value}
+    return {"id": request_id, "method": "catalog_publish", "params": params}
+
+
+def catalog_get_request(request_id, execution_id, path, number=None):
+    params = {"execution_id": execution_id, "path": path}
+    if number is not None:
+        params["number"] = number
+    return {"id": request_id, "method": "catalog_get", "params": params}
 
 
 def checkpoint_update_notification(execution_id, set_=None, reset=None):

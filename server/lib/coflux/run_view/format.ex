@@ -22,6 +22,16 @@ defmodule Coflux.RunView.Format do
 
   def asset(asset), do: build_asset(asset)
 
+  def catalog_version(version), do: build_catalog_version(version)
+
+  # How a resolved version and a wait are keyed among an execution's
+  # dependencies (and its publishes): the same keys the orchestration uses.
+  def catalog_version_key(path, number), do: "#{path}@#{number}"
+
+  # A wait is for whatever comes after `number`, so it's keyed apart from a
+  # read of that version.
+  def catalog_wait_key(path, number), do: "#{path}@#{number}+"
+
   def branch_status(status), do: Atom.to_string(status)
 
   @doc """
@@ -126,6 +136,27 @@ defmodule Coflux.RunView.Format do
            streamId: stream_id,
            module: module,
            target: target,
+           pending: MapSet.member?(pending, id)
+         }}
+
+      {id, {:catalog, version}} ->
+        {id,
+         %{
+           type: "catalog",
+           path: version.path,
+           number: version.number,
+           version: build_catalog_version(version),
+           pending: false
+         }}
+
+      # A wait is for whatever comes after `number`: no version yet.
+      {id, {:catalog_wait, path, number}} ->
+        {id,
+         %{
+           type: "catalog",
+           path: path,
+           number: number,
+           version: nil,
            pending: MapSet.member?(pending, id)
          }}
     end)

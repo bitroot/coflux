@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,12 +23,18 @@ type ExecutionHandler interface {
 	PersistAsset(ctx context.Context, executionID string, paths map[string]string, metadata map[string]any, preResolved map[string][]any) (map[string]any, error)
 	// GetAsset retrieves asset entries
 	GetAsset(ctx context.Context, executionID string, assetID string) (map[string]any, error)
+	// CatalogPublish publishes a value at a catalog path and returns the
+	// resulting version's number.
+	CatalogPublish(ctx context.Context, executionID, path string, value *adapter.Value) (int64, error)
+	// CatalogGet resolves the latest version at a path as of the execution's
+	// snapshot, or a named one. A nil result means nothing is there yet.
+	CatalogGet(ctx context.Context, executionID, path string, number *int64) (*adapter.CatalogGetResult, error)
 	// DownloadBlob downloads a blob, or a byte range of one, to a local file
 	DownloadBlob(ctx context.Context, executionID, blobKey, targetPath string, offset, length *int64) error
 	// UploadBlob uploads a local file as a blob
 	UploadBlob(ctx context.Context, executionID, sourcePath string) (string, error)
 	// Suspend suspends an execution
-	Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait) error
+	Suspend(ctx context.Context, executionID string, executeAfter *int64, streamWait *adapter.StreamWait, catalogWait *adapter.CatalogWait) error
 	// Cancel cancels one or more handles (executions and/or inputs)
 	Cancel(ctx context.Context, executionID string, handles []adapter.SelectHandle) error
 	// RegisterGroup registers a group for organizing child executions.
@@ -366,7 +373,7 @@ loop:
 			// throttle means at most one per window per execution.
 			p.handleCheckpointUpdate(execCtx, executionID, params, logger)
 
-		case "submit_execution", "select", "persist_asset", "get_asset", "suspend", "cancel", "download_blob", "upload_blob", "submit_input", "flush", "stream_register":
+		case "submit_execution", "select", "persist_asset", "get_asset", "catalog_publish", "catalog_get", "suspend", "cancel", "download_blob", "upload_blob", "submit_input", "flush", "stream_register":
 			// Dispatch async: these can block on the server (e.g. a
 			// `select` that waits for a child execution). Blocking the
 			// message loop here would stop us reading the adapter's
@@ -788,6 +795,34 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 			result = map[string]any{"entries": entries}
 		}
 
+	case "catalog_publish":
+		var req adapter.CatalogPublishParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		number, err := p.handler.CatalogPublish(ctx, req.ExecutionID, req.Path, req.Value)
+		if err != nil {
+			errInfo = requestErrorInfo(err, "catalog_error")
+		} else {
+			result = map[string]any{"number": number}
+		}
+
+	case "catalog_get":
+		var req adapter.CatalogGetParams
+		if err := json.Unmarshal(params, &req); err != nil {
+			errInfo = &adapter.ErrorInfo{Code: "parse_error", Message: err.Error()}
+			break
+		}
+		version, err := p.handler.CatalogGet(ctx, req.ExecutionID, req.Path, req.Number)
+		if err != nil {
+			errInfo = requestErrorInfo(err, "catalog_error")
+		} else {
+			// A nil version is a real answer — nothing at the path yet —
+			// and reaches the adapter as JSON null.
+			result = map[string]any{"version": version}
+		}
+
 	case "download_blob":
 		var req adapter.DownloadBlobParams
 		if err := json.Unmarshal(params, &req); err != nil {
@@ -837,7 +872,7 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		// suspension, so anything still buffered has to land first — otherwise
 		// it resumes from a stale checkpoint.
 		p.flushCheckpoints(ctx, req.ExecutionID, "suspend", logger)
-		if err := p.handler.Suspend(ctx, req.ExecutionID, req.ExecuteAfter, req.StreamWait); err != nil {
+		if err := p.handler.Suspend(ctx, req.ExecutionID, req.ExecuteAfter, req.StreamWait, req.CatalogWait); err != nil {
 			errInfo = &adapter.ErrorInfo{Code: "suspend_error", Message: err.Error()}
 		} else {
 			result = map[string]any{}
@@ -876,8 +911,26 @@ func (p *Pool) handleRequest(ctx context.Context, exec *adapter.Executor, method
 		return
 	}
 	if err := exec.SendResponse(id, result, errInfo); err != nil {
-		logger.Error("failed to send response", "error", err, "method", method, "id", id)
+		if errors.Is(err, adapter.ErrExecutorClosed) {
+			// The process is already gone — typically the server aborted
+			// the execution after a select suspended, and its null reply
+			// raced the abort — so nobody is waiting for this response.
+			logger.Debug("response dropped, executor closed", "method", method, "id", id)
+		} else {
+			logger.Error("failed to send response", "error", err, "method", method, "id", id)
+		}
 	}
+}
+
+// requestErrorInfo turns a handler error into the response's error info,
+// keeping a server-assigned code when there is one so the adapter can act
+// on it rather than parse the message.
+func requestErrorInfo(err error, fallback string) *adapter.ErrorInfo {
+	var reqErr *adapter.RequestError
+	if errors.As(err, &reqErr) {
+		return &adapter.ErrorInfo{Code: reqErr.Code, Message: reqErr.Error()}
+	}
+	return &adapter.ErrorInfo{Code: fallback, Message: err.Error()}
 }
 
 // Abort terminates an execution by killing its executor process.

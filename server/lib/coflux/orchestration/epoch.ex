@@ -50,6 +50,12 @@ defmodule Coflux.Orchestration.Epoch do
       #    (ensures manifests, parameter_sets, instructions, cache_configs, tag_sets on demand)
       copy_latest_workspace_manifests(old_db, new_db, workspace_ids)
 
+      # 6. Copy the catalog log wholesale, ids included (ensures values,
+      #    execution refs and principals on demand). The log is small — a
+      #    path and a few integers per publish — and keeping ids is what
+      #    keeps the catalog clock monotonic across epochs.
+      copy_catalog_versions(old_db, new_db, workspace_ids)
+
       %{
         workspace_ids: workspace_ids,
         session_ids: session_ids,
@@ -85,7 +91,7 @@ defmodule Coflux.Orchestration.Epoch do
       case query_one(
              source_db,
              """
-             SELECT id, external_id, parent_ref_id, idempotency_key, requires_tag_set_id, memo, created_at, created_by
+             SELECT id, external_id, parent_ref_id, idempotency_key, requires_tag_set_id, memo, catalog_sequence, created_at, created_by
              FROM runs
              WHERE external_id = ?1
              """,
@@ -96,7 +102,7 @@ defmodule Coflux.Orchestration.Epoch do
 
         {:ok,
          {old_run_id, ext_id, parent_ref_id, idempotency_key, requires_tag_set_id, memo,
-          created_at, created_by}} ->
+          catalog_sequence, created_at, created_by}} ->
           # Check if already exists in target
           case query_one(target_db, "SELECT id FROM runs WHERE external_id = ?1", {ext_id}) do
             {:ok, {_existing_id}} ->
@@ -117,6 +123,7 @@ defmodule Coflux.Orchestration.Epoch do
                   idempotency_key: if(idempotency_key, do: {:blob, idempotency_key}),
                   requires_tag_set_id: ensure_tag_set(source_db, target_db, requires_tag_set_id),
                   memo: memo,
+                  catalog_sequence: catalog_sequence,
                   created_at: created_at,
                   created_by: ensure_principal(source_db, target_db, created_by)
                 })
@@ -212,7 +219,7 @@ defmodule Coflux.Orchestration.Epoch do
                     query(
                       source_db,
                       """
-                      SELECT id, attempt, workspace_id, execute_after, created_at, created_by
+                      SELECT id, attempt, workspace_id, execute_after, catalog_sequence, created_at, created_by
                       FROM executions
                       WHERE step_id = ?1
                       """,
@@ -221,8 +228,8 @@ defmodule Coflux.Orchestration.Epoch do
 
                   exec_acc =
                     Enum.reduce(execs, exec_acc, fn {old_exec_id, attempt, workspace_id,
-                                                     execute_after, exec_created_at,
-                                                     exec_created_by},
+                                                     execute_after, catalog_sequence,
+                                                     exec_created_at, exec_created_by},
                                                     acc ->
                       {:ok, new_exec_id} =
                         insert_one(target_db, :executions, %{
@@ -230,6 +237,7 @@ defmodule Coflux.Orchestration.Epoch do
                           attempt: attempt,
                           workspace_id: remap_workspace_id(source_db, target_db, workspace_id),
                           execute_after: execute_after,
+                          catalog_sequence: catalog_sequence,
                           created_at: exec_created_at,
                           created_by: ensure_principal(source_db, target_db, exec_created_by)
                         })
@@ -246,10 +254,10 @@ defmodule Coflux.Orchestration.Epoch do
               Enum.each(execution_ids, fn {old_exec_id, new_exec_id} ->
                 case query_one(
                        source_db,
-                       "SELECT session_id, created_at FROM assignments WHERE execution_id = ?1",
+                       "SELECT session_id, created_at, catalog_sequence FROM assignments WHERE execution_id = ?1",
                        {old_exec_id}
                      ) do
-                  {:ok, {session_id, assign_created_at}} ->
+                  {:ok, {session_id, assign_created_at, catalog_sequence}} ->
                     new_session_id =
                       remap_session_id(source_db, target_db, session_id)
 
@@ -259,7 +267,8 @@ defmodule Coflux.Orchestration.Epoch do
                         insert_one(target_db, :assignments, %{
                           execution_id: new_exec_id,
                           session_id: new_session_id,
-                          created_at: assign_created_at
+                          created_at: assign_created_at,
+                          catalog_sequence: catalog_sequence
                         })
                     end
 
@@ -488,6 +497,8 @@ defmodule Coflux.Orchestration.Epoch do
                 copy_execution_stream_deps(source_db, target_db, old_exec_id, new_exec_id)
                 copy_execution_inputs(source_db, target_db, old_exec_id, new_exec_id, new_run_id)
                 copy_execution_input_deps(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_catalog_reads(source_db, target_db, old_exec_id, new_exec_id)
+                copy_execution_catalog_waits(source_db, target_db, old_exec_id, new_exec_id)
               end)
 
               {:ok,
@@ -659,6 +670,54 @@ defmodule Coflux.Orchestration.Epoch do
     end)
   end
 
+  # Catalog versions keep their ids across rotation (the log is copied
+  # wholesale), so a read row carries over as-is. A version the target
+  # doesn't hold — which shouldn't happen, but a pruned archive could —
+  # drops the lineage row rather than dangling.
+  defp copy_execution_catalog_reads(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, reads} =
+      query(
+        source_db,
+        "SELECT version_id, created_at FROM catalog_reads WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(reads, fn {version_id, created_at} ->
+      case query_one(target_db, "SELECT id FROM catalog_versions WHERE id = ?1", {version_id}) do
+        {:ok, {_}} ->
+          {:ok, _} =
+            insert_one(
+              target_db,
+              :catalog_reads,
+              %{execution_id: new_exec_id, version_id: version_id, created_at: created_at},
+              on_conflict: "DO NOTHING"
+            )
+
+        {:ok, nil} ->
+          :ok
+      end
+    end)
+  end
+
+  defp copy_execution_catalog_waits(source_db, target_db, old_exec_id, new_exec_id) do
+    {:ok, waits} =
+      query(
+        source_db,
+        "SELECT path, number, created_at FROM catalog_waits WHERE execution_id = ?1",
+        {old_exec_id}
+      )
+
+    Enum.each(waits, fn {path, number, created_at} ->
+      {:ok, _} =
+        insert_one(
+          target_db,
+          :catalog_waits,
+          %{execution_id: new_exec_id, path: path, number: number, created_at: created_at},
+          on_conflict: "DO NOTHING"
+        )
+    end)
+  end
+
   defp ensure_stream_ref(source_db, target_db, old_ref_id) do
     {:ok, {run_ext_id, step_number, index, module, target}} =
       query_one!(
@@ -776,6 +835,34 @@ defmodule Coflux.Orchestration.Epoch do
   end
 
   # Private helpers — config copy
+
+  defp copy_catalog_versions(old_db, new_db, workspace_ids) do
+    {:ok, rows} =
+      query(
+        old_db,
+        """
+        SELECT id, path, workspace_id, number, value_id, execution_ref_id, created_by, created_at
+        FROM catalog_versions
+        ORDER BY id
+        """
+      )
+
+    Enum.each(rows, fn {id, path, workspace_id, number, value_id, execution_ref_id, created_by,
+                        created_at} ->
+      {:ok, _} =
+        insert_one(new_db, :catalog_versions, %{
+          id: id,
+          path: path,
+          workspace_id: Map.fetch!(workspace_ids, workspace_id),
+          number: number,
+          value_id: ensure_value(old_db, new_db, value_id),
+          execution_ref_id:
+            if(execution_ref_id, do: ensure_execution_ref(old_db, new_db, execution_ref_id)),
+          created_by: ensure_principal(old_db, new_db, created_by),
+          created_at: created_at
+        })
+    end)
+  end
 
   defp copy_workspaces(old_db, new_db) do
     {:ok, rows} = query(old_db, "SELECT id, external_id FROM workspaces")

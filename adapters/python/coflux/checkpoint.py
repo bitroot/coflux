@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Generic, TypeVar, overload
+from typing import Any, ClassVar, Generic, TypeVar, overload
 
 from .state import get_context
+from .validation import type_adapter, type_name
 
 T = TypeVar("T")
+
+# Distinguishes ``Checkpoint("x")`` from ``Checkpoint("x", default=None)``.
+# The two behave the same — an unset checkpoint reads as ``None`` either
+# way — but only the second is a claim that ``None`` is a ``T``.
+_UNSET = object()
 
 # Checkpoint names starting with this are the adapter's own. Reserved as a
 # namespace rather than name by name, so later internal state doesn't need
@@ -53,20 +59,39 @@ class Checkpoint(Generic[T]):
     resolves from the cache never runs and never sees one.
 
     ``T`` is the type ``get()`` returns. It's inferred from ``default`` when
-    one is given, so ``cursor`` above is a ``Checkpoint[int]``. Without a
-    default the checkpoint can also read as ``None``, so spell that out::
+    one is given, so ``cursor`` above is a ``Checkpoint[int]``. Spelling it
+    out with pydantic installed validates it on both sides: ``set()`` checks
+    the value against it and stores plain data (a model's fields, say), and
+    ``get()`` validates what it reads with it, so an attempt that reads what
+    an older version of the code wrote finds out here. Any type pydantic can
+    validate works — a model, a dataclass, a ``dict[str, int]``::
 
-        cursor = cf.Checkpoint[int | None]("cursor")
+        cursor = cf.Checkpoint[int]("cursor", default=0)
+        seen = cf.Checkpoint[set[str]]("seen", default=set())
 
-    As with task arguments and results, this only informs type checkers —
-    nothing is enforced at runtime.
+    A checkpoint with no default reads as ``None`` until it's set, so a
+    declared type has to admit that — ``Checkpoint[int | None]("cursor")`` —
+    or give a default that it does admit. Without pydantic, ``T`` only
+    informs type checkers, as with task arguments and results: the value is
+    stored and returned as it is.
 
     Args:
         name: Checkpoint name, unique within the step. Can't start with
             ``_`` — that prefix is reserved for adapter-managed state.
         default: Value returned when the checkpoint has never been set, or has
-            been reset. Client-side only — the server never sees it.
+            been reset. Client-side only — the server never sees it. With a
+            declared type, validated as one here.
     """
+
+    _type: ClassVar[Any] = None
+    _adapter: ClassVar[Any] = None
+
+    def __class_getitem__(cls, item: Any) -> type:
+        # A subclass that remembers the type argument and what validates it,
+        # built here so a type pydantic can't handle fails where the
+        # checkpoint is declared. Mirrors ``Catalog[T]``.
+        attrs = {"_type": item, "_adapter": type_adapter(item)}
+        return type(f"Checkpoint[{type_name(item)}]", (cls,), attrs)
 
     @overload
     def __init__(self, name: str, *, default: T) -> None: ...
@@ -77,7 +102,7 @@ class Checkpoint(Generic[T]):
     # ``Any`` rather than ``T | None``: the stored default has to satisfy the
     # ``-> T`` on ``default`` and ``get()``, which it can't when ``T`` is
     # non-optional and no default was given.
-    def __init__(self, name: str, *, default: Any = None) -> None:
+    def __init__(self, name: str, *, default: Any = _UNSET) -> None:
         if name.startswith(RESERVED_PREFIX):
             raise ValueError(
                 f"checkpoint name {name!r} is reserved: names starting with"
@@ -85,7 +110,31 @@ class Checkpoint(Generic[T]):
                 " such as the cursors behind stream suspension"
             )
         self._name = name
-        self._default = default
+        self._default = self._validate_default(name, default)
+
+    @classmethod
+    def _validate_default(cls, name: str, default: Any) -> Any:
+        """The default this checkpoint falls back to, checked against ``T``.
+
+        Checked at declaration rather than at the read it would be returned
+        from, since it's part of what makes ``get()`` a ``T``. That includes
+        the implicit ``None`` of a checkpoint declared without one: nothing
+        has to be stored for a read to return it.
+        """
+        adapter = cls._adapter
+        if adapter is None:
+            return None if default is _UNSET else default
+        if default is _UNSET:
+            try:
+                return adapter.validate_python(None)
+            except ValueError:
+                raise ValueError(
+                    f"checkpoint {name!r} has no default, so it reads as None"
+                    f" until it is set — which the declared type"
+                    f" ({type_name(cls._type)}) doesn't allow: give a default,"
+                    " or declare the type as optional"
+                ) from None
+        return adapter.validate_python(default)
 
     @property
     def name(self) -> str:
@@ -100,18 +149,34 @@ class Checkpoint(Generic[T]):
 
         A checkpoint explicitly set to ``None`` reads back as ``None``; only
         an unset or reset checkpoint falls back to the default.
+
+        With a declared type and pydantic, the stored value is validated as
+        a ``T`` — a model comes back as an instance. The default was checked
+        when the checkpoint was declared, and is returned as it is.
         """
         try:
-            return get_context().checkpoint_get(self._name)
+            value = get_context().checkpoint_get(self._name)
         except KeyError:
             return self._default
+        adapter = self._adapter
+        if adapter is not None:
+            return adapter.validate_python(value)
+        return value
 
     def is_set(self) -> bool:
         """Whether the checkpoint has a value (including an explicit ``None``)."""
         return get_context().checkpoint_has(self._name)
 
     def set(self, value: T) -> None:
-        """Set the value, replacing anything already there."""
+        """Set the value, replacing anything already there.
+
+        With a declared type and pydantic, the value is validated as a ``T``
+        first and stored as plain data — a model becomes its fields — so what
+        the next attempt reads doesn't depend on this particular class.
+        """
+        adapter = self._adapter
+        if adapter is not None:
+            value = adapter.dump_python(adapter.validate_python(value))
         get_context().checkpoint_set(self._name, value)
 
     def update(self, fn: Callable[[T], T]) -> T:
@@ -143,7 +208,7 @@ class Checkpoint(Generic[T]):
         get_context().checkpoint_reset(self._name)
 
     def __repr__(self) -> str:
-        return f"Checkpoint({self._name!r})"
+        return f"{type(self).__name__}({self._name!r})"
 
     def __reduce__(self):
         # Unlike cf.Metric, a checkpoint handle names step-scoped storage

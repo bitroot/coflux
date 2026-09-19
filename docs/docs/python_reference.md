@@ -371,17 +371,17 @@ cf.Checkpoint[T | None](
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `name` | `str` | required | Checkpoint name, unique within the step. Can't start with `_`, which is reserved for adapter-managed state |
-| `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None` |
+| `default` | `T` | — | Returned when the checkpoint is unset or has been reset. Omit it and `get()` may return `None`. With a declared type, validated as one here |
 
-`T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. Types only inform type checkers — nothing is enforced at runtime.
+`T` is the type `get()` returns. It's inferred from `default` when one is given, so `cf.Checkpoint("cursor", default=0)` is a `Checkpoint[int]`. Without a default the checkpoint can read as `None`, so spell the type out: `cf.Checkpoint[int | None]("cursor")`. With Pydantic installed, a spelled-out type — any type it can validate, from a model to a plain annotation like `dict[str, int]` — is validated on write and on read; without it, `T` only informs type checkers.
 
 #### `checkpoint.get() -> T`
 
-The current value, or the declared default if it isn't set. A checkpoint explicitly set to `None` reads back as `None`.
+The current value, or the declared default if it isn't set. A checkpoint explicitly set to `None` reads back as `None`. With Pydantic, the stored value is validated as a `T` and returned as one (a model as an instance).
 
 #### `checkpoint.set(value) -> None`
 
-Sets the value, replacing anything already there.
+Sets the value, replacing anything already there. With Pydantic, the value is validated as a `T` first and stored as plain data (a model as its fields).
 
 #### `checkpoint.update(fn: Callable[[T], T]) -> T`
 
@@ -522,6 +522,30 @@ cf.log_error(template=None, **kwargs)
 
 Creates and persists a collection of files as an asset, which can be inspected and downloaded from Studio or the CLI. See [assets](./assets.md).
 
+## Catalog
+
+### `Catalog[T](path)`
+
+A handle to a path in the [catalog](./catalog.md), declared once (usually at module level) and used from any target. A `{placeholder}` in the path is filled in with `at()`. Nothing round-trips until the handle is used. An invalid path raises `ValueError` here rather than on use. `T` is the type of the values at the path. With Pydantic installed, any type it can validate — a model, a dataclass, a plain annotation like `dict[str, int]` — is validated on publish and on read; without it, `T` only informs type checkers. Also a handle for `cf.select`, resolving when the path has a version this execution hasn't seen, which on an empty path is the first. Not a value: pass the path or the value it holds to a task, not the handle.
+
+`handle.template` is the path as declared, placeholders included; `handle.path` is the path once every placeholder is bound, and a `ValueError` before.
+
+#### `handle.at(**placeholders) -> Catalog[T]`
+
+A handle to the path with the given placeholders filled in, of the same type. Values are substituted as strings and the result has to be a valid path. Placeholders left out stay unbound; a handle with any unbound refuses `publish()`, `current()` and `next()` with `ValueError`.
+
+#### `handle.publish(value) -> int`
+
+Publishes a value at the path and returns the version's number. `value` is anything that can be passed to a task: an asset, a data structure holding assets, a reference to something external. Facts about the publish, such as a metric, go in the value alongside the thing itself. Publishing what is already the latest version (the same value) returns the existing version's number without writing. With Pydantic, the value is validated as a `T` first and stored as plain data (a model as its fields).
+
+#### `handle.current() -> T`
+
+The value at the path as of the execution's snapshot. Waits for a first publish if there is none — blocking outside a `cf.suspense` scope, suspending inside one. With Pydantic, validated as a `T` and returned as one (a model as an instance).
+
+#### `handle.next() -> NoReturn`
+
+Suspends the execution until the path has a version newer than the execution can see, whether or not inside a `cf.suspense` scope. The execution that resumes the step sees it with `current()`. Never returns.
+
 ## Exceptions
 
 | Exception | Description |
@@ -534,4 +558,5 @@ Creates and persists a collection of files as an asset, which can be inspected a
 | `ExecutionCrashed` | The child execution's process ended without reporting a result. |
 | `StreamSuperseded` | A stream ended because its recurrent producer finished an iteration. Not a failure: the next iteration produces its own stream. |
 | `InputDismissed` | A requested input was dismissed by the responder. |
+| `RequestError` | The server refused a request the execution made — reading a catalog version it can't see, say. The refusal's code is `.code`. |
 | `TimeoutError` (built-in) | A `cf.suspense(timeout=...)` wait expired before a handle resolved. |
