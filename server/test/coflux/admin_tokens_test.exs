@@ -7,14 +7,6 @@ defmodule Coflux.AdminTokensTest do
   alias Coflux.Store.Migrations
   alias Exqlite.Sqlite3
 
-  # Creating a token signs it with the server secret.
-  setup_all do
-    previous = :persistent_term.get(:coflux_secret, nil)
-    :persistent_term.put(:coflux_secret, "test-secret")
-    on_exit(fn -> :persistent_term.put(:coflux_secret, previous) end)
-    :ok
-  end
-
   # An orchestration database as it was before tokens moved: at version 5,
   # with a token, its principal, and a user principal that created it.
   defp legacy_orchestration_db do

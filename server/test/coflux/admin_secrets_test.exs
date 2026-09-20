@@ -9,13 +9,6 @@ defmodule Coflux.AdminSecretsTest do
   @project "proj"
   @by %{type: "user", external_id: "user-1"}
 
-  setup_all do
-    previous = :persistent_term.get(:coflux_secret, nil)
-    :persistent_term.put(:coflux_secret, "test-secret")
-    on_exit(fn -> :persistent_term.put(:coflux_secret, previous) end)
-    :ok
-  end
-
   setup do
     {:ok, db} = Sqlite3.open(":memory:")
     :ok = Migrations.run(db, "admin")
@@ -121,14 +114,29 @@ defmodule Coflux.AdminSecretsTest do
     assert {:error, {:secret_invalid, "not-json"}} =
              Secrets.resolve_launcher(db, @project, "dev", %{credentials_secret: "not-json"})
   end
+end
+
+defmodule Coflux.AdminSecretsWithoutServerSecretTest do
+  # Takes the server secret away, which every other test's fixtures read,
+  # so it can't run alongside them.
+  use ExUnit.Case, async: false
+
+  alias Coflux.Admin.Secrets
+  alias Coflux.Store.Migrations
+  alias Exqlite.Sqlite3
+
+  setup do
+    previous = :persistent_term.get(:coflux_secret, nil)
+    :persistent_term.put(:coflux_secret, nil)
+    on_exit(fn -> :persistent_term.put(:coflux_secret, previous) end)
+
+    {:ok, db} = Sqlite3.open(":memory:")
+    :ok = Migrations.run(db, "admin")
+    {:ok, db: db}
+  end
 
   test "without a server secret nothing can be stored or read", %{db: db} do
-    :persistent_term.put(:coflux_secret, nil)
-
-    try do
-      assert {:error, :no_secret} = Secrets.set(db, @project, "", "x", "v", nil)
-    after
-      :persistent_term.put(:coflux_secret, "test-secret")
-    end
+    assert {:error, :no_secret} = Secrets.set(db, "proj", "", "x", "v", nil)
+    assert {:error, :no_secret} = Secrets.resolve(db, "proj", "dev", "x")
   end
 end
