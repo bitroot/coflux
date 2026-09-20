@@ -1,5 +1,9 @@
 ## 0.13.0
 
+Enhancements:
+
+- The ECS launcher can assume an IAM role (`roleArn`, with `roleExternalId` where the trust policy asks for one) with whatever credentials it finds, so a server in one account can launch into another. The search of the server's surroundings now includes a web identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, as EKS sets for a pod whose service account has a role). Credentials issued by STS are cached until shortly before they expire.
+
 Changes:
 
 - Workspace patterns mean one thing everywhere now. A pattern selects a workspace (`development`), the workspaces under it (`development/*`, at any depth, but not `development` itself), or all of them (`*`) — the rule tokens already used, now used for a secret's workspaces too, where a bare name previously selected everything beneath it as well. Patterns that name nothing are rejected.

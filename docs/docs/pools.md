@@ -142,11 +142,28 @@ coflux pools update mypool --set credentialsSecret=aws-sandbox
 ```
 
 Without one, credentials come from the server's surroundings the way the
-AWS SDKs look: `AWS_ACCESS_KEY_ID` and friends in its environment, its ECS
-task role, or its EC2 instance profile. Either way they need `ecs:RunTask`,
-`ecs:DescribeTasks` and `ecs:StopTask` on the cluster,
-`ecs:DescribeTaskDefinition` unless `containerName` is set, and
-`iam:PassRole` for the roles the task definition names.
+AWS SDKs look: `AWS_ACCESS_KEY_ID` and friends in its environment, a web
+identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, as EKS
+sets for a pod whose service account has a role), its ECS task role, or
+its EC2 instance profile.
+
+Either way, `roleArn` names a role to assume with them before ECS is
+called, with `roleExternalId` if the role's trust policy asks for one - so a
+server in one account can launch into another, or a pool can be held to a
+role that reaches only its cluster:
+
+```bash
+coflux pools update mypool \
+  --set roleArn=arn:aws:iam::123456789012:role/coflux-launcher \
+  --set roleExternalId=coflux-production
+```
+
+Whichever identity calls ECS - the role, or the credentials themselves
+when there's no role - needs `ecs:RunTask`, `ecs:DescribeTasks` and
+`ecs:StopTask` on the cluster, `ecs:DescribeTaskDefinition` unless
+`containerName` is set, and `iam:PassRole` for the roles the task
+definition names. Credentials that assume a role need `sts:AssumeRole` on
+it, and the role's trust policy has to allow them to.
 
 ECS doesn't expose container output through its API, so a worker's log
 tail isn't shown; a task that fails to start reports its reason in its
@@ -166,6 +183,8 @@ see what workers print.
 | `assignPublicIp` | Give the task a public IP |
 | `platformVersion` | Fargate platform version |
 | `credentialsSecret` | Name of the secret holding AWS credentials as JSON (`AccessKeyId`, `SecretAccessKey`, optional `SessionToken`) |
+| `roleArn` | IAM role to assume before calling ECS |
+| `roleExternalId` | External ID the role's trust policy expects, if any |
 | `endpoint` | ECS API endpoint override (e.g. a VPC endpoint) |
 
 ### Common fields

@@ -2,7 +2,7 @@
 
 Enhancements:
 
-- Adds `--type ecs` support for `pools create` and `pools update`.
+- Adds `--type ecs` support for `pools create` and `pools update`, including the `roleArn` and `roleExternalId` fields for a role to assume before calling ECS.
 - Adds the `idleTimeout` pool field, for how long a pool keeps an idle worker before stopping it.
 - Adds `secrets set`, `secrets list` and `secrets delete`. Pools refer to secrets by name (`tokenSecret`, `credentialsSecret`, `envSecrets`) instead of holding credentials, so `pools export` no longer needs `--include-secrets`. Each secret is set for one or more workspace patterns, given as a required `--workspaces`, in the same language `tokens create --workspaces` uses.
 

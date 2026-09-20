@@ -17,7 +17,8 @@ defmodule Coflux.EcsLauncher do
 
   Credentials are resolved on every call rather than kept with the task:
   from the secret the pool names, or failing that from the server's own
-  surroundings. See `Coflux.Launchers.AwsCredentials`.
+  surroundings, and then through the role the pool names, if it does.
+  See `Coflux.Launchers.AwsCredentials`.
   """
 
   import Coflux.Launchers.Utils, only: [truncate_bytes: 2]
@@ -287,6 +288,10 @@ defmodule Coflux.EcsLauncher do
   # with, the detail (when there is one) is the API's own message, which
   # for an invalid request is the only thing that says what was wrong.
   defp normalize_launch_error(:credentials_missing), do: {"launch_credentials_missing", nil}
+
+  defp normalize_launch_error({:assume_role, code, message}),
+    do: {"launch_assume_role_failed", if(message, do: "#{code}: #{message}", else: code)}
+
   defp normalize_launch_error(:request_failed), do: {"launch_request_failed", nil}
   defp normalize_launch_error(:no_container), do: {"launch_no_container", nil}
   defp normalize_launch_error(:unexpected_response), do: {"launch_api_error", nil}
@@ -340,6 +345,7 @@ defmodule Coflux.EcsLauncher do
 
   # For poll and stop, where the error is retried rather than shown.
   defp describe_error(:credentials_missing), do: "credentials_missing"
+  defp describe_error({:assume_role, code, _message}), do: "assume_role_failed:#{code}"
   defp describe_error(:request_failed), do: "request_failed"
 
   defp describe_error({:api, _status, type, _message}) when is_binary(type),
@@ -354,7 +360,12 @@ defmodule Coflux.EcsLauncher do
   defp build_conn(config) do
     region = Map.fetch!(config, :region)
 
-    with {:ok, credentials} <- AwsCredentials.resolve(static_credentials(config)) do
+    with {:ok, credentials} <-
+           AwsCredentials.resolve(static_credentials(config),
+             region: region,
+             role_arn: config[:role_arn],
+             external_id: config[:role_external_id]
+           ) do
       {:ok,
        %{
          region: region,

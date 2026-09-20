@@ -8,6 +8,13 @@ defmodule Coflux.Handlers.Api do
 
   @ecs_launch_types ["FARGATE", "EC2", "EXTERNAL"]
 
+  # An IAM role ARN: any partition, a 12-digit account, and a name that
+  # may sit under a path.
+  @iam_role_arn_regex ~r/^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@\/-]+$/
+
+  # STS's own rule for an external ID.
+  @external_id_regex ~r/^[\w+=,.@:\/-]{2,1224}$/
+
   # A directory upload arrives as one entry per file, so this bounds an
   # accidental drop of a very large tree. Unlike the sizes, which the
   # client asserts, the count is something the server can see for itself.
@@ -1399,6 +1406,8 @@ defmodule Coflux.Handlers.Api do
     assign_public_ip = Map.get(value, "assignPublicIp")
     platform_version = Map.get(value, "platformVersion")
     credentials_secret = Map.get(value, "credentialsSecret")
+    role_arn = Map.get(value, "roleArn")
+    role_external_id = Map.get(value, "roleExternalId")
     endpoint = Map.get(value, "endpoint")
 
     cond do
@@ -1444,6 +1453,17 @@ defmodule Coflux.Handlers.Api do
           not Coflux.Admin.Secrets.valid_name?(credentials_secret) ->
         {:error, :invalid}
 
+      not is_nil(role_arn) and
+          (not is_binary(role_arn) or String.length(role_arn) > 2048 or
+             not Regex.match?(@iam_role_arn_regex, role_arn)) ->
+        {:error, :invalid}
+
+      # An external ID is something to assume a role with, so it needs one.
+      not is_nil(role_external_id) and
+          (is_nil(role_arn) or not is_binary(role_external_id) or
+             not Regex.match?(@external_id_regex, role_external_id)) ->
+        {:error, :invalid}
+
       not is_nil(endpoint) and
           (not is_binary(endpoint) or String.length(endpoint) > 500 or
              not String.starts_with?(endpoint, ["http://", "https://"])) ->
@@ -1460,6 +1480,8 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value(:assign_public_ip, if(assign_public_ip == true, do: true))
           |> maybe_put_value(:platform_version, platform_version)
           |> maybe_put_value(:credentials_secret, credentials_secret)
+          |> maybe_put_value(:role_arn, role_arn)
+          |> maybe_put_value(:role_external_id, role_external_id)
           |> maybe_put_value(:endpoint, endpoint)
 
         {:ok, launcher}
@@ -1651,6 +1673,8 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("assignPublicIp", Map.get(launcher, :assign_public_ip))
           |> maybe_put_value("platformVersion", Map.get(launcher, :platform_version))
           |> maybe_put_value("credentialsSecret", Map.get(launcher, :credentials_secret))
+          |> maybe_put_value("roleArn", Map.get(launcher, :role_arn))
+          |> maybe_put_value("roleExternalId", Map.get(launcher, :role_external_id))
           |> maybe_put_value("endpoint", Map.get(launcher, :endpoint))
 
         :kubernetes ->
@@ -1838,6 +1862,8 @@ defmodule Coflux.Handlers.Api do
       {"assignPublicIp", &is_boolean/1},
       {"platformVersion", &is_binary/1},
       {"credentialsSecret", &Coflux.Admin.Secrets.valid_name?/1},
+      {"roleArn", &(is_binary(&1) and Regex.match?(@iam_role_arn_regex, &1))},
+      {"roleExternalId", &(is_binary(&1) and Regex.match?(@external_id_regex, &1))},
       {"endpoint", &is_binary/1},
       {"serverHost", &is_binary/1},
       {"serverSecure", &is_boolean/1},
@@ -1890,6 +1916,8 @@ defmodule Coflux.Handlers.Api do
       "assignPublicIp" => :assign_public_ip,
       "platformVersion" => :platform_version,
       "credentialsSecret" => :credentials_secret,
+      "roleArn" => :role_arn,
+      "roleExternalId" => :role_external_id,
       "endpoint" => :endpoint,
       "serverHost" => :server_host,
       "serverSecure" => :server_secure,

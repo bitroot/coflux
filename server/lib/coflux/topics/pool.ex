@@ -78,6 +78,8 @@ defmodule Coflux.Topics.Pool do
           |> maybe_put(:assignPublicIp, Map.get(launcher, :assign_public_ip))
           |> maybe_put(:platformVersion, Map.get(launcher, :platform_version))
           |> maybe_put(:credentialsSecret, Map.get(launcher, :credentials_secret))
+          |> maybe_put(:roleArn, Map.get(launcher, :role_arn))
+          |> maybe_put(:roleExternalId, Map.get(launcher, :role_external_id))
           |> maybe_put(:endpoint, Map.get(launcher, :endpoint))
 
         :kubernetes ->

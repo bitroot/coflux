@@ -226,6 +226,12 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if secret := getString(launcher, "credentialsSecret"); secret != "" {
 			fmt.Printf("Credentials secret: %s\n", secret)
 		}
+		if roleArn := getString(launcher, "roleArn"); roleArn != "" {
+			fmt.Printf("Role ARN: %s\n", roleArn)
+		}
+		if externalID := getString(launcher, "roleExternalId"); externalID != "" {
+			fmt.Printf("Role external ID: %s\n", externalID)
+		}
 		if endpoint := getString(launcher, "endpoint"); endpoint != "" {
 			fmt.Printf("Endpoint: %s\n", endpoint)
 		}
@@ -645,7 +651,8 @@ var launcherFields = map[string]bool{
 	"cluster": true, "taskDefinition": true, "region": true,
 	"containerName": true, "launchType": true, "capacityProvider": true,
 	"subnets": true, "securityGroups": true, "assignPublicIp": true,
-	"platformVersion": true, "credentialsSecret": true, "endpoint": true,
+	"platformVersion": true, "credentialsSecret": true, "roleArn": true,
+	"roleExternalId": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
 	"concurrency": true, "env": true, "envSecrets": true,
 }
@@ -1424,6 +1431,8 @@ var camelToSnake = map[string]string{
 	"platformVersion":       "platform_version",
 	"tokenSecret":           "token_secret",
 	"credentialsSecret":     "credentials_secret",
+	"roleArn":               "role_arn",
+	"roleExternalId":        "role_external_id",
 	"envSecrets":            "env_secrets",
 }
 
