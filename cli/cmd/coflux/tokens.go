@@ -97,11 +97,14 @@ var tokensCreateCmd = &cobra.Command{
 
 The token value is displayed only once. Make sure to copy it.
 
-Use --workspaces to restrict the token to specific workspaces. A pattern grants
-a workspace and everything under it, so 'development' and 'development/*' both
-cover 'development' and 'development/joe'. Use '*' for every workspace. A token
-can't be given broader access than the one creating it. If omitted, the token
-inherits the access of the token creating it.`,
+Use --workspaces to restrict the token to specific workspaces. A pattern selects
+one workspace ('development'), the workspaces under it ('development/*', at any
+depth, but not 'development' itself), or all of them ('*'). Give several
+comma-separated for the union: 'development,development/*'.
+
+A token can't be given broader access than the one creating it - each pattern
+has to sit wholly inside one the creator holds. If omitted, the token inherits
+the access of the token creating it.`,
 	RunE: runTokensCreate,
 }
 

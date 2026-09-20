@@ -16,31 +16,36 @@ defmodule Coflux.AdminSecretsTest do
   end
 
   test "a value round-trips, and setting it again replaces it and bumps the version", %{db: db} do
-    assert {:ok, %{version: 1}} = Secrets.set(db, @project, "", "api-key", "first", @by)
+    assert {:ok, %{version: 1}} = Secrets.set(db, @project, "*", "api-key", "first", @by)
     assert {:ok, "first"} = Secrets.resolve(db, @project, "development", "api-key")
 
     assert {:ok, %{version: 2, updated_by: @by}} =
-             Secrets.set(db, @project, "", "api-key", "second", @by)
+             Secrets.set(db, @project, "*", "api-key", "second", @by)
 
     assert {:ok, "second"} = Secrets.resolve(db, @project, "development", "api-key")
 
-    assert {:ok, [%{name: "api-key", scope: "", version: 2}]} = Secrets.list(db)
-    assert :ok = Secrets.delete(db, "", "api-key")
-    assert {:error, :not_found} = Secrets.delete(db, "", "api-key")
+    assert {:ok, [%{name: "api-key", scope: "*", version: 2}]} = Secrets.list(db)
+    assert :ok = Secrets.delete(db, "*", "api-key")
+    assert {:error, :not_found} = Secrets.delete(db, "*", "api-key")
     assert {:error, :not_found} = Secrets.resolve(db, @project, "development", "api-key")
   end
 
   test "the nearest scope wins, and production's secrets don't reach development", %{db: db} do
-    {:ok, _} = Secrets.set(db, @project, "", "key", "project-wide", nil)
-    {:ok, _} = Secrets.set(db, @project, "development", "key", "for-development", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "key", "project-wide", nil)
+    {:ok, _} = Secrets.set(db, @project, "development/*", "key", "for-development", nil)
+    {:ok, _} = Secrets.set(db, @project, "development/joe/*", "key", "under-joe", nil)
     {:ok, _} = Secrets.set(db, @project, "development/joe", "key", "for-joe", nil)
     {:ok, _} = Secrets.set(db, @project, "production", "key", "for-production", nil)
 
+    # An exact scope beats a prefix, and a longer prefix beats a shorter.
     assert {:ok, "for-joe"} = Secrets.resolve(db, @project, "development/joe", "key")
-    assert {:ok, "for-joe"} = Secrets.resolve(db, @project, "development/joe/feature", "key")
+    assert {:ok, "under-joe"} = Secrets.resolve(db, @project, "development/joe/feature", "key")
     assert {:ok, "for-development"} = Secrets.resolve(db, @project, "development/sam", "key")
     assert {:ok, "project-wide"} = Secrets.resolve(db, @project, "staging", "key")
     assert {:ok, "for-production"} = Secrets.resolve(db, @project, "production", "key")
+
+    # `development/*` doesn't select `development` itself.
+    assert {:ok, "project-wide"} = Secrets.resolve(db, @project, "development", "key")
 
     # A prefix is a path prefix, not a string prefix.
     assert {:ok, "project-wide"} = Secrets.resolve(db, @project, "developments", "key")
@@ -50,8 +55,8 @@ defmodule Coflux.AdminSecretsTest do
   end
 
   test "a ciphertext is bound to its row", %{db: db} do
-    {:ok, _} = Secrets.set(db, @project, "", "a", "value-a", nil)
-    {:ok, _} = Secrets.set(db, @project, "", "b", "value-b", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "a", "value-a", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "b", "value-b", nil)
 
     {:ok, _} =
       Store.query(
@@ -70,14 +75,14 @@ defmodule Coflux.AdminSecretsTest do
   end
 
   test "a launcher config is given the values it names", %{db: db} do
-    {:ok, _} = Secrets.set(db, @project, "", "k8s-token", "bearer-xyz", nil)
-    {:ok, _} = Secrets.set(db, @project, "", "openai", "sk-123", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "k8s-token", "bearer-xyz", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "openai", "sk-123", nil)
 
     {:ok, _} =
       Secrets.set(
         db,
         @project,
-        "",
+        "*",
         "aws",
         ~s({"Version": 1, "AccessKeyId": "AKIA1", "SecretAccessKey": "s3cr3t", "SessionToken": "tok"}),
         nil
@@ -109,7 +114,7 @@ defmodule Coflux.AdminSecretsTest do
     assert {:error, {:secret_not_found, "nope"}} =
              Secrets.resolve_launcher(db, @project, "dev", missing)
 
-    {:ok, _} = Secrets.set(db, @project, "", "not-json", "plain text", nil)
+    {:ok, _} = Secrets.set(db, @project, "*", "not-json", "plain text", nil)
 
     assert {:error, {:secret_invalid, "not-json"}} =
              Secrets.resolve_launcher(db, @project, "dev", %{credentials_secret: "not-json"})
@@ -136,7 +141,7 @@ defmodule Coflux.AdminSecretsWithoutServerSecretTest do
   end
 
   test "without a server secret nothing can be stored or read", %{db: db} do
-    assert {:error, :no_secret} = Secrets.set(db, "proj", "", "x", "v", nil)
+    assert {:error, :no_secret} = Secrets.set(db, "proj", "*", "x", "v", nil)
     assert {:error, :no_secret} = Secrets.resolve(db, "proj", "dev", "x")
   end
 end

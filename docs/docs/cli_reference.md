@@ -218,9 +218,9 @@ See [pools](./pools.md) for launcher-specific fields.
 
 | Command | Description |
 |---------|-------------|
-| `secrets set <name>` | Set a secret's value from stdin (`--from-env`, `--from-file`, `--scope`, `--global`) |
+| `secrets set <name>` | Set a secret's value from stdin (`--workspaces`, `--from-env`, `--from-file`) |
 | `secrets list` | List secrets (names, scopes and versions) |
-| `secrets delete <name>` | Delete a secret (`--scope`, `--global`) |
+| `secrets delete <name>` | Delete a secret (`--workspaces`) |
 
 ## `coflux inputs`
 

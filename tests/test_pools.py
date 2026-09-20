@@ -663,7 +663,7 @@ class TestPoolSecrets:
         ]
 
         # Set for the current workspace, which is where the pool is.
-        cli.secrets_set("api-key", "s3cr3t-value", host=host)
+        cli.secrets_set("api-key", "s3cr3t-value", workspaces="default", host=host)
 
         cli.pools_create(
             "secret-pool",
@@ -705,7 +705,7 @@ class TestPoolSecrets:
         assert "secrets_not_found" in exc_info.value.stderr
         assert "nope" in exc_info.value.stderr
 
-        cli.secrets_set("k8s-token", "bearer", host=host)
+        cli.secrets_set("k8s-token", "bearer", workspaces="default", host=host)
         self._kubernetes_pool(host)
 
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
@@ -721,10 +721,10 @@ class TestPoolSecrets:
         assert "secrets_not_found" in exc_info.value.stderr
 
     def test_scope_follows_workspace_names(self, pool_env):
-        """A secret for 'development' serves 'development/joe' and not
+        """A secret for 'development/*' serves 'development/joe' and not
         'production', whatever the workspaces inherit from."""
         host = pool_env["host"]
-        cli.secrets_set("k8s-token", "bearer", scope="development", host=host)
+        cli.secrets_set("k8s-token", "bearer", workspaces="development/*", host=host)
 
         self._kubernetes_pool(host, workspace="development/joe")
 
@@ -736,7 +736,7 @@ class TestPoolSecrets:
         """An export carries the names, never the values, and imports back
         as long as the secrets exist."""
         host = pool_env["host"]
-        cli.secrets_set("k8s-token", "super-secret-token", host=host)
+        cli.secrets_set("k8s-token", "super-secret-token", workspaces="default", host=host)
         self._kubernetes_pool(host)
         cli._coflux(
             "pools",
@@ -816,7 +816,7 @@ def _setup_ecs_pool(ecs_env, targets, modules=None, pool_name="ecs-pool", sets=(
     cli.secrets_set(
         "aws-test",
         json.dumps({"AccessKeyId": "AKIATEST", "SecretAccessKey": "test-secret-key"}),
-        global_=True,
+        workspaces="*",
         host=host,
     )
 

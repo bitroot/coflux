@@ -4,73 +4,116 @@ defmodule Coflux.ScopesTest do
   alias Coflux.Scopes
 
   describe "covers?/2" do
-    test "a scope covers itself and everything under it" do
+    test "an exact scope selects that workspace and no other" do
       assert Scopes.covers?("development", "development")
-      assert Scopes.covers?("development", "development/joe")
-      assert Scopes.covers?("development", "development/joe/feature-1")
-      assert Scopes.covers?("development/joe", "development/joe/feature-1")
-    end
-
-    test "the root scope covers every workspace" do
-      assert Scopes.covers?("", "development")
-      assert Scopes.covers?("", "development/joe")
-    end
-
-    test "names are compared a segment at a time" do
+      refute Scopes.covers?("development", "development/joe")
       refute Scopes.covers?("development", "development-2")
-      refute Scopes.covers?("development", "development2/joe")
-      refute Scopes.covers?("development/joe", "development/joel")
     end
 
-    test "a scope doesn't cover what's above it, or a sibling" do
-      refute Scopes.covers?("development/joe", "development")
-      refute Scopes.covers?("development", "")
-      refute Scopes.covers?("development/joe", "development/sam")
-      refute Scopes.covers?("development", "production")
+    test "a prefix scope selects what's under it, at any depth" do
+      assert Scopes.covers?("development/*", "development/joe")
+      assert Scopes.covers?("development/*", "development/joe/feature-1")
     end
 
-    test "the scope of a pattern granting nothing covers nothing" do
-      refute Scopes.covers?(:never, "development")
-      refute Scopes.covers?(:never, "")
-    end
-  end
-
-  describe "from_pattern/1" do
-    test "a bare name and a wildcard grant the same subtree" do
-      assert Scopes.from_pattern("development") == "development"
-      assert Scopes.from_pattern("development/*") == "development"
-      assert Scopes.from_pattern("development/joe/*") == "development/joe"
+    test "a prefix scope doesn't select the workspace it names" do
+      refute Scopes.covers?("development/*", "development")
     end
 
-    test "a wildcard grant includes the workspace it names" do
-      scope = Scopes.from_pattern("development/*")
-
-      assert Scopes.covers?(scope, "development")
-      assert Scopes.covers?(scope, "development/joe")
+    test "prefixes stop at a segment boundary" do
+      refute Scopes.covers?("development/*", "development-2/joe")
+      refute Scopes.covers?("dev/*", "devops/thing")
     end
 
-    test "'*' grants the root scope" do
-      assert Scopes.from_pattern("*") == ""
-      assert Scopes.covers?(Scopes.from_pattern("*"), "anything/at/all")
+    test "'*' selects every workspace" do
+      assert Scopes.covers?("*", "development")
+      assert Scopes.covers?("*", "development/joe/feature-1")
     end
 
-    test "a pattern that names nothing grants nothing, not everything" do
-      assert Scopes.from_pattern("") == :never
-      assert Scopes.from_pattern("/*") == :never
-      assert Scopes.from_pattern(nil) == :never
-      assert Scopes.from_pattern(["development"]) == :never
+    test "covering a workspace and everything under it takes both scopes" do
+      scopes = ["development", "development/*"]
+
+      assert Scopes.covers_any?(scopes, "development")
+      assert Scopes.covers_any?(scopes, "development/joe")
+      refute Scopes.covers_any?(scopes, "development-2")
     end
   end
 
-  describe "valid_pattern?/1" do
-    test "accepts what names a scope, rejects what doesn't" do
-      assert Scopes.valid_pattern?("*")
-      assert Scopes.valid_pattern?("development")
-      assert Scopes.valid_pattern?("development/*")
+  describe "contains?/2" do
+    test "a scope contains itself" do
+      assert Scopes.contains?("development", "development")
+      assert Scopes.contains?("development/*", "development/*")
+      assert Scopes.contains?("*", "*")
+    end
 
-      refute Scopes.valid_pattern?("")
-      refute Scopes.valid_pattern?("/*")
-      refute Scopes.valid_pattern?(nil)
+    test "'*' contains everything, and nothing else contains '*'" do
+      assert Scopes.contains?("*", "development")
+      assert Scopes.contains?("*", "development/*")
+
+      refute Scopes.contains?("development", "*")
+      refute Scopes.contains?("development/*", "*")
+    end
+
+    test "a prefix contains the scopes beneath it" do
+      assert Scopes.contains?("development/*", "development/joe")
+      assert Scopes.contains?("development/*", "development/joe/*")
+      assert Scopes.contains?("development/*", "development/joe/feature-1")
+    end
+
+    test "a prefix doesn't contain the workspace it names, which it doesn't select" do
+      refute Scopes.contains?("development/*", "development")
+    end
+
+    test "an exact scope contains only itself" do
+      refute Scopes.contains?("development", "development/joe")
+      refute Scopes.contains?("development", "development/*")
+    end
+
+    test "containment stops at a segment boundary" do
+      refute Scopes.contains?("dev/*", "devops/*")
+      refute Scopes.contains?("dev/*", "devops")
+    end
+
+    # The distinction that matters: holding one workspace is not holding a
+    # scope that reaches others.
+    test "covering a workspace is not containing a scope that names it" do
+      assert Scopes.covers?("staging", "staging")
+      refute Scopes.contains?("staging", "staging/*")
+    end
+  end
+
+  describe "valid?/1" do
+    test "accepts scopes" do
+      assert Scopes.valid?("*")
+      assert Scopes.valid?("development")
+      assert Scopes.valid?("development/joe")
+      assert Scopes.valid?("development/*")
+      assert Scopes.valid?("development/joe/*")
+    end
+
+    test "rejects what isn't one" do
+      refute Scopes.valid?("")
+      refute Scopes.valid?("/*")
+      refute Scopes.valid?("development/")
+      refute Scopes.valid?("not valid!")
+      refute Scopes.valid?(nil)
+      refute Scopes.valid?(["development"])
+    end
+  end
+
+  describe "specificity/1" do
+    test "the nearest scope wins: exact, then longer prefix, then '*'" do
+      scopes = ["*", "development/*", "development/joe/*", "development/joe/feature-1"]
+
+      assert Enum.max_by(scopes, &Scopes.specificity/1) == "development/joe/feature-1"
+
+      assert scopes
+             |> Enum.reject(&(&1 == "development/joe/feature-1"))
+             |> Enum.max_by(&Scopes.specificity/1) == "development/joe/*"
+    end
+
+    test "an exact scope beats a longer prefix" do
+      assert Scopes.specificity("development/joe") >
+               Scopes.specificity("development/joe/very/long/*")
     end
   end
 end

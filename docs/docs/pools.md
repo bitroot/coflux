@@ -71,7 +71,7 @@ coflux pools create mypool --type kubernetes \
 When the Coflux server runs inside Kubernetes, it automatically uses in-cluster authentication. For external servers, provide the API server URL and name a [secret](#secrets) holding a bearer token:
 
 ```bash
-coflux secrets set k8s-token < /path/to/token
+coflux secrets set k8s-token --workspaces '*' < /path/to/token
 
 coflux pools create mypool --type kubernetes \
   --set image=myorg/myapp:latest \
@@ -137,7 +137,7 @@ whose value is JSON in the shape the AWS CLI produces, so a profile's
 credentials can be stored directly:
 
 ```bash
-aws configure export-credentials --profile sandbox | coflux secrets set aws-sandbox
+aws configure export-credentials --profile sandbox |\n  coflux secrets set aws-sandbox --workspaces 'production/*'
 coflux pools update mypool --set credentialsSecret=aws-sandbox
 ```
 
@@ -195,29 +195,55 @@ encrypted, and referred to by name. A pool's configuration, `pools get`, and
 The value is read from stdin, so it never appears on the command line:
 
 ```bash
-printf '%s' "$OPENAI_API_KEY" | coflux secrets set openai
+printf '%s' "$OPENAI_API_KEY" | coflux secrets set openai --workspaces 'development/*'
 coflux pools update mypool --set envSecrets.OPENAI_API_KEY=openai
 ```
 
 `--from-env` and `--from-file` read it from an environment variable or a file
-instead. `secrets list` shows names, scopes and versions, never values, and
+instead. `secrets list` shows names, workspaces and versions, never values, and
 `secrets delete` removes one.
 
-A secret applies to a _scope_: a workspace name, or a prefix of one. A secret
-set for `development` applies to `development/joe`, and the nearest scope wins,
-so `development/joe` can override it. By default the scope is the current
-workspace; `--scope` names another, and `--global` applies it to every
-workspace. Scopes follow workspace names, not what a workspace inherits from:
-a workspace that inherits from `production` doesn't see production's secrets.
+### Which workspaces a secret applies to
 
-Setting a secret takes operator access to its scope, and `--global` takes
-access to every workspace. Setting one again replaces its value and bumps its
-version; workers already running keep the value they were launched with.
-Values are encrypted with a key derived from `COFLUX_SECRET`, which must be
-configured for secrets to be used.
+`--workspaces` is required, and takes the same patterns a token's access does:
+
+| Pattern | Selects |
+| --- | --- |
+| `development` | that workspace, and nothing else |
+| `development/*` | the workspaces under `development/` — but not `development` itself |
+| `*` | every workspace in the project |
+
+The `*` is not a glob: `development/*` reaches `development/joe` and
+`development/joe/feature-1` alike, because it matches a prefix of the name
+rather than one level of it. For a workspace *and* everything under it, give
+both: `--workspaces 'development,development/*'`.
+
+Several patterns, comma-separated, store the value once for each — so they are
+listed, rotated and deleted separately. Patterns follow workspace names, not
+what a workspace inherits from: a workspace that inherits results from
+`production` doesn't see production's secrets, and `development` never selects
+`development-2`.
+
+Where patterns overlap the nearest wins: an exact workspace beats a longer
+prefix, which beats a shorter one, which beats `*`.
+
+Setting a secret takes access containing every pattern given, whole — a token
+for `development/joe` can't set a secret for `development/*`, because that
+would reach workspaces it has no access to. Setting one again replaces its
+value and bumps its version; workers already running keep the value they were
+launched with. Values are encrypted with a key derived from `COFLUX_SECRET`,
+which must be configured for secrets to be used.
 
 A pool that names a secret its workspace can't see is refused when it is
 created, updated, or imported.
+
+### Who can read a secret
+
+Reading is bounded by the patterns, not by the access it took to set the
+value: a pool launches its workers with the secrets it names, so anyone who
+can edit a pool in a workspace can obtain the value of every secret that
+applies there. Give a secret no more workspaces than the people who should be
+able to read it — a secret set for `*` is readable by everyone in the project.
 
 ## Managing pools
 

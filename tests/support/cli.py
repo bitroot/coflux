@@ -393,17 +393,9 @@ def pools_export(host=None, workspace="default"):
     return result.stdout
 
 
-def _secret_scope_args(scope, global_):
-    if global_:
-        return ["--global"]
-    if scope is not None:
-        return ["--scope", scope]
-    return []
-
-
-def secrets_set(name, value, scope=None, global_=False, host=None, workspace="default"):
+def secrets_set(name, value, workspaces, host=None, workspace="default"):
     """Set a secret, with the value on stdin as a user would give it."""
-    args = ["secrets", "set", name, *_secret_scope_args(scope, global_)]
+    args = ["secrets", "set", name, "--workspaces", workspaces]
     _coflux(*args, host=host, workspace=workspace, output=None, input=value)
 
 
@@ -412,8 +404,8 @@ def secrets_list(host=None, workspace="default"):
     return json.loads(result.stdout)
 
 
-def secrets_delete(name, scope=None, global_=False, host=None, workspace="default"):
-    args = ["secrets", "delete", name, *_secret_scope_args(scope, global_)]
+def secrets_delete(name, workspaces, host=None, workspace="default"):
+    args = ["secrets", "delete", name, "--workspaces", workspaces]
     _coflux(*args, host=host, workspace=workspace, output=None)
 
 

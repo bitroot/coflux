@@ -59,12 +59,12 @@ defmodule Coflux.Orchestration do
     call_server(project_id, {:archive_workspace, workspace_id, access})
   end
 
-  def set_secret(project_id, scope, name, value, access \\ nil) do
-    call_server(project_id, {:set_secret, scope, name, value, access})
+  def set_secret(project_id, scopes, name, value, access \\ nil) do
+    call_server(project_id, {:set_secret, scopes, name, value, access})
   end
 
-  def delete_secret(project_id, scope, name, access \\ nil) do
-    call_server(project_id, {:delete_secret, scope, name, access})
+  def delete_secret(project_id, scopes, name, access \\ nil) do
+    call_server(project_id, {:delete_secret, scopes, name, access})
   end
 
   def get_pools(project_id, workspace_id) do

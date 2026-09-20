@@ -1,68 +1,117 @@
 defmodule Coflux.Scopes do
   @moduledoc """
-  The workspace naming hierarchy, and the one relation asked of it:
-  whether a scope covers a workspace.
+  Scopes: the patterns that select workspaces.
 
-  A scope is a workspace name, or a prefix of one along the `/` in the
-  name - `development` covers `development/joe` and `development/joe/x` -
-  and the root scope, `""`, covers every workspace. Names are compared a
-  segment at a time, so `development` doesn't cover `development-2`.
+  A workspace name identifies one workspace - `development/joe`. A scope
+  selects a set of them:
 
-  Two things are defined in terms of this: which workspaces a secret set
-  for a scope applies to, and which workspaces a token's grant allows. A
-  grant is written as a pattern - `*` for the root, and `development` or
-  `development/*` for a subtree, which mean the same thing - and
-  `from_pattern/1` turns one into the scope it grants.
+    * `*` - every workspace
+    * `development/*` - every workspace under `development/`, but not
+      `development` itself
+    * `development` - that workspace, and nothing else
 
-  Coverage is closed downward: a scope that covers a workspace covers
-  everything under that workspace too. That is what makes it sound to
-  authorise a whole scope - setting a secret for one, say - by asking
-  only whether a grant covers the scope's own name.
+  The `*` is not a glob. `development/*` reaches `development/joe` and
+  `development/joe/feature-1` alike - it is a prefix of the name, not one
+  level of it. To select a workspace *and* everything under it, name both:
+  `development,development/*`.
+
+  Several scopes given together - a token's grant, or the workspaces a
+  secret is set for - mean the union of what each selects.
+
+  Two questions get asked of a scope, and they are not the same question:
+
+    * `covers?/2` - does this scope select this workspace? Asked when a
+      caller acts on a workspace, and when a secret is resolved for one.
+
+    * `contains?/2` - does this scope select everything that one does?
+      Asked when a caller hands authority on: setting a secret for a
+      scope, or minting a token for one. Selecting *part* of a scope is
+      not enough to give it away, and asking `covers?/2` there - treating
+      the scope as though it were a workspace name - is how a grant over
+      one workspace came to authorise a scope reaching others.
   """
 
-  @typedoc """
-  A scope, or `:never` - the scope of a pattern that grants nothing,
-  which covers no workspace at all.
-  """
-  @type t :: String.t() | :never
+  @scope_regex ~r/^[a-z0-9][a-z0-9_\/-]{0,99}$/i
 
   @doc """
-  Whether `scope` covers `name`: the workspace is the scope itself, or
-  lies under it.
+  Whether `scope` selects the workspace called `name`.
   """
-  @spec covers?(t(), String.t()) :: boolean()
-  def covers?(:never, _name), do: false
-  def covers?("", _name), do: true
+  @spec covers?(String.t(), String.t()) :: boolean()
+  def covers?("*", _name), do: true
 
-  def covers?(scope, name) when is_binary(scope) and is_binary(name),
-    do: name == scope or String.starts_with?(name, scope <> "/")
-
-  @doc """
-  The scope a grant pattern grants.
-
-  `*` is the root scope, and a trailing `/*` is optional, so
-  `development/*` and `development` both grant the `development`
-  subtree - the workspace itself and everything under it.
-
-  Anything that names nothing - an empty pattern, or a bare `/*` - grants
-  `:never` rather than the root, so a stored pattern that means nothing
-  can't come to mean everything.
-  """
-  @spec from_pattern(term()) :: t()
-  def from_pattern("*"), do: ""
-
-  def from_pattern(pattern) when is_binary(pattern) do
-    case String.replace_suffix(pattern, "/*", "") do
-      "" -> :never
-      scope -> scope
+  def covers?(scope, name) when is_binary(scope) and is_binary(name) do
+    case prefix_base(scope) do
+      nil -> name == scope
+      base -> String.starts_with?(name, base <> "/")
     end
   end
 
-  def from_pattern(_pattern), do: :never
+  @doc """
+  Whether `outer` selects everything `inner` selects.
+
+  A scope contains itself, `*` contains everything, and `development/*`
+  contains `development/joe` and `development/joe/*` - but not
+  `development`, which it doesn't select.
+  """
+  @spec contains?(String.t(), String.t()) :: boolean()
+  def contains?("*", _inner), do: true
+  def contains?(_outer, "*"), do: false
+
+  def contains?(outer, inner) when is_binary(outer) and is_binary(inner) do
+    case {prefix_base(outer), prefix_base(inner)} do
+      # An exact scope selects one workspace, so it can only contain the
+      # scope that selects the same one.
+      {nil, _} -> outer == inner
+      {base, nil} -> String.starts_with?(inner, base <> "/")
+      {base, inner_base} -> String.starts_with?(inner_base <> "/", base <> "/")
+    end
+  end
+
+  @doc "Whether any of `scopes` selects the workspace called `name`."
+  @spec covers_any?([String.t()], String.t()) :: boolean()
+  def covers_any?(scopes, name), do: Enum.any?(scopes, &covers?(&1, name))
+
+  @doc "Whether any of `scopes` contains `inner` whole."
+  @spec contains_any?([String.t()], String.t()) :: boolean()
+  def contains_any?(scopes, inner), do: Enum.any?(scopes, &contains?(&1, inner))
 
   @doc """
-  Whether a pattern names a scope - false for one that grants nothing.
+  Whether this is a scope: `*`, a workspace name, or one with `/*`.
   """
-  @spec valid_pattern?(term()) :: boolean()
-  def valid_pattern?(pattern), do: from_pattern(pattern) != :never
+  @spec valid?(term()) :: boolean()
+  def valid?("*"), do: true
+
+  def valid?(scope) when is_binary(scope) do
+    case prefix_base(scope) do
+      nil -> Regex.match?(@scope_regex, scope) and not String.ends_with?(scope, "/")
+      base -> base != "" and Regex.match?(@scope_regex, base)
+    end
+  end
+
+  def valid?(_scope), do: false
+
+  @doc """
+  How specific a scope is, for picking between those that all cover the
+  same workspace: an exact scope beats a prefix, a longer prefix beats a
+  shorter one, and `*` loses to everything.
+
+  Only meaningful between scopes covering the same workspace - which is
+  why it is a number and not an ordering of scopes in general.
+  """
+  @spec specificity(String.t()) :: {non_neg_integer(), non_neg_integer()}
+  def specificity("*"), do: {0, 0}
+
+  def specificity(scope) do
+    case prefix_base(scope) do
+      nil -> {2, byte_size(scope)}
+      base -> {1, byte_size(base)}
+    end
+  end
+
+  # The name before a trailing `/*`, or nil when the scope has none.
+  defp prefix_base(scope) do
+    if String.ends_with?(scope, "/*") do
+      binary_part(scope, 0, byte_size(scope) - 2)
+    end
+  end
 end

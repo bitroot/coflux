@@ -73,22 +73,14 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # Whether the caller can grant the requested access: every scope asked
-  # for has to sit within one the caller already has. Scopes are closed
-  # downward, so a caller's scope covering the root of a requested one
-  # covers all of it.
+  # Whether the caller can grant the requested access: each scope asked for
+  # has to be contained whole by one the caller holds. Holding a workspace
+  # inside a scope is not holding the scope.
   defp workspaces_covered?(:all, _requested), do: true
   defp workspaces_covered?(_caller, nil), do: true
 
-  defp workspaces_covered?(caller_patterns, requested) do
-    caller_scopes = Enum.map(caller_patterns, &Scopes.from_pattern/1)
-
-    Enum.all?(requested, fn pattern ->
-      case Scopes.from_pattern(pattern) do
-        :never -> false
-        scope -> Enum.any?(caller_scopes, &Scopes.covers?(&1, scope))
-      end
-    end)
+  defp workspaces_covered?(caller_scopes, requested) do
+    Enum.all?(requested, &Scopes.contains_any?(caller_scopes, &1))
   end
 
   defp handle(req, "GET", ["discover"], _project_id, %{workspaces: workspaces}) do
@@ -985,27 +977,26 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["set_secret"], project_id, access) do
-    case read_arguments(
-           req,
-           %{
-             name: {"name", &parse_secret_name/1},
-             value: {"value", &parse_secret_value/1}
-           },
-           %{scope: {"scope", &parse_secret_scope/1}}
-         ) do
+    case read_arguments(req, %{
+           name: {"name", &parse_secret_name/1},
+           value: {"value", &parse_secret_value/1},
+           workspaces: {"workspaces", &parse_workspaces/1}
+         }) do
       {:ok, arguments, req} ->
         case Orchestration.set_secret(
                project_id,
-               Map.get(arguments, :scope, ""),
+               arguments.workspaces,
                arguments.name,
                arguments.value,
                access
              ) do
-          {:ok, secret} ->
+          {:ok, secrets} ->
             json_response(req, %{
-              "name" => secret.name,
-              "scope" => secret.scope,
-              "version" => secret.version
+              "name" => arguments.name,
+              "secrets" =>
+                Enum.map(secrets, fn secret ->
+                  %{"workspaces" => secret.scope, "version" => secret.version}
+                end)
             })
 
           {:error, :forbidden} ->
@@ -1023,19 +1014,18 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp handle(req, "POST", ["delete_secret"], project_id, access) do
-    case read_arguments(
-           req,
-           %{name: {"name", &parse_secret_name/1}},
-           %{scope: {"scope", &parse_secret_scope/1}}
-         ) do
+    case read_arguments(req, %{
+           name: {"name", &parse_secret_name/1},
+           workspaces: {"workspaces", &parse_workspaces/1}
+         }) do
       {:ok, arguments, req} ->
         case Orchestration.delete_secret(
                project_id,
-               Map.get(arguments, :scope, ""),
+               arguments.workspaces,
                arguments.name,
                access
              ) do
-          :ok -> :cowboy_req.reply(204, req)
+          {:ok, deleted} -> json_response(req, %{"workspaces" => deleted})
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
@@ -1103,8 +1093,8 @@ defmodule Coflux.Handlers.Api do
   # Helper functions for handle/5 clauses
 
   defp parse_workspaces(value) when is_list(value) do
-    if Enum.all?(value, &Scopes.valid_pattern?/1) do
-      {:ok, value}
+    if value != [] and Enum.all?(value, &Scopes.valid?/1) do
+      {:ok, Enum.uniq(value)}
     else
       {:error, :invalid}
     end
@@ -1698,10 +1688,6 @@ defmodule Coflux.Handlers.Api do
 
   defp parse_secret_name(value) do
     if Coflux.Admin.Secrets.valid_name?(value), do: {:ok, value}, else: {:error, :invalid}
-  end
-
-  defp parse_secret_scope(value) do
-    if Coflux.Admin.Secrets.valid_scope?(value), do: {:ok, value}, else: {:error, :invalid}
   end
 
   defp parse_secret_value(value) do

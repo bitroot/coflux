@@ -2,7 +2,9 @@
 
 Changes:
 
-- A workspace pattern on a token now grants the workspace it names *and everything under it*, so `development/*` covers `development` itself (as documented, but not previously implemented), and a plain `development` covers `development/joe`. Previously a plain pattern matched one workspace exactly, and `development/*` matched everything below `development` but not `development` itself. Tokens already issued widen accordingly, always to workspaces under a name the token already held. Patterns that name nothing (an empty pattern) are now rejected when creating a token.
+- Workspace patterns mean one thing everywhere now. A pattern selects a workspace (`development`), the workspaces under it (`development/*`, at any depth, but not `development` itself), or all of them (`*`) — the rule tokens already used, now used for a secret's workspaces too, where a bare name previously selected everything beneath it as well. Patterns that name nothing are rejected.
+- Setting a secret takes access containing every pattern given, whole, rather than access to any one workspace the pattern reaches — so a token for `staging` can no longer set a secret reaching `staging/feature-1`.
+- Secrets are set for one or more workspace patterns (`workspaces` on `set_secret` and `delete_secret`, replacing `scope`), stored once per pattern. Where patterns overlap, the nearest wins: an exact workspace, then a longer prefix, then a shorter one, then `*`.
 
 ## 0.12.0
 

@@ -9,11 +9,12 @@ defmodule Coflux.Admin.Secrets do
   value and bumps the version; deleting it removes it. Nothing older is
   kept, so a rotated or deleted value is gone from here.
 
-  A secret is set for a scope, as `Coflux.Scopes` defines one: a secret
-  for `development` applies to `development/joe`, and the nearest scope
-  wins. The root scope is the whole project. This follows the naming
-  hierarchy rather than the base-workspace chain: a workspace that
-  inherits results from `production` doesn't inherit its secrets.
+  A secret is set for a scope, as `Coflux.Scopes` defines one: `*` for
+  every workspace, `development/*` for those under `development/`, or a
+  workspace name for that one alone. Where scopes overlap the nearest one
+  wins. This follows the naming hierarchy rather than the base-workspace
+  chain: a workspace that inherits results from `production` doesn't
+  inherit its secrets.
 
   Pools name secrets in fields that take nothing else - `tokenSecret`,
   `credentialsSecret`, `envSecrets` - and the values are resolved for a
@@ -28,16 +29,10 @@ defmodule Coflux.Admin.Secrets do
   @max_value_bytes 65_536
 
   @name_regex ~r/^[a-z0-9][a-z0-9_-]{0,63}$/i
-  @scope_regex ~r/^[a-z0-9][a-z0-9_\/-]{0,99}$/i
 
   def valid_name?(name), do: is_binary(name) and Regex.match?(@name_regex, name)
 
-  def valid_scope?(""), do: true
-
-  def valid_scope?(scope),
-    do:
-      is_binary(scope) and Regex.match?(@scope_regex, scope) and
-        not String.ends_with?(scope, "/")
+  defdelegate valid_scope?(scope), to: Coflux.Scopes, as: :valid?
 
   def valid_value?(value), do: is_binary(value) and byte_size(value) <= @max_value_bytes
 
@@ -302,7 +297,7 @@ defmodule Coflux.Admin.Secrets do
 
   # --- Storage and crypto ---
 
-  # Nearest scope wins: the longest that covers the workspace.
+  # Nearest scope wins: of those covering the workspace, the most specific.
   defp find(db, workspace_name, name) do
     {:ok, rows} =
       Store.query(
@@ -313,7 +308,7 @@ defmodule Coflux.Admin.Secrets do
 
     rows
     |> Enum.filter(fn {scope, _, _, _} -> scope_applies?(scope, workspace_name) end)
-    |> Enum.max_by(fn {scope, _, _, _} -> byte_size(scope) end, fn -> nil end)
+    |> Enum.max_by(fn {scope, _, _, _} -> Coflux.Scopes.specificity(scope) end, fn -> nil end)
     |> case do
       nil -> {:error, :not_found}
       row -> {:ok, row}

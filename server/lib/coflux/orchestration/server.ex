@@ -27,6 +27,7 @@ defmodule Coflux.Orchestration.Server do
     WorkspaceUpdated
   }
 
+  alias Coflux.Scopes
   alias Coflux.Store.{Epochs, Index}
 
   alias Coflux.Orchestration.{
@@ -318,37 +319,65 @@ defmodule Coflux.Orchestration.Server do
 
   # Secrets
 
-  defp dispatch_call({:set_secret, scope, name, value, access}, state) do
-    with :ok <- check_secret_scope_access(access, scope),
-         {:ok, secret} <-
-           Coflux.Admin.Secrets.set(
-             state.admin_db,
-             state.project_id,
-             scope,
-             name,
-             value,
-             principal_identity(state, access)
-           ) do
-      state =
-        Effects.emit(state, %SecretSet{
-          scope: secret.scope,
-          name: secret.name,
-          version: secret.version,
-          created_at: secret.created_at,
-          updated_at: secret.updated_at,
-          updated_by: secret.updated_by
-        })
+  # A secret is set for one or more scopes, each stored on its own. Access
+  # to every scope is checked before any is written, so a request that
+  # isn't wholly allowed changes nothing.
+  defp dispatch_call({:set_secret, scopes, name, value, access}, state) do
+    with :ok <- check_secret_scope_access(access, scopes) do
+      identity = principal_identity(state, access)
 
-      {:reply, {:ok, secret}, state}
+      Enum.reduce_while(scopes, {:reply, {:ok, []}, state}, fn scope,
+                                                               {:reply, {:ok, secrets}, state} ->
+        case Coflux.Admin.Secrets.set(
+               state.admin_db,
+               state.project_id,
+               scope,
+               name,
+               value,
+               identity
+             ) do
+          {:ok, secret} ->
+            state =
+              Effects.emit(state, %SecretSet{
+                scope: secret.scope,
+                name: secret.name,
+                version: secret.version,
+                created_at: secret.created_at,
+                updated_at: secret.updated_at,
+                updated_by: secret.updated_by
+              })
+
+            {:cont, {:reply, {:ok, secrets ++ [secret]}, state}}
+
+          {:error, reason} ->
+            {:halt, {:reply, {:error, reason}, state}}
+        end
+      end)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  defp dispatch_call({:delete_secret, scope, name, access}, state) do
-    with :ok <- check_secret_scope_access(access, scope),
-         :ok <- Coflux.Admin.Secrets.delete(state.admin_db, scope, name) do
-      {:reply, :ok, Effects.emit(state, %SecretDeleted{scope: scope, name: name})}
+  # Deleting is done scope by scope: it is not an error for a secret to be
+  # absent from some of them, only from all of them.
+  defp dispatch_call({:delete_secret, scopes, name, access}, state) do
+    with :ok <- check_secret_scope_access(access, scopes) do
+      {state, deleted} =
+        Enum.reduce(scopes, {state, []}, fn scope, {state, deleted} ->
+          case Coflux.Admin.Secrets.delete(state.admin_db, scope, name) do
+            :ok ->
+              {Effects.emit(state, %SecretDeleted{scope: scope, name: name}), deleted ++ [scope]}
+
+            {:error, :not_found} ->
+              {state, deleted}
+          end
+        end)
+
+      if deleted == [] do
+        {:reply, {:error, :not_found}, state}
+      else
+        {:reply, {:ok, deleted}, state}
+      end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -2976,15 +3005,22 @@ defmodule Coflux.Orchestration.Server do
 
   # Private helper functions
 
-  # A secret in a scope is a secret for every workspace under it, so
-  # setting one takes operator access to the scope itself. Scopes are
-  # closed downward (see `Coflux.Scopes`), so a grant covering the scope's
-  # own name covers everything the secret can reach - asking about the
-  # name alone is enough. The root scope is covered only by a `*` grant.
-  defp check_secret_scope_access(nil, _scope), do: :ok
+  # A secret set for a scope is a secret for every workspace that scope
+  # selects, so setting one takes a grant that contains the scope whole.
+  # Holding one workspace inside it isn't enough - that is the difference
+  # between `Scopes.covers?/2` and `Scopes.contains?/2`.
+  defp check_secret_scope_access(nil, _scopes), do: :ok
 
-  defp check_secret_scope_access(access, scope) do
-    if Permissions.operator?(access[:workspaces], scope), do: :ok, else: {:error, :forbidden}
+  defp check_secret_scope_access(access, scopes) do
+    case access[:workspaces] do
+      :all ->
+        :ok
+
+      granted ->
+        if Enum.all?(scopes, &Scopes.contains_any?(granted, &1)),
+          do: :ok,
+          else: {:error, :forbidden}
+    end
   end
 
   defp principal_identity(state, access) do

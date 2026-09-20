@@ -369,16 +369,19 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 
 // Secrets API
 
-// SetSecretResult is what the server says about a secret it has set.
+// SetSecretResult is what the server says about the secrets it has set -
+// one entry per workspace pattern the value was stored for.
 type SetSecretResult struct {
 	Name    string `json:"name"`
-	Scope   string `json:"scope"`
-	Version int    `json:"version"`
+	Secrets []struct {
+		Workspaces string `json:"workspaces"`
+		Version    int    `json:"version"`
+	} `json:"secrets"`
 }
 
-// SetSecret sets a secret's value for a scope ("" for the whole project).
-func (c *Client) SetSecret(ctx context.Context, scope, name, value string) (*SetSecretResult, error) {
-	body := map[string]any{"name": name, "value": value, "scope": scope}
+// SetSecret sets a secret's value for each of the given workspace patterns.
+func (c *Client) SetSecret(ctx context.Context, workspaces []string, name, value string) (*SetSecretResult, error) {
+	body := map[string]any{"name": name, "value": value, "workspaces": workspaces}
 	var result SetSecretResult
 	if _, err := c.post(ctx, "/api/set_secret", body, &result); err != nil {
 		return nil, err
@@ -386,11 +389,20 @@ func (c *Client) SetSecret(ctx context.Context, scope, name, value string) (*Set
 	return &result, nil
 }
 
-// DeleteSecret deletes a secret from a scope ("" for the whole project).
-func (c *Client) DeleteSecret(ctx context.Context, scope, name string) error {
-	body := map[string]any{"name": name, "scope": scope}
-	_, err := c.post(ctx, "/api/delete_secret", body, nil)
-	return err
+// DeleteSecretResult is the workspace patterns a secret was deleted from -
+// those of the requested ones it was actually set for.
+type DeleteSecretResult struct {
+	Workspaces []string `json:"workspaces"`
+}
+
+// DeleteSecret deletes a secret from each of the given workspace patterns.
+func (c *Client) DeleteSecret(ctx context.Context, workspaces []string, name string) (*DeleteSecretResult, error) {
+	body := map[string]any{"name": name, "workspaces": workspaces}
+	var result DeleteSecretResult
+	if _, err := c.post(ctx, "/api/delete_secret", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // ListSecrets lists the project's secrets: names, scopes and versions.

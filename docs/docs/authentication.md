@@ -42,7 +42,9 @@ Service tokens can be created and scoped to specific workspaces, making them sui
 coflux tokens create --name "CI" --workspaces "production/*"
 ```
 
-A pattern grants a workspace and everything under it, following the `/` in workspace names. So `production` and `production/*` both cover `production` itself and `production/eu`, but neither covers `production-2`. Use `*` for every workspace. A token can't be created with broader access than the token creating it has, and one created without `--workspaces` inherits the creating token's access.
+A pattern selects workspaces: `production` is that workspace alone, `production/*` is the workspaces under it, and `*` is all of them. Give several, comma-separated, for the union — `production,production/*` covers a workspace and everything under it. The `*` spans any depth, so `production/*` reaches `production/eu/batch`, and it follows the `/` in names, so neither pattern ever selects `production-2`.
+
+A token can't be created with broader access than the token creating it has: each pattern it asks for has to sit wholly inside one the creator holds. A token created without `--workspaces` inherits the creating token's access.
 
 Service tokens require `COFLUX_SECRET` to be configured on the server. This secret is used to derive per-project signing keys.
 

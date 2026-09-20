@@ -10,9 +10,10 @@ defmodule Coflux.Orchestration.Server.Permissions do
   Access arrives as the caller's grant - a token's workspace patterns, or
   a studio session's - and `nil` means an internal caller with no
   restriction. A pattern grants a scope of the workspace naming
-  hierarchy, which `Coflux.Scopes` defines, and an operator grant
-  additionally allows the management operations (creating workspaces,
-  editing pools, revoking tokens) that a plain workspace grant does not.
+  hierarchy, which `Coflux.Scopes` defines. There is one level of it: a
+  grant covering a workspace allows everything in that workspace, from
+  submitting a run to editing its pools. "Operator" here means only that
+  - holding the workspace - not a second, higher kind of grant.
 
   Also here: which workspaces a cache lookup may reach into, which is the
   same question of visibility asked of the workspace graph rather than of
@@ -61,9 +62,7 @@ defmodule Coflux.Orchestration.Server.Permissions do
 
   def operator?(:all, _workspace), do: true
 
-  def operator?(patterns, workspace) do
-    Enum.any?(patterns, &Scopes.covers?(Scopes.from_pattern(&1), workspace))
-  end
+  def operator?(scopes, workspace), do: Scopes.covers_any?(scopes, workspace)
 
   def check_operator_access(nil, _name), do: :ok
 

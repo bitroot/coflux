@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -17,48 +18,53 @@ var secretsCmd = &cobra.Command{
 or environment variables for workers - and that never appear in a pool's
 configuration.
 
-A secret is set for a scope: a workspace name, or a prefix of one. A secret for
-'development' applies to 'development/joe', and the nearest scope wins. Without
---scope or --global, the scope is the current workspace.`,
+Every secret is set for one or more workspaces, given as --workspaces: a
+workspace name for that one alone, 'development/*' for those under it, or '*'
+for all of them. The '*' spans any depth, so 'development/*' reaches
+'development/joe/feature-1' too, but it doesn't include 'development' itself -
+give both ('development,development/*') for that.
+
+Where scopes overlap the nearest wins: an exact workspace beats a longer
+prefix, which beats a shorter one, which beats '*'.`,
 }
 
 var (
-	secretsScope    string
-	secretsGlobal   bool
-	secretsFromEnv  string
-	secretsFromFile string
+	secretsWorkspaces string
+	secretsFromEnv    string
+	secretsFromFile   string
 )
 
 func init() {
 	for _, cmd := range []*cobra.Command{secretsSetCmd, secretsDeleteCmd} {
-		cmd.Flags().StringVar(&secretsScope, "scope", "", "Workspace name, or prefix, the secret applies to (default: the current workspace)")
-		cmd.Flags().BoolVar(&secretsGlobal, "global", false, "Apply to every workspace in the project")
+		cmd.Flags().StringVar(&secretsWorkspaces, "workspaces", "", "Comma-separated workspace patterns the secret applies to")
+		cmd.MarkFlagRequired("workspaces")
 	}
 	secretsSetCmd.Flags().StringVar(&secretsFromEnv, "from-env", "", "Read the value from this environment variable")
 	secretsSetCmd.Flags().StringVar(&secretsFromFile, "from-file", "", "Read the value from this file")
 	secretsCmd.AddCommand(secretsSetCmd, secretsListCmd, secretsDeleteCmd)
 }
 
-// secretScope is the scope a secret is set or deleted in: "" for the whole
-// project, else a workspace name or prefix.
-func secretScope() (string, error) {
-	if secretsGlobal && secretsScope != "" {
-		return "", fmt.Errorf("--scope and --global can't both be given")
+// secretWorkspaces is the patterns a secret is set for or deleted from. The
+// secret is stored once per pattern, so each is listed and rotated on its own.
+func secretWorkspaces() ([]string, error) {
+	var workspaces []string
+	for _, part := range strings.Split(secretsWorkspaces, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			workspaces = append(workspaces, part)
+		}
 	}
-	if secretsGlobal {
-		return "", nil
+	if len(workspaces) == 0 {
+		return nil, fmt.Errorf("--workspaces can't be empty")
 	}
-	if secretsScope != "" {
-		return secretsScope, nil
-	}
-	return requireWorkspace()
+	return workspaces, nil
 }
 
-func describeScope(scope string) string {
-	if scope == "" {
-		return "all workspaces"
+func describeWorkspaces(workspaces []string) string {
+	quoted := make([]string, len(workspaces))
+	for i, workspace := range workspaces {
+		quoted[i] = fmt.Sprintf("'%s'", workspace)
 	}
-	return fmt.Sprintf("'%s'", scope)
+	return strings.Join(quoted, ", ")
 }
 
 // secrets set
@@ -71,8 +77,9 @@ var secretsSetCmd = &cobra.Command{
 The value is read from stdin, so it never appears on the command line or in
 shell history:
 
-  printf '%s' "$API_KEY" | coflux secrets set api-key
-  aws configure export-credentials --profile sandbox | coflux secrets set aws-sandbox
+  printf '%s' "$API_KEY" | coflux secrets set api-key --workspaces '*'
+  aws configure export-credentials --profile sandbox |
+    coflux secrets set aws-sandbox --workspaces 'production/*'
 
 Or from an environment variable (--from-env) or a file (--from-file). A single
 trailing newline is dropped, so 'echo' works too.`,
@@ -83,7 +90,7 @@ trailing newline is dropped, so 'echo' works too.`,
 func runSecretsSet(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	scope, err := secretScope()
+	workspaces, err := secretWorkspaces()
 	if err != nil {
 		return err
 	}
@@ -98,12 +105,14 @@ func runSecretsSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.SetSecret(cmd.Context(), scope, name, value)
+	result, err := client.SetSecret(cmd.Context(), workspaces, name, value)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Set secret '%s' (version %d) for %s.\n", result.Name, result.Version, describeScope(result.Scope))
+	for _, secret := range result.Secrets {
+		fmt.Printf("Set secret '%s' (version %d) for '%s'.\n", result.Name, secret.Version, secret.Workspaces)
+	}
 	return nil
 }
 
@@ -150,7 +159,7 @@ func readSecretValue() (string, error) {
 var secretsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List secrets",
-	Long:  "List the project's secrets: their names, scopes and versions. Never their values.",
+	Long:  "List the project's secrets: their names, workspaces and versions. Never their values.",
 	RunE:  runSecretsList,
 }
 
@@ -184,24 +193,20 @@ func runSecretsList(cmd *cobra.Command, args []string) error {
 
 	var rows [][]string
 	for _, s := range secrets {
-		scope := getString(s, "scope")
-		if scope == "" {
-			scope = "(all)"
-		}
 		by := "-"
 		if principal, ok := s["updatedBy"].(map[string]any); ok {
 			by = fmt.Sprintf("%s %s", getString(principal, "type"), getString(principal, "externalId"))
 		}
 		rows = append(rows, []string{
 			getString(s, "name"),
-			scope,
+			getString(s, "scope"),
 			fmt.Sprintf("%d", int(getFloat64(s, "version"))),
 			formatTimestamp(getInt64(s, "updatedAt")),
 			by,
 		})
 	}
 
-	printTable([]string{"Name", "Scope", "Version", "Updated", "By"}, rows)
+	printTable([]string{"Name", "Workspaces", "Version", "Updated", "By"}, rows)
 	return nil
 }
 
@@ -217,7 +222,7 @@ var secretsDeleteCmd = &cobra.Command{
 func runSecretsDelete(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	scope, err := secretScope()
+	workspaces, err := secretWorkspaces()
 	if err != nil {
 		return err
 	}
@@ -227,10 +232,11 @@ func runSecretsDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := client.DeleteSecret(cmd.Context(), scope, name); err != nil {
+	result, err := client.DeleteSecret(cmd.Context(), workspaces, name)
+	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Deleted secret '%s' for %s.\n", name, describeScope(scope))
+	fmt.Printf("Deleted secret '%s' for %s.\n", name, describeWorkspaces(result.Workspaces))
 	return nil
 }
