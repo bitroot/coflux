@@ -2,6 +2,7 @@
 
 Enhancements:
 
+- A worker launched on ECS that fails now carries the tail of its log stream, read from CloudWatch, the way the Docker, Kubernetes and process launchers already carry the container's own output. It needs the task definition to use the `awslogs` driver and the launcher's identity to have `logs:GetLogEvents`; without either, the worker reports what ECS said about the stop — now including the container's own reason and exit code rather than only the task-level message, which for a container exit says nothing but that it exited.
 - The ECS launcher can assume an IAM role (`roleArn`, with `roleExternalId` where the trust policy asks for one) with whatever credentials it finds, so a server in one account can launch into another. The search of the server's surroundings now includes a web identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, as EKS sets for a pod whose service account has a role). Credentials issued by STS are cached until shortly before they expire.
 
 Changes:

@@ -26,6 +26,12 @@ defmodule Coflux.EcsLauncher do
   alias Coflux.Launchers.AwsCredentials
 
   @api_target_prefix "AmazonEC2ContainerServiceV20141113"
+  @logs_target_prefix "Logs_20140328"
+
+  # Matches the other launchers, so a failed worker reads the same however
+  # it was launched.
+  @log_tail_lines 20
+  @log_max_bytes 1024
   @reason_max_bytes 1024
 
   # ECS limits `startedBy` to 36 characters.
@@ -96,7 +102,7 @@ defmodule Coflux.EcsLauncher do
            ecs_request(conn, "DescribeTasks", %{"cluster" => cluster, "tasks" => [task_arn]}) do
       case body do
         %{"tasks" => [task | _]} ->
-          interpret_task(task, data)
+          interpret_task(task, data, conn)
 
         # Stopped tasks are only described for an hour or so afterwards;
         # one that has aged out has nothing left to say.
@@ -116,15 +122,148 @@ defmodule Coflux.EcsLauncher do
 
   # --- Task state ---
 
-  defp interpret_task(%{"lastStatus" => "STOPPED"} = task, data) do
+  defp interpret_task(%{"lastStatus" => "STOPPED"} = task, data, conn) do
     error = stop_error(task, data[:container_name])
-    logs = if error, do: stopped_reason(task)
+    logs = if error, do: failure_logs(task, data[:container_name], conn)
     {:ok, false, error, logs}
   end
 
   # Anything else - provisioning, pending, running, or on its way to
   # stopped - is a task that hasn't finished yet.
-  defp interpret_task(_task, _data), do: {:ok, true}
+  defp interpret_task(_task, _data, _conn), do: {:ok, true}
+
+  # --- Failure diagnostics ---
+
+  # What to show for a worker that died. The other launchers put the
+  # container's own output here; ECS doesn't serve that through its API,
+  # so this reads CloudWatch when the task definition logs there and the
+  # role is allowed to read it, and falls back to what ECS itself said.
+  #
+  # Every step is best-effort. A worker that died has already been
+  # recorded; a log fetch that fails must never turn into a failed poll,
+  # so this narrows to a string or nil and swallows anything else.
+  defp failure_logs(task, container_name, conn) do
+    fetch_log_tail(task, container_name, conn) || stop_detail(task, container_name)
+  rescue
+    _ -> stop_detail(task, container_name)
+  catch
+    _, _ -> stop_detail(task, container_name)
+  end
+
+  # ECS's own account of the stop: the task-level reason (for a container
+  # exit this is only ever "Essential container in task exited"), plus
+  # whatever the container itself reported, which is where anything
+  # specific tends to be.
+  defp stop_detail(task, container_name) do
+    container = find_container(task["containers"], container_name)
+
+    [
+      stopped_reason(task),
+      container && container["reason"],
+      container && exit_code_detail(container)
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> case do
+      [] -> nil
+      parts -> truncate_bytes(Enum.join(parts, " - "), @reason_max_bytes)
+    end
+  end
+
+  defp exit_code_detail(%{"exitCode" => code}) when is_integer(code), do: "exit code #{code}"
+  defp exit_code_detail(_container), do: nil
+
+  # The tail of the container's log stream, when there is one to read.
+  # Returns nil for every reason it might not be readable - no log
+  # configuration, a driver other than awslogs, no stream prefix to build
+  # the name from, the role lacking `logs:GetLogEvents`, or the events
+  # simply not having been delivered yet.
+  defp fetch_log_tail(task, container_name, conn) do
+    with {:ok, options} <- awslogs_options(task, container_name, conn),
+         {:ok, group} <- fetch_option(options, "awslogs-group"),
+         {:ok, prefix} <- fetch_option(options, "awslogs-stream-prefix"),
+         {:ok, name} <- container_name_for_logs(task, container_name),
+         {:ok, task_id} <- task_id(task) do
+      region = options["awslogs-region"] || conn.region
+      stream = "#{prefix}/#{name}/#{task_id}"
+
+      case logs_request(conn, region, "GetLogEvents", %{
+             "logGroupName" => group,
+             "logStreamName" => stream,
+             "limit" => @log_tail_lines,
+             "startFromHead" => false
+           }) do
+        {:ok, %{"events" => events}} when is_list(events) -> format_events(events)
+        _ -> nil
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp format_events(events) do
+    events
+    |> Enum.map(&Map.get(&1, "message"))
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join("\n")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      text -> truncate_bytes(text, @log_max_bytes)
+    end
+  end
+
+  # The log configuration is on the container definition, so this costs a
+  # DescribeTaskDefinition - only ever on the failure path, and only worth
+  # anything for the awslogs driver.
+  defp awslogs_options(%{"taskDefinitionArn" => arn}, container_name, conn) when is_binary(arn) do
+    case ecs_request(conn, "DescribeTaskDefinition", %{"taskDefinition" => arn}) do
+      {:ok, %{"taskDefinition" => %{"containerDefinitions" => containers}}}
+      when is_list(containers) ->
+        container =
+          Enum.find(containers, &(&1["name"] == container_name)) || List.first(containers)
+
+        case container do
+          %{"logConfiguration" => %{"logDriver" => "awslogs", "options" => options}}
+          when is_map(options) ->
+            {:ok, options}
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp awslogs_options(_task, _container_name, _conn), do: :error
+
+  defp fetch_option(options, key) do
+    case Map.get(options, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  # The stream is named after the container the log configuration belongs
+  # to, which is the one the pool overrides, or the task's only one.
+  defp container_name_for_logs(_task, name) when is_binary(name) and name != "", do: {:ok, name}
+
+  defp container_name_for_logs(%{"containers" => [%{"name" => name} | _]}, _name)
+       when is_binary(name),
+       do: {:ok, name}
+
+  defp container_name_for_logs(_task, _name), do: :error
+
+  defp task_id(%{"taskArn" => arn}) when is_binary(arn) do
+    case arn |> String.split("/") |> List.last() do
+      id when is_binary(id) and id != "" -> {:ok, id}
+      _ -> :error
+    end
+  end
+
+  defp task_id(_task), do: :error
 
   # Returns nil for a task that stopped because it was asked to, or an
   # error code for one that didn't.
@@ -153,15 +292,11 @@ defmodule Coflux.EcsLauncher do
   defp failed_to_start_error(_reason), do: "task_failed_to_start"
 
   defp container_exit_error(containers, container_name) when is_list(containers) do
-    container =
-      Enum.find(containers, &(&1["name"] == container_name)) ||
-        Enum.find(containers, &is_integer(&1["exitCode"]))
-
-    case container do
-      %{"reason" => reason} when is_binary(reason) ->
+    case find_container(containers, container_name) do
+      %{"reason" => reason} = container when is_binary(reason) ->
         if reason =~ "OutOfMemory", do: "oom_killed", else: exit_code_error(container)
 
-      %{} ->
+      %{} = container ->
         exit_code_error(container)
 
       nil ->
@@ -170,6 +305,13 @@ defmodule Coflux.EcsLauncher do
   end
 
   defp container_exit_error(_containers, _container_name), do: "container_exited"
+
+  defp find_container(containers, container_name) when is_list(containers) do
+    Enum.find(containers, &(&1["name"] == container_name)) ||
+      Enum.find(containers, &is_integer(&1["exitCode"]))
+  end
+
+  defp find_container(_containers, _container_name), do: nil
 
   defp exit_code_error(%{"exitCode" => 0}), do: nil
   defp exit_code_error(%{"exitCode" => code}) when is_integer(code), do: "exit_code:#{code}"
@@ -363,13 +505,17 @@ defmodule Coflux.EcsLauncher do
            AwsCredentials.resolve(static_credentials(config),
              region: region,
              role_arn: config[:role_arn],
-             external_id: config[:role_external_id]
+             external_id: config[:role_external_id],
+             req_options: Map.get(config, :req_options, [])
            ) do
       {:ok,
        %{
          region: region,
          endpoint: config[:endpoint] || default_endpoint(region),
-         credentials: credentials
+         credentials: credentials,
+         # Extra options for `Req.request/1`, so a test can stub the API
+         # without reaching AWS. Never set in normal operation.
+         req_options: Map.get(config, :req_options, [])
        }}
     end
   end
@@ -391,12 +537,38 @@ defmodule Coflux.EcsLauncher do
   # The ECS API is JSON 1.1 over HTTPS: every call is a POST to the
   # regional endpoint, and the header says which operation.
   defp ecs_request(conn, action, body) do
+    aws_json_request(
+      conn,
+      "ecs",
+      conn.region,
+      conn.endpoint,
+      "#{@api_target_prefix}.#{action}",
+      body
+    )
+  end
+
+  # CloudWatch Logs, for the tail of a failed worker. A separate service
+  # and endpoint, but the same JSON 1.1 shape and the same credentials.
+  # An `endpoint` override on the pool names an ECS endpoint, so it is
+  # deliberately not reused here.
+  defp logs_request(conn, region, action, body) do
+    aws_json_request(
+      conn,
+      "logs",
+      region,
+      "https://logs.#{region}.amazonaws.com",
+      "#{@logs_target_prefix}.#{action}",
+      body
+    )
+  end
+
+  defp aws_json_request(conn, service, region, endpoint, target, body) do
     credentials = conn.credentials
 
     sigv4 =
       [
-        service: "ecs",
-        region: conn.region,
+        service: service,
+        region: region,
         access_key_id: credentials.access_key_id,
         secret_access_key: credentials.secret_access_key
       ]
@@ -405,16 +577,17 @@ defmodule Coflux.EcsLauncher do
     request =
       [
         method: :post,
-        url: conn.endpoint,
+        url: endpoint,
         headers: [
           {"content-type", "application/x-amz-json-1.1"},
-          {"x-amz-target", "#{@api_target_prefix}.#{action}"}
+          {"x-amz-target", target}
         ],
         body: Jason.encode!(body),
         aws_sigv4: sigv4,
         retry: false,
         decode_body: false
       ]
+      |> Keyword.merge(Map.get(conn, :req_options, []))
 
     case Req.request(request) do
       {:ok, %{status: status, body: raw}} ->

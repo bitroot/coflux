@@ -162,13 +162,18 @@ Whichever identity calls ECS - the role, or the credentials themselves
 when there's no role - needs `ecs:RunTask`, `ecs:DescribeTasks` and
 `ecs:StopTask` on the cluster, `ecs:DescribeTaskDefinition` unless
 `containerName` is set, and `iam:PassRole` for the roles the task
-definition names. Credentials that assume a role need `sts:AssumeRole` on
+definition names. `logs:GetLogEvents` on the log group is optional: with
+it a failed worker carries the tail of its output, and without it the
+worker is still reported, with less to go on. Credentials that assume a role need `sts:AssumeRole` on
 it, and the role's trust policy has to allow them to.
 
 ECS doesn't expose container output through its API, so a worker's log
-tail isn't shown; a task that fails to start reports its reason in its
-place. Give the task definition a log configuration (`awslogs`, say) to
-see what workers print.
+tail is read from CloudWatch instead. That needs the task definition to
+use the `awslogs` driver with a stream prefix, and the identity calling
+ECS to have `logs:GetLogEvents` on the log group. Where any of that is
+missing the worker reports what ECS itself said about the stop, which for
+a container that exited is little more than its exit code — so a task
+definition without a log configuration is worth giving one.
 
 | Field | Description |
 |-------|-------------|
