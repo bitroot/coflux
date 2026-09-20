@@ -572,7 +572,7 @@ defmodule Coflux.Orchestration.Workspaces do
     |> apply_patch_field(patch, :modules)
     |> apply_patch_field(patch, :provides)
     |> apply_patch_field(patch, :accepts)
-    |> apply_patch_field(patch, :idle_timeout)
+    |> apply_patch_field(patch, :idle_timeout_ms)
     |> apply_launcher_patch(patch)
   end
 
@@ -732,7 +732,7 @@ defmodule Coflux.Orchestration.Workspaces do
          provides_tag_set_id,
          accepts_tag_set_id,
          modules,
-         idle_timeout
+         idle_timeout_ms
        ) do
     launcher_hash =
       if launcher_id do
@@ -766,7 +766,7 @@ defmodule Coflux.Orchestration.Workspaces do
 
     # Only part of the hash when set, so a definition without one keeps
     # the hash it had before the field existed.
-    idle_timeout_part = if idle_timeout, do: [Integer.to_string(idle_timeout)], else: []
+    idle_timeout_part = if idle_timeout_ms, do: [Integer.to_string(idle_timeout_ms)], else: []
 
     data =
       Enum.intersperse(
@@ -787,7 +787,7 @@ defmodule Coflux.Orchestration.Workspaces do
     provides = Map.get(pool, :provides, %{})
     accepts = Map.get(pool, :accepts, %{})
     launcher = Map.get(pool, :launcher)
-    idle_timeout = Map.get(pool, :idle_timeout)
+    idle_timeout_ms = Map.get(pool, :idle_timeout_ms)
 
     launcher_id =
       if launcher do
@@ -817,7 +817,7 @@ defmodule Coflux.Orchestration.Workspaces do
         provides_tag_set_id,
         accepts_tag_set_id,
         modules,
-        idle_timeout
+        idle_timeout_ms
       )
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
@@ -831,7 +831,7 @@ defmodule Coflux.Orchestration.Workspaces do
             provides_tag_set_id: provides_tag_set_id,
             accepts_tag_set_id: accepts_tag_set_id,
             launcher_id: launcher_id,
-            idle_timeout: idle_timeout
+            idle_timeout_ms: idle_timeout_ms
           })
 
         {:ok, _} =
@@ -914,10 +914,10 @@ defmodule Coflux.Orchestration.Workspaces do
   defp get_pool_definition(db, pool_definition_id) do
     case query_one(
            db,
-           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout FROM pool_definitions WHERE id = ?1",
+           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms FROM pool_definitions WHERE id = ?1",
            {pool_definition_id}
          ) do
-      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout}} ->
+      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms}} ->
         provides =
           if provides_tag_set_id do
             case TagSets.get_tag_set(db, provides_tag_set_id) do
@@ -959,7 +959,7 @@ defmodule Coflux.Orchestration.Workspaces do
            accepts: accepts,
            modules: modules,
            launcher: launcher,
-           idle_timeout: idle_timeout
+           idle_timeout_ms: idle_timeout_ms
          }}
 
       {:ok, nil} ->

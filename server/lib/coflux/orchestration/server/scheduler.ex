@@ -22,7 +22,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
       and whose tags match what the execution requires.
 
   The pass also sweeps the fleet: sessions that have gone quiet are
-  polled, workers past their idle timeout are stopped, and pools short of
+  polled, workers past their idle timeout_ms are stopped, and pools short of
   their declared size get another worker launched.
   """
 
@@ -162,7 +162,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                   Permissions.get_cache_workspace_ids(state, execution.workspace_id)
 
                 cache = Map.fetch!(cache_configs, execution.cache_config_id)
-                recorded_after = if cache.max_age, do: now - cache.max_age, else: 0
+                recorded_after = if cache.max_age_ms, do: now - cache.max_age_ms, else: 0
 
                 Archives.find_cached_execution_across_epochs(
                   state,
@@ -275,7 +275,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                                 enriched_arguments,
                                 execution.run_external_id,
                                 workspace_external_id,
-                                execution.timeout,
+                                execution.timeout_ms,
                                 Scheduling.build_streams_config(
                                   execution.streams_buffer,
                                   execution.streams_timeout_ms
@@ -336,8 +336,8 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                                      do: nil,
                                      else: execution.retry_limit
                                    ),
-                                 backoff_min: execution.retry_backoff_min,
-                                 backoff_max: execution.retry_backoff_max
+                                 backoff_min_ms: execution.retry_backoff_min_ms,
+                                 backoff_max_ms: execution.retry_backoff_max_ms
                                }
                              ),
                            requires: requires,
@@ -468,19 +468,19 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                     )
 
                   # Create a session for the pool-launched worker
-                  activation_timeout =
-                    Map.get(pool, :activation_timeout, @default_activation_timeout_ms)
+                  activation_timeout_ms =
+                    Map.get(pool, :activation_timeout_ms, @default_activation_timeout_ms)
 
-                  reconnection_timeout =
-                    Map.get(pool, :reconnection_timeout, @default_reconnection_timeout_ms)
+                  reconnection_timeout_ms =
+                    Map.get(pool, :reconnection_timeout_ms, @default_reconnection_timeout_ms)
 
                   pool_accepts = Map.get(pool, :accepts, %{})
 
                   session_opts = [
                     provides: pool.provides,
                     accepts: pool_accepts,
-                    activation_timeout: activation_timeout,
-                    reconnection_timeout: reconnection_timeout
+                    activation_timeout_ms: activation_timeout_ms,
+                    reconnection_timeout_ms: reconnection_timeout_ms
                   ]
 
                   {:ok, session_id, external_id, token, secret_hash, session_now} =
@@ -504,15 +504,15 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                     activated_at: nil,
                     declared_at: nil,
                     ready_deadline_at: nil,
-                    activation_timeout: activation_timeout,
-                    reconnection_timeout: reconnection_timeout,
+                    activation_timeout_ms: activation_timeout_ms,
+                    reconnection_timeout_ms: reconnection_timeout_ms,
                     total_executions: 0
                   }
 
                   state
                   |> put_in([Access.key(:sessions), session_id], session)
                   |> put_in([Access.key(:session_ids), external_id], session_id)
-                  |> Fleet.schedule_session_expiry(session_id, activation_timeout)
+                  |> Fleet.schedule_session_expiry(session_id, activation_timeout_ms)
                   |> Listeners.maybe_schedule_idle_shutdown()
                   |> put_in([Access.key(:workers), worker_id], %{
                     external_id: worker_external_id,
@@ -784,7 +784,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   # worker that takes a while to start is worth keeping warm between
   # runs. One whose pool doesn't say gets the default.
   defp worker_idle_timeout_ms(state, worker) do
-    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout]) do
+    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout_ms]) do
       seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1000
       _ -> @default_worker_idle_timeout_ms
     end

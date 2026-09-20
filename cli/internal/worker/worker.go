@@ -310,7 +310,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if w.cfg.Logs.Token != nil {
 		logToken = *w.cfg.Logs.Token
 	}
-	flushInterval := time.Duration(w.cfg.Logs.FlushInterval * float64(time.Second))
+	flushInterval := w.cfg.Logs.FlushInterval
 	w.logs = logstore.NewHTTPStore(logURL, logToken, w.cfg.Project, w.cfg.Logs.BatchSize, flushInterval, w.logger)
 	defer func() { _ = w.logs.Close() }()
 
@@ -324,7 +324,7 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	if metricBatchSize <= 0 {
 		metricBatchSize = 100
 	}
-	metricFlushInterval := time.Duration(w.cfg.Metrics.FlushInterval * float64(time.Second))
+	metricFlushInterval := w.cfg.Metrics.FlushInterval
 	if metricFlushInterval <= 0 {
 		metricFlushInterval = 500 * time.Millisecond
 	}
@@ -971,9 +971,9 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 			"params": params.Cache.Params,
 		}
 		if params.Cache.MaxAgeMs != nil {
-			cacheMap["max_age"] = *params.Cache.MaxAgeMs
+			cacheMap["max_age_ms"] = *params.Cache.MaxAgeMs
 		} else {
-			cacheMap["max_age"] = nil
+			cacheMap["max_age_ms"] = nil
 		}
 		if params.Cache.Namespace != nil {
 			cacheMap["namespace"] = *params.Cache.Namespace
@@ -1006,18 +1006,18 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 			retriesMap["limit"] = nil
 		}
 		if params.Retries.BackoffMinMs != nil {
-			retriesMap["backoff_min"] = *params.Retries.BackoffMinMs
+			retriesMap["backoff_min_ms"] = *params.Retries.BackoffMinMs
 		}
 		if params.Retries.BackoffMaxMs != nil {
-			retriesMap["backoff_max"] = *params.Retries.BackoffMaxMs
+			retriesMap["backoff_max_ms"] = *params.Retries.BackoffMaxMs
 		}
 		retries = retriesMap
 	}
 
 	// Delay is already in milliseconds from the adapter
 	var delay int64
-	if params.Delay != nil {
-		delay = int64(*params.Delay)
+	if params.DelayMs != nil {
+		delay = int64(*params.DelayMs)
 	}
 
 	// Determine target type (default to "task" for backward compatibility)
@@ -1028,8 +1028,8 @@ func (w *Worker) SubmitExecution(ctx context.Context, params *adapter.SubmitExec
 
 	// Timeout is already in milliseconds from the adapter (0 = no timeout)
 	var timeout any
-	if params.Timeout > 0 {
-		timeout = params.Timeout
+	if params.TimeoutMs > 0 {
+		timeout = params.TimeoutMs
 	}
 
 	// Streams config (buffer + idle timeout_ms defaults for streams
@@ -2389,9 +2389,9 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 				"params": t.Cache.Params,
 			}
 			if t.Cache.MaxAgeMs != nil {
-				cacheMap["max_age"] = *t.Cache.MaxAgeMs
+				cacheMap["max_age_ms"] = *t.Cache.MaxAgeMs
 			} else {
-				cacheMap["max_age"] = nil
+				cacheMap["max_age_ms"] = nil
 			}
 			if t.Cache.Namespace != nil {
 				cacheMap["namespace"] = *t.Cache.Namespace
@@ -2416,16 +2416,16 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 
 		// Delay is already in milliseconds from the adapter (0 if not set - server requires integer, not nil)
 		delay := 0
-		if t.Delay != nil {
-			delay = int(*t.Delay)
+		if t.DelayMs != nil {
+			delay = int(*t.DelayMs)
 		}
 
 		// Build retries (nil if not set) - uses snake_case for server
 		var retries any
 		if t.Retries != nil {
 			retriesMap := map[string]any{
-				"backoff_min": int64(0),
-				"backoff_max": int64(0),
+				"backoff_min_ms": int64(0),
+				"backoff_max_ms": int64(0),
 			}
 			if t.Retries.Limit != nil {
 				retriesMap["limit"] = *t.Retries.Limit
@@ -2433,10 +2433,10 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 				retriesMap["limit"] = nil
 			}
 			if t.Retries.BackoffMinMs != nil {
-				retriesMap["backoff_min"] = *t.Retries.BackoffMinMs
+				retriesMap["backoff_min_ms"] = *t.Retries.BackoffMinMs
 			}
 			if t.Retries.BackoffMaxMs != nil {
-				retriesMap["backoff_max"] = *t.Retries.BackoffMaxMs
+				retriesMap["backoff_max_ms"] = *t.Retries.BackoffMaxMs
 			}
 			retries = retriesMap
 		}
@@ -2454,7 +2454,7 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 		}
 
 		// Build timeout (0 = not set, same as delay)
-		timeout := int(t.Timeout)
+		timeout := int(t.TimeoutMs)
 
 		// Build streams (nil if not set) — keys snake_case to match the
 		// Python adapter's wire format for register_manifests. The buffer
@@ -2491,10 +2491,10 @@ func (w *Worker) buildManifests(manifest *adapter.DiscoveryManifest) map[string]
 			"waitFor":     waitFor,
 			"cache":       cache,
 			"defer":       defer_,
-			"delay":       delay,
+			"delayMs":     delay,
 			"retries":     retries,
 			"recurrent":   t.Recurrent,
-			"timeout":     timeout,
+			"timeoutMs":   timeout,
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,

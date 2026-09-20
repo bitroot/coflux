@@ -18,8 +18,18 @@ defmodule Coflux.Orchestration.Server.Commands do
   """
 
   @doc "Run this execution. `streams` is the step's default stream config, or nil."
-  def execute(execution, module, target, arguments, run, workspace, timeout, streams, checkpoints) do
-    {:execute, execution, module, target, arguments, run, workspace, timeout, streams,
+  def execute(
+        execution,
+        module,
+        target,
+        arguments,
+        run,
+        workspace,
+        timeout_ms,
+        streams,
+        checkpoints
+      ) do
+    {:execute, execution, module, target, arguments, run, workspace, timeout_ms, streams,
      checkpoints}
   end
 

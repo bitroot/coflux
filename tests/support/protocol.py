@@ -88,7 +88,7 @@ def submit_execution_request(
     if group_id is not None:
         params["group_id"] = group_id
     if delay is not None:
-        params["delay"] = delay
+        params["delay_ms"] = delay
     if retries is not None:
         params["retries"] = retries
     if requires is not None:
@@ -102,7 +102,7 @@ def submit_execution_request(
     if wait_for is not None:
         params["wait_for"] = wait_for
     if timeout:
-        params["timeout"] = timeout
+        params["timeout_ms"] = timeout
     return {"id": request_id, "method": "submit_execution", "params": params}
 
 

@@ -193,11 +193,11 @@ def request_submit_execution(
     cache: dict[str, Any] | None = None,
     defer: dict[str, Any] | None = None,
     memo: bool | list[int] | None = None,
-    delay: float | None = None,
+    delay_ms: int | None = None,
     retries: dict[str, Any] | None = None,
     recurrent: bool = False,
     requires: dict[str, list[str]] | None = None,
-    timeout: int = 0,
+    timeout_ms: int = 0,
     streams: dict[str, Any] | None = None,
     concurrency: dict[str, Any] | None = None,
 ) -> int:
@@ -220,16 +220,16 @@ def request_submit_execution(
         params["defer"] = defer
     if memo is not None:
         params["memo"] = memo
-    if delay is not None:
-        params["delay"] = delay
+    if delay_ms is not None:
+        params["delay_ms"] = delay_ms
     if retries is not None:
         params["retries"] = retries
     if recurrent:
         params["recurrent"] = recurrent
     if requires:
         params["requires"] = requires
-    if timeout:
-        params["timeout"] = timeout
+    if timeout_ms:
+        params["timeout_ms"] = timeout_ms
     if streams is not None:
         params["streams"] = streams
     if concurrency is not None:

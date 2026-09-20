@@ -37,11 +37,11 @@ defmodule Coflux.Orchestration.Runs do
         group_key,
         group_limit,
         retry_limit,
-        retry_backoff_min,
-        retry_backoff_max,
+        retry_backoff_min_ms,
+        retry_backoff_max_ms,
         recurrent,
-        delay,
-        timeout,
+        delay_ms,
+        timeout_ms,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -75,11 +75,11 @@ defmodule Coflux.Orchestration.Runs do
         s.group_key,
         s.group_limit,
         s.retry_limit,
-        s.retry_backoff_min,
-        s.retry_backoff_max,
+        s.retry_backoff_min_ms,
+        s.retry_backoff_max_ms,
         s.recurrent,
-        s.delay,
-        s.timeout,
+        s.delay_ms,
+        s.timeout_ms,
         s.requires_tag_set_id,
         s.created_at
       FROM steps AS s
@@ -385,8 +385,8 @@ defmodule Coflux.Orchestration.Runs do
     memo = Keyword.get(opts, :memo)
     retries = Keyword.get(opts, :retries)
     recurrent = Keyword.get(opts, :recurrent, false)
-    delay = Keyword.get(opts, :delay, 0)
-    timeout = Keyword.get(opts, :timeout, 0)
+    delay_ms = Keyword.get(opts, :delay_ms, 0)
+    timeout_ms = Keyword.get(opts, :timeout_ms, 0)
     streams = Keyword.get(opts, :streams)
     concurrency = Keyword.get(opts, :concurrency)
     given_key = Keyword.get(opts, :concurrency_key)
@@ -394,7 +394,7 @@ defmodule Coflux.Orchestration.Runs do
     requires = Keyword.get(opts, :requires) || %{}
 
     # Calculate execute_after from delay
-    execute_after = if delay > 0, do: now + delay
+    execute_after = if delay_ms > 0, do: now + delay_ms
 
     memo_key = if memo, do: build_key(memo, arguments, "#{module}:#{target}")
 
@@ -515,11 +515,11 @@ defmodule Coflux.Orchestration.Runs do
               defer_key,
               memo_key,
               if(retries, do: retries.limit || -1, else: 0),
-              if(retries, do: retries.backoff_min || 0, else: 0),
-              if(retries, do: retries.backoff_max || 0, else: 0),
+              if(retries, do: retries.backoff_min_ms || 0, else: 0),
+              if(retries, do: retries.backoff_max_ms || 0, else: 0),
               recurrent,
-              delay,
-              timeout,
+              delay_ms,
+              timeout_ms,
               requires_tag_set_id,
               streams_buffer,
               streams_timeout_ms,
@@ -767,9 +767,9 @@ defmodule Coflux.Orchestration.Runs do
         s.requires_tag_set_id,
         run.requires_tag_set_id AS run_requires_tag_set_id,
         s.retry_limit,
-        s.retry_backoff_min,
-        s.retry_backoff_max,
-        s.timeout,
+        s.retry_backoff_min_ms,
+        s.retry_backoff_max_ms,
+        s.timeout_ms,
         s.streams_buffer,
         s.streams_timeout_ms,
         e.workspace_id,
@@ -1175,11 +1175,11 @@ defmodule Coflux.Orchestration.Runs do
         group_key,
         group_limit,
         retry_limit,
-        retry_backoff_min,
-        retry_backoff_max,
+        retry_backoff_min_ms,
+        retry_backoff_max_ms,
         recurrent,
-        delay,
-        timeout,
+        delay_ms,
+        timeout_ms,
         requires_tag_set_id,
         created_at
       FROM steps
@@ -1584,11 +1584,11 @@ defmodule Coflux.Orchestration.Runs do
          defer_key,
          memo_key,
          retry_limit,
-         retry_backoff_min,
-         retry_backoff_max,
+         retry_backoff_min_ms,
+         retry_backoff_max_ms,
          recurrent,
-         delay,
-         timeout,
+         delay_ms,
+         timeout_ms,
          requires_tag_set_id,
          streams_buffer,
          streams_timeout_ms,
@@ -1614,11 +1614,11 @@ defmodule Coflux.Orchestration.Runs do
            defer_key: if(defer_key, do: {:blob, defer_key}),
            memo_key: if(memo_key, do: {:blob, memo_key}),
            retry_limit: retry_limit,
-           retry_backoff_min: retry_backoff_min,
-           retry_backoff_max: retry_backoff_max,
+           retry_backoff_min_ms: retry_backoff_min_ms,
+           retry_backoff_max_ms: retry_backoff_max_ms,
            recurrent: if(recurrent, do: 1, else: 0),
-           delay: delay,
-           timeout: timeout,
+           delay_ms: delay_ms,
+           timeout_ms: timeout_ms,
            requires_tag_set_id: requires_tag_set_id,
            streams_buffer: streams_buffer,
            streams_timeout_ms: streams_timeout_ms,

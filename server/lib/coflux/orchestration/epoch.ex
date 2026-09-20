@@ -139,8 +139,8 @@ defmodule Coflux.Orchestration.Epoch do
                   SELECT
                     id, number, run_id, parent_id, module, target, type, priority,
                     wait_for, cache_config_id, cache_key, defer_key, memo_key,
-                    retry_limit, retry_backoff_min, retry_backoff_max, recurrent, delay,
-                    timeout, requires_tag_set_id, streams_buffer, streams_timeout_ms,
+                    retry_limit, retry_backoff_min_ms, retry_backoff_max_ms, recurrent, delay_ms,
+                    timeout_ms, requires_tag_set_id, streams_buffer, streams_timeout_ms,
                     concurrency_key, concurrency_limit, group_key, group_limit, created_at
                   FROM steps
                   WHERE run_id = ?1
@@ -153,12 +153,12 @@ defmodule Coflux.Orchestration.Epoch do
                 Enum.reduce(steps, {%{}, %{}}, fn {old_step_id, number, _run_id, step_parent_id,
                                                    module, target, type, priority, wait_for,
                                                    cache_config_id, cache_key, defer_key,
-                                                   memo_key, retry_limit, retry_backoff_min,
-                                                   retry_backoff_max, recurrent, delay, timeout,
-                                                   requires_tag_set_id, streams_buffer,
-                                                   streams_timeout_ms, concurrency_key,
-                                                   concurrency_limit, group_key, group_limit,
-                                                   step_created_at},
+                                                   memo_key, retry_limit, retry_backoff_min_ms,
+                                                   retry_backoff_max_ms, recurrent, delay_ms,
+                                                   timeout_ms, requires_tag_set_id,
+                                                   streams_buffer, streams_timeout_ms,
+                                                   concurrency_key, concurrency_limit, group_key,
+                                                   group_limit, step_created_at},
                                                   {step_acc, exec_acc} ->
                   # steps.parent_id is same-run internal — strict remap
                   new_parent_id =
@@ -179,11 +179,11 @@ defmodule Coflux.Orchestration.Epoch do
                       defer_key: if(defer_key, do: {:blob, defer_key}),
                       memo_key: if(memo_key, do: {:blob, memo_key}),
                       retry_limit: retry_limit,
-                      retry_backoff_min: retry_backoff_min,
-                      retry_backoff_max: retry_backoff_max,
+                      retry_backoff_min_ms: retry_backoff_min_ms,
+                      retry_backoff_max_ms: retry_backoff_max_ms,
                       recurrent: recurrent,
-                      delay: delay,
-                      timeout: timeout,
+                      delay_ms: delay_ms,
+                      timeout_ms: timeout_ms,
                       requires_tag_set_id:
                         ensure_tag_set(source_db, target_db, requires_tag_set_id),
                       streams_buffer: streams_buffer,
@@ -1112,7 +1112,7 @@ defmodule Coflux.Orchestration.Epoch do
     {:ok, rows} =
       query(old_db, """
         SELECT s.id, s.external_id, s.workspace_id, s.worker_id, s.provides_tag_set_id,
-               s.accepts_tag_set_id, s.activation_timeout, s.reconnection_timeout, s.secret_hash,
+               s.accepts_tag_set_id, s.activation_timeout_ms, s.reconnection_timeout_ms, s.secret_hash,
                s.created_at, s.created_by
         FROM sessions AS s
         LEFT JOIN session_expirations AS se ON se.session_id = s.id
@@ -1120,8 +1120,8 @@ defmodule Coflux.Orchestration.Epoch do
       """)
 
     Enum.reduce(rows, %{}, fn {old_id, ext_id, old_ws_id, old_worker_id, old_provides_tag_set_id,
-                               old_accepts_tag_set_id, activation_timeout, reconnection_timeout,
-                               secret_hash, created_at, created_by},
+                               old_accepts_tag_set_id, activation_timeout_ms,
+                               reconnection_timeout_ms, secret_hash, created_at, created_by},
                               acc ->
       new_ws_id = Map.fetch!(workspace_ids, old_ws_id)
       new_worker_id = if old_worker_id, do: Map.fetch!(worker_ids, old_worker_id)
@@ -1136,8 +1136,8 @@ defmodule Coflux.Orchestration.Epoch do
           worker_id: new_worker_id,
           provides_tag_set_id: new_provides_tag_set_id,
           accepts_tag_set_id: new_accepts_tag_set_id,
-          activation_timeout: activation_timeout,
-          reconnection_timeout: reconnection_timeout,
+          activation_timeout_ms: activation_timeout_ms,
+          reconnection_timeout_ms: reconnection_timeout_ms,
           secret_hash: if(secret_hash, do: {:blob, secret_hash}),
           created_at: created_at,
           created_by: new_created_by
@@ -1830,10 +1830,10 @@ defmodule Coflux.Orchestration.Epoch do
   defp ensure_cache_config(_source_db, _target_db, nil), do: nil
 
   defp ensure_cache_config(source_db, target_db, old_id) do
-    {:ok, {hash, params, max_age, namespace, version}} =
+    {:ok, {hash, params, max_age_ms, namespace, version}} =
       query_one!(
         source_db,
-        "SELECT hash, params, max_age, namespace, version FROM cache_configs WHERE id = ?1",
+        "SELECT hash, params, max_age_ms, namespace, version FROM cache_configs WHERE id = ?1",
         {old_id}
       )
 
@@ -1846,7 +1846,7 @@ defmodule Coflux.Orchestration.Epoch do
           insert_one(target_db, :cache_configs, %{
             hash: {:blob, hash},
             params: params,
-            max_age: max_age,
+            max_age_ms: max_age_ms,
             namespace: namespace,
             version: version
           })
@@ -1874,17 +1874,17 @@ defmodule Coflux.Orchestration.Epoch do
             source_db,
             """
             SELECT name, parameter_set_id, instruction_id, wait_for,
-              cache_config_id, defer_params, delay, retry_limit,
-              retry_backoff_min, retry_backoff_max, recurrent, requires_tag_set_id, memo
+              cache_config_id, defer_params, delay_ms, retry_limit,
+              retry_backoff_min_ms, retry_backoff_max_ms, recurrent, requires_tag_set_id, memo
             FROM workflows
             WHERE manifest_id = ?1
             """,
             {old_id}
           )
 
-        Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay,
-                                 retry_limit, retry_backoff_min, retry_backoff_max, recurrent,
-                                 rts_id, memo} ->
+        Enum.each(workflows, fn {name, ps_id, instr_id, wait_for, cc_id, defer_params, delay_ms,
+                                 retry_limit, retry_backoff_min_ms, retry_backoff_max_ms,
+                                 recurrent, rts_id, memo} ->
           {:ok, _} =
             insert_one(target_db, :workflows, %{
               manifest_id: new_id,
@@ -1894,10 +1894,10 @@ defmodule Coflux.Orchestration.Epoch do
               wait_for: wait_for,
               cache_config_id: ensure_cache_config(source_db, target_db, cc_id),
               defer_params: defer_params,
-              delay: delay,
+              delay_ms: delay_ms,
               retry_limit: retry_limit,
-              retry_backoff_min: retry_backoff_min,
-              retry_backoff_max: retry_backoff_max,
+              retry_backoff_min_ms: retry_backoff_min_ms,
+              retry_backoff_max_ms: retry_backoff_max_ms,
               recurrent: recurrent,
               requires_tag_set_id: ensure_tag_set(source_db, target_db, rts_id),
               memo: memo
@@ -1929,10 +1929,10 @@ defmodule Coflux.Orchestration.Epoch do
   defp ensure_pool_definition(_source_db, _target_db, nil), do: nil
 
   defp ensure_pool_definition(source_db, target_db, old_id) do
-    {:ok, {hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout}} =
+    {:ok, {hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms}} =
       query_one!(
         source_db,
-        "SELECT hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout FROM pool_definitions WHERE id = ?1",
+        "SELECT hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms FROM pool_definitions WHERE id = ?1",
         {old_id}
       )
 
@@ -1951,7 +1951,7 @@ defmodule Coflux.Orchestration.Epoch do
             launcher_id: ensure_launcher(source_db, target_db, launcher_id),
             provides_tag_set_id: ensure_tag_set(source_db, target_db, provides_tag_set_id),
             accepts_tag_set_id: ensure_tag_set(source_db, target_db, accepts_tag_set_id),
-            idle_timeout: idle_timeout
+            idle_timeout_ms: idle_timeout_ms
           })
 
         # Copy pool_definition_modules

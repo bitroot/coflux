@@ -798,8 +798,8 @@ defmodule Coflux.Orchestration.Server.Lifecycle do
       result_retryable?(result) && step.retry_limit == -1 ->
         # Unlimited retries - random delay between min and max
         delay_ms =
-          step.retry_backoff_min +
-            :rand.uniform() * (step.retry_backoff_max - step.retry_backoff_min)
+          step.retry_backoff_min_ms +
+            :rand.uniform() * (step.retry_backoff_max_ms - step.retry_backoff_min_ms)
 
         execute_after = System.os_time(:millisecond) + delay_ms
 
@@ -827,9 +827,9 @@ defmodule Coflux.Orchestration.Server.Lifecycle do
         if consecutive_failures < step.retry_limit do
           # TODO: add jitter (within min/max delay)
           delay_ms =
-            step.retry_backoff_min +
+            step.retry_backoff_min_ms +
               consecutive_failures / max(step.retry_limit - 1, 1) *
-                (step.retry_backoff_max - step.retry_backoff_min)
+                (step.retry_backoff_max_ms - step.retry_backoff_min_ms)
 
           execute_after = System.os_time(:millisecond) + delay_ms
 
@@ -844,8 +844,8 @@ defmodule Coflux.Orchestration.Server.Lifecycle do
       step.recurrent == 1 and match?({:value, {:raw, nil, []}}, result) ->
         # Null return from recurrent step: schedule next iteration via :recurred
         execute_after =
-          if step.delay > 0 do
-            System.os_time(:millisecond) + step.delay
+          if step.delay_ms > 0 do
+            System.os_time(:millisecond) + step.delay_ms
           end
 
         {:ok, retry_id, _, state} =

@@ -74,8 +74,11 @@ See [Blobs](./blobs.md) for detailed blob store configuration.
 type = "http"
 url = "http://localhost:7777/logs"
 batch_size = 100
-flush_interval = 0.5
+flush_interval = "500ms"
 ```
+
+`flush_interval` is a duration (`"500ms"`, `"2s"`). Log and metric batches
+are flushed when they fill or when this elapses, whichever comes first.
 
 ## Environment variables
 

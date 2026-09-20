@@ -177,7 +177,7 @@ defmodule Coflux.Topics.Workflow.Model do
     if cache do
       %{
         params: cache.params,
-        maxAge: cache.max_age,
+        maxAgeMs: cache.max_age_ms,
         namespace: cache.namespace,
         version: cache.version
       }
@@ -194,8 +194,8 @@ defmodule Coflux.Topics.Workflow.Model do
     if retries do
       %{
         limit: retries.limit,
-        backoffMin: retries.backoff_min,
-        backoffMax: retries.backoff_max
+        backoffMinMs: retries.backoff_min_ms,
+        backoffMaxMs: retries.backoff_max_ms
       }
     end
   end
@@ -206,10 +206,10 @@ defmodule Coflux.Topics.Workflow.Model do
         waitFor: workflow.wait_for,
         cache: build_cache_configuration(workflow.cache),
         defer: build_defer_configuration(workflow.defer),
-        delay: workflow.delay,
+        delayMs: workflow.delay_ms,
         retries: build_retries_configuration(workflow.retries),
         recurrent: workflow.recurrent,
-        timeout: workflow.timeout,
+        timeoutMs: workflow.timeout_ms,
         requires: workflow.requires,
         memo: workflow.memo,
         streams: build_streams_configuration(workflow[:streams]),

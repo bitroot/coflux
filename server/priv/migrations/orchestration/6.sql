@@ -135,9 +135,9 @@ ALTER TABLE assignments ADD COLUMN catalog_sequence INTEGER;
 ALTER TABLE runs ADD COLUMN catalog_sequence INTEGER;
 ALTER TABLE executions ADD COLUMN catalog_sequence INTEGER;
 
--- How long a pool keeps an idle worker before stopping it, in seconds.
+-- How long a pool keeps an idle worker before stopping it, in milliseconds.
 -- NULL leaves it to the scheduler's default.
-ALTER TABLE pool_definitions ADD COLUMN idle_timeout INTEGER;
+ALTER TABLE pool_definitions ADD COLUMN idle_timeout_ms INTEGER;
 
 -- Tokens have moved to the admin store, which isn't rotated, so a
 -- principal names its token by external id rather than by a row in this
@@ -160,3 +160,28 @@ WHERE p.user_external_id IS NOT NULL OR t.external_id IS NOT NULL;
 
 DROP TABLE principals;
 ALTER TABLE principals_new RENAME TO principals;
+
+-- Durations carry their unit in the name.
+--
+-- Every duration in this database is, and always has been, an integer
+-- number of milliseconds, but only the columns added most recently said
+-- so (`streams_timeout_ms`, `timeout_ms`). The rest read as bare
+-- `timeout` / `delay` / `max_age`, which is how the pool idle timeout
+-- came to be added in seconds without anyone noticing the mismatch.
+--
+-- Renames only: no value changes, and no column here is referenced by a
+-- view, trigger or index.
+ALTER TABLE cache_configs RENAME COLUMN max_age TO max_age_ms;
+
+ALTER TABLE workflows RENAME COLUMN delay TO delay_ms;
+ALTER TABLE workflows RENAME COLUMN timeout TO timeout_ms;
+ALTER TABLE workflows RENAME COLUMN retry_backoff_min TO retry_backoff_min_ms;
+ALTER TABLE workflows RENAME COLUMN retry_backoff_max TO retry_backoff_max_ms;
+
+ALTER TABLE steps RENAME COLUMN delay TO delay_ms;
+ALTER TABLE steps RENAME COLUMN timeout TO timeout_ms;
+ALTER TABLE steps RENAME COLUMN retry_backoff_min TO retry_backoff_min_ms;
+ALTER TABLE steps RENAME COLUMN retry_backoff_max TO retry_backoff_max_ms;
+
+ALTER TABLE sessions RENAME COLUMN activation_timeout TO activation_timeout_ms;
+ALTER TABLE sessions RENAME COLUMN reconnection_timeout TO reconnection_timeout_ms;

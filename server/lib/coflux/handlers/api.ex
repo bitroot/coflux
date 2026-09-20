@@ -492,10 +492,10 @@ defmodule Coflux.Handlers.Api do
              wait_for: {"waitFor", &parse_indexes/1},
              cache: {"cache", &parse_cache/1},
              defer: {"defer", &parse_defer/1},
-             delay: {"delay", &parse_integer(&1, optional: true)},
+             delay_ms: {"delayMs", &parse_integer(&1, optional: true)},
              retries: {"retries", &parse_retries/1},
              recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
-             timeout: {"timeout", &parse_integer(&1, optional: true)},
+             timeout_ms: {"timeoutMs", &parse_integer(&1, optional: true)},
              requires: {"requires", &parse_tag_set/1},
              memo: {"memo", &parse_boolean(&1, optional: true)},
              streams: {"streams", &parse_streams_config/1},
@@ -516,10 +516,10 @@ defmodule Coflux.Handlers.Api do
                wait_for: arguments[:wait_for],
                cache: arguments[:cache],
                defer: arguments[:defer],
-               delay: arguments[:delay] || 0,
+               delay_ms: arguments[:delay_ms] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
-               timeout: arguments[:timeout] || 0,
+               timeout_ms: arguments[:timeout_ms] || 0,
                requires: arguments[:requires],
                memo: arguments[:memo],
                streams: arguments[:streams],
@@ -1637,7 +1637,7 @@ defmodule Coflux.Handlers.Api do
 
     config = if Enum.any?(provides), do: Map.put(config, "provides", provides), else: config
     config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
-    config = maybe_put_value(config, "idleTimeout", Map.get(pool, :idle_timeout))
+    config = maybe_put_value(config, "idleTimeoutMs", Map.get(pool, :idle_timeout_ms))
 
     if pool.launcher do
       Map.put(config, "launcher", build_launcher_config(pool.launcher))
@@ -1729,7 +1729,7 @@ defmodule Coflux.Handlers.Api do
             {"modules", &parse_modules/1, :modules, []},
             {"provides", &parse_tag_set/1, :provides, %{}},
             {"accepts", &parse_tag_set/1, :accepts, %{}},
-            {"idleTimeout", &parse_idle_timeout/1, :idle_timeout, nil},
+            {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms, nil},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
           {:ok, %{}},
@@ -1758,9 +1758,9 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # Seconds an idle worker is kept for. Zero means the next sweep.
-  defp parse_idle_timeout(value) when is_integer(value) and value >= 0, do: {:ok, value}
-  defp parse_idle_timeout(_value), do: {:error, :invalid}
+  # Milliseconds an idle worker is kept for. Zero means the next sweep.
+  defp parse_idle_timeout_ms(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp parse_idle_timeout_ms(_value), do: {:error, :invalid}
 
   # Parses a partial pool update (PATCH semantics).
   # Only keys present in the JSON are included. A JSON null value means "unset".
@@ -1771,7 +1771,7 @@ defmodule Coflux.Handlers.Api do
           {"modules", &parse_modules/1, :modules},
           {"provides", &parse_tag_set/1, :provides},
           {"accepts", &parse_tag_set/1, :accepts},
-          {"idleTimeout", &parse_idle_timeout/1, :idle_timeout},
+          {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms},
           {"launcher", &parse_launcher_patch/1, :launcher}
         ]
 
@@ -2202,7 +2202,7 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         with {:ok, params} <- parse_indexes(Map.get(value, "params"), allow_boolean: true),
-             {:ok, max_age} <- parse_integer(Map.get(value, "maxAge"), optional: true),
+             {:ok, max_age_ms} <- parse_integer(Map.get(value, "maxAgeMs"), optional: true),
              # TODO: regex
              {:ok, namespace} <-
                parse_string(Map.get(value, "namespace"), optional: true, max_length: 200),
@@ -2212,7 +2212,7 @@ defmodule Coflux.Handlers.Api do
           {:ok,
            %{
              params: params,
-             max_age: max_age,
+             max_age_ms: max_age_ms,
              namespace: namespace,
              version: version
            }}
@@ -2272,11 +2272,18 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         # limit can be nil (unlimited) or an integer
-        # backoff_min and backoff_max default to 0 if not provided (database requires NOT NULL)
+        # backoff_min_ms and backoff_max_ms default to 0 if not provided (database requires NOT NULL)
         with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
-             {:ok, backoff_min} <- parse_integer(Map.get(value, "backoffMin"), optional: true),
-             {:ok, backoff_max} <- parse_integer(Map.get(value, "backoffMax"), optional: true) do
-          {:ok, %{limit: limit, backoff_min: backoff_min || 0, backoff_max: backoff_max || 0}}
+             {:ok, backoff_min_ms} <-
+               parse_integer(Map.get(value, "backoffMinMs"), optional: true),
+             {:ok, backoff_max_ms} <-
+               parse_integer(Map.get(value, "backoffMaxMs"), optional: true) do
+          {:ok,
+           %{
+             limit: limit,
+             backoff_min_ms: backoff_min_ms || 0,
+             backoff_max_ms: backoff_max_ms || 0
+           }}
         end
 
       true ->
@@ -2315,10 +2322,10 @@ defmodule Coflux.Handlers.Api do
            {:ok, wait_for} <- parse_indexes(Map.get(value, "waitFor")),
            {:ok, cache} <- parse_cache(Map.get(value, "cache")),
            {:ok, defer} <- parse_defer(Map.get(value, "defer")),
-           {:ok, delay} <- parse_integer(Map.get(value, "delay")),
+           {:ok, delay_ms} <- parse_integer(Map.get(value, "delayMs")),
            {:ok, retries} <- parse_retries(Map.get(value, "retries")),
            {:ok, recurrent} <- parse_boolean(Map.get(value, "recurrent"), optional: true),
-           {:ok, timeout} <- parse_integer(Map.get(value, "timeout"), optional: true),
+           {:ok, timeout_ms} <- parse_integer(Map.get(value, "timeoutMs"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, memo} <- parse_boolean(Map.get(value, "memo"), optional: true),
            {:ok, streams} <- parse_manifest_streams(Map.get(value, "streams")),
@@ -2335,10 +2342,10 @@ defmodule Coflux.Handlers.Api do
            wait_for: wait_for,
            cache: cache,
            defer: defer,
-           delay: delay,
+           delay_ms: delay_ms,
            retries: retries,
            recurrent: recurrent == true,
-           timeout: timeout || 0,
+           timeout_ms: timeout_ms || 0,
            requires: requires,
            memo: memo == true,
            streams: streams,

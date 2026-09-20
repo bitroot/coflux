@@ -111,7 +111,7 @@ defmodule Coflux.Orchestration.Server.State do
             # why a session is separate from it and outlives it.
             connections: %{},
 
-            # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, declared_at, activation_timeout, reconnection_timeout}
+            # session_id -> %{external_id, connection, targets, queue, starting, executing, concurrency, workspace_id, provides, accepts, worker_id, last_idle_at, activated_at, declared_at, activation_timeout_ms, reconnection_timeout_ms}
             #
             # One entry per worker session. A session outlives its
             # connection - a worker that drops reconnects into the same one

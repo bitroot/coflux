@@ -900,7 +900,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
           group_limit: step.group_limit,
           retries: Scheduling.step_retries(step),
           recurrent: step.recurrent == 1 or step.recurrent == true,
-          timeout: step.timeout,
+          timeout_ms: step.timeout_ms,
           created_at: step.created_at,
           requires: Resolve.tag_set(db, step.requires_tag_set_id)
         }

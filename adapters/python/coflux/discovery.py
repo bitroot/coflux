@@ -181,7 +181,7 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["defer"] = serialize_defer(definition.defer, definition.parameters)
 
     if definition.delay:
-        result["delay"] = _to_ms(definition.delay)
+        result["delay_ms"] = _to_ms(definition.delay)
 
     if definition.memo:
         result["memo"] = definition.memo
@@ -190,7 +190,7 @@ def _build_target_definition(target: Any, module_name: str) -> dict[str, Any]:
         result["requires"] = definition.requires
 
     if definition.timeout:
-        result["timeout"] = _to_ms(definition.timeout)
+        result["timeout_ms"] = _to_ms(definition.timeout)
 
     if definition.recurrent:
         result["recurrent"] = True

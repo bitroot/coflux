@@ -158,8 +158,8 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Idle timeout
-	if idleTimeout, ok := pool["idleTimeout"].(float64); ok {
-		fmt.Printf("Idle timeout: %ds\n", int(idleTimeout))
+	if idleTimeout, ok := pool["idleTimeoutMs"].(float64); ok {
+		fmt.Printf("Idle timeout: %s\n", formatDurationMs(int64(idleTimeout)))
 	}
 
 	// Launcher
@@ -635,10 +635,50 @@ func parseSetValue(s string) any {
 
 // poolTopLevelFields lists field names that are pool-level (not launcher-level).
 var poolTopLevelFields = map[string]bool{
-	"modules":     true,
-	"provides":    true,
-	"accepts":     true,
-	"idleTimeout": true,
+	"modules":       true,
+	"provides":      true,
+	"accepts":       true,
+	"idleTimeoutMs": true,
+}
+
+// durationFields maps the name a duration is written under - on --set,
+// --unset, and in an exported config - to the API field carrying it. The
+// written name has no unit suffix because the written value is a duration
+// ("5m"), not a count of anything; the suffix belongs on the integer the
+// API is handed.
+var durationFields = map[string]string{
+	"idleTimeout": "idleTimeoutMs",
+}
+
+// parseDurationMs parses a duration string into milliseconds. A bare
+// number is rejected: the pool idle timeout was briefly a count of
+// seconds, and reading "300" as 300ms would be a silent thousandfold
+// change.
+func parseDurationMs(value string) (int64, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (expected e.g. \"30s\", \"5m\")", value)
+	}
+	if duration < 0 {
+		return 0, fmt.Errorf("duration %q must not be negative", value)
+	}
+	return duration.Milliseconds(), nil
+}
+
+// formatDurationMs renders milliseconds as the shortest duration string
+// that parses back to the same value. time.Duration's own String() pads
+// with zero components ("5m0s"), which is noise in an exported config.
+func formatDurationMs(ms int64) string {
+	if ms == 0 {
+		return "0s"
+	}
+	formatted := (time.Duration(ms) * time.Millisecond).String()
+	for _, suffix := range []string{"h0m0s", "m0s"} {
+		if strings.HasSuffix(formatted, suffix) {
+			return strings.TrimSuffix(formatted, suffix[1:])
+		}
+	}
+	return formatted
 }
 
 // launcherFields lists valid launcher field names.
@@ -673,6 +713,9 @@ var mapSubkeyFields = map[string]bool{
 // isValidFieldName checks if a field name (possibly with dotted prefix) is valid.
 func isValidFieldName(name string) bool {
 	if poolTopLevelFields[name] || launcherFields[name] {
+		return true
+	}
+	if _, ok := durationFields[name]; ok {
 		return true
 	}
 	if base, _, ok := strings.Cut(name, "."); ok {
@@ -724,6 +767,14 @@ func collectFieldOps(cmd *cobra.Command) ([]poolFieldOp, error) {
 		if !isValidFieldName(key) {
 			return nil, fmt.Errorf("unknown field %q", key)
 		}
+		if field, ok := durationFields[key]; ok {
+			ms, err := parseDurationMs(val)
+			if err != nil {
+				return nil, fmt.Errorf("--set %s: %w", key, err)
+			}
+			ops = append(ops, poolFieldOp{action: "set", key: field, value: ms})
+			continue
+		}
 		ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
 	}
 
@@ -731,6 +782,9 @@ func collectFieldOps(cmd *cobra.Command) ([]poolFieldOp, error) {
 	for _, key := range unsetValues {
 		if !isValidFieldName(key) {
 			return nil, fmt.Errorf("unknown field %q", key)
+		}
+		if field, ok := durationFields[key]; ok {
+			key = field
 		}
 		ops = append(ops, poolFieldOp{action: "unset", key: key})
 	}
@@ -1150,7 +1204,11 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("invalid pool configuration for '%s'", name)
 		}
-		desiredPools[name] = tomlPoolToAPI(pool)
+		converted, err := tomlPoolToAPI(pool)
+		if err != nil {
+			return fmt.Errorf("invalid pool configuration for '%s': %w", name, err)
+		}
+		desiredPools[name] = converted
 	}
 
 	// Connect and get current state
@@ -1460,8 +1518,10 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 			result["accepts"] = accepts
 		}
 	}
-	if idleTimeout, ok := pool["idleTimeout"]; ok {
-		result["idle_timeout"] = tomlNumber(idleTimeout)
+	if idleTimeout, ok := pool["idleTimeoutMs"]; ok {
+		if ms, ok := tomlNumber(idleTimeout).(int64); ok {
+			result["idle_timeout"] = formatDurationMs(ms)
+		}
 	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
@@ -1497,7 +1557,7 @@ func tomlNumber(v any) any {
 	return v
 }
 
-func tomlPoolToAPI(pool map[string]any) map[string]any {
+func tomlPoolToAPI(pool map[string]any) (map[string]any, error) {
 	result := make(map[string]any)
 
 	if modules, ok := pool["modules"]; ok {
@@ -1510,17 +1570,20 @@ func tomlPoolToAPI(pool map[string]any) map[string]any {
 		result["accepts"] = toStringSliceMap(accepts)
 	}
 	if idleTimeout, ok := pool["idle_timeout"]; ok {
-		// TOML int64 → JSON number
-		if i, ok := idleTimeout.(int64); ok {
-			result["idleTimeout"] = int(i)
-		} else {
-			result["idleTimeout"] = idleTimeout
+		text, ok := idleTimeout.(string)
+		if !ok {
+			return nil, fmt.Errorf("idle_timeout must be a duration string (e.g. \"5m\")")
 		}
+		ms, err := parseDurationMs(text)
+		if err != nil {
+			return nil, fmt.Errorf("idle_timeout: %w", err)
+		}
+		result["idleTimeoutMs"] = ms
 	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = tomlLauncherToAPI(launcher)
 	}
-	return result
+	return result, nil
 }
 
 func tomlLauncherToAPI(launcher map[string]any) map[string]any {

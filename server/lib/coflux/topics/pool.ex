@@ -46,7 +46,7 @@ defmodule Coflux.Topics.Pool do
       launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
       state: to_string(Map.get(pool, :state, :active))
     }
-    |> maybe_put(:idleTimeout, Map.get(pool, :idle_timeout))
+    |> maybe_put(:idleTimeoutMs, Map.get(pool, :idle_timeout_ms))
   end
 
   defp build_launcher(launcher) do

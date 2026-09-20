@@ -18,12 +18,12 @@ type TargetDefinition struct {
 	Cache       *CacheConfig        `json:"cache,omitempty"`
 	Retries     *RetriesConfig      `json:"retries,omitempty"`
 	Defer       *DeferConfig        `json:"defer,omitempty"`
-	Delay       *float64            `json:"delay,omitempty"`
+	DelayMs     *float64            `json:"delay_ms,omitempty"`
 	WaitFor     any                 `json:"wait_for,omitempty"` // true or list of param indices
 	Memo        any                 `json:"memo,omitempty"`     // true or list of param indices
 	Requires    map[string][]string `json:"requires,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
-	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	TimeoutMs   int64               `json:"timeout_ms,omitempty"`
 	Streams     *StreamsConfig      `json:"streams,omitempty"`
 	Concurrency *ConcurrencyConfig  `json:"concurrency,omitempty"`
 	IsStub      bool                `json:"is_stub,omitempty"`
@@ -239,12 +239,12 @@ type SubmitExecutionParams struct {
 	GroupID     *int                `json:"group_id,omitempty"` // group to associate with
 	Cache       *CacheConfig        `json:"cache,omitempty"`
 	Defer       *DeferConfig        `json:"defer,omitempty"`
-	Memo        any                 `json:"memo,omitempty"`  // true or list of param indices
-	Delay       *float64            `json:"delay,omitempty"` // delay in seconds
+	Memo        any                 `json:"memo,omitempty"` // true or list of param indices
+	DelayMs     *float64            `json:"delay_ms,omitempty"`
 	Retries     *RetriesConfig      `json:"retries,omitempty"`
 	Recurrent   bool                `json:"recurrent,omitempty"`
 	Requires    map[string][]string `json:"requires,omitempty"`
-	Timeout     int64               `json:"timeout,omitempty"` // timeout in milliseconds
+	TimeoutMs   int64               `json:"timeout_ms,omitempty"`
 	Streams     *StreamsConfig      `json:"streams,omitempty"`
 	Concurrency *ConcurrencyConfig  `json:"concurrency,omitempty"`
 }

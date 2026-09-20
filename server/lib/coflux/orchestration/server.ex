@@ -963,18 +963,20 @@ defmodule Coflux.Orchestration.Server do
   defp dispatch_call({:create_session, workspace_external_id, access, opts}, state) do
     provides = Keyword.get(opts, :provides, %{})
     accepts = Keyword.get(opts, :accepts, %{})
-    activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
-    reconnection_timeout =
-      Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
+    activation_timeout_ms =
+      Keyword.get(opts, :activation_timeout_ms, @default_activation_timeout_ms)
+
+    reconnection_timeout_ms =
+      Keyword.get(opts, :reconnection_timeout_ms, @default_reconnection_timeout_ms)
 
     with {:ok, workspace_id, _} <-
            Permissions.require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
         accepts: accepts,
-        activation_timeout: activation_timeout,
-        reconnection_timeout: reconnection_timeout,
+        activation_timeout_ms: activation_timeout_ms,
+        reconnection_timeout_ms: reconnection_timeout_ms,
         created_by: access[:principal_id]
       ]
 
@@ -998,8 +1000,8 @@ defmodule Coflux.Orchestration.Server do
             activated_at: nil,
             declared_at: nil,
             ready_deadline_at: nil,
-            activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout,
+            activation_timeout_ms: activation_timeout_ms,
+            reconnection_timeout_ms: reconnection_timeout_ms,
             total_executions: 0
           }
 
@@ -1007,7 +1009,7 @@ defmodule Coflux.Orchestration.Server do
             state
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
-            |> Fleet.schedule_session_expiry(session_id, activation_timeout)
+            |> Fleet.schedule_session_expiry(session_id, activation_timeout_ms)
             |> Listeners.maybe_schedule_idle_shutdown()
 
           {:reply, {:ok, token}, state}
@@ -1070,7 +1072,7 @@ defmodule Coflux.Orchestration.Server do
       # fresh one; a session that has already declared keeps none.
       ready_deadline_at =
         if is_nil(session.declared_at) do
-          System.os_time(:millisecond) + session.activation_timeout
+          System.os_time(:millisecond) + session.activation_timeout_ms
         end
 
       state =
@@ -1301,9 +1303,9 @@ defmodule Coflux.Orchestration.Server do
         concurrency = Keyword.get(opts, :concurrency)
         concurrency_limit = if concurrency, do: concurrency.limit, else: 0
         retries = Keyword.get(opts, :retries)
-        timeout = Keyword.get(opts, :timeout, 0)
-        delay = Keyword.get(opts, :delay, 0)
-        execute_after = if delay > 0, do: created_at + delay
+        timeout_ms = Keyword.get(opts, :timeout_ms, 0)
+        delay_ms = Keyword.get(opts, :delay_ms, 0)
+        execute_after = if delay_ms > 0, do: created_at + delay_ms
         step_requires = Keyword.get(opts, :requires) || %{}
 
         run_requires = Resolve.tag_set(state.db, run.requires_tag_set_id)
@@ -1358,7 +1360,7 @@ defmodule Coflux.Orchestration.Server do
               group_limit: group_limit,
               retries: retries,
               recurrent: recurrent,
-              timeout: timeout,
+              timeout_ms: timeout_ms,
               created_at: created_at,
               requires: step_requires
             })
@@ -2949,7 +2951,7 @@ defmodule Coflux.Orchestration.Server do
                   [Access.key(:sessions), session_id],
                   &Map.put(&1, :connection, nil)
                 )
-                |> Fleet.schedule_session_expiry(session_id, session.reconnection_timeout)
+                |> Fleet.schedule_session_expiry(session_id, session.reconnection_timeout_ms)
                 |> Effects.emit(%SessionConnected{
                   workspace: State.workspace_external_id(state, session.workspace_id),
                   session: session.external_id,

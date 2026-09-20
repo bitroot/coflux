@@ -169,7 +169,7 @@ defmodule Coflux.Events.StepCreated do
     :group_limit,
     :retries,
     :recurrent,
-    :timeout,
+    :timeout_ms,
     :created_at,
     :requires
   ]

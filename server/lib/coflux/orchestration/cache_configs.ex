@@ -14,7 +14,7 @@ defmodule Coflux.Orchestration.CacheConfigs do
         insert_one(db, :cache_configs, %{
           hash: {:blob, hash},
           params: Utils.encode_params_list(cache.params),
-          max_age: cache.max_age,
+          max_age_ms: cache.max_age_ms,
           namespace: cache.namespace,
           version: cache.version
         })
@@ -24,14 +24,14 @@ defmodule Coflux.Orchestration.CacheConfigs do
   def get_cache_config(db, cache_config_id) do
     case query_one(
            db,
-           "SELECT params, max_age, namespace, version FROM cache_configs WHERE id = ?1",
+           "SELECT params, max_age_ms, namespace, version FROM cache_configs WHERE id = ?1",
            {cache_config_id}
          ) do
-      {:ok, {params, max_age, namespace, version}} ->
+      {:ok, {params, max_age_ms, namespace, version}} ->
         {:ok,
          %{
            params: Utils.decode_params_list(params),
-           max_age: max_age,
+           max_age_ms: max_age_ms,
            namespace: namespace,
            version: version
          }}
@@ -41,7 +41,7 @@ defmodule Coflux.Orchestration.CacheConfigs do
   defp hash_cache_config(cache) do
     parts = [
       Utils.encode_params_list(cache.params) || "",
-      if(cache.max_age, do: Integer.to_string(cache.max_age), else: ""),
+      if(cache.max_age_ms, do: Integer.to_string(cache.max_age_ms), else: ""),
       cache.namespace || "",
       cache.version || ""
     ]

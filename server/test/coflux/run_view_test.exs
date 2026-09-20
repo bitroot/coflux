@@ -80,7 +80,7 @@ defmodule Coflux.RunViewTest do
       group_limit: 0,
       retries: nil,
       recurrent: false,
-      timeout: 0,
+      timeout_ms: 0,
       created_at: number * 10,
       requires: %{}
     }

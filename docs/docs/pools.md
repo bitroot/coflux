@@ -196,7 +196,7 @@ These fields apply to all launcher types:
 | `--modules`, `-m` | Modules to host, comma-separated (see [Modules](#modules)). Leave unset to host everything |
 | `--provides` | Features that workers provide (e.g., `gpu:A100`) |
 | `--accepts` | Tags that executions must have to be assigned to this pool |
-| `idleTimeout` | Seconds the pool keeps an idle worker before stopping it (default: 5). Worth raising for launchers with slow starts, such as ECS |
+| `idleTimeout` | How long the pool keeps an idle worker before stopping it, as a duration (e.g. `30s`, `5m`; default: 5s). Worth raising for launchers with slow starts, such as ECS |
 | `serverHost` | Server host override for launched workers |
 | `serverSecure` | Use TLS for server connection |
 | `adapter` | Adapter command |

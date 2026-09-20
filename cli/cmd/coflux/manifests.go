@@ -411,9 +411,9 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 				"params": t.Cache.Params,
 			}
 			if t.Cache.MaxAgeMs != nil {
-				cacheMap["maxAge"] = *t.Cache.MaxAgeMs
+				cacheMap["maxAgeMs"] = *t.Cache.MaxAgeMs
 			} else {
-				cacheMap["maxAge"] = nil
+				cacheMap["maxAgeMs"] = nil
 			}
 			if t.Cache.Namespace != nil {
 				cacheMap["namespace"] = *t.Cache.Namespace
@@ -453,16 +453,16 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 
 		// Delay is already in milliseconds from the adapter (0 if not set - server requires integer, not nil)
 		delay := 0
-		if t.Delay != nil {
-			delay = int(*t.Delay)
+		if t.DelayMs != nil {
+			delay = int(*t.DelayMs)
 		}
 
 		// Build retries (nil if not set, use 0 for delay values like Python does)
 		var retries any
 		if t.Retries != nil {
 			retriesMap := map[string]any{
-				"backoffMin": int64(0),
-				"backoffMax": int64(0),
+				"backoffMinMs": int64(0),
+				"backoffMaxMs": int64(0),
 			}
 			if t.Retries.Limit != nil {
 				retriesMap["limit"] = *t.Retries.Limit
@@ -470,10 +470,10 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 				retriesMap["limit"] = nil
 			}
 			if t.Retries.BackoffMinMs != nil {
-				retriesMap["backoffMin"] = *t.Retries.BackoffMinMs
+				retriesMap["backoffMinMs"] = *t.Retries.BackoffMinMs
 			}
 			if t.Retries.BackoffMaxMs != nil {
-				retriesMap["backoffMax"] = *t.Retries.BackoffMaxMs
+				retriesMap["backoffMaxMs"] = *t.Retries.BackoffMaxMs
 			}
 			retries = retriesMap
 		}
@@ -495,7 +495,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"waitFor":     waitFor,
 			"cache":       cache,
 			"defer":       defer_,
-			"delay":       delay,
+			"delayMs":     delay,
 			"retries":     retries,
 			"recurrent":   t.Recurrent,
 			"requires":    requires,

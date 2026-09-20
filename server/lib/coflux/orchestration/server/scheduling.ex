@@ -110,8 +110,8 @@ defmodule Coflux.Orchestration.Server.Scheduling do
          attempt: attempt,
          created_at: created_at
        }} ->
-        delay = Keyword.get(opts, :delay, 0)
-        execute_after = if delay > 0, do: created_at + delay
+        delay_ms = Keyword.get(opts, :delay_ms, 0)
+        execute_after = if delay_ms > 0, do: created_at + delay_ms
 
         principal =
           case Principals.get_principal(state.db, created_by) do
@@ -442,8 +442,8 @@ defmodule Coflux.Orchestration.Server.Scheduling do
   def step_retries(step) do
     %{
       limit: if(step.retry_limit == -1, do: nil, else: step.retry_limit),
-      backoff_min: step.retry_backoff_min,
-      backoff_max: step.retry_backoff_max
+      backoff_min_ms: step.retry_backoff_min_ms,
+      backoff_max_ms: step.retry_backoff_max_ms
     }
   end
 

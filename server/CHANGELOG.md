@@ -6,6 +6,8 @@ Enhancements:
 
 Changes:
 
+- Durations carry their unit in their name, and are milliseconds everywhere the API and the database speak them. `delay` is `delayMs`, `timeout` is `timeoutMs`, `maxAge` is `maxAgeMs`, `backoffMin`/`backoffMax` are `backoffMinMs`/`backoffMaxMs` — on `submit_workflow`, on `register_manifests`, and in the topics that report them. The worker protocol matches, so `max_age`, `backoff_min` and `backoff_max` gain the `_ms` the adapter already sent them with. Database columns are renamed to match; no values change.
+- The pool `idleTimeout` field, added earlier in this release and never published, is `idleTimeoutMs` on the API and is milliseconds rather than seconds. Its default is unchanged at 5 seconds. (The CLI still writes it as `idleTimeout`, taking a duration.)
 - Workspace patterns mean one thing everywhere now. A pattern selects a workspace (`development`), the workspaces under it (`development/*`, at any depth, but not `development` itself), or all of them (`*`) — the rule tokens already used, now used for a secret's workspaces too, where a bare name previously selected everything beneath it as well. Patterns that name nothing are rejected.
 - Setting a secret takes access containing every pattern given, whole, rather than access to any one workspace the pattern reaches — so a token for `staging` can no longer set a secret reaching `staging/feature-1`.
 - Secrets are set for one or more workspace patterns (`workspaces` on `set_secret` and `delete_secret`, replacing `scope`), stored once per pattern. Where patterns overlap, the nearest wins: an exact workspace, then a longer prefix, then a shorter one, then `*`.

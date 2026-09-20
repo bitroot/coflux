@@ -7,8 +7,8 @@ defmodule Coflux.Orchestration.Server.Fleet do
   its connection - a worker that drops reconnects into the same session
   and picks up where it left off - which is why a session expires on a
   timer rather than on disconnect. Two timers apply: a worker that never
-  connects expires on its activation timeout, one that connected and went
-  away on its reconnection timeout. A third case is neither, and is
+  connects expires on its activation timeout_ms, one that connected and went
+  away on its reconnection timeout_ms. A third case is neither, and is
   handled by `Scheduler`: a worker that connects but never declares any
   targets is deactivated once its readiness deadline passes.
 
@@ -198,7 +198,7 @@ defmodule Coflux.Orchestration.Server.Fleet do
 
   Until both have happened the session has never been able to accept an
   execution, so the fact that it isn't running one says nothing about it
-  being surplus - which is why the idle timeout only applies from here.
+  being surplus - which is why the idle timeout_ms only applies from here.
   Declaring an *empty* set of targets still counts: the worker answered,
   it just has nothing to offer, and it should be allowed to drain like
   any other rather than pinning its pool open forever.
@@ -532,14 +532,14 @@ defmodule Coflux.Orchestration.Server.Fleet do
         active_sessions,
         state,
         fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
-            accepts_tag_set_id, activation_timeout, reconnection_timeout, secret_hash, created_at,
-            activated_at},
+            accepts_tag_set_id, activation_timeout_ms, reconnection_timeout_ms, secret_hash,
+            created_at, activated_at},
            state ->
           provides = Resolve.tag_set(state.db, provides_tag_set_id)
           accepts = Resolve.tag_set(state.db, accepts_tag_set_id)
 
-          activation_timeout = activation_timeout || @default_activation_timeout_ms
-          reconnection_timeout = reconnection_timeout || @default_reconnection_timeout_ms
+          activation_timeout_ms = activation_timeout_ms || @default_activation_timeout_ms
+          reconnection_timeout_ms = reconnection_timeout_ms || @default_reconnection_timeout_ms
 
           session = %{
             external_id: external_id,
@@ -564,8 +564,8 @@ defmodule Coflux.Orchestration.Server.Fleet do
             # before the restart.
             declared_at: nil,
             ready_deadline_at: nil,
-            activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout,
+            activation_timeout_ms: activation_timeout_ms,
+            reconnection_timeout_ms: reconnection_timeout_ms,
             total_executions: Map.get(assignment_counts_by_session, session_id, 0)
           }
 
@@ -577,9 +577,9 @@ defmodule Coflux.Orchestration.Server.Fleet do
           # Schedule expiry - either activation (if never connected) or reconnection (if was connected)
           state =
             if activated_at do
-              schedule_session_expiry(state, session_id, reconnection_timeout)
+              schedule_session_expiry(state, session_id, reconnection_timeout_ms)
             else
-              schedule_session_expiry(state, session_id, activation_timeout)
+              schedule_session_expiry(state, session_id, activation_timeout_ms)
             end
 
           # Link session to worker if applicable

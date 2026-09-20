@@ -37,7 +37,7 @@ Arguments are passed as JSON strings.
 | `--requires` | Override requires tags (can be repeated) |
 | `--no-requires` | Clear requires |
 | `--memo` / `--no-memo` | Override memoisation |
-| `--delay` | Override delay (seconds) |
+| `--delay` | Override delay, as a duration (e.g. `30s`, `5m`) |
 | `--retries` | Override retry limit (0 = no retries) |
 
 ```bash

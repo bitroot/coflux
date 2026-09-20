@@ -306,17 +306,17 @@ class TestCommonLauncherFields:
         level, and zero is a value rather than an absence."""
         host = pool_env["host"]
         targets = [workflow("test", "my_workflow")]
-        _setup_pool(pool_env, targets, pool_name="idle-pool", idle_timeout=300)
+        _setup_pool(pool_env, targets, pool_name="idle-pool", idle_timeout="5m")
 
         pool = cli.pools_get("idle-pool", host=host)
-        assert pool["idleTimeout"] == 300
-        assert "idleTimeout" not in pool["launcher"]
+        assert pool["idleTimeoutMs"] == 300_000
+        assert "idleTimeoutMs" not in pool["launcher"]
 
         exported = cli.pools_export(host=host)
-        assert "idle_timeout = 300\n" in exported
+        assert 'idle_timeout = "5m"\n' in exported
 
-        cli.pools_update("idle-pool", idle_timeout=0, host=host)
-        assert cli.pools_get("idle-pool", host=host)["idleTimeout"] == 0
+        cli.pools_update("idle-pool", idle_timeout="0s", host=host)
+        assert cli.pools_get("idle-pool", host=host)["idleTimeoutMs"] == 0
 
         cli._coflux(
             "pools",
@@ -327,12 +327,12 @@ class TestCommonLauncherFields:
             host=host,
             output=None,
         )
-        assert "idleTimeout" not in cli.pools_get("idle-pool", host=host)
+        assert "idleTimeoutMs" not in cli.pools_get("idle-pool", host=host)
 
         path = tmp_path / "pools.toml"
         path.write_text(exported)
         cli.pools_import(path, host=host)
-        assert cli.pools_get("idle-pool", host=host)["idleTimeout"] == 300
+        assert cli.pools_get("idle-pool", host=host)["idleTimeoutMs"] == 300_000
 
     def test_idle_timeout_keeps_worker_warm(self, pool_env):
         """A worker with an idle timeout outlives the gap between runs, so
@@ -340,7 +340,7 @@ class TestCommonLauncherFields:
         host = pool_env["host"]
         executor = pool_env["executor"]
         targets = [workflow("test", "greet", parameters=["name"])]
-        _setup_pool(pool_env, targets, pool_name="warm-pool", idle_timeout=60)
+        _setup_pool(pool_env, targets, pool_name="warm-pool", idle_timeout="60s")
 
         resp = cli.submit("test/greet", '"one"', host=host)
         executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
