@@ -87,6 +87,21 @@ class TestServiceTokens:
         token_server.restart(timeout=30)
         assert _discover(port, project_id, created["token"]) == (200, ["*"])
 
+    def _set_secret(self, port, project_id, token, scope):
+        """The status of setting a secret for a scope - a convenient probe
+        for what a grant covers."""
+        try:
+            api_post(
+                port,
+                project_id,
+                "set_secret",
+                token=token,
+                body={"name": "key", "scope": scope, "value": "v"},
+            )
+            return 200
+        except urllib.error.HTTPError as e:
+            return e.code
+
     def test_setting_a_secret_takes_operator_access_to_its_scope(self, token_server):
         """A token for 'development/*' can set a secret for a development
         workspace, but not for the project or for production."""
@@ -95,21 +110,65 @@ class TestServiceTokens:
         restricted = _create(port, project_id, name="dev", workspaces=["development/*"])
 
         def set_secret(scope):
+            return self._set_secret(port, project_id, restricted["token"], scope)
+
+        assert set_secret("development/joe") == 200
+        assert set_secret("") == 403
+        assert set_secret("production") == 403
+
+    def test_a_grant_covers_the_workspace_it_names_and_everything_under_it(
+        self, token_server
+    ):
+        """A pattern grants a subtree: 'development' and 'development/*'
+        both cover 'development' itself and everything below it. A sibling
+        that merely starts with the same characters isn't below it."""
+        port = token_server.port
+        project_id = f"tok-{uuid.uuid4().hex[:8]}"
+        bare = _create(port, project_id, name="bare", workspaces=["development"])
+        wildcard = _create(port, project_id, name="wild", workspaces=["development/*"])
+
+        for created in [bare, wildcard]:
+            token = created["token"]
+
+            assert self._set_secret(port, project_id, token, "development") == 200
+            assert self._set_secret(port, project_id, token, "development/joe") == 200
+            assert (
+                self._set_secret(port, project_id, token, "development/joe/feature-1")
+                == 200
+            )
+
+            assert self._set_secret(port, project_id, token, "development-2") == 403
+            assert self._set_secret(port, project_id, token, "") == 403
+
+    def test_a_token_cannot_be_granted_more_than_its_creator_has(self, token_server):
+        """A token can hand on a scope within its own, and no more."""
+        port = token_server.port
+        project_id = f"tok-{uuid.uuid4().hex[:8]}"
+        parent = _create(port, project_id, name="parent", workspaces=["development"])
+
+        def create(workspaces):
             try:
-                api_post(
+                _create(
                     port,
                     project_id,
-                    "set_secret",
-                    token=restricted["token"],
-                    body={"name": "key", "scope": scope, "value": "v"},
+                    token=parent["token"],
+                    name="child",
+                    workspaces=workspaces,
                 )
                 return 200
             except urllib.error.HTTPError as e:
                 return e.code
 
-        assert set_secret("development/joe") == 200
-        assert set_secret("") == 403
-        assert set_secret("production") == 403
+        assert create(["development"]) == 200
+        assert create(["development/*"]) == 200
+        assert create(["development/joe"]) == 200
+
+        assert create(["*"]) == 403
+        assert create(["production"]) == 403
+        assert create(["development-2"]) == 403
+
+        # A pattern that names no scope is rejected outright.
+        assert create([""]) == 400
 
     def test_only_the_creator_or_full_access_can_revoke(self, token_server):
         """Who created a token is kept with it, and resolved to a principal

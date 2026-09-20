@@ -48,10 +48,11 @@ defmodule Coflux.Auth do
 
   ## Workspace Patterns
 
-  Workspace patterns control write access:
-  - "*" matches all workspaces
-  - "staging" matches exactly "staging"
-  - "staging/*" matches "staging", "staging/feature1", etc.
+  A grant is a list of workspace patterns, which control write access.
+  `Coflux.Scopes` defines what a pattern grants, and
+  `Coflux.Orchestration.Server.Permissions` applies it - the patterns are
+  carried through this module unread, beyond normalising a grant that
+  includes "*" to `:all`.
   """
 
   alias Coflux.{Config, JwksStore, Orchestration}

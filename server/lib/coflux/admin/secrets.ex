@@ -9,9 +9,9 @@ defmodule Coflux.Admin.Secrets do
   value and bumps the version; deleting it removes it. Nothing older is
   kept, so a rotated or deleted value is gone from here.
 
-  A secret is scoped to a workspace name, or to a prefix of one: a secret
+  A secret is set for a scope, as `Coflux.Scopes` defines one: a secret
   for `development` applies to `development/joe`, and the nearest scope
-  wins. The empty scope is the whole project. This follows the naming
+  wins. The root scope is the whole project. This follows the naming
   hierarchy rather than the base-workspace chain: a workspace that
   inherits results from `production` doesn't inherit its secrets.
 
@@ -178,10 +178,7 @@ defmodule Coflux.Admin.Secrets do
   def exists?(db, workspace_name, name), do: match?({:ok, _}, find(db, workspace_name, name))
 
   @doc "Whether a secret in `scope` is one a workspace of this name sees."
-  def scope_applies?("", _workspace_name), do: true
-
-  def scope_applies?(scope, workspace_name),
-    do: workspace_name == scope or String.starts_with?(workspace_name, scope <> "/")
+  defdelegate scope_applies?(scope, workspace_name), to: Coflux.Scopes, as: :covers?
 
   # --- Launcher configs ---
 

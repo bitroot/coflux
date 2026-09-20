@@ -1,6 +1,8 @@
 ## 0.13.0
 
-No changes.
+Changes:
+
+- A workspace pattern on a token now grants the workspace it names *and everything under it*, so `development/*` covers `development` itself (as documented, but not previously implemented), and a plain `development` covers `development/joe`. Previously a plain pattern matched one workspace exactly, and `development/*` matched everything below `development` but not `development` itself. Tokens already issued widen accordingly, always to workspaces under a name the token already held. Patterns that name nothing (an empty pattern) are now rejected when creating a token.
 
 ## 0.12.0
 

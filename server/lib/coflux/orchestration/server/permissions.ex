@@ -9,7 +9,8 @@ defmodule Coflux.Orchestration.Server.Permissions do
 
   Access arrives as the caller's grant - a token's workspace patterns, or
   a studio session's - and `nil` means an internal caller with no
-  restriction. A grant matches by name pattern, and an operator grant
+  restriction. A pattern grants a scope of the workspace naming
+  hierarchy, which `Coflux.Scopes` defines, and an operator grant
   additionally allows the management operations (creating workspaces,
   editing pools, revoking tokens) that a plain workspace grant does not.
 
@@ -19,6 +20,7 @@ defmodule Coflux.Orchestration.Server.Permissions do
   """
 
   alias Coflux.Orchestration.{Sessions}
+  alias Coflux.Scopes
 
   def require_workspace(state, workspace_external_id, access \\ nil) do
     case Map.fetch(state.workspace_external_ids, workspace_external_id) do
@@ -60,18 +62,7 @@ defmodule Coflux.Orchestration.Server.Permissions do
   def operator?(:all, _workspace), do: true
 
   def operator?(patterns, workspace) do
-    Enum.any?(patterns, &workspace_matches?(workspace, &1))
-  end
-
-  def workspace_matches?(_workspace, "*"), do: true
-  def workspace_matches?(workspace, workspace), do: true
-
-  def workspace_matches?(workspace, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
-    else
-      false
-    end
+    Enum.any?(patterns, &Scopes.covers?(Scopes.from_pattern(&1), workspace))
   end
 
   def check_operator_access(nil, _name), do: :ok

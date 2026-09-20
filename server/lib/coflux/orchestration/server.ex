@@ -2977,13 +2977,11 @@ defmodule Coflux.Orchestration.Server do
   # Private helper functions
 
   # A secret in a scope is a secret for every workspace under it, so
-  # setting one takes operator access to the scope itself, and the project
-  # scope takes access to everything.
+  # setting one takes operator access to the scope itself. Scopes are
+  # closed downward (see `Coflux.Scopes`), so a grant covering the scope's
+  # own name covers everything the secret can reach - asking about the
+  # name alone is enough. The root scope is covered only by a `*` grant.
   defp check_secret_scope_access(nil, _scope), do: :ok
-
-  defp check_secret_scope_access(access, "") do
-    if access[:workspaces] == :all, do: :ok, else: {:error, :forbidden}
-  end
 
   defp check_secret_scope_access(access, scope) do
     if Permissions.operator?(access[:workspaces], scope), do: :ok, else: {:error, :forbidden}

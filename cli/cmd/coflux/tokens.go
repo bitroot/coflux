@@ -97,9 +97,11 @@ var tokensCreateCmd = &cobra.Command{
 
 The token value is displayed only once. Make sure to copy it.
 
-Use --workspaces to restrict the token to specific workspaces. Patterns can
-include wildcards (e.g., 'development/*' matches all workspaces starting with
-'development/'). If omitted, the token has access to all workspaces.`,
+Use --workspaces to restrict the token to specific workspaces. A pattern grants
+a workspace and everything under it, so 'development' and 'development/*' both
+cover 'development' and 'development/joe'. Use '*' for every workspace. A token
+can't be given broader access than the one creating it. If omitted, the token
+inherits the access of the token creating it.`,
 	RunE: runTokensCreate,
 }
 

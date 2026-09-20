@@ -1,7 +1,7 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Auth, Config, Orchestration, MapUtils, Version}
+  alias Coflux.{Auth, Config, Orchestration, MapUtils, Scopes, Version}
   alias Coflux.Orchestration.Ids
 
   @max_parameters 20
@@ -73,46 +73,22 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp workspace_matches?(_workspace, "*"), do: true
-  defp workspace_matches?(workspace, workspace), do: true
-
-  defp workspace_matches?(workspace, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      # "staging/*" matches "staging/foo", "staging/foo/bar", etc. (not "staging" itself)
-      String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
-    else
-      false
-    end
-  end
-
-  # Check if all requested workspace patterns are covered by the caller's access.
-  # Returns true if the caller can grant the requested access level.
+  # Whether the caller can grant the requested access: every scope asked
+  # for has to sit within one the caller already has. Scopes are closed
+  # downward, so a caller's scope covering the root of a requested one
+  # covers all of it.
   defp workspaces_covered?(:all, _requested), do: true
   defp workspaces_covered?(_caller, nil), do: true
 
   defp workspaces_covered?(caller_patterns, requested) do
-    Enum.all?(requested, &pattern_covered_by?(caller_patterns, &1))
-  end
+    caller_scopes = Enum.map(caller_patterns, &Scopes.from_pattern/1)
 
-  defp pattern_covered_by?(caller_patterns, "*") do
-    # Full access - only covered by explicit "*" pattern
-    Enum.any?(caller_patterns, &(&1 == "*"))
-  end
-
-  defp pattern_covered_by?(caller_patterns, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      # Wildcard pattern "X/*" - caller needs "*", same pattern, or broader wildcard
-      prefix = String.slice(pattern, 0..-2//1)
-
-      Enum.any?(caller_patterns, fn cp ->
-        cp == "*" or cp == pattern or
-          (String.ends_with?(cp, "/*") and
-             String.starts_with?(prefix, String.slice(cp, 0..-2//1)))
-      end)
-    else
-      # Exact pattern - use existing workspace_matches?
-      Enum.any?(caller_patterns, &workspace_matches?(pattern, &1))
-    end
+    Enum.all?(requested, fn pattern ->
+      case Scopes.from_pattern(pattern) do
+        :never -> false
+        scope -> Enum.any?(caller_scopes, &Scopes.covers?(&1, scope))
+      end
+    end)
   end
 
   defp handle(req, "GET", ["discover"], _project_id, %{workspaces: workspaces}) do
@@ -1127,7 +1103,7 @@ defmodule Coflux.Handlers.Api do
   # Helper functions for handle/5 clauses
 
   defp parse_workspaces(value) when is_list(value) do
-    if Enum.all?(value, &is_binary/1) do
+    if Enum.all?(value, &Scopes.valid_pattern?/1) do
       {:ok, value}
     else
       {:error, :invalid}
