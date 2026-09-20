@@ -10,9 +10,84 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/version"
 )
+
+// reasonText renders the server's validation vocabulary. Anything not
+// listed is printed as-is, so a new reason degrades to its own name
+// rather than disappearing.
+var reasonText = map[string]string{
+	"required":      "required",
+	"invalid":       "invalid",
+	"invalid_name":  "not a valid name",
+	"malformed":     "malformed",
+	"too_long":      "too long",
+	"too_many":      "too many",
+	"out_of_range":  "out of range",
+	"unknown_value": "not one of the accepted values",
+	"exclusive":     "cannot be combined with the other field given",
+	"reserved":      "uses a reserved name",
+}
+
+// flattenDetails turns the server's nested `details` into one line per
+// field: {"pools": {"mypool": {"launcher": {"region": "required"}}}}
+// becomes "pools.mypool.launcher.region: required".
+func flattenDetails(prefix string, details map[string]any) []string {
+	var lines []string
+	for key, value := range details {
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+		switch v := value.(type) {
+		case map[string]any:
+			lines = append(lines, flattenDetails(path, v)...)
+		case string:
+			text, ok := reasonText[v]
+			if !ok {
+				text = v
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", path, text))
+		default:
+			lines = append(lines, fmt.Sprintf("%s: %v", path, v))
+		}
+	}
+	return lines
+}
+
+// apiError renders an error response. The server names the field it
+// rejected and why, so print that rather than the raw JSON: a bad region
+// in a pool's launcher reads as
+//
+//	bad request
+//	  pools.mypool.launcher.region: required
+func apiError(statusCode int, body []byte) error {
+	var parsed struct {
+		Error   string         `json:"error"`
+		Message string         `json:"message"`
+		Details map[string]any `json:"details"`
+	}
+	if json.Unmarshal(body, &parsed) != nil || parsed.Error == "" {
+		return fmt.Errorf("HTTP %d: %s", statusCode, string(body))
+	}
+
+	// The error code is left as-is: it is a stable identifier that scripts
+	// and tests match on, and the detail lines below carry the prose.
+	headline := parsed.Error
+	if parsed.Message != "" {
+		headline += ": " + parsed.Message
+	}
+
+	lines := flattenDetails("", parsed.Details)
+	if len(lines) == 0 {
+		return errors.New(headline)
+	}
+	sort.Strings(lines)
+	return fmt.Errorf("%s\n  %s", headline, strings.Join(lines, "\n  "))
+}
 
 // Client provides HTTP API access to the Coflux server
 type Client struct {
@@ -309,7 +384,7 @@ func (c *Client) UpdatePools(ctx context.Context, workspaceID string, pools map[
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return err
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return apiError(resp.StatusCode, respBody)
 	}
 
 	return nil
@@ -595,19 +670,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return err
 		}
-		var errResp struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-			Details any    `json:"details"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			if errResp.Details != nil {
-				detailsJSON, _ := json.Marshal(errResp.Details)
-				return fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
-			}
-			return fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
-		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return apiError(resp.StatusCode, respBody)
 	}
 
 	if result != nil && len(respBody) > 0 {
@@ -648,19 +711,7 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) (h
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return nil, err
 		}
-		var errResp struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-			Details any    `json:"details"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			if errResp.Details != nil {
-				detailsJSON, _ := json.Marshal(errResp.Details)
-				return nil, fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
-			}
-			return nil, fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
-		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, apiError(resp.StatusCode, respBody)
 	}
 
 	if result != nil && len(respBody) > 0 {

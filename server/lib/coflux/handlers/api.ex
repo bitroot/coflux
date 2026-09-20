@@ -7,6 +7,7 @@ defmodule Coflux.Handlers.Api do
   @max_parameters 20
 
   @ecs_launch_types ["FARGATE", "EC2", "EXTERNAL"]
+  @pull_policies ["Always", "Never", "IfNotPresent"]
 
   # An IAM role ARN: any partition, a 12-digit account, and a name that
   # may sit under a path.
@@ -1191,7 +1192,7 @@ defmodule Coflux.Handlers.Api do
               {:cont, {:ok, Map.put(result, key, value)}}
 
             {:error, error} ->
-              {:halt, {:error, error}}
+              {:halt, {:error, %{key => error}}}
           end
         end)
 
@@ -1200,295 +1201,274 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_docker_launcher(value) do
-    image = Map.get(value, "image")
-    docker_host = Map.get(value, "dockerHost")
-    network_mode = Map.get(value, "networkMode")
+  # --- Field validation ------------------------------------------------
+  #
+  # Each check returns `:ok`, or `{:error, %{field => reason}}` naming the
+  # field it rejected. `merge_error/3` folds those into a dotted path, so a
+  # bad region in a pool's launcher reaches the client as
+  # `pools.my-pool.launcher.region` rather than a bare `invalid`, which
+  # says only that something somewhere in the request was wrong.
+  #
+  # Reasons are a small fixed vocabulary, so a client can render them
+  # without parsing prose: `:required`, `:invalid` (wrong type or shape),
+  # `:too_long`, `:too_many`, `:malformed`, `:out_of_range`,
+  # `:unknown_value`, `:exclusive`, `:reserved`.
 
+  defp required(value, field, kind, opts) do
+    case Map.get(value, field) do
+      nil -> {:error, %{field => :required}}
+      field_value -> check_field(field_value, field, kind, opts)
+    end
+  end
+
+  defp optional(value, field, kind, opts \\ []) do
+    case Map.get(value, field) do
+      nil -> :ok
+      field_value -> check_field(field_value, field, kind, opts)
+    end
+  end
+
+  defp check_field(value, field, :string, opts) do
     cond do
-      not is_binary(image) or String.length(image) > 200 ->
-        {:error, :invalid}
+      not is_binary(value) ->
+        {:error, %{field => :invalid}}
 
-      not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
-        {:error, :invalid}
+      opts[:non_empty] && value == "" ->
+        {:error, %{field => :required}}
 
-      not is_nil(network_mode) and
-          (not is_binary(network_mode) or String.length(network_mode) > 200) ->
-        {:error, :invalid}
+      opts[:max] && String.length(value) > opts[:max] ->
+        {:error, %{field => :too_long}}
+
+      opts[:match] && not Regex.match?(opts[:match], value) ->
+        {:error, %{field => :malformed}}
+
+      opts[:secret_name] && not Coflux.Admin.Secrets.valid_name?(value) ->
+        {:error, %{field => :malformed}}
+
+      opts[:prefixes] && not String.starts_with?(value, opts[:prefixes]) ->
+        {:error, %{field => :malformed}}
 
       true ->
-        launcher = %{type: :docker, image: image}
+        :ok
+    end
+  end
 
-        launcher =
-          if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+  defp check_field(value, field, :boolean, _opts) do
+    if is_boolean(value), do: :ok, else: {:error, %{field => :invalid}}
+  end
 
-        launcher =
-          if network_mode, do: Map.put(launcher, :network_mode, network_mode), else: launcher
+  defp check_field(value, field, :integer, opts) do
+    cond do
+      not is_integer(value) -> {:error, %{field => :invalid}}
+      opts[:min] && value < opts[:min] -> {:error, %{field => :out_of_range}}
+      true -> :ok
+    end
+  end
 
-        {:ok, launcher}
+  defp check_field(value, field, :enum, opts) do
+    if value in opts[:values], do: :ok, else: {:error, %{field => :unknown_value}}
+  end
+
+  defp check_field(value, field, :list, opts) do
+    cond do
+      not is_list(value) -> {:error, %{field => :invalid}}
+      opts[:max] && length(value) > opts[:max] -> {:error, %{field => :too_many}}
+      true -> :ok
+    end
+  end
+
+  defp check_field(value, field, :string_list, opts) do
+    cond do
+      not is_list(value) -> {:error, %{field => :invalid}}
+      opts[:min] && length(value) < opts[:min] -> {:error, %{field => :required}}
+      opts[:max] && length(value) > opts[:max] -> {:error, %{field => :too_many}}
+      Enum.any?(value, &(not is_binary(&1))) -> {:error, %{field => :invalid}}
+      true -> :ok
+    end
+  end
+
+  # Subnet and security-group IDs: a non-empty list of non-empty strings.
+  defp check_field(value, field, :id_list, opts) do
+    if is_string_list?(value, opts[:max]), do: :ok, else: {:error, %{field => :invalid}}
+  end
+
+  defp check_field(value, field, :string_map, opts) do
+    cond do
+      not is_map(value) ->
+        {:error, %{field => :invalid}}
+
+      Enum.any?(value, fn {k, v} -> not is_binary(k) or not is_binary(v) end) ->
+        {:error, %{field => :invalid}}
+
+      opts[:reserved_prefix] &&
+          Enum.any?(value, fn {k, _} -> String.starts_with?(k, opts[:reserved_prefix]) end) ->
+        {:error, %{field => :reserved}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Environment variables set from named secrets: keys as for `env`, values
+  # naming a secret rather than holding one.
+  defp check_field(value, field, :secret_map, opts) do
+    cond do
+      not is_map(value) ->
+        {:error, %{field => :invalid}}
+
+      Enum.any?(value, fn {k, v} ->
+        not is_binary(k) or not Coflux.Admin.Secrets.valid_name?(v)
+      end) ->
+        {:error, %{field => :invalid}}
+
+      opts[:reserved_prefix] &&
+          Enum.any?(value, fn {k, _} -> String.starts_with?(k, opts[:reserved_prefix]) end) ->
+        {:error, %{field => :reserved}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_field(value, field, :map, _opts) do
+    if is_map(value), do: :ok, else: {:error, %{field => :invalid}}
+  end
+
+  # Two fields that may not be given together. Both are named, since
+  # either one is a candidate for removal and the reader can't tell which
+  # from one half of the pair.
+  defp exclusive(value, field, with_field) do
+    if is_nil(Map.get(value, field)) or is_nil(Map.get(value, with_field)) do
+      :ok
+    else
+      {:error, %{field => :exclusive, with_field => :exclusive}}
+    end
+  end
+
+  # A field that means nothing on its own: giving it makes the other
+  # required, so that is what the error names.
+  defp together(value, field, needs) do
+    if is_nil(Map.get(value, field)) or not is_nil(Map.get(value, needs)) do
+      :ok
+    else
+      {:error, %{needs => :required}}
+    end
+  end
+
+  defp parse_docker_launcher(value) do
+    with :ok <- required(value, "image", :string, max: 200),
+         :ok <- optional(value, "dockerHost", :string, max: 200),
+         :ok <- optional(value, "networkMode", :string, max: 200) do
+      launcher =
+        %{type: :docker, image: Map.get(value, "image")}
+        |> maybe_put_value(:docker_host, Map.get(value, "dockerHost"))
+        |> maybe_put_value(:network_mode, Map.get(value, "networkMode"))
+
+      {:ok, launcher}
     end
   end
 
   defp parse_process_launcher(value) do
-    directory = Map.get(value, "directory")
-
-    cond do
-      not is_binary(directory) or String.length(directory) > 500 ->
-        {:error, :invalid}
-
-      true ->
-        {:ok, %{type: :process, directory: directory}}
+    with :ok <- required(value, "directory", :string, max: 500) do
+      {:ok, %{type: :process, directory: Map.get(value, "directory")}}
     end
   end
 
   defp parse_kubernetes_launcher(value) do
-    image = Map.get(value, "image")
-    namespace = Map.get(value, "namespace")
-    service_account = Map.get(value, "serviceAccount")
-    api_server = Map.get(value, "apiServer")
-    token_secret = Map.get(value, "tokenSecret")
-    ca_cert = Map.get(value, "caCert")
-    insecure = Map.get(value, "insecure")
-    image_pull_policy = Map.get(value, "imagePullPolicy")
-    node_selector = Map.get(value, "nodeSelector")
-    tolerations = Map.get(value, "tolerations")
-    image_pull_secrets = Map.get(value, "imagePullSecrets")
-    host_aliases = Map.get(value, "hostAliases")
-    resources = Map.get(value, "resources")
-    labels = Map.get(value, "labels")
-    annotations = Map.get(value, "annotations")
-    active_deadline_seconds = Map.get(value, "activeDeadlineSeconds")
-    volumes = Map.get(value, "volumes")
-    volume_mounts = Map.get(value, "volumeMounts")
+    with :ok <- required(value, "image", :string, max: 200),
+         :ok <- optional(value, "namespace", :string, max: 253),
+         :ok <- optional(value, "serviceAccount", :string, max: 253),
+         :ok <- optional(value, "apiServer", :string, max: 500),
+         :ok <- optional(value, "tokenSecret", :string, secret_name: true),
+         :ok <- optional(value, "caCert", :string),
+         :ok <- optional(value, "insecure", :boolean),
+         :ok <- optional(value, "imagePullPolicy", :enum, values: @pull_policies),
+         :ok <- optional(value, "nodeSelector", :map),
+         :ok <- optional(value, "tolerations", :list),
+         :ok <- optional(value, "imagePullSecrets", :string_list),
+         :ok <- optional(value, "hostAliases", :list),
+         :ok <- optional(value, "resources", :map),
+         :ok <- optional(value, "labels", :string_map),
+         :ok <- optional(value, "annotations", :string_map),
+         :ok <- optional(value, "activeDeadlineSeconds", :integer, min: 1),
+         :ok <- optional(value, "volumes", :list),
+         :ok <- optional(value, "volumeMounts", :list) do
+      launcher =
+        %{type: :kubernetes, image: Map.get(value, "image")}
+        |> maybe_put_value(:namespace, Map.get(value, "namespace"))
+        |> maybe_put_value(:service_account, Map.get(value, "serviceAccount"))
+        |> maybe_put_value(:api_server, Map.get(value, "apiServer"))
+        |> maybe_put_value(:token_secret, Map.get(value, "tokenSecret"))
+        |> maybe_put_value(:ca_cert, Map.get(value, "caCert"))
+        |> maybe_put_value(:insecure, if(Map.get(value, "insecure") == true, do: true))
+        |> maybe_put_value(:image_pull_policy, Map.get(value, "imagePullPolicy"))
+        |> maybe_put_value(:node_selector, Map.get(value, "nodeSelector"))
+        |> maybe_put_value(:tolerations, Map.get(value, "tolerations"))
+        |> maybe_put_value(:image_pull_secrets, Map.get(value, "imagePullSecrets"))
+        |> maybe_put_value(:host_aliases, Map.get(value, "hostAliases"))
+        |> maybe_put_value(:resources, Map.get(value, "resources"))
+        |> maybe_put_value(:labels, Map.get(value, "labels"))
+        |> maybe_put_value(:annotations, Map.get(value, "annotations"))
+        |> maybe_put_value(:active_deadline_seconds, Map.get(value, "activeDeadlineSeconds"))
+        |> maybe_put_value(:volumes, Map.get(value, "volumes"))
+        |> maybe_put_value(:volume_mounts, Map.get(value, "volumeMounts"))
 
-    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
-
-    cond do
-      not is_binary(image) or String.length(image) > 200 ->
-        {:error, :invalid}
-
-      not is_nil(namespace) and (not is_binary(namespace) or String.length(namespace) > 253) ->
-        {:error, :invalid}
-
-      not is_nil(service_account) and
-          (not is_binary(service_account) or String.length(service_account) > 253) ->
-        {:error, :invalid}
-
-      not is_nil(api_server) and (not is_binary(api_server) or String.length(api_server) > 500) ->
-        {:error, :invalid}
-
-      not is_nil(token_secret) and not Coflux.Admin.Secrets.valid_name?(token_secret) ->
-        {:error, :invalid}
-
-      not is_nil(ca_cert) and not is_binary(ca_cert) ->
-        {:error, :invalid}
-
-      not is_nil(insecure) and not is_boolean(insecure) ->
-        {:error, :invalid}
-
-      not is_nil(image_pull_policy) and image_pull_policy not in valid_pull_policies ->
-        {:error, :invalid}
-
-      not is_nil(node_selector) and not is_map(node_selector) ->
-        {:error, :invalid}
-
-      not is_nil(tolerations) and not is_list(tolerations) ->
-        {:error, :invalid}
-
-      not is_nil(image_pull_secrets) and
-          (not is_list(image_pull_secrets) or
-             Enum.any?(image_pull_secrets, &(not is_binary(&1)))) ->
-        {:error, :invalid}
-
-      not is_nil(host_aliases) and not is_list(host_aliases) ->
-        {:error, :invalid}
-
-      not is_nil(resources) and not is_map(resources) ->
-        {:error, :invalid}
-
-      not is_nil(labels) and
-          (not is_map(labels) or
-             Enum.any?(labels, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
-        {:error, :invalid}
-
-      not is_nil(annotations) and
-          (not is_map(annotations) or
-             Enum.any?(annotations, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
-        {:error, :invalid}
-
-      not is_nil(active_deadline_seconds) and
-          (not is_integer(active_deadline_seconds) or active_deadline_seconds < 1) ->
-        {:error, :invalid}
-
-      not is_nil(volumes) and not is_list(volumes) ->
-        {:error, :invalid}
-
-      not is_nil(volume_mounts) and not is_list(volume_mounts) ->
-        {:error, :invalid}
-
-      true ->
-        launcher = %{type: :kubernetes, image: image}
-
-        launcher =
-          if namespace, do: Map.put(launcher, :namespace, namespace), else: launcher
-
-        launcher =
-          if service_account,
-            do: Map.put(launcher, :service_account, service_account),
-            else: launcher
-
-        launcher =
-          if api_server, do: Map.put(launcher, :api_server, api_server), else: launcher
-
-        launcher =
-          if token_secret, do: Map.put(launcher, :token_secret, token_secret), else: launcher
-
-        launcher = if ca_cert, do: Map.put(launcher, :ca_cert, ca_cert), else: launcher
-
-        launcher =
-          if insecure == true, do: Map.put(launcher, :insecure, true), else: launcher
-
-        launcher =
-          if image_pull_policy,
-            do: Map.put(launcher, :image_pull_policy, image_pull_policy),
-            else: launcher
-
-        launcher =
-          if node_selector, do: Map.put(launcher, :node_selector, node_selector), else: launcher
-
-        launcher =
-          if tolerations, do: Map.put(launcher, :tolerations, tolerations), else: launcher
-
-        launcher =
-          if image_pull_secrets,
-            do: Map.put(launcher, :image_pull_secrets, image_pull_secrets),
-            else: launcher
-
-        launcher =
-          if host_aliases,
-            do: Map.put(launcher, :host_aliases, host_aliases),
-            else: launcher
-
-        launcher =
-          if resources, do: Map.put(launcher, :resources, resources), else: launcher
-
-        launcher =
-          if labels, do: Map.put(launcher, :labels, labels), else: launcher
-
-        launcher =
-          if annotations, do: Map.put(launcher, :annotations, annotations), else: launcher
-
-        launcher =
-          if active_deadline_seconds,
-            do: Map.put(launcher, :active_deadline_seconds, active_deadline_seconds),
-            else: launcher
-
-        launcher =
-          if volumes, do: Map.put(launcher, :volumes, volumes), else: launcher
-
-        launcher =
-          if volume_mounts, do: Map.put(launcher, :volume_mounts, volume_mounts), else: launcher
-
-        {:ok, launcher}
+      {:ok, launcher}
     end
   end
 
   defp parse_ecs_launcher(value) do
-    cluster = Map.get(value, "cluster")
-    task_definition = Map.get(value, "taskDefinition")
-    region = Map.get(value, "region")
-    container_name = Map.get(value, "containerName")
-    launch_type = Map.get(value, "launchType")
-    capacity_provider = Map.get(value, "capacityProvider")
-    subnets = wrap_list(Map.get(value, "subnets"))
-    security_groups = wrap_list(Map.get(value, "securityGroups"))
-    assign_public_ip = Map.get(value, "assignPublicIp")
-    platform_version = Map.get(value, "platformVersion")
-    credentials_secret = Map.get(value, "credentialsSecret")
-    role_arn = Map.get(value, "roleArn")
-    role_external_id = Map.get(value, "roleExternalId")
-    endpoint = Map.get(value, "endpoint")
+    # A single ID is accepted where a list is expected, so `--set
+    # subnets=subnet-1` works without JSON.
+    value =
+      value
+      |> Map.replace_lazy("subnets", &wrap_list/1)
+      |> Map.replace_lazy("securityGroups", &wrap_list/1)
 
-    cond do
-      not is_binary(cluster) or cluster == "" or String.length(cluster) > 255 ->
-        {:error, :invalid}
+    with :ok <- required(value, "cluster", :string, non_empty: true, max: 255),
+         :ok <- required(value, "taskDefinition", :string, non_empty: true, max: 500),
+         :ok <- required(value, "region", :string, match: ~r/^[a-z0-9-]{1,30}$/),
+         :ok <- optional(value, "containerName", :string, max: 255),
+         :ok <- optional(value, "launchType", :enum, values: @ecs_launch_types),
+         :ok <- optional(value, "capacityProvider", :string, max: 255),
+         # A capacity provider strategy decides the launch type itself.
+         :ok <- exclusive(value, "capacityProvider", "launchType"),
+         :ok <- optional(value, "subnets", :id_list, max: 16),
+         :ok <- optional(value, "securityGroups", :id_list, max: 5),
+         :ok <- optional(value, "assignPublicIp", :boolean),
+         :ok <- optional(value, "platformVersion", :string, max: 50),
+         :ok <- optional(value, "credentialsSecret", :string, secret_name: true),
+         :ok <- optional(value, "roleArn", :string, max: 2048, match: @iam_role_arn_regex),
+         # An external ID is something to assume a role with, so it needs one.
+         :ok <- together(value, "roleExternalId", "roleArn"),
+         :ok <- optional(value, "roleExternalId", :string, match: @external_id_regex),
+         :ok <- optional(value, "endpoint", :string, max: 500, prefixes: ["http://", "https://"]) do
+      launcher =
+        %{
+          type: :ecs,
+          cluster: Map.get(value, "cluster"),
+          task_definition: Map.get(value, "taskDefinition"),
+          region: Map.get(value, "region")
+        }
+        |> maybe_put_value(:container_name, Map.get(value, "containerName"))
+        |> maybe_put_value(:launch_type, Map.get(value, "launchType"))
+        |> maybe_put_value(:capacity_provider, Map.get(value, "capacityProvider"))
+        |> maybe_put_value(:subnets, Map.get(value, "subnets"))
+        |> maybe_put_value(:security_groups, Map.get(value, "securityGroups"))
+        |> maybe_put_value(
+          :assign_public_ip,
+          if(Map.get(value, "assignPublicIp") == true, do: true)
+        )
+        |> maybe_put_value(:platform_version, Map.get(value, "platformVersion"))
+        |> maybe_put_value(:credentials_secret, Map.get(value, "credentialsSecret"))
+        |> maybe_put_value(:role_arn, Map.get(value, "roleArn"))
+        |> maybe_put_value(:role_external_id, Map.get(value, "roleExternalId"))
+        |> maybe_put_value(:endpoint, Map.get(value, "endpoint"))
 
-      not is_binary(task_definition) or task_definition == "" or
-          String.length(task_definition) > 500 ->
-        {:error, :invalid}
-
-      not is_binary(region) or not Regex.match?(~r/^[a-z0-9-]{1,30}$/, region) ->
-        {:error, :invalid}
-
-      not is_nil(container_name) and
-          (not is_binary(container_name) or String.length(container_name) > 255) ->
-        {:error, :invalid}
-
-      not is_nil(launch_type) and launch_type not in @ecs_launch_types ->
-        {:error, :invalid}
-
-      not is_nil(capacity_provider) and
-          (not is_binary(capacity_provider) or String.length(capacity_provider) > 255) ->
-        {:error, :invalid}
-
-      # A capacity provider strategy decides the launch type itself.
-      not is_nil(launch_type) and not is_nil(capacity_provider) ->
-        {:error, :invalid}
-
-      not is_nil(subnets) and not is_string_list?(subnets, 16) ->
-        {:error, :invalid}
-
-      not is_nil(security_groups) and not is_string_list?(security_groups, 5) ->
-        {:error, :invalid}
-
-      not is_nil(assign_public_ip) and not is_boolean(assign_public_ip) ->
-        {:error, :invalid}
-
-      not is_nil(platform_version) and
-          (not is_binary(platform_version) or String.length(platform_version) > 50) ->
-        {:error, :invalid}
-
-      not is_nil(credentials_secret) and
-          not Coflux.Admin.Secrets.valid_name?(credentials_secret) ->
-        {:error, :invalid}
-
-      not is_nil(role_arn) and
-          (not is_binary(role_arn) or String.length(role_arn) > 2048 or
-             not Regex.match?(@iam_role_arn_regex, role_arn)) ->
-        {:error, :invalid}
-
-      # An external ID is something to assume a role with, so it needs one.
-      not is_nil(role_external_id) and
-          (is_nil(role_arn) or not is_binary(role_external_id) or
-             not Regex.match?(@external_id_regex, role_external_id)) ->
-        {:error, :invalid}
-
-      not is_nil(endpoint) and
-          (not is_binary(endpoint) or String.length(endpoint) > 500 or
-             not String.starts_with?(endpoint, ["http://", "https://"])) ->
-        {:error, :invalid}
-
-      true ->
-        launcher =
-          %{type: :ecs, cluster: cluster, task_definition: task_definition, region: region}
-          |> maybe_put_value(:container_name, container_name)
-          |> maybe_put_value(:launch_type, launch_type)
-          |> maybe_put_value(:capacity_provider, capacity_provider)
-          |> maybe_put_value(:subnets, subnets)
-          |> maybe_put_value(:security_groups, security_groups)
-          |> maybe_put_value(:assign_public_ip, if(assign_public_ip == true, do: true))
-          |> maybe_put_value(:platform_version, platform_version)
-          |> maybe_put_value(:credentials_secret, credentials_secret)
-          |> maybe_put_value(:role_arn, role_arn)
-          |> maybe_put_value(:role_external_id, role_external_id)
-          |> maybe_put_value(:endpoint, endpoint)
-
-        {:ok, launcher}
+      {:ok, launcher}
     end
   end
 
-  # A single ID is accepted where a list is expected, so `--set
-  # subnets=subnet-1` works without JSON.
   defp wrap_list(value) when is_binary(value), do: [value]
   defp wrap_list(value), do: value
 
@@ -1498,67 +1478,22 @@ defmodule Coflux.Handlers.Api do
   end
 
   defp parse_common_launcher_fields(launcher, value) do
-    server_host = Map.get(value, "serverHost")
-    server_secure = Map.get(value, "serverSecure")
-    adapter = Map.get(value, "adapter")
-    concurrency = Map.get(value, "concurrency")
-    env = Map.get(value, "env")
-    env_secrets = Map.get(value, "envSecrets")
+    with :ok <- optional(value, "serverHost", :string, max: 200),
+         :ok <- optional(value, "serverSecure", :boolean),
+         :ok <- optional(value, "adapter", :string_list, min: 1),
+         :ok <- optional(value, "concurrency", :integer, min: 1),
+         :ok <- optional(value, "env", :string_map, reserved_prefix: "COFLUX_"),
+         :ok <- optional(value, "envSecrets", :secret_map, reserved_prefix: "COFLUX_") do
+      launcher =
+        launcher
+        |> maybe_put_value(:server_host, Map.get(value, "serverHost"))
+        |> maybe_put_value(:server_secure, Map.get(value, "serverSecure"))
+        |> maybe_put_value(:adapter, Map.get(value, "adapter"))
+        |> maybe_put_value(:concurrency, Map.get(value, "concurrency"))
+        |> maybe_put_value(:env, Map.get(value, "env"))
+        |> maybe_put_value(:env_secrets, Map.get(value, "envSecrets"))
 
-    cond do
-      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
-        {:error, :invalid}
-
-      not is_nil(server_secure) and not is_boolean(server_secure) ->
-        {:error, :invalid}
-
-      not is_nil(adapter) and
-          (not is_list(adapter) or adapter == [] or
-             Enum.any?(adapter, &(not is_binary(&1)))) ->
-        {:error, :invalid}
-
-      not is_nil(concurrency) and (not is_integer(concurrency) or concurrency < 1) ->
-        {:error, :invalid}
-
-      not is_nil(env) and not is_map(env) ->
-        {:error, :invalid}
-
-      not is_nil(env) and
-          Enum.any?(env, fn {k, v} ->
-            not is_binary(k) or not is_binary(v) or String.starts_with?(k, "COFLUX_")
-          end) ->
-        {:error, :invalid}
-
-      not is_nil(env_secrets) and not is_map(env_secrets) ->
-        {:error, :invalid}
-
-      not is_nil(env_secrets) and
-          Enum.any?(env_secrets, fn {k, v} ->
-            not is_binary(k) or String.starts_with?(k, "COFLUX_") or
-                not Coflux.Admin.Secrets.valid_name?(v)
-          end) ->
-        {:error, :invalid}
-
-      true ->
-        launcher =
-          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
-
-        launcher =
-          if not is_nil(server_secure),
-            do: Map.put(launcher, :server_secure, server_secure),
-            else: launcher
-
-        launcher = if adapter, do: Map.put(launcher, :adapter, adapter), else: launcher
-
-        launcher =
-          if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
-
-        launcher = if env, do: Map.put(launcher, :env, env), else: launcher
-
-        launcher =
-          if env_secrets, do: Map.put(launcher, :env_secrets, env_secrets), else: launcher
-
-        {:ok, launcher}
+      {:ok, launcher}
     end
   end
 
@@ -1741,7 +1676,7 @@ defmodule Coflux.Handlers.Api do
                     {:cont, {:ok, Map.put(result, target, parsed)}}
 
                   {:error, error} ->
-                    {:halt, {:error, error}}
+                    {:halt, {:error, %{source => error}}}
                 end
 
               :error ->
@@ -1784,7 +1719,7 @@ defmodule Coflux.Handlers.Api do
             {:ok, field_value} ->
               case parser.(field_value) do
                 {:ok, parsed} -> {:cont, {:ok, Map.put(result, target, parsed)}}
-                {:error, error} -> {:halt, {:error, error}}
+                {:error, error} -> {:halt, {:error, %{source => error}}}
               end
 
             :error ->
@@ -1830,8 +1765,6 @@ defmodule Coflux.Handlers.Api do
   defp parse_launcher_patch(_), do: {:error, :invalid}
 
   defp parse_launcher_patch_fields(value, type) do
-    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
-
     # All possible launcher fields with their validators
     field_specs = [
       {"image", &is_binary/1},
@@ -1844,7 +1777,7 @@ defmodule Coflux.Handlers.Api do
       {"tokenSecret", &Coflux.Admin.Secrets.valid_name?/1},
       {"caCert", &is_binary/1},
       {"insecure", &is_boolean/1},
-      {"imagePullPolicy", &(&1 in valid_pull_policies)},
+      {"imagePullPolicy", &(&1 in @pull_policies)},
       {"nodeSelector", &is_map/1},
       {"tolerations", &is_list/1},
       {"imagePullSecrets", &is_list/1},
@@ -1954,7 +1887,7 @@ defmodule Coflux.Handlers.Api do
 
               {:cont, {:ok, Map.put(acc, atom_key, processed_value)}}
             else
-              {:halt, {:error, :invalid}}
+              {:halt, {:error, %{json_key => :invalid}}}
             end
 
           :error ->
@@ -1998,10 +1931,12 @@ defmodule Coflux.Handlers.Api do
   defp parse_asset_entries(value) do
     if is_list(value) && value != [] && length(value) <= @max_asset_entries do
       result =
-        Enum.reduce_while(value, {:ok, []}, fn entry, {:ok, entries} ->
+        value
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, []}, fn {entry, index}, {:ok, entries} ->
           case parse_asset_entry(entry) do
             {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-            {:error, error} -> {:halt, {:error, error}}
+            {:error, error} -> {:halt, {:error, %{index => error}}}
           end
         end)
 
@@ -2152,10 +2087,12 @@ defmodule Coflux.Handlers.Api do
 
       is_list(value) && length(value) <= @max_parameters ->
         with {:ok, backwards} <-
-               Enum.reduce_while(value, {:ok, []}, fn item, {:ok, result} ->
+               value
+               |> Enum.with_index()
+               |> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, result} ->
                  case parse_integer(item) do
                    {:ok, value} -> {:cont, {:ok, [value | result]}}
-                   {:error, error} -> {:halt, {:error, error}}
+                   {:error, error} -> {:halt, {:error, %{index => error}}}
                  end
                end) do
           {:ok, Enum.reverse(backwards)}
@@ -2396,10 +2333,10 @@ defmodule Coflux.Handlers.Api do
             {:cont, {:ok, Map.put(result, workflow_name, parsed)}}
 
           {:error, error} ->
-            {:halt, {:error, error}}
+            {:halt, {:error, %{workflow_name => error}}}
         end
       else
-        {:halt, {:error, :invalid}}
+        {:halt, {:error, %{workflow_name => :invalid_name}}}
       end
     end)
   end
@@ -2413,10 +2350,10 @@ defmodule Coflux.Handlers.Api do
               {:cont, {:ok, Map.put(result, module, parsed)}}
 
             {:error, error} ->
-              {:halt, {:error, error}}
+              {:halt, {:error, %{module => error}}}
           end
         else
-          {:halt, {:error, :invalid}}
+          {:halt, {:error, %{module => :invalid_name}}}
         end
       end)
     else
