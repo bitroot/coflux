@@ -364,6 +364,28 @@ class TestCommonLauncherFields:
         executor.wait_connections(1, timeout=1)
         assert len(cli.pools_launches("warm-pool", host=host)) == 1
 
+    def test_idle_timeout_stops_worker(self, pool_env):
+        """A worker past its pool's idle timeout is stopped. The timeout is
+        milliseconds all the way through: a value misread as seconds would
+        keep this worker for the best part of an hour."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_pool(pool_env, targets, pool_name="brief-pool", idle_timeout="2s")
+
+        resp = cli.submit("test/greet", '"one"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="one")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        # The timeout plus the sweep that enforces it, with room to spare.
+        worker = _wait_for_worker(
+            host, "brief-pool", lambda w: w["stoppedAt"] is not None, timeout=20
+        )
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+
     def test_update_common_fields(self, pool_env):
         """Common launcher fields can be updated on an existing pool."""
         host = pool_env["host"]

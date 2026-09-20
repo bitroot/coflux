@@ -780,12 +780,12 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     )
   end
 
-  # A pool can say how long its workers linger once idle, in seconds: a
-  # worker that takes a while to start is worth keeping warm between
+  # A pool can say how long its workers linger once idle, in milliseconds:
+  # a worker that takes a while to start is worth keeping warm between
   # runs. One whose pool doesn't say gets the default.
   defp worker_idle_timeout_ms(state, worker) do
     case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout_ms]) do
-      seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1000
+      timeout_ms when is_integer(timeout_ms) and timeout_ms >= 0 -> timeout_ms
       _ -> @default_worker_idle_timeout_ms
     end
   end
