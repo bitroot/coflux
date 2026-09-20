@@ -466,23 +466,48 @@ defmodule Coflux.Orchestration.Workspaces do
   # unchanged. When pool is nil, the pool is deleted.
   # Returns {:error, :not_found} if the pool doesn't exist.
   # Returns {:error, :type_change} if the patch tries to change the launcher type.
+  @doc """
+  The definition a patch would produce, without writing it, so a caller can
+  check the result rather than the patch - a patch naming no secrets can
+  still leave a pool referring to one. `nil` when the patch would delete
+  the pool.
+  """
+  def resolve_pool_patch(db, workspace_id, pool_name, pool_patch) do
+    with {:ok, {_pool_id, _definition_id, existing}} <-
+           load_pool_for_patch(db, workspace_id, pool_name),
+         :ok <- check_launcher_type_change(existing, pool_patch) do
+      {:ok, pool_patch && apply_pool_patch(existing, pool_patch)}
+    end
+  end
+
+  # The pool's current definition, with the ids needed to replace it.
+  defp load_pool_for_patch(db, workspace_id, pool_name) do
+    case get_latest_pool(db, workspace_id, pool_name) do
+      {:ok, nil} ->
+        {:error, :not_found}
+
+      {:ok, {pool_id, definition_id}} ->
+        existing =
+          if definition_id do
+            {:ok, definition} = get_pool_definition(db, definition_id)
+            definition
+          else
+            %{modules: [], provides: %{}, accepts: %{}, launcher: nil}
+          end
+
+        {:ok, {pool_id, definition_id, existing}}
+    end
+  end
+
   def update_pool(db, workspace_id, pool_name, pool_patch, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
-      case get_latest_pool(db, workspace_id, pool_name) do
-        {:ok, nil} ->
+      case load_pool_for_patch(db, workspace_id, pool_name) do
+        {:error, :not_found} ->
           {:error, :not_found}
 
-        {:ok, {existing_pool_id, existing_pool_definition_id}} ->
-          existing =
-            if existing_pool_definition_id do
-              {:ok, def} = get_pool_definition(db, existing_pool_definition_id)
-              def
-            else
-              %{modules: [], provides: %{}, accepts: %{}, launcher: nil}
-            end
-
+        {:ok, {existing_pool_id, existing_pool_definition_id, existing}} ->
           # Check for type change in launcher patch
           with :ok <- check_launcher_type_change(existing, pool_patch) do
             pool =

@@ -720,6 +720,43 @@ class TestPoolSecrets:
             )
         assert "secrets_not_found" in exc_info.value.stderr
 
+    def test_a_patch_is_checked_against_the_pool_it_would_leave(self, pool_env):
+        """A patch naming no secret can still leave the pool referring to
+        one that has gone, so the check is against the merged definition,
+        not the patch."""
+        host = pool_env["host"]
+        cli.secrets_set("k8s-token", "bearer", workspaces="default", host=host)
+        self._kubernetes_pool(host)
+
+        cli.secrets_delete("k8s-token", workspaces="default", host=host)
+
+        # Touching an unrelated field would leave `tokenSecret` dangling.
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli._coflux(
+                "pools",
+                "update",
+                "k8s-pool",
+                "--set",
+                "namespace=other",
+                host=host,
+                output=None,
+            )
+        assert "secrets_not_found" in exc_info.value.stderr
+        assert "k8s-token" in exc_info.value.stderr
+
+        # Removing the dangling reference in the same patch is allowed.
+        cli._coflux(
+            "pools",
+            "update",
+            "k8s-pool",
+            "--set",
+            "namespace=other",
+            "--unset",
+            "tokenSecret",
+            host=host,
+            output=None,
+        )
+
     def test_scope_follows_workspace_names(self, pool_env):
         """A secret for 'development/*' serves 'development/joe' and not
         'production', whatever the workspaces inherit from."""

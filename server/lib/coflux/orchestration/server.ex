@@ -725,7 +725,9 @@ defmodule Coflux.Orchestration.Server do
        ) do
     with {:ok, workspace_id, _} <-
            Permissions.require_workspace(state, workspace_external_id, access),
-         :ok <- check_secret_references(state, workspace_id, pool_patch[:launcher]) do
+         {:ok, merged} <-
+           Workspaces.resolve_pool_patch(state.db, workspace_id, pool_name, pool_patch),
+         :ok <- check_secret_references(state, workspace_id, merged[:launcher]) do
       case Workspaces.update_pool(
              state.db,
              workspace_id,
@@ -3028,7 +3030,9 @@ defmodule Coflux.Orchestration.Server do
   end
 
   # A pool naming a secret its workspace can't see would never launch, so
-  # it is refused now rather than found out then.
+  # it is refused now rather than found out then. Checked against the
+  # definition being stored, never against a patch: a patch that names no
+  # secret can still leave the pool referring to one that has since gone.
   defp check_secret_references(state, workspace_id, launcher) when is_map(launcher) do
     workspace_name = state.workspaces[workspace_id].name
     Coflux.Admin.Secrets.check_references(state.admin_db, workspace_name, launcher)
