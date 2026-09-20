@@ -6,7 +6,6 @@ enabled so these tests don't interfere with the rest of the suite.
 """
 
 import json
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -43,11 +42,10 @@ def jwks_server(keypair):
 
 
 @pytest.fixture(scope="module")
-def auth_server(jwks_server):
+def auth_server(jwks_server, tmp_path_factory):
     """A Coflux server with authentication enabled."""
-    data_dir = tempfile.mkdtemp(prefix="coflux-test-auth-")
     srv = ManagedServer(
-        data_dir,
+        str(tmp_path_factory.mktemp("auth-server")),
         extra_env={
             "COFLUX_REQUIRE_AUTH": "true",
             "COFLUX_STUDIO_TEAMS": TEAM_ID,

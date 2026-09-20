@@ -5,7 +5,6 @@ epoch rotations and server restarts, and is gone for good once revoked.
 """
 
 import json
-import tempfile
 import urllib.error
 import urllib.request
 import uuid
@@ -16,11 +15,10 @@ from support.server import ManagedServer
 
 
 @pytest.fixture(scope="module")
-def token_server():
+def token_server(tmp_path_factory):
     """A server with authentication on and a secret to sign tokens with."""
-    data_dir = tempfile.mkdtemp(prefix="coflux-test-tokens-")
     srv = ManagedServer(
-        data_dir,
+        str(tmp_path_factory.mktemp("token-server")),
         extra_env={
             "COFLUX_REQUIRE_AUTH": "true",
             "COFLUX_SECRET": "test-secret-for-service-tokens",
