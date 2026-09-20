@@ -537,7 +537,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
 
         workers =
           Enum.flat_map(pool_workers, fn {worker_id, worker_external_id, starting_at, started_at,
-                                          start_error, stopping_at, stopped_at, stop_error,
+                                          start_error, stopping_at, stop_completed_at, stop_error,
                                           deactivated_at, error, logs, total_executions} ->
             worker = Map.get(state.workers, worker_id)
 
@@ -585,13 +585,13 @@ defmodule Coflux.Orchestration.Server.Snapshots do
                 ],
                 else: []
               ) ++
-              if(stopped_at || stop_error,
+              if(stop_completed_at || stop_error,
                 do: [
                   %WorkerStopResult{
                     workspace: workspace_external_id,
                     pool: pool_name,
                     worker: worker_external_id,
-                    stopped_at: stopped_at,
+                    completed_at: stop_completed_at,
                     error: stop_error
                   }
                 ],

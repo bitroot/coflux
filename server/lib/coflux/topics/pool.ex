@@ -171,19 +171,28 @@ defmodule Coflux.Topics.Pool.Model do
   def apply(model, %WorkerLaunchResult{} = e),
     do: update(model, e.worker, &%{&1 | started_at: e.started_at, start_error: e.error})
 
+  # A worker may be asked to stop more than once (over its connection,
+  # then through its launcher): `stopping_at` is the first time it was
+  # asked, `stop_error` is how the latest attempt went, and `stopped_at`
+  # is set only once the worker is confirmed gone, cleanly, having been
+  # asked - a stop that was requested is not a worker that has stopped.
   def apply(model, %WorkerStopping{} = e),
-    do: update(model, e.worker, &%{&1 | stopping_at: e.stopping_at})
+    do: update(model, e.worker, &%{&1 | stopping_at: &1.stopping_at || e.stopping_at})
 
   def apply(model, %WorkerStopResult{} = e),
-    do: update(model, e.worker, &%{&1 | stopped_at: e.stopped_at, stop_error: e.error})
+    do: update(model, e.worker, &%{&1 | stop_error: e.error})
 
   def apply(model, %WorkerDeactivated{} = e),
     do:
-      update(
-        model,
-        e.worker,
-        &%{&1 | deactivated_at: e.deactivated_at, error: e.error, logs: e.logs}
-      )
+      update(model, e.worker, fn worker ->
+        %{
+          worker
+          | deactivated_at: e.deactivated_at,
+            error: e.error,
+            logs: e.logs,
+            stopped_at: if(worker.stopping_at && is_nil(e.error), do: e.deactivated_at)
+        }
+      end)
 
   def apply(model, %WorkerStateChanged{} = e),
     do: update(model, e.worker, &%{&1 | state: e.state})

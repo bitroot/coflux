@@ -408,13 +408,20 @@ defmodule Coflux.Events.WorkerLaunchResult do
 end
 
 defmodule Coflux.Events.WorkerStopping do
-  @moduledoc "Row: `worker_stops`."
+  @moduledoc """
+  Row: `worker_stops`. One attempt to stop the worker - over its own
+  connection, or through its launcher. A worker can have several.
+  """
   defstruct [:workspace, :pool, :worker, :stopping_at]
 end
 
 defmodule Coflux.Events.WorkerStopResult do
-  @moduledoc "Row: `worker_stop_results`."
-  defstruct [:workspace, :pool, :worker, :stopped_at, :error]
+  @moduledoc """
+  Row: `worker_stop_results`. How the attempt went: an error if the
+  launcher refused, nil if the request was made. Neither means the worker
+  has gone - `WorkerDeactivated` says that.
+  """
+  defstruct [:workspace, :pool, :worker, :completed_at, :error]
 end
 
 defmodule Coflux.Events.WorkerDeactivated do

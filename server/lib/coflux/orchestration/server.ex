@@ -152,6 +152,7 @@ defmodule Coflux.Orchestration.Server do
             session_id: nil,
             stop_id: nil,
             stop_retry_at: nil,
+            stop_signalled_at: nil,
             last_poll_at: nil,
             polling: false,
             poll_failures: 0,

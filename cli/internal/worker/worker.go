@@ -68,7 +68,13 @@ type Worker struct {
 
 	connMu sync.RWMutex
 	conn   *api.Connection
-	connCh chan struct{} // closed when a new connection is established
+
+	// Closed once the server has asked the worker to stop (a `stop`
+	// command over the connection), which the command treats the way it
+	// treats SIGTERM: drain, then exit.
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	connCh   chan struct{} // closed when a new connection is established
 
 	mu         sync.RWMutex
 	executions map[string]*executionState
@@ -137,9 +143,17 @@ func New(cfg *config.Config, adp adapter.Adapter, session string, logger *slog.L
 		session:    session,
 		logger:     logger,
 		connCh:     make(chan struct{}),
+		stopCh:     make(chan struct{}),
 		executions: make(map[string]*executionState),
 		streamSubs: make(map[streamSubKey]*streamSubscription),
 	}
+}
+
+// StopRequested returns a channel that is closed once the server has asked
+// the worker to stop. The worker keeps running until whoever runs it
+// drains and cancels it, so in-flight executions still finish.
+func (w *Worker) StopRequested() <-chan struct{} {
+	return w.stopCh
 }
 
 // getConn returns the current connection (thread-safe)
@@ -430,6 +444,7 @@ func (w *Worker) runConnection(ctx context.Context, targets map[string]map[strin
 	)
 	conn.RegisterHandler("execute", w.handleExecute)
 	conn.RegisterHandler("abort", w.handleAbort)
+	conn.RegisterHandler("stop", w.handleStop)
 	conn.RegisterHandler("stream_items", w.handleStreamItems)
 	conn.RegisterHandler("stream_closed", w.handleStreamClosed)
 	conn.RegisterHandler("stream_demand", w.handleStreamDemand)
@@ -738,6 +753,17 @@ func (w *Worker) refsToAdapter(refs []api.Reference) ([][]any, error) {
 		}
 	}
 	return result, nil
+}
+
+// handleStop is the server asking the worker to exit: it has been idle
+// past its pool's timeout, or its pool is going away. Signalled once;
+// a repeat (after a reconnect, say) changes nothing.
+func (w *Worker) handleStop(_ []any) error {
+	w.stopOnce.Do(func() {
+		w.logger.Info("stop requested by server")
+		close(w.stopCh)
+	})
+	return nil
 }
 
 func (w *Worker) handleAbort(params []any) error {

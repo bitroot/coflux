@@ -79,6 +79,18 @@ class FakeEcs:
         with self._lock:
             return list(self.tasks)
 
+    def pause(self, arn):
+        """Freeze a task's process, so it holds its connection open but acts
+        on nothing - the shape of a worker that won't respond."""
+        with self._lock:
+            proc = self.tasks[arn]["proc"]
+        proc.send_signal(signal.SIGSTOP)
+
+    def resume(self, arn):
+        with self._lock:
+            proc = self.tasks[arn]["proc"]
+        proc.send_signal(signal.SIGCONT)
+
     def kill_with_oom(self, arn):
         """Kill a task's process the way an OOM kill looks from ECS."""
         with self._lock:

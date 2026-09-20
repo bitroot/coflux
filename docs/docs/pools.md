@@ -209,6 +209,15 @@ These fields apply to all launcher types:
 | `env` | Environment variables (e.g., `--set env.KEY=VALUE`) |
 | `envSecrets` | Environment variables set from secrets (e.g., `--set envSecrets.API_KEY=api-key`) |
 
+When a worker is to be stopped - it has sat idle for `idleTimeout`, or
+its pool has been disabled or deleted - the server asks it to exit over
+its own connection, and the worker drains and leaves as it does on
+SIGTERM. The launcher is only asked to stop it if the worker isn't
+connected, or hasn't gone within 30 seconds; so a worker still leaves
+cleanly when the launcher can't be reached, and the launcher still
+bounds one that doesn't respond. A worker is reported as stopped once
+its launcher confirms it has gone, not once it was asked.
+
 ### Modules
 
 A pool is chosen for an execution by the execution's module. The pool's

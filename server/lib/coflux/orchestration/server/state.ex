@@ -88,13 +88,19 @@ defmodule Coflux.Orchestration.Server.State do
             # named on the wire.
             workspace_names: %{},
 
-            # worker_id -> %{created_at, pool_id, pool_name, workspace_id, state, data, session_id, stop_id, stop_retry_at, last_poll_at, polling, poll_failures, first_poll_failure_at}
+            # worker_id -> %{created_at, pool_id, pool_name, workspace_id, state, data, session_id, stop_id, stop_retry_at, stop_signalled_at, last_poll_at, polling, poll_failures, first_poll_failure_at}
             #
             # Workers this server launched and hasn't deactivated.
             # `session_id` links to the session that connected for it, if
             # one has. Rebuilt at boot by `Fleet.load/1`, which deactivates
             # any that were launched but never got a session - nothing is
             # going to connect to those.
+            #
+            # `stop_signalled_at` is when the worker was told to stop over
+            # its connection; `stop_id` is a launcher stop that was
+            # accepted (or is in flight), and `stop_retry_at` is when to
+            # ask the launcher, whether because the signalled worker hasn't
+            # left or because the launcher refused last time.
             #
             # `polling` is set while a poll is in flight, so a slow
             # launcher can't accumulate overlapping polls. The poll failure

@@ -929,6 +929,12 @@ defmodule Coflux.Handlers.Worker do
     {[{:close, 4000, "workspace_not_found"}], state}
   end
 
+  # The server asking the worker to exit. The worker drains and leaves;
+  # nothing comes back over this connection but its close.
+  def websocket_info(:stop_worker, state) do
+    {[command_message("stop", [])], state}
+  end
+
   defp is_recognised_execution?(execution_id, state) do
     MapSet.member?(state.execution_ids, execution_id)
   end

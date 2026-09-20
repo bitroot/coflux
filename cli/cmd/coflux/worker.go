@@ -189,19 +189,23 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		workerDone <- w.Run(ctx, modules, shouldRegister)
 	}()
 
+	// A stop the server asks for is handled the way a signal is: drain
+	// what's running, then leave.
 	select {
 	case <-shutdownCh:
-		drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
-		cancel()
-		<-workerDone
-		logger.Info("worker stopped")
-		return nil
+	case <-w.StopRequested():
 	case err := <-workerDone:
 		if err != nil {
 			return fmt.Errorf("worker error: %w", err)
 		}
 		return nil
 	}
+
+	drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
+	cancel()
+	<-workerDone
+	logger.Info("worker stopped")
+	return nil
 }
 
 // drainWorker runs a graceful drain with the configured timeout, aborting
@@ -298,6 +302,9 @@ func runWorkerWithWatch(
 		for reason == "" {
 			select {
 			case <-shutdownCh:
+				reason = "shutdown"
+
+			case <-w.StopRequested():
 				reason = "shutdown"
 
 			case err := <-workerDone:

@@ -867,7 +867,9 @@ class TestPoolSecrets:
         """An export carries the names, never the values, and imports back
         as long as the secrets exist."""
         host = pool_env["host"]
-        cli.secrets_set("k8s-token", "super-secret-token", workspaces="default", host=host)
+        cli.secrets_set(
+            "k8s-token", "super-secret-token", workspaces="default", host=host
+        )
         self._kubernetes_pool(host)
         cli._coflux(
             "pools",
@@ -1026,8 +1028,42 @@ class TestEcsLauncher:
         assert "/us-east-1/ecs/aws4_request" in authorization
         assert "x-amz-date" in headers
 
-    def test_idle_worker_is_stopped(self, ecs_env):
-        """An idle worker's task is stopped, and a task stopped on request
+    def test_idle_worker_leaves_when_asked(self, ecs_env):
+        """An idle worker is asked to exit over its own connection and does,
+        so its task ends without ECS being asked to stop it - which is what
+        keeps an idle worker from running on when the launcher's
+        credentials have lapsed. It is recorded as stopped only once the
+        task is seen to have gone, and as a clean stop rather than a
+        failure."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["stoppingAt"] is not None
+        )
+        # Asked, but not yet gone: not stopped.
+        if worker["deactivatedAt"] is None:
+            assert worker["stoppedAt"] is None
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["stoppedAt"] == worker["deactivatedAt"]
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+        assert fake.requests_for("StopTask") == []
+
+    def test_unresponsive_worker_is_stopped_by_launcher(self, ecs_env):
+        """A worker that doesn't act on the stop it was sent is stopped
+        through ECS once it has had its grace, and a task stopped that way
         isn't reported as having failed."""
         host = ecs_env["host"]
         executor = ecs_env["executor"]
@@ -1040,13 +1076,22 @@ class TestEcsLauncher:
         ex.conn.complete(ex.execution_id, value="done")
         poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
 
-        [(stop_task, _)] = fake.wait_for("StopTask", timeout=30)
-        assert stop_task["cluster"] == fake.cluster
-        assert stop_task["task"] in fake.task_arns()
+        # Frozen, the worker keeps its connection but never reads the stop.
+        [arn] = fake.task_arns()
+        fake.pause(arn)
 
+        # The idle timeout, then the grace the signalled worker is given.
+        [(stop_task, _)] = fake.wait_for("StopTask", timeout=60)
+        assert stop_task["task"] == arn
+        worker = _wait_for_worker(host, "ecs-pool", lambda w: w["stoppingAt"])
+        assert worker["deactivatedAt"] is None
+        assert worker["stoppedAt"] is None
+
+        fake.resume(arn)
         worker = _wait_for_worker(
             host, "ecs-pool", lambda w: w["deactivatedAt"] is not None
         )
+        assert worker["stoppedAt"] == worker["deactivatedAt"]
         assert worker["stopError"] is None
         assert worker["error"] is None
 

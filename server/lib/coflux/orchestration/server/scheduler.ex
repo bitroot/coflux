@@ -88,6 +88,12 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   # How long before asking the launcher again after a stop fails.
   @stop_retry_interval_ms 30_000
 
+  # How long a worker told to stop over its connection is given to leave
+  # before its launcher is asked to stop it instead. Long enough for a
+  # clean exit and the poll that notices it; asking the launcher as well
+  # is harmless, just a stop the record didn't need.
+  @stop_grace_ms 30_000
+
   @default_activation_timeout_ms 600_000
   @default_reconnection_timeout_ms 30_000
 
@@ -525,6 +531,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                     session_id: session_id,
                     stop_id: nil,
                     stop_retry_at: nil,
+                    stop_signalled_at: nil,
                     last_poll_at: nil,
                     polling: false,
                     poll_failures: 0,
@@ -646,49 +653,21 @@ defmodule Coflux.Orchestration.Server.Scheduler do
         )
       end)
 
+    # A worker is asked to leave over its own connection first; its
+    # launcher is only asked to stop it if it isn't connected, or hasn't
+    # gone within the grace. So a worker leaves cleanly even when the
+    # launcher can't be reached - expired credentials, say - and the
+    # launcher still bounds one that won't listen.
     state =
       state.workers
       |> Enum.filter(fn {_worker_id, worker} -> stop_due?(state, worker, now) end)
       |> Enum.reduce(state, fn {worker_id, worker}, state ->
-        {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
+        case worker_connection(state, worker) do
+          {:ok, pid} when is_nil(worker.stop_signalled_at) ->
+            signal_stop(state, worker_id, worker, pid, now)
 
-        state =
-          state
-          |> update_worker(worker_id, &%{&1 | stop_id: worker_stop_id, stop_retry_at: nil})
-          |> Effects.emit(%WorkerStopping{
-            workspace: State.workspace_external_id(state, worker.workspace_id),
-            pool: worker.pool_name,
-            worker: worker.external_id,
-            stopping_at: stopping_at
-          })
-
-        case worker_launcher(state, worker) do
-          {:ok, launcher} ->
-            Fleet.call_launcher(state, launcher, :stop, [worker.data, launcher], fn state,
-                                                                                    result ->
-              case result do
-                {:ok, :ok} ->
-                  {:ok, stopped_at} =
-                    Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
-
-                  Effects.emit(state, %WorkerStopResult{
-                    workspace: State.workspace_external_id(state, worker.workspace_id),
-                    pool: worker.pool_name,
-                    worker: worker.external_id,
-                    stopped_at: stopped_at,
-                    error: nil
-                  })
-
-                {:ok, {:error, reason}} ->
-                  record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
-
-                :error ->
-                  record_stop_failure(state, worker_id, worker, worker_stop_id, "stop_crashed")
-              end
-            end)
-
-          {:error, reason} ->
-            record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
+          _ ->
+            launcher_stop(state, worker_id, worker)
         end
       end)
 
@@ -997,9 +976,10 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     cond do
       # Nothing to ask the launcher about until the launch has landed.
       is_nil(worker.data) -> false
-      # A stop is already in flight, or has already succeeded.
+      # A launcher stop is in flight, or has already succeeded.
       worker.stop_id -> false
-      # A previous stop failed; wait before asking again.
+      # The worker was signalled and is being given time to leave, or a
+      # launcher stop failed and is waiting to be retried.
       worker.stop_retry_at && now < worker.stop_retry_at -> false
       # The session has gone, so there is nothing left to drain.
       is_nil(worker.session_id) -> true
@@ -1015,6 +995,93 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     end
   end
 
+  # Asks the worker itself to stop. There is no answer to wait for: the
+  # worker drains and exits, and the launcher's poll is what says it has
+  # gone - which is why this doesn't set `stop_id`, and instead arms the
+  # retry that asks the launcher if the worker is still there after the
+  # grace. The attempt is recorded as made, not as the worker stopped.
+  defp signal_stop(state, worker_id, worker, pid, now) do
+    {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
+    {:ok, completed_at} = Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
+
+    send(pid, :stop_worker)
+
+    state
+    |> update_worker(
+      worker_id,
+      &%{&1 | stop_signalled_at: now, stop_retry_at: now + @stop_grace_ms}
+    )
+    |> Effects.emit(%WorkerStopping{
+      workspace: State.workspace_external_id(state, worker.workspace_id),
+      pool: worker.pool_name,
+      worker: worker.external_id,
+      stopping_at: stopping_at
+    })
+    |> Effects.emit(%WorkerStopResult{
+      workspace: State.workspace_external_id(state, worker.workspace_id),
+      pool: worker.pool_name,
+      worker: worker.external_id,
+      completed_at: completed_at,
+      error: nil
+    })
+  end
+
+  # Asks the launcher to stop the worker. A launcher that accepts the
+  # request has only accepted it: the worker is stopped when a poll finds
+  # it gone, and deactivates it.
+  defp launcher_stop(state, worker_id, worker) do
+    {:ok, worker_stop_id, stopping_at} = Workers.create_worker_stop(state.db, worker_id)
+
+    state =
+      state
+      |> update_worker(worker_id, &%{&1 | stop_id: worker_stop_id, stop_retry_at: nil})
+      |> Effects.emit(%WorkerStopping{
+        workspace: State.workspace_external_id(state, worker.workspace_id),
+        pool: worker.pool_name,
+        worker: worker.external_id,
+        stopping_at: stopping_at
+      })
+
+    case worker_launcher(state, worker) do
+      {:ok, launcher} ->
+        Fleet.call_launcher(state, launcher, :stop, [worker.data, launcher], fn state, result ->
+          case result do
+            {:ok, :ok} ->
+              {:ok, completed_at} =
+                Workers.create_worker_stop_result(state.db, worker_stop_id, nil)
+
+              Effects.emit(state, %WorkerStopResult{
+                workspace: State.workspace_external_id(state, worker.workspace_id),
+                pool: worker.pool_name,
+                worker: worker.external_id,
+                completed_at: completed_at,
+                error: nil
+              })
+
+            {:ok, {:error, reason}} ->
+              record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
+
+            :error ->
+              record_stop_failure(state, worker_id, worker, worker_stop_id, "stop_crashed")
+          end
+        end)
+
+      {:error, reason} ->
+        record_stop_failure(state, worker_id, worker, worker_stop_id, to_error(reason))
+    end
+  end
+
+  # The live connection of a worker's session, if it has one.
+  defp worker_connection(state, worker) do
+    with {:ok, session} <- worker_session(state, worker),
+         ref when not is_nil(ref) <- session.connection,
+         {pid, _session_id} <- Map.get(state.connections, ref) do
+      {:ok, pid}
+    else
+      _ -> :error
+    end
+  end
+
   # A stop that failed is recorded as one: the container may well still be
   # running, and reporting it as stopped both misleads whoever is watching
   # and means nothing ever tries again. Clearing `stop_id` is what allows
@@ -1027,7 +1094,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
       workspace: State.workspace_external_id(state, worker.workspace_id),
       pool: worker.pool_name,
       worker: worker.external_id,
-      stopped_at: nil,
+      completed_at: nil,
       error: error
     })
     |> update_worker(
