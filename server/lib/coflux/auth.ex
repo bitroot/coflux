@@ -51,15 +51,15 @@ defmodule Coflux.Auth do
   A grant is a list of workspace patterns, which control write access.
   `Coflux.Scopes` defines what a pattern grants, and
   `Coflux.Orchestration.Server.Permissions` applies it - the patterns are
-  carried through this module unread, beyond normalising a grant that
-  includes "*" to `:all`.
+  carried through this module unread, beyond collapsing a grant that
+  includes "*" to just that.
   """
 
   alias Coflux.{Config, JwksStore, Orchestration}
 
   @type access :: %{
           type: :super | :none | :service | :studio | :session,
-          workspaces: :all | [String.t()],
+          workspaces: [String.t()],
           principal_id: integer() | nil
         }
 
@@ -73,7 +73,7 @@ defmodule Coflux.Auth do
 
   Returns `{:ok, access}` with access details when allowed.
   The access map contains:
-    - workspaces: :all | [String.t()] - workspace patterns the token has access to
+    - workspaces: [String.t()] - workspace patterns the token has access to
     - principal_id: integer() | nil - the database ID of the principal (nil for super token or anonymous)
 
   Returns `{:error, :unauthorized}` otherwise.
@@ -87,7 +87,7 @@ defmodule Coflux.Auth do
     if Config.require_auth?() do
       {:error, :unauthorized}
     else
-      {:ok, %{type: :none, workspaces: :all, principal_id: nil}}
+      {:ok, %{type: :none, workspaces: ["*"], principal_id: nil}}
     end
   end
 
@@ -189,7 +189,7 @@ defmodule Coflux.Auth do
       expected_hash ->
         if hash_token(token) == expected_hash do
           # Super token has full access, no principal
-          {:ok, %{type: :super, workspaces: :all, principal_id: nil}}
+          {:ok, %{type: :super, workspaces: ["*"], principal_id: nil}}
         else
           :error
         end
@@ -379,13 +379,11 @@ defmodule Coflux.Auth do
     end
   end
 
+  # Unrestricted access is the `*` pattern, not a separate shape - so
+  # every grant is a list of patterns and there is one thing to match.
   defp normalize_workspaces(workspaces) when is_list(workspaces) do
-    if "*" in workspaces do
-      :all
-    else
-      workspaces
-    end
+    if "*" in workspaces, do: ["*"], else: workspaces
   end
 
-  defp normalize_workspaces(_), do: :all
+  defp normalize_workspaces(_), do: ["*"]
 end

@@ -14,7 +14,7 @@ class TestSecrets:
         cli.secrets_set("api-key", "first", workspaces="default", host=host)
         [secret] = cli.secrets_list(host=host)
         assert secret["name"] == "api-key"
-        assert secret["scope"] == "default"
+        assert secret["workspaces"] == "default"
         assert secret["version"] == 1
 
         # Setting it again replaces the value and bumps the version.
@@ -24,7 +24,7 @@ class TestSecrets:
 
         cli.secrets_set("shared", "x", workspaces="*", host=host)
         cli.secrets_set("shared", "y", workspaces="development/*", host=host)
-        listed = {(s["scope"], s["name"]) for s in cli.secrets_list(host=host)}
+        listed = {(s["workspaces"], s["name"]) for s in cli.secrets_list(host=host)}
         assert listed == {
             ("default", "api-key"),
             ("*", "shared"),
@@ -37,7 +37,7 @@ class TestSecrets:
 
         cli.secrets_delete("shared", workspaces="*", host=host)
         cli.secrets_delete("api-key", workspaces="default", host=host)
-        listed = {(s["scope"], s["name"]) for s in cli.secrets_list(host=host)}
+        listed = {(s["workspaces"], s["name"]) for s in cli.secrets_list(host=host)}
         assert listed == {("development/*", "shared")}
 
         with pytest.raises(subprocess.CalledProcessError):
@@ -49,12 +49,12 @@ class TestSecrets:
         host = f"{project_id}.localhost:{server.port}"
 
         cli.secrets_set("api-key", "shared", workspaces="staging,production/*", host=host)
-        listed = {(s["scope"], s["version"]) for s in cli.secrets_list(host=host)}
+        listed = {(s["workspaces"], s["version"]) for s in cli.secrets_list(host=host)}
         assert listed == {("staging", 1), ("production/*", 1)}
 
         # Rotating one leaves the other where it was.
         cli.secrets_set("api-key", "rotated", workspaces="staging", host=host)
-        listed = {(s["scope"], s["version"]) for s in cli.secrets_list(host=host)}
+        listed = {(s["workspaces"], s["version"]) for s in cli.secrets_list(host=host)}
         assert listed == {("staging", 2), ("production/*", 1)}
 
         # Deleting takes the patterns it was actually set for.

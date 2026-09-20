@@ -339,7 +339,7 @@ defmodule Coflux.Orchestration.Server do
           {:ok, secret} ->
             state =
               Effects.emit(state, %SecretSet{
-                scope: secret.scope,
+                workspaces: secret.workspaces,
                 name: secret.name,
                 version: secret.version,
                 created_at: secret.created_at,
@@ -366,7 +366,8 @@ defmodule Coflux.Orchestration.Server do
         Enum.reduce(scopes, {state, []}, fn scope, {state, deleted} ->
           case Coflux.Admin.Secrets.delete(state.admin_db, scope, name) do
             :ok ->
-              {Effects.emit(state, %SecretDeleted{scope: scope, name: name}), deleted ++ [scope]}
+              {Effects.emit(state, %SecretDeleted{workspaces: scope, name: name}),
+               deleted ++ [scope]}
 
             {:error, :not_found} ->
               {state, deleted}
@@ -3012,15 +3013,11 @@ defmodule Coflux.Orchestration.Server do
   defp check_secret_scope_access(nil, _scopes), do: :ok
 
   defp check_secret_scope_access(access, scopes) do
-    case access[:workspaces] do
-      :all ->
-        :ok
+    granted = access[:workspaces]
 
-      granted ->
-        if Enum.all?(scopes, &Scopes.contains_any?(granted, &1)),
-          do: :ok,
-          else: {:error, :forbidden}
-    end
+    if Enum.all?(scopes, &Scopes.contains_any?(granted, &1)),
+      do: :ok,
+      else: {:error, :forbidden}
   end
 
   defp principal_identity(state, access) do

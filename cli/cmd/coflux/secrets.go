@@ -175,7 +175,7 @@ func runSecretsList(cmd *cobra.Command, args []string) error {
 	}
 
 	sort.Slice(secrets, func(i, j int) bool {
-		si, sj := getString(secrets[i], "scope"), getString(secrets[j], "scope")
+		si, sj := getString(secrets[i], "workspaces"), getString(secrets[j], "workspaces")
 		if si != sj {
 			return si < sj
 		}
@@ -199,7 +199,7 @@ func runSecretsList(cmd *cobra.Command, args []string) error {
 		}
 		rows = append(rows, []string{
 			getString(s, "name"),
-			getString(s, "scope"),
+			getString(s, "workspaces"),
 			fmt.Sprintf("%d", int(getFloat64(s, "version"))),
 			formatTimestamp(getInt64(s, "updatedAt")),
 			by,

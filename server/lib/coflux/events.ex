@@ -321,12 +321,12 @@ defmodule Coflux.Events.SecretSet do
   Row: `secrets` (admin store), created or replaced. Its value is not an
   event: nothing that carries this ever sees it.
   """
-  defstruct [:scope, :name, :version, :created_at, :updated_at, :updated_by]
+  defstruct [:workspaces, :name, :version, :created_at, :updated_at, :updated_by]
 end
 
 defmodule Coflux.Events.SecretDeleted do
   @moduledoc "Row: `secrets` (admin store), gone."
-  defstruct [:scope, :name]
+  defstruct [:workspaces, :name]
 end
 
 defmodule Coflux.Events.WorkspaceCreated do

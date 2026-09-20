@@ -1,7 +1,7 @@
 defmodule Coflux.Topics.Secrets do
   @moduledoc """
-  The project's secrets - what exists, in which scope, and when it last
-  changed. Never a value.
+  The project's secrets - what exists, for which workspaces, and when it
+  last changed. Never a value.
   """
 
   use Topical.Topic, route: ["secrets"]
@@ -51,10 +51,10 @@ defmodule Coflux.Topics.Secrets.Model do
   end
 
   def apply(model, %SecretSet{} = e) do
-    key = key(e.scope, e.name)
+    key = key(e.workspaces, e.name)
 
     secret = %{
-      scope: e.scope,
+      workspaces: e.workspaces,
       name: e.name,
       version: e.version,
       created_at: e.created_at,
@@ -66,12 +66,12 @@ defmodule Coflux.Topics.Secrets.Model do
   end
 
   def apply(model, %SecretDeleted{} = e) do
-    key = key(e.scope, e.name)
+    key = key(e.workspaces, e.name)
     {Map.delete(model, key), [key]}
   end
 
-  # A name is unique within a scope, and a scope can be empty.
-  defp key(scope, name), do: "#{name}@#{scope}"
+  # A name is unique within a workspace pattern.
+  defp key(workspaces, name), do: "#{name}@#{workspaces}"
 
   def project(model), do: Map.new(model, fn {key, _} -> {key, project_entry(model, key)} end)
 
@@ -79,7 +79,7 @@ defmodule Coflux.Topics.Secrets.Model do
     case Map.fetch(model, key) do
       {:ok, secret} ->
         %{
-          scope: secret.scope,
+          workspaces: secret.workspaces,
           name: secret.name,
           version: secret.version,
           createdAt: secret.created_at,

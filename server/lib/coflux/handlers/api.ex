@@ -76,16 +76,13 @@ defmodule Coflux.Handlers.Api do
   # Whether the caller can grant the requested access: each scope asked for
   # has to be contained whole by one the caller holds. Holding a workspace
   # inside a scope is not holding the scope.
-  defp workspaces_covered?(:all, _requested), do: true
   defp workspaces_covered?(_caller, nil), do: true
 
   defp workspaces_covered?(caller_scopes, requested) do
     Enum.all?(requested, &Scopes.contains_any?(caller_scopes, &1))
   end
 
-  defp handle(req, "GET", ["discover"], _project_id, %{workspaces: workspaces}) do
-    patterns = if workspaces == :all, do: ["*"], else: workspaces
-
+  defp handle(req, "GET", ["discover"], _project_id, %{workspaces: patterns}) do
     json_response(req, %{
       "version" => Version.version(),
       "api_version" => Version.api_version(),
@@ -948,7 +945,7 @@ defmodule Coflux.Handlers.Api do
             # If no workspaces specified, inherit caller's workspaces (unless caller has full access)
             effective_workspaces =
               case {requested_workspaces, access.workspaces} do
-                {nil, :all} -> nil
+                {nil, ["*"]} -> nil
                 {nil, patterns} -> patterns
                 {requested, _} -> requested
               end
@@ -995,7 +992,7 @@ defmodule Coflux.Handlers.Api do
               "name" => arguments.name,
               "secrets" =>
                 Enum.map(secrets, fn secret ->
-                  %{"workspaces" => secret.scope, "version" => secret.version}
+                  %{"workspaces" => secret.workspaces, "version" => secret.version}
                 end)
             })
 
@@ -1046,7 +1043,7 @@ defmodule Coflux.Handlers.Api do
           {:ok, token} ->
             # Allow revocation if caller has full access OR created this token
             can_revoke =
-              access.workspaces == :all or
+              "*" in access.workspaces or
                 token.created_by_principal_id == access[:principal_id]
 
             if can_revoke do

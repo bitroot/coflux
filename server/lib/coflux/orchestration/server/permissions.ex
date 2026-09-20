@@ -60,8 +60,6 @@ defmodule Coflux.Orchestration.Server.Permissions do
     end
   end
 
-  def operator?(:all, _workspace), do: true
-
   def operator?(scopes, workspace), do: Scopes.covers_any?(scopes, workspace)
 
   def check_operator_access(nil, _name), do: :ok

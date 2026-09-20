@@ -24,7 +24,7 @@ defmodule Coflux.AdminSecretsTest do
 
     assert {:ok, "second"} = Secrets.resolve(db, @project, "development", "api-key")
 
-    assert {:ok, [%{name: "api-key", scope: "*", version: 2}]} = Secrets.list(db)
+    assert {:ok, [%{name: "api-key", workspaces: "*", version: 2}]} = Secrets.list(db)
     assert :ok = Secrets.delete(db, "*", "api-key")
     assert {:error, :not_found} = Secrets.delete(db, "*", "api-key")
     assert {:error, :not_found} = Secrets.resolve(db, @project, "development", "api-key")

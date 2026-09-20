@@ -50,7 +50,7 @@ defmodule Coflux.Admin.Secrets do
       {existing_id, created_at, version} =
         case Store.query_one(
                db,
-               "SELECT id, created_at, version FROM secrets WHERE scope = ?1 AND name = ?2",
+               "SELECT id, created_at, version FROM secrets WHERE workspaces = ?1 AND name = ?2",
                {scope, name}
              ) do
           {:ok, {id, created_at, version}} -> {id, created_at, version + 1}
@@ -89,7 +89,7 @@ defmodule Coflux.Admin.Secrets do
       else
         {:ok, _} =
           Store.insert_one(db, :secrets, %{
-            scope: scope,
+            workspaces: scope,
             name: name,
             version: version,
             key_id: @key_id,
@@ -104,7 +104,7 @@ defmodule Coflux.Admin.Secrets do
 
       {:ok,
        %{
-         scope: scope,
+         workspaces: scope,
          name: name,
          version: version,
          created_at: created_at,
@@ -117,7 +117,7 @@ defmodule Coflux.Admin.Secrets do
   def delete(db, scope, name) do
     case Store.query_one(
            db,
-           "SELECT id FROM secrets WHERE scope = ?1 AND name = ?2",
+           "SELECT id FROM secrets WHERE workspaces = ?1 AND name = ?2",
            {scope, name}
          ) do
       {:ok, {id}} ->
@@ -135,9 +135,9 @@ defmodule Coflux.Admin.Secrets do
       Store.query(
         db,
         """
-        SELECT scope, name, version, created_at, updated_at, updated_by_type, updated_by_external_id
+        SELECT workspaces, name, version, created_at, updated_at, updated_by_type, updated_by_external_id
         FROM secrets
-        ORDER BY scope, name
+        ORDER BY workspaces, name
         """,
         {}
       )
@@ -145,7 +145,7 @@ defmodule Coflux.Admin.Secrets do
     {:ok,
      Enum.map(rows, fn {scope, name, version, created_at, updated_at, type, external_id} ->
        %{
-         scope: scope,
+         workspaces: scope,
          name: name,
          version: version,
          created_at: created_at,
@@ -302,7 +302,7 @@ defmodule Coflux.Admin.Secrets do
     {:ok, rows} =
       Store.query(
         db,
-        "SELECT scope, version, nonce, ciphertext FROM secrets WHERE name = ?1",
+        "SELECT workspaces, version, nonce, ciphertext FROM secrets WHERE name = ?1",
         {name}
       )
 

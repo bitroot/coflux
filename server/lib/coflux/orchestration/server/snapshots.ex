@@ -214,7 +214,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     {:ok,
      Enum.map(secrets, fn secret ->
        %SecretSet{
-         scope: secret.scope,
+         workspaces: secret.workspaces,
          name: secret.name,
          version: secret.version,
          created_at: secret.created_at,
