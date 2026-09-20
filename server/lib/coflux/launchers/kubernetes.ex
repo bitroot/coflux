@@ -13,7 +13,9 @@ defmodule Coflux.KubernetesLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config, opts \\ %{}) do
+  # `args` are the worker's arguments - its modules, or `--all-modules` -
+  # which the image's entrypoint (`coflux worker ...`) is expected to take.
+  def launch(env, args, config, opts \\ %{}) do
     namespace = Map.get(config, :namespace, "default")
     conn = build_conn(config)
     job_name = generate_job_name(opts)
@@ -26,7 +28,7 @@ defmodule Coflux.KubernetesLauncher do
     container = %{
       "name" => "worker",
       "image" => Map.fetch!(config, :image),
-      "args" => modules,
+      "args" => args,
       "env" => container_env
     }
 

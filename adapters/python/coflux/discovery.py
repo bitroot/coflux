@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import json
+import os
 import pkgutil
 import sys
 import traceback
@@ -21,13 +22,41 @@ from .target import (
 )
 
 
+# Top-level names that are never where targets live, and that tend to have
+# import-time side effects or dependencies the worker doesn't have.
+_SKIPPED_TOP_LEVEL = frozenset({"setup", "conftest", "tests", "test"})
+
+
+def _working_directory_modules() -> list[str]:
+    """The top-level modules and packages in the working directory.
+
+    This is what a worker hosts when it's given no modules: the directory
+    it was started in, which ``python -m`` puts on ``sys.path``. Private
+    (``_``-prefixed) names and a few conventional non-targets are left out,
+    and packages are only found by their ``__init__.py``, as elsewhere.
+    """
+    cwd = os.getcwd()
+    if cwd not in sys.path and "" not in sys.path:
+        sys.path.insert(0, cwd)
+
+    return sorted(
+        info.name
+        for info in pkgutil.iter_modules([cwd])
+        if not info.name.startswith("_") and info.name not in _SKIPPED_TOP_LEVEL
+    )
+
+
 def _expand_modules(module_names: list[str]) -> list[str]:
     """Expand package names into their constituent submodules.
 
     If a name refers to a Python package (has __path__), it is recursively
     walked using pkgutil.walk_packages. Plain module names are passed through
     unchanged. Submodules whose final component starts with '_' are skipped.
+    No names at all means every module in the working directory.
     """
+    if not module_names:
+        module_names = _working_directory_modules()
+
     result: list[str] = []
     seen: set[str] = set()
 
@@ -75,11 +104,13 @@ def discover_targets(
     """Discover all targets in the specified modules.
 
     If a module name refers to a package, all submodules are scanned
-    recursively (private submodules starting with '_' are skipped).
+    recursively (private submodules starting with '_' are skipped). An
+    empty list scans every module in the working directory.
 
     Args:
         modules: List of module or package names to scan
-                 (e.g., ["myapp.workflows", "myapp.tasks"] or just ["myapp"])
+                 (e.g., ["myapp.workflows", "myapp.tasks"] or just ["myapp"]),
+                 or [] for the working directory
 
     Returns:
         A ``(targets, errors)`` pair — target definitions suitable for JSON
@@ -192,7 +223,7 @@ def run_discovery(modules: list[str]) -> int:
     file would mean restarting by hand — has it.
 
     Args:
-        modules: List of module names to scan.
+        modules: List of module names to scan, or [] for the working directory.
 
     Returns:
         Exit code (0 for success, 1 for error).

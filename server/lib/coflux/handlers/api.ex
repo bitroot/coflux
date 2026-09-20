@@ -1146,11 +1146,10 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  # A pool's modules are module names, not patterns: the same list is
-  # handed to the launcher as the worker's arguments, so a wildcard would
-  # be passed to the worker to import - nothing expands it - as well as
-  # matching no execution. Accepting one would mean a pool that quietly
-  # never runs anything, so they are validated like any other module name.
+  # A pool's modules are names, not patterns: the list is handed to the
+  # launcher as the worker's arguments, and a name already covers its
+  # submodules, the way discovery imports it. An empty list is no
+  # restriction - the pool hosts everything its workers find.
   defp parse_modules(value) do
     value = List.wrap(value)
 

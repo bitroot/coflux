@@ -57,7 +57,7 @@ provides = ["gpu:A100", "region:eu"]
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `worker.modules` | `[]` | Modules to load targets from (overridden by modules passed on the command line) |
+| `worker.modules` | _(all)_ | Modules to load targets from; a package is scanned recursively. Unset, every module in the working directory. Overridden by modules passed on the command line, or by `--all-modules` |
 | `worker.concurrency` | _(CPU count + 4, max 32)_ | Maximum concurrent executions |
 | `worker.adapter` | `[]` | Adapter command for executing Python code |
 | `worker.provides` | `[]` | Features this worker provides (for pool matching) |

@@ -15,8 +15,10 @@ Importantly, workers can be run locally, automatically watching for code changes
 Start a worker with:
 
 ```bash
-coflux worker --dev hello
+coflux worker --dev
 ```
+
+Given no modules, the worker hosts every module in the current directory — for now, just `hello`. Modules can also be listed explicitly (`coflux worker --dev hello`), or set in `coflux.toml`.
 
 The worker attempts to automatically detect your Python environment. It checks for virtual environments (`.venv/`, `venv/`), package managers (`poetry`, `uv`), and falls back to `uv run --with coflux` or system Python. You can also configure the adapter explicitly with `--adapter` or in `coflux.toml` (see below).
 

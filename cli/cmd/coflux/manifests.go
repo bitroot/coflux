@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -29,6 +30,9 @@ func init() {
 	manifestsCmd.AddCommand(manifestsInspectCmd)
 
 	manifestsInspectCmd.Flags().BoolVar(&manifestsInspectWatch, "watch", false, "Watch for changes")
+
+	manifestsDiscoverCmd.Flags().Bool("all-modules", false, "Scan every module in the working directory, ignoring 'worker.modules' in coflux.toml")
+	manifestsRegisterCmd.Flags().Bool("all-modules", false, "Scan every module in the working directory, ignoring 'worker.modules' in coflux.toml")
 }
 
 var manifestsDiscoverCmd = &cobra.Command{
@@ -37,14 +41,16 @@ var manifestsDiscoverCmd = &cobra.Command{
 	Long: `Discover @task and @workflow decorated functions from the specified modules.
 
 This runs the adapter's discovery process and displays the results without
-registering anything with the server. If no modules are specified, uses
-'worker.modules' from coflux.toml.
+registering anything with the server. A package is scanned recursively. If
+no modules are specified, uses 'worker.modules' from coflux.toml, or, when
+that isn't set either, every module in the working directory.
 
 Examples:
   coflux manifests discover myapp.workflows myapp.tasks
   coflux manifests discover myapp
   coflux manifests discover -o json myapp.workflows
-  coflux manifests discover                              # Use modules from coflux.toml`,
+  coflux manifests discover                              # Use modules from coflux.toml, or all
+  coflux manifests discover --all-modules                # All, even if coflux.toml sets modules`,
 	RunE: runManifestsDiscover,
 }
 
@@ -54,13 +60,16 @@ var manifestsRegisterCmd = &cobra.Command{
 	Long: `Register workflow manifests from the specified modules with the server.
 
 This discovers @task and @workflow decorated functions and registers
-their definitions with the Coflux server. If no modules are specified,
-uses 'worker.modules' from coflux.toml.
+their definitions with the Coflux server. A package is scanned
+recursively. If no modules are specified, uses 'worker.modules' from
+coflux.toml, or, when that isn't set either, every module in the working
+directory.
 
 Examples:
   coflux manifests register myapp.workflows myapp.tasks
   coflux manifests register myapp
-  coflux manifests register                              # Use modules from coflux.toml`,
+  coflux manifests register                              # Use modules from coflux.toml, or all
+  coflux manifests register --all-modules                # All, even if coflux.toml sets modules`,
 	RunE: runManifestsRegister,
 }
 
@@ -88,15 +97,64 @@ Example:
 	RunE: runManifestsInspect,
 }
 
-func resolveModules(args []string, cfg *config.Config) ([]string, error) {
+// resolveModules decides what discovery is pointed at. Arguments win, then
+// worker.modules from coflux.toml; with neither the result is nil, and the
+// adapter scans the working directory for every module it holds. The
+// --all-modules flag asks for that scan explicitly - the one thing leaving
+// the arguments out can't express once the config sets a list.
+func resolveModules(args []string, allModules bool, cfg *config.Config) ([]string, error) {
+	if allModules {
+		if len(args) > 0 {
+			return nil, fmt.Errorf("--all-modules can't be combined with module arguments")
+		}
+		return nil, nil
+	}
 	modules := args
 	if len(modules) == 0 {
 		modules = cfg.Worker.Modules
 	}
-	if len(modules) == 0 {
-		return nil, fmt.Errorf("no modules specified; pass them as arguments or set 'worker.modules' in coflux.toml")
+	for _, name := range modules {
+		if err := validateModuleName(name); err != nil {
+			return nil, err
+		}
 	}
 	return modules, nil
+}
+
+var moduleNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+
+// File extensions a module name can end in only by mistake: a file given
+// instead of the name it's imported by, or an unquoted glob the shell
+// expanded into the directory listing.
+var fileExtensions = map[string]bool{
+	"py": true, "toml": true, "md": true, "txt": true, "json": true,
+	"yaml": true, "yml": true, "cfg": true, "ini": true, "lock": true,
+}
+
+// validateModuleName rejects what the adapter would only fail to import,
+// with a hint for the likely mistakes: a file or path, or a pattern,
+// where a name already covers its submodules.
+func validateModuleName(name string) error {
+	looksLikeFile := strings.ContainsAny(name, `/\`) ||
+		fileExtensions[strings.ToLower(name[strings.LastIndex(name, ".")+1:])]
+	switch {
+	case strings.Contains(name, "*"):
+		return fmt.Errorf("'%s' is not a module name: a name covers its submodules, so patterns aren't needed (pass no modules to host everything in the working directory)", name)
+	case looksLikeFile:
+		return fmt.Errorf("'%s' is a file, not a module name: pass the name it's imported by (e.g. myapp.workflows), or no modules to host everything in the working directory", name)
+	case moduleNameRe.MatchString(name):
+		return nil
+	default:
+		return fmt.Errorf("'%s' is not a module name (e.g. myapp.workflows)", name)
+	}
+}
+
+// modulesLabel names a module list in logs and messages.
+func modulesLabel(modules []string) string {
+	if len(modules) == 0 {
+		return "all (working directory)"
+	}
+	return strings.Join(modules, ", ")
 }
 
 func discoverTargets(cmd *cobra.Command, modules []string) (*adapter.DiscoveryManifest, error) {
@@ -112,7 +170,8 @@ func discoverTargets(cmd *cobra.Command, modules []string) (*adapter.DiscoveryMa
 		return nil, fmt.Errorf("no adapter configured; use --adapter or add 'worker.adapter' to coflux.toml")
 	}
 
-	resolved, err := resolveModules(modules, cfg)
+	allModules, _ := cmd.Flags().GetBool("all-modules")
+	resolved, err := resolveModules(modules, allModules, cfg)
 	if err != nil {
 		return nil, err
 	}

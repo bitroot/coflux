@@ -29,13 +29,14 @@ defmodule Coflux.ProcessLauncher do
   # 128 + SIGKILL.
   @signalled_exit_codes [143, 137]
 
-  def launch(env, modules, config, _opts \\ %{}) do
+  # `args` are the worker's arguments: its modules, or `--all-modules`.
+  def launch(env, args, config, _opts \\ %{}) do
     cli_path = Coflux.Config.cli_path()
     directory = Map.fetch!(config, :directory)
 
     # Use `exec` so the shell is replaced by the command, ensuring
     # the port's OS process IS the worker (not a wrapper shell).
-    argv = Enum.map_join([cli_path, "worker" | modules], " ", &shell_escape/1)
+    argv = Enum.map_join([cli_path, "worker" | args], " ", &shell_escape/1)
     shell_cmd = "exec #{argv}"
 
     port_env =

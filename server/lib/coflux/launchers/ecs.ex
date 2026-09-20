@@ -3,11 +3,11 @@ defmodule Coflux.EcsLauncher do
   Runs workers as Amazon ECS tasks.
 
   A pool names a task definition, and each worker is one task run from it,
-  with the container's command overridden to the modules to host and its
-  environment to what the worker needs to connect. Everything else about
-  the task - image, CPU and memory, IAM roles, logging - belongs to the
-  task definition, which is where ECS users expect to configure it, so the
-  launcher doesn't try to own it.
+  with the container's command overridden to the worker's arguments (the
+  modules to host) and its environment to what the worker needs to
+  connect. Everything else about the task - image, CPU and memory, IAM
+  roles, logging - belongs to the task definition, which is where ECS
+  users expect to configure it, so the launcher doesn't try to own it.
 
   ECS has no log API of its own: container output goes wherever the task
   definition's log configuration sends it. What a stopped task does carry
@@ -51,10 +51,10 @@ defmodule Coflux.EcsLauncher do
     "BlockedException"
   ]
 
-  def launch(env, modules, config, opts \\ %{}) do
+  def launch(env, args, config, opts \\ %{}) do
     with {:ok, conn} <- build_conn(config),
          {:ok, container_name} <- resolve_container_name(conn, config),
-         {:ok, task_arn} <- run_task(conn, config, container_name, env, modules, opts) do
+         {:ok, task_arn} <- run_task(conn, config, container_name, env, args, opts) do
       {:ok,
        %{
          task_arn: task_arn,
@@ -211,13 +211,12 @@ defmodule Coflux.EcsLauncher do
     end
   end
 
-  defp run_task(conn, config, container_name, env, modules, opts) do
+  defp run_task(conn, config, container_name, env, args, opts) do
     override = %{
       "name" => container_name,
+      "command" => args,
       "environment" => Enum.map(env, fn {name, value} -> %{"name" => name, "value" => value} end)
     }
-
-    override = if modules == [], do: override, else: Map.put(override, "command", modules)
 
     body =
       %{

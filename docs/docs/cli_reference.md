@@ -94,11 +94,12 @@ Fetch logs for a run or specific execution.
 coflux worker [modules...]
 ```
 
-Start a worker.
+Start a worker. Modules can be given as arguments or as `worker.modules` in `coflux.toml`; a package is scanned recursively. With neither, every module in the working directory is hosted.
 
 | Flag | Description |
 |------|-------------|
 | `--dev` | Development mode (implies `--watch` and `--register`) |
+| `--all-modules` | Host every module in the working directory, even if `coflux.toml` sets `worker.modules` |
 | `--watch` | Watch for file changes and reload |
 | `--register` | Register modules with server |
 | `--concurrency` | Max concurrent executions (default: CPU count + 4, max 32) |
@@ -162,12 +163,12 @@ Authenticate with Coflux Studio using a device authorization flow.
 
 | Command | Description |
 |---------|-------------|
-| `manifests discover <modules...>` | Discover targets without registering |
-| `manifests register <modules...>` | Register targets with the server |
+| `manifests discover [modules...]` | Discover targets without registering |
+| `manifests register [modules...]` | Register targets with the server |
 | `manifests archive <module>` | Archive a module |
 | `manifests inspect` | List registered modules and targets (`--watch`) |
 
-All manifest commands accept `--adapter` to specify the adapter command.
+All manifest commands accept `--adapter` to specify the adapter command. `discover` and `register` resolve modules the way `coflux worker` does, and take `--all-modules`.
 
 ## `coflux pools`
 
@@ -190,7 +191,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 |------|-------------|
 | `--type` | Launcher type: `kubernetes`, `docker`, `process`, `ecs` (required) |
 | `--set` | Set a field (e.g., `--set image=myapp:latest`, `--set env.KEY=VALUE`) |
-| `--modules`, `-m` | Modules to host |
+| `--modules`, `-m` | Modules to host, comma-separated; a name covers its submodules. Unset: all |
 | `--provides` | Features workers provide |
 | `--accepts` | Tags executions must have |
 
@@ -200,7 +201,7 @@ All manifest commands accept `--adapter` to specify the adapter command.
 |------|-------------|
 | `--set` | Set a field |
 | `--unset` | Unset a field |
-| `--modules`, `-m` | Modules to host |
+| `--modules`, `-m` | Modules to host, comma-separated; a name covers its submodules. `--unset modules` for all |
 | `--provides` / `--no-provides` | Set or clear provides |
 | `--accepts` / `--no-accepts` | Set or clear accepts |
 

@@ -811,7 +811,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
           :launch,
           [
             Fleet.build_launcher_env(state, workspace_id, token, launcher),
-            pool.modules,
+            Fleet.worker_args(pool),
             launcher,
             %{pool_name: pool_name}
           ],

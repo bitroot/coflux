@@ -80,8 +80,8 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 		if l, ok := pool["launcher"].(map[string]any); ok {
 			launcher = getString(l, "type")
 		}
-		modules := ""
-		if m, ok := pool["modules"].([]any); ok {
+		modules := "(all)"
+		if m, ok := pool["modules"].([]any); ok && len(m) > 0 {
 			var mods []string
 			for _, mod := range m {
 				if s, ok := mod.(string); ok {
@@ -134,7 +134,7 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		return outputJSON(pool)
 	}
 
-	// Modules
+	// Modules (none means the pool hosts everything its workers find)
 	if modules, ok := pool["modules"].([]any); ok && len(modules) > 0 {
 		var mods []string
 		for _, m := range modules {
@@ -143,6 +143,8 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("Modules: %s\n", strings.Join(mods, ", "))
+	} else {
+		fmt.Println("Modules: (all)")
 	}
 
 	// Provides
@@ -607,14 +609,14 @@ func init() {
 	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process, ecs)")
 	_ = poolsCreateCmd.MarkFlagRequired("type")
 	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
-	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted")
+	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted (a name covers its submodules; default: all)")
 	poolsCreateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsCreateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 
 	// pools update flags
 	poolsUpdateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
 	poolsUpdateCmd.Flags().StringArray("unset", nil, "Unset a field")
-	poolsUpdateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted")
+	poolsUpdateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted (a name covers its submodules; --unset modules for all)")
 	poolsUpdateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsUpdateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 	poolsUpdateCmd.Flags().Bool("no-provides", false, "Clear provides")
@@ -849,13 +851,6 @@ func runPoolsCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Created pool '%s'.\n", name)
-
-	// A pool is matched to executions by module, so one with no modules
-	// can never launch anything.
-	if modules, ok := pool["modules"].([]any); !ok || len(modules) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: pool '%s' has no modules, so it will not be used. Set some with: coflux pools update %s --modules <module>...\n", name, name)
-	}
-
 	return nil
 }
 

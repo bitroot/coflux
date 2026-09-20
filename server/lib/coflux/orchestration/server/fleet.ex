@@ -331,13 +331,36 @@ defmodule Coflux.Orchestration.Server.Fleet do
       |> Map.get(execution.workspace_id, %{})
       |> Map.filter(fn {_, pool} ->
         Map.get(pool, :state, :active) != :disabled &&
-          pool.launcher && execution.module in pool.modules &&
+          pool.launcher && pool_hosts_module?(pool.modules, execution.module) &&
           has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
           satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
       end)
 
     if Enum.any?(pools) do
       pools |> Map.values() |> Enum.map(& &1.id) |> Enum.random()
+    end
+  end
+
+  # A pool's modules are what its workers are started with, so they mean
+  # what they mean to discovery: a name covers that module and, if it's a
+  # package, everything under it. No modules is no restriction.
+  def pool_hosts_module?([], _module), do: true
+
+  def pool_hosts_module?(modules, module) do
+    Enum.any?(modules, fn name ->
+      name == module || String.starts_with?(module, name <> ".")
+    end)
+  end
+
+  # The arguments a launched worker is started with. A pool with no
+  # modules hosts everything, and the worker has to be told so rather
+  # than left to default: it would otherwise take `worker.modules` from
+  # whatever coflux.toml its working directory holds, and host less than
+  # the server routes to it.
+  def worker_args(pool) do
+    case pool.modules do
+      [] -> ["--all-modules"]
+      modules -> modules
     end
   end
 

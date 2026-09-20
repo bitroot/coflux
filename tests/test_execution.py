@@ -311,6 +311,32 @@ def test_multiple_modules(worker):
         assert ctx.result(run_id)["value"]["data"] == 10
 
 
+def test_no_modules_hosts_everything(worker):
+    """A worker started without modules hosts every module it finds."""
+    targets = [
+        workflow("app", "main"),
+        task("compute", "double", parameters=["x"]),
+    ]
+
+    with worker(targets, modules=[], concurrency=2) as ctx:
+        resp = ctx.submit("app", "main")
+        run_id = resp["runId"]
+
+        ex0 = ctx.executor.next_execute()
+        assert ex0.target == "main"
+
+        ref = ex0.conn.submit_task(ex0.execution_id, "compute", "double", json_args(5))
+
+        ex1 = ctx.executor.next_execute()
+        assert ex1.target == "double"
+        ex1.conn.complete(ex1.execution_id, value=10)
+
+        assert ex0.conn.resolve(ex0.execution_id, ref)["value"] == 10
+
+        ex0.conn.complete(ex0.execution_id, value=10)
+        assert ctx.result(run_id)["value"]["data"] == 10
+
+
 def test_rerun_step(worker):
     """Completed workflow step can be re-run, producing a new execution."""
     targets = [workflow("test", "my_workflow")]

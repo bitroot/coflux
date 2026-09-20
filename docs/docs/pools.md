@@ -9,7 +9,7 @@ Pools are configured using the CLI. Use `--type` to specify the launcher type an
 ```bash
 coflux pools create mypool --type process \
   --set directory=/path/to/project \
-  --modules myapp.workflows myapp.tasks
+  --modules myapp.workflows,myapp.tasks
 ```
 
 ### Launcher types
@@ -193,7 +193,7 @@ These fields apply to all launcher types:
 
 | Field / Flag | Description |
 |--------------|-------------|
-| `--modules`, `-m` | Modules to host (can be specified multiple times). Module names only — wildcards aren't supported, since this is also what launched workers are told to import |
+| `--modules`, `-m` | Modules to host, comma-separated (see [Modules](#modules)). Leave unset to host everything |
 | `--provides` | Features that workers provide (e.g., `gpu:A100`) |
 | `--accepts` | Tags that executions must have to be assigned to this pool |
 | `idleTimeout` | Seconds the pool keeps an idle worker before stopping it (default: 5). Worth raising for launchers with slow starts, such as ECS |
@@ -203,6 +203,23 @@ These fields apply to all launcher types:
 | `concurrency` | Maximum concurrent executions per worker |
 | `env` | Environment variables (e.g., `--set env.KEY=VALUE`) |
 | `envSecrets` | Environment variables set from secrets (e.g., `--set envSecrets.API_KEY=api-key`) |
+
+### Modules
+
+A pool is chosen for an execution by the execution's module. The pool's
+module list is what its workers are started with, so a name means what it
+means to a worker: the module itself and, if it's a package, everything
+under it. A pool for `myapp` hosts `myapp.workflows` and `myapp.tasks`
+alike. There is no pattern syntax.
+
+A pool with no modules hosts everything. Its workers are started with
+`--all-modules`, so they host every module in their working directory
+regardless of any `worker.modules` a `coflux.toml` there sets.
+
+Where several pools in a workspace cover the same module, one is picked at
+random for each launch. To keep work apart, route it with
+[`requires` and `provides`](#provides-accepts-and-requires) rather than by
+module list.
 
 ## Secrets
 

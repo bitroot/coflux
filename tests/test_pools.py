@@ -52,6 +52,18 @@ def pool_env(server, project_id, tmp_path):
         executor.close()
 
 
+def _adapter(pool_env):
+    """The test adapter command, serving pool_env's manifest and socket."""
+    return [
+        "python3",
+        ADAPTER_SCRIPT,
+        "--manifest",
+        pool_env["manifest_path"],
+        "--socket",
+        pool_env["socket_path"],
+    ]
+
+
 def _setup_pool(
     pool_env, targets, modules=None, pool_name="test-pool", provides=None, **kwargs
 ):
@@ -61,22 +73,15 @@ def _setup_pool(
     starts a ``coflux worker`` process pointing at the test adapter.
     Extra keyword arguments are forwarded to ``cli.pools_create``.
     """
-    modules = modules or ["test"]
+    if modules is None:
+        modules = ["test"]
     manifest_path = pool_env["manifest_path"]
-    socket_path = pool_env["socket_path"]
     host = pool_env["host"]
 
     with open(manifest_path, "w") as f:
         json.dump(manifest(targets), f)
 
-    adapter = [
-        "python3",
-        ADAPTER_SCRIPT,
-        "--manifest",
-        manifest_path,
-        "--socket",
-        socket_path,
-    ]
+    adapter = _adapter(pool_env)
 
     cli.pools_create(
         pool_name,
@@ -580,18 +585,85 @@ class TestPoolState:
 
 
 class TestPoolModules:
-    def test_wildcard_modules_are_rejected(self, pool_env):
-        """A pool's modules are names, not patterns.
+    """A pool's modules are what its workers are started with, so they
+    mean what they mean to discovery: a name covers its submodules, and
+    no modules at all is everything."""
 
-        The same list is handed to the launcher as the worker's arguments,
-        so a wildcard would be passed to the worker to import as well as
-        matching no execution - a pool that silently never runs anything.
-        """
+    def test_no_modules_hosts_everything(self, pool_env):
+        """A pool created without modules is chosen for any module, and its
+        workers are started with --all-modules so they host it all."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [
+            workflow("module_a", "job_a"),
+            workflow("module_b", "job_b"),
+        ]
+        _setup_pool(pool_env, targets, modules=[])
+
+        assert cli.pools_get("test-pool", host=host)["modules"] == []
+
+        resp_a = cli.submit("module_a/job_a", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex_a = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex_a.target == "job_a"
+        ex_a.conn.complete(ex_a.execution_id, value="from_a")
+
+        result_a = poll_result(resp_a["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result_a["value"]["data"] == "from_a"
+
+        resp_b = cli.submit("module_b/job_b", host=host)
+        ex_b = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex_b.target == "job_b"
+        ex_b.conn.complete(ex_b.execution_id, value="from_b")
+
+        result_b = poll_result(resp_b["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result_b["value"]["data"] == "from_b"
+
+        launches = cli.pools_launches("test-pool", host=host)
+        assert len(launches) == 1
+
+    def test_a_package_covers_its_submodules(self, pool_env):
+        """A pool for 'myapp' launches for an execution in 'myapp.workflows',
+        since that's what a worker started with 'myapp' imports - but not
+        for 'myapp2', which only shares a prefix."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [
+            workflow("myapp.workflows", "job"),
+            workflow("myapp2", "other"),
+        ]
+        _setup_pool(pool_env, targets, modules=["myapp"])
+        # Registered so it can be submitted; nothing is configured to host it.
+        cli.manifests_register(
+            "myapp2",
+            adapter=",".join(_adapter(pool_env)),
+            host=host,
+        )
+
+        resp = cli.submit("myapp.workflows/job", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex.target == "job"
+        ex.conn.complete(ex.execution_id, value="done")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "done"
+
+        # Nothing hosts myapp2: the worker didn't declare it, and no pool
+        # covers it, so the run stays unassigned and nothing new launches.
+        cli.submit("myapp2/other", host=host)
+        time.sleep(3)
+        assert len(cli.pools_launches("test-pool", host=host)) == 1
+
+    def test_patterns_are_rejected(self, pool_env):
+        """There is no pattern syntax: a name already covers its submodules."""
         host = pool_env["host"]
 
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
             cli.pools_create(
-                "wildcard-pool",
+                "pattern-pool",
                 type="process",
                 modules=["myapp.*"],
                 process_dir=str(pool_env["worker_dir"]),
@@ -599,7 +671,7 @@ class TestPoolModules:
             )
         assert "bad_request" in exc_info.value.stderr
 
-        assert "wildcard-pool" not in cli.pools_list(host=host)
+        assert "pattern-pool" not in cli.pools_list(host=host)
 
 
 class TestPoolSecrets:

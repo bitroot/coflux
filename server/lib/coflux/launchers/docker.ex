@@ -10,7 +10,9 @@ defmodule Coflux.DockerLauncher do
   # VM's - so it is a default, not a fixture.
   @default_network_mode "host"
 
-  def launch(env, modules, config, _opts \\ %{}) do
+  # `args` are the worker's arguments - its modules, or `--all-modules` -
+  # which the image's entrypoint (`coflux worker ...`) is expected to take.
+  def launch(env, args, config, _opts \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
 
     container_env = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)
@@ -22,7 +24,7 @@ defmodule Coflux.DockerLauncher do
              %{
                "Image" => Map.fetch!(config, :image),
                "HostConfig" => %{"NetworkMode" => network_mode},
-               "Cmd" => modules,
+               "Cmd" => args,
                "Env" => container_env
              }
            ),

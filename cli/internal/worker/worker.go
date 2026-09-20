@@ -256,6 +256,9 @@ func (w *Worker) Run(ctx context.Context, modules []string, register bool) error
 	w.logger.Debug("discovered targets", "count", len(manifest.Targets))
 
 	if len(manifest.Targets) == 0 {
+		if len(modules) == 0 {
+			return fmt.Errorf("%w in the working directory", ErrNoTargets)
+		}
 		return fmt.Errorf("%w in modules %v", ErrNoTargets, modules)
 	}
 
