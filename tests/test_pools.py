@@ -1097,7 +1097,7 @@ class TestEcsLauncher:
 
     def test_oom_killed_task_is_reported(self, ecs_env):
         """A task that ECS stops for exceeding its memory is reported as
-        such, with the task's stopped reason in place of a log tail."""
+        such, with ECS's account of the stop in place of a log tail."""
         host = ecs_env["host"]
         executor = ecs_env["executor"]
         fake = ecs_env["ecs"]
@@ -1115,7 +1115,11 @@ class TestEcsLauncher:
             host, "ecs-pool", lambda w: w["deactivatedAt"] is not None, timeout=45
         )
         assert worker["error"] == "oom_killed"
-        assert worker["logs"] == "Essential container in task exited"
+        assert worker["logs"] == (
+            "Essential container in task exited"
+            " - OutOfMemoryError: Container killed due to memory usage"
+            " - exit code 137"
+        )
 
     def test_refused_launch_is_reported(self, ecs_env):
         """A RunTask the API refuses fails the worker, with the API's own
