@@ -21,7 +21,6 @@ from .target import (
     serialize_streams,
 )
 
-
 # Top-level names that are never where targets live, and that tend to have
 # import-time side effects or dependencies the worker doesn't have.
 _SKIPPED_TOP_LEVEL = frozenset({"setup", "conftest", "tests", "test"})
