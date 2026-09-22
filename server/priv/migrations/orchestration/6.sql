@@ -134,3 +134,54 @@ ALTER TABLE assignments ADD COLUMN catalog_sequence INTEGER;
 -- NULL means "not chosen": resolve by the rule above.
 ALTER TABLE runs ADD COLUMN catalog_sequence INTEGER;
 ALTER TABLE executions ADD COLUMN catalog_sequence INTEGER;
+
+-- How long a pool keeps an idle worker before stopping it, in milliseconds.
+-- NULL leaves it to the scheduler's default.
+ALTER TABLE pool_definitions ADD COLUMN idle_timeout_ms INTEGER;
+
+-- Tokens have moved to the admin store, which isn't rotated, so a
+-- principal names its token by external id rather than by a row in this
+-- database - the way it already names a user.
+--
+-- The `tokens` table stays for now: the server copies it across to the
+-- admin store when it starts, then drops it (`Coflux.Admin.Tokens`).
+CREATE TABLE principals_new (
+  id INTEGER PRIMARY KEY,
+  user_external_id TEXT UNIQUE,
+  token_external_id TEXT UNIQUE,
+  CHECK ((user_external_id IS NOT NULL AND token_external_id IS NULL) OR (user_external_id IS NULL AND token_external_id IS NOT NULL))
+) STRICT;
+
+INSERT INTO principals_new (id, user_external_id, token_external_id)
+SELECT p.id, p.user_external_id, t.external_id
+FROM principals AS p
+LEFT JOIN tokens AS t ON t.id = p.token_id
+WHERE p.user_external_id IS NOT NULL OR t.external_id IS NOT NULL;
+
+DROP TABLE principals;
+ALTER TABLE principals_new RENAME TO principals;
+
+-- Durations carry their unit in the name.
+--
+-- Every duration in this database is, and always has been, an integer
+-- number of milliseconds, but only the columns added most recently said
+-- so (`streams_timeout_ms`, `timeout_ms`). The rest read as bare
+-- `timeout` / `delay` / `max_age`, which is how the pool idle timeout
+-- came to be added in seconds without anyone noticing the mismatch.
+--
+-- Renames only: no value changes, and no column here is referenced by a
+-- view, trigger or index.
+ALTER TABLE cache_configs RENAME COLUMN max_age TO max_age_ms;
+
+ALTER TABLE workflows RENAME COLUMN delay TO delay_ms;
+ALTER TABLE workflows RENAME COLUMN timeout TO timeout_ms;
+ALTER TABLE workflows RENAME COLUMN retry_backoff_min TO retry_backoff_min_ms;
+ALTER TABLE workflows RENAME COLUMN retry_backoff_max TO retry_backoff_max_ms;
+
+ALTER TABLE steps RENAME COLUMN delay TO delay_ms;
+ALTER TABLE steps RENAME COLUMN timeout TO timeout_ms;
+ALTER TABLE steps RENAME COLUMN retry_backoff_min TO retry_backoff_min_ms;
+ALTER TABLE steps RENAME COLUMN retry_backoff_max TO retry_backoff_max_ms;
+
+ALTER TABLE sessions RENAME COLUMN activation_timeout TO activation_timeout_ms;
+ALTER TABLE sessions RENAME COLUMN reconnection_timeout TO reconnection_timeout_ms;

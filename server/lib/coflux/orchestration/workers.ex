@@ -164,36 +164,60 @@ defmodule Coflux.Orchestration.Workers do
     end
   end
 
-  def get_pool_workers(db, pool_name, limit \\ 100) do
-    # TODO: decode errors?
-    query(
-      db,
-      """
-      SELECT w.id, w.external_id, w.created_at, r.created_at, r.error, s.created_at, sr.created_at, sr.error,
-             d.created_at, d.error, wl.content,
-             (SELECT COUNT(*) FROM assignments AS a
-              INNER JOIN sessions AS ses ON ses.id = a.session_id
-              WHERE ses.worker_id = w.id) AS total_executions
-      FROM workers AS w
-      INNER JOIN pools AS p ON p.id = w.pool_id
-      LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
-      LEFT JOIN worker_stops AS s ON s.id = (
-        SELECT id
-        FROM worker_stops
-        WHERE worker_id = w.id
-        ORDER BY created_at DESC
-        LIMIT 1
-      )
-      LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
-      LEFT JOIN worker_deactivations AS d ON d.worker_id = w.id
-      LEFT JOIN worker_logs AS wl ON wl.id = d.worker_log_id
-      WHERE p.name = ?1
-      ORDER BY w.created_at DESC
-      LIMIT ?2
-      """,
-      {pool_name, limit}
-    )
+  # Pool names are unique per workspace, not per project, so the workspace
+  # is part of identifying a pool - without it this returns the workers of
+  # every same-named pool in the project.
+  #
+  # A worker can be asked to stop more than once: over its connection,
+  # then through its launcher, then again if the launcher refused. What's
+  # reported is when it was first asked, and how the latest attempt went.
+  def get_pool_workers(db, workspace_id, pool_name, limit \\ 100) do
+    case query(
+           db,
+           """
+           SELECT w.id, w.external_id, w.created_at, r.created_at, r.error,
+                  (SELECT MIN(created_at) FROM worker_stops WHERE worker_id = w.id) AS stopping_at,
+                  sr.created_at, sr.error,
+                  d.created_at, d.error, wl.content,
+                  (SELECT COUNT(*) FROM assignments AS a
+                   INNER JOIN sessions AS ses ON ses.id = a.session_id
+                   WHERE ses.worker_id = w.id) AS total_executions
+           FROM workers AS w
+           INNER JOIN pools AS p ON p.id = w.pool_id
+           LEFT JOIN worker_launch_results AS r ON r.worker_id = w.id
+           LEFT JOIN worker_stops AS s ON s.id = (
+             SELECT id
+             FROM worker_stops
+             WHERE worker_id = w.id
+             ORDER BY created_at DESC
+             LIMIT 1
+           )
+           LEFT JOIN worker_stop_results AS sr ON sr.worker_stop_id = s.id
+           LEFT JOIN worker_deactivations AS d ON d.worker_id = w.id
+           LEFT JOIN worker_logs AS wl ON wl.id = d.worker_log_id
+           WHERE p.workspace_id = ?1 AND p.name = ?2
+           ORDER BY w.created_at DESC
+           LIMIT ?3
+           """,
+           {workspace_id, pool_name, limit}
+         ) do
+      {:ok, rows} ->
+        {:ok,
+         Enum.map(rows, fn {worker_id, external_id, created_at, started_at, start_error,
+                            stopping_at, stop_completed_at, stop_error, deactivated_at, error,
+                            logs, total_executions} ->
+           # Launch and stop errors are stored encoded; deactivation errors
+           # are not. Decode here so a worker read back from the database
+           # carries the same shapes as one observed live.
+           {worker_id, external_id, created_at, started_at, decode_error(start_error),
+            stopping_at, stop_completed_at, decode_error(stop_error), deactivated_at, error, logs,
+            total_executions}
+         end)}
+    end
   end
+
+  defp decode_error(nil), do: nil
+  defp decode_error(value), do: Jason.decode!(value)
 
   defp generate_uuid() do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)

@@ -100,11 +100,11 @@ defmodule Coflux.Orchestration.Server.Rotation do
   end
 
   def maybe_start_index_build(%{index_task: nil, index_queue: [epoch_id | _]} = state) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
+    epochs = state.epochs
 
     task =
       Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, fn ->
-        {:ok, db} = Exqlite.Sqlite3.open(path)
+        {:ok, db} = Epochs.open_archive(epochs, epoch_id)
 
         try do
           build_blooms_for_epoch(db)
@@ -178,6 +178,13 @@ defmodule Coflux.Orchestration.Server.Rotation do
 
         {new_ws_id, new_ws_pools}
       end)
+
+    # Remap pool_failures: keyed by pool ID. A pool that no longer exists
+    # in the new epoch has nothing left to back off from.
+    pool_failures =
+      state.pool_failures
+      |> Enum.filter(fn {old_id, _} -> Map.has_key?(pool_map, old_id) end)
+      |> Map.new(fn {old_id, failures} -> {Map.fetch!(pool_map, old_id), failures} end)
 
     # Remap workers: rekey map, update pool_id, workspace_id, session_id
     workers =
@@ -262,6 +269,7 @@ defmodule Coflux.Orchestration.Server.Rotation do
         workspace_names: workspace_names,
         workspace_external_ids: workspace_external_ids,
         pools: pools,
+        pool_failures: pool_failures,
         workers: workers,
         worker_external_ids: worker_external_ids,
         sessions: sessions,

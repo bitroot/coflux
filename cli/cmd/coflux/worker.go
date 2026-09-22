@@ -27,13 +27,15 @@ var workerCmd = &cobra.Command{
 targets, and executes workflows and tasks as assigned.
 
 Modules can be specified as arguments or via 'worker.modules' in coflux.toml.
-Packages are scanned recursively for targets.
+Packages are scanned recursively for targets. With neither, every module in
+the working directory is hosted; --all-modules asks for that even when
+coflux.toml sets a list.
 
 Examples:
-  coflux worker myapp
-  coflux worker myapp.workflows myapp.tasks
+  coflux worker --dev
   coflux worker --dev myapp
-  coflux worker`,
+  coflux worker myapp.workflows myapp.tasks
+  coflux worker --all-modules`,
 	RunE: runWorker,
 }
 
@@ -41,6 +43,7 @@ var (
 	workerWatch        bool
 	workerRegister     bool
 	workerDev          bool
+	workerAllModules   bool
 	workerConcurrency  int
 	workerSession      string
 	workerProvides     []string
@@ -53,6 +56,7 @@ func init() {
 	workerCmd.Flags().BoolVar(&workerWatch, "watch", false, "Watch for file changes and reload")
 	workerCmd.Flags().BoolVar(&workerRegister, "register", false, "Automatically register modules with the server")
 	workerCmd.Flags().BoolVar(&workerDev, "dev", false, "Enable development mode (implies --watch and --register)")
+	workerCmd.Flags().BoolVar(&workerAllModules, "all-modules", false, "Host every module in the working directory, ignoring 'worker.modules' in coflux.toml")
 	workerCmd.Flags().IntVar(&workerConcurrency, "concurrency", 0, "Number of concurrent executors (default: CPU count + 4)")
 	workerCmd.Flags().StringVar(&workerSession, "session", "", "Session ID (for pool-launched workers)")
 	workerCmd.Flags().StringSliceVar(&workerProvides, "provides", nil, "Features that this worker provides (e.g., --provides gpu:A100,gpu:H100,region:eu)")
@@ -100,8 +104,8 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	}
 	cfg.Token = token
 
-	// Resolve modules: CLI args override config
-	modules, err := resolveModules(args, cfg)
+	// Resolve modules: CLI args override config; nil means all
+	modules, err := resolveModules(args, workerAllModules, cfg)
 	if err != nil {
 		return err
 	}
@@ -175,7 +179,7 @@ func runWorker(cmd *cobra.Command, args []string) error {
 	logger.Info("starting worker",
 		"workspace", cfg.Workspace,
 		"host", cfg.Host,
-		"modules", modules,
+		"modules", modulesLabel(modules),
 		"concurrency", cfg.Worker.Concurrency,
 		"register", shouldRegister,
 	)
@@ -185,19 +189,23 @@ func runWorker(cmd *cobra.Command, args []string) error {
 		workerDone <- w.Run(ctx, modules, shouldRegister)
 	}()
 
+	// A stop the server asks for is handled the way a signal is: drain
+	// what's running, then leave.
 	select {
 	case <-shutdownCh:
-		drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
-		cancel()
-		<-workerDone
-		logger.Info("worker stopped")
-		return nil
+	case <-w.StopRequested():
 	case err := <-workerDone:
 		if err != nil {
 			return fmt.Errorf("worker error: %w", err)
 		}
 		return nil
 	}
+
+	drainWorker(w, workerDrainTimeout, drainAbortCh, logger)
+	cancel()
+	<-workerDone
+	logger.Info("worker stopped")
+	return nil
 }
 
 // drainWorker runs a graceful drain with the configured timeout, aborting
@@ -281,6 +289,7 @@ func runWorkerWithWatch(
 			logger.Info("starting worker",
 				"workspace", cfg.Workspace,
 				"host", cfg.Host,
+				"modules", modulesLabel(modules),
 				"concurrency", cfg.Worker.Concurrency,
 				"register", shouldRegister,
 			)
@@ -293,6 +302,9 @@ func runWorkerWithWatch(
 		for reason == "" {
 			select {
 			case <-shutdownCh:
+				reason = "shutdown"
+
+			case <-w.StopRequested():
 				reason = "shutdown"
 
 			case err := <-workerDone:

@@ -12,7 +12,11 @@ defmodule Coflux.Application do
     children = [
       # TODO: separate launch supervisor per project? (and specify max_children?)
       {Task.Supervisor, name: Coflux.LauncherSupervisor},
+      Coflux.Launchers.AwsCredentials.Cache,
       {DynamicSupervisor, name: Coflux.ProcessLauncher.Supervisor, strategy: :one_for_one},
+      # Keyed by OS pid, so a launched worker is found by something that
+      # means the same thing after a restart as before one.
+      {Registry, keys: :unique, name: Coflux.ProcessLauncher.Registry},
       Orchestration.Supervisor,
       {Registry, keys: :unique, name: Coflux.Logs.Registry},
       Logs.Supervisor,
@@ -46,6 +50,7 @@ defmodule Coflux.Application do
       Topics.Search,
       Topics.Manifests,
       Topics.Tokens,
+      Topics.Secrets,
       Topics.Asset,
       Topics.Catalog,
       Topics.Queue,

@@ -80,8 +80,8 @@ func runPoolsList(cmd *cobra.Command, args []string) error {
 		if l, ok := pool["launcher"].(map[string]any); ok {
 			launcher = getString(l, "type")
 		}
-		modules := ""
-		if m, ok := pool["modules"].([]any); ok {
+		modules := "(all)"
+		if m, ok := pool["modules"].([]any); ok && len(m) > 0 {
 			var mods []string
 			for _, mod := range m {
 				if s, ok := mod.(string); ok {
@@ -134,7 +134,7 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		return outputJSON(pool)
 	}
 
-	// Modules
+	// Modules (none means the pool hosts everything its workers find)
 	if modules, ok := pool["modules"].([]any); ok && len(modules) > 0 {
 		var mods []string
 		for _, m := range modules {
@@ -143,6 +143,8 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("Modules: %s\n", strings.Join(mods, ", "))
+	} else {
+		fmt.Println("Modules: (all)")
 	}
 
 	// Provides
@@ -153,6 +155,11 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 	// Accepts
 	if accepts := encodeProvides(pool["accepts"]); accepts != "" {
 		fmt.Printf("Accepts: %s\n", accepts)
+	}
+
+	// Idle timeout
+	if idleTimeout, ok := pool["idleTimeoutMs"].(float64); ok {
+		fmt.Printf("Idle timeout: %s\n", formatDurationMs(int64(idleTimeout)))
 	}
 
 	// Launcher
@@ -186,6 +193,50 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		if policy := getString(launcher, "imagePullPolicy"); policy != "" {
 			fmt.Printf("Image pull policy: %s\n", policy)
 		}
+		if secret := getString(launcher, "tokenSecret"); secret != "" {
+			fmt.Printf("Token secret: %s\n", secret)
+		}
+		if cluster := getString(launcher, "cluster"); cluster != "" {
+			fmt.Printf("Cluster: %s\n", cluster)
+		}
+		if taskDef := getString(launcher, "taskDefinition"); taskDef != "" {
+			fmt.Printf("Task definition: %s\n", taskDef)
+		}
+		if region := getString(launcher, "region"); region != "" {
+			fmt.Printf("Region: %s\n", region)
+		}
+		if container := getString(launcher, "containerName"); container != "" {
+			fmt.Printf("Container: %s\n", container)
+		}
+		if provider := getString(launcher, "capacityProvider"); provider != "" {
+			fmt.Printf("Capacity provider: %s\n", provider)
+		} else if launchType := getString(launcher, "launchType"); launchType != "" {
+			fmt.Printf("Launch type: %s\n", launchType)
+		}
+		if subnets := getStringSlice(launcher, "subnets"); len(subnets) > 0 {
+			fmt.Printf("Subnets: %s\n", strings.Join(subnets, ", "))
+		}
+		if groups := getStringSlice(launcher, "securityGroups"); len(groups) > 0 {
+			fmt.Printf("Security groups: %s\n", strings.Join(groups, ", "))
+		}
+		if publicIP, ok := launcher["assignPublicIp"].(bool); ok && publicIP {
+			fmt.Printf("Public IP: yes\n")
+		}
+		if version := getString(launcher, "platformVersion"); version != "" {
+			fmt.Printf("Platform version: %s\n", version)
+		}
+		if secret := getString(launcher, "credentialsSecret"); secret != "" {
+			fmt.Printf("Credentials secret: %s\n", secret)
+		}
+		if roleArn := getString(launcher, "roleArn"); roleArn != "" {
+			fmt.Printf("Role ARN: %s\n", roleArn)
+		}
+		if externalID := getString(launcher, "roleExternalId"); externalID != "" {
+			fmt.Printf("Role external ID: %s\n", externalID)
+		}
+		if endpoint := getString(launcher, "endpoint"); endpoint != "" {
+			fmt.Printf("Endpoint: %s\n", endpoint)
+		}
 		printServerHost(launcher)
 		if adapter := getStringSlice(launcher, "adapter"); len(adapter) > 0 {
 			fmt.Printf("Adapter: %s\n", strings.Join(adapter, " "))
@@ -197,6 +248,12 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Environment:\n")
 			for k, v := range env {
 				fmt.Printf("  %s=%s\n", k, v)
+			}
+		}
+		if secrets, ok := launcher["envSecrets"].(map[string]any); ok && len(secrets) > 0 {
+			fmt.Printf("Secret environment:\n")
+			for k, v := range secrets {
+				fmt.Printf("  %s=<%s>\n", k, v)
 			}
 		}
 	}
@@ -514,14 +571,15 @@ var poolsCreateCmd = &cobra.Command{
 	Short: "Create a pool",
 	Long: `Create a new pool with the specified launcher type and configuration.
 
-Use --type to specify the launcher type (kubernetes, docker, or process).
+Use --type to specify the launcher type (kubernetes, docker, process, or ecs).
 Use --set to set field values. Values are parsed as JSON if valid, otherwise
 treated as strings.
 
 Examples:
   coflux pools create my-pool --type kubernetes --set image=foo:latest --set namespace=default
   coflux pools create my-pool --type docker --set image=myapp:v1 --modules mod1,mod2
-  coflux pools create my-pool --type process --set directory=/app --set concurrency=5`,
+  coflux pools create my-pool --type process --set directory=/app --set concurrency=5
+  coflux pools create my-pool --type ecs --set cluster=workers --set taskDefinition=myapp --set region=eu-west-2 --set subnets=subnet-1`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPoolsCreate,
 }
@@ -548,17 +606,17 @@ Examples:
 
 func init() {
 	// pools create flags
-	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process)")
+	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process, ecs)")
 	_ = poolsCreateCmd.MarkFlagRequired("type")
 	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
-	poolsCreateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted (a name covers its submodules; default: all)")
 	poolsCreateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsCreateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 
 	// pools update flags
 	poolsUpdateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
 	poolsUpdateCmd.Flags().StringArray("unset", nil, "Unset a field")
-	poolsUpdateCmd.Flags().StringSlice("modules", nil, "Modules to be hosted")
+	poolsUpdateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted (a name covers its submodules; --unset modules for all)")
 	poolsUpdateCmd.Flags().StringSlice("provides", nil, "Features that workers provide")
 	poolsUpdateCmd.Flags().StringSlice("accepts", nil, "Tags that executions must have")
 	poolsUpdateCmd.Flags().Bool("no-provides", false, "Clear provides")
@@ -577,28 +635,75 @@ func parseSetValue(s string) any {
 
 // poolTopLevelFields lists field names that are pool-level (not launcher-level).
 var poolTopLevelFields = map[string]bool{
-	"modules":  true,
-	"provides": true,
-	"accepts":  true,
+	"modules":       true,
+	"provides":      true,
+	"accepts":       true,
+	"idleTimeoutMs": true,
+}
+
+// durationFields maps the name a duration is written under - on --set,
+// --unset, and in an exported config - to the API field carrying it. The
+// written name has no unit suffix because the written value is a duration
+// ("5m"), not a count of anything; the suffix belongs on the integer the
+// API is handed.
+var durationFields = map[string]string{
+	"idleTimeout": "idleTimeoutMs",
+}
+
+// parseDurationMs parses a duration string into milliseconds. A bare
+// number is rejected: the pool idle timeout was briefly a count of
+// seconds, and reading "300" as 300ms would be a silent thousandfold
+// change.
+func parseDurationMs(value string) (int64, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (expected e.g. \"30s\", \"5m\")", value)
+	}
+	if duration < 0 {
+		return 0, fmt.Errorf("duration %q must not be negative", value)
+	}
+	return duration.Milliseconds(), nil
+}
+
+// formatDurationMs renders milliseconds as the shortest duration string
+// that parses back to the same value. time.Duration's own String() pads
+// with zero components ("5m0s"), which is noise in an exported config.
+func formatDurationMs(ms int64) string {
+	if ms == 0 {
+		return "0s"
+	}
+	formatted := (time.Duration(ms) * time.Millisecond).String()
+	for _, suffix := range []string{"h0m0s", "m0s"} {
+		if strings.HasSuffix(formatted, suffix) {
+			return strings.TrimSuffix(formatted, suffix[1:])
+		}
+	}
+	return formatted
 }
 
 // launcherFields lists valid launcher field names.
 var launcherFields = map[string]bool{
-	"image": true, "dockerHost": true, "directory": true,
+	"image": true, "dockerHost": true, "networkMode": true, "directory": true,
 	"namespace": true, "serviceAccount": true, "apiServer": true,
-	"token": true, "caCert": true, "insecure": true,
+	"tokenSecret": true, "caCert": true, "insecure": true,
 	"imagePullPolicy": true, "nodeSelector": true, "tolerations": true,
 	"imagePullSecrets": true, "hostAliases": true, "resources": true,
 	"labels": true, "annotations": true, "activeDeadlineSeconds": true,
 	"volumes": true, "volumeMounts": true,
+	"cluster": true, "taskDefinition": true, "region": true,
+	"containerName": true, "launchType": true, "capacityProvider": true,
+	"subnets": true, "securityGroups": true, "assignPublicIp": true,
+	"platformVersion": true, "credentialsSecret": true, "roleArn": true,
+	"roleExternalId": true, "endpoint": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
-	"concurrency": true, "env": true,
+	"concurrency": true, "env": true, "envSecrets": true,
 }
 
 // mapSubkeyFields lists launcher fields that support dotted sub-key access
 // (e.g. labels.team=ml, annotations.prometheus.io/scrape=true).
 var mapSubkeyFields = map[string]bool{
 	"env":          true,
+	"envSecrets":   true,
 	"labels":       true,
 	"annotations":  true,
 	"nodeSelector": true,
@@ -608,6 +713,9 @@ var mapSubkeyFields = map[string]bool{
 // isValidFieldName checks if a field name (possibly with dotted prefix) is valid.
 func isValidFieldName(name string) bool {
 	if poolTopLevelFields[name] || launcherFields[name] {
+		return true
+	}
+	if _, ok := durationFields[name]; ok {
 		return true
 	}
 	if base, _, ok := strings.Cut(name, "."); ok {
@@ -623,105 +731,79 @@ type poolFieldOp struct {
 	value  any // only for "set"
 }
 
-// collectFieldOps builds an ordered list of field operations from os.Args,
-// processing convenience flags (--modules, --provides, --accepts, --no-provides,
-// --no-accepts) alongside --set/--unset in the order they appear on the command line.
+// collectFieldOps builds the list of field operations from the parsed
+// flags: the convenience flags (--modules, --provides, --accepts) and
+// --set first, then --unset and the --no-* flags, so a field named by
+// both ends up unset however it was ordered on the command line.
+//
+// Taking the order from os.Args instead would look more faithful, but it
+// only sees the flag spellings the scan anticipates - a shorthand, or a
+// form it doesn't recognise, is silently dropped - and order only decides
+// anything for contradictory operations on one field.
 func collectFieldOps(cmd *cobra.Command) ([]poolFieldOp, error) {
 	var ops []poolFieldOp
 
-	// Build a map from flag to its parsed values for quick lookup
+	if cmd.Flags().Changed("modules") {
+		values, _ := cmd.Flags().GetStringSlice("modules")
+		ops = append(ops, poolFieldOp{action: "set", key: "modules", value: toAnySlice(values)})
+	}
+
+	if cmd.Flags().Changed("provides") {
+		values, _ := cmd.Flags().GetStringSlice("provides")
+		ops = append(ops, poolFieldOp{action: "set", key: "provides", value: parseProvides(values)})
+	}
+
+	if cmd.Flags().Changed("accepts") {
+		values, _ := cmd.Flags().GetStringSlice("accepts")
+		ops = append(ops, poolFieldOp{action: "set", key: "accepts", value: parseProvides(values)})
+	}
+
 	setValues, _ := cmd.Flags().GetStringArray("set")
-	unsetValues, _ := cmd.Flags().GetStringArray("unset")
-	setIdx := 0
-	unsetIdx := 0
-
-	modulesValues, _ := cmd.Flags().GetStringSlice("modules")
-	providesValues, _ := cmd.Flags().GetStringSlice("provides")
-	acceptsValues, _ := cmd.Flags().GetStringSlice("accepts")
-
-	// Walk os.Args to determine command-line order of flags
-	args := os.Args
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-
-		// Normalize: handle --flag=value and --flag value forms
-		flagName := ""
-		switch {
-		case strings.HasPrefix(arg, "--set="):
-			flagName = "set"
-		case arg == "--set" && i+1 < len(args):
-			flagName = "set"
-		case strings.HasPrefix(arg, "--unset="):
-			flagName = "unset"
-		case arg == "--unset" && i+1 < len(args):
-			flagName = "unset"
-		case strings.HasPrefix(arg, "--modules=") || arg == "--modules":
-			flagName = "modules"
-		case strings.HasPrefix(arg, "--provides=") || arg == "--provides":
-			flagName = "provides"
-		case strings.HasPrefix(arg, "--accepts=") || arg == "--accepts":
-			flagName = "accepts"
-		case arg == "--no-provides":
-			flagName = "no-provides"
-		case arg == "--no-accepts":
-			flagName = "no-accepts"
-		default:
+	for _, kv := range setValues {
+		key, val, hasVal := strings.Cut(kv, "=")
+		if !hasVal {
+			return nil, fmt.Errorf("invalid --set value %q: must be key=value", kv)
+		}
+		if !isValidFieldName(key) {
+			return nil, fmt.Errorf("unknown field %q", key)
+		}
+		if field, ok := durationFields[key]; ok {
+			ms, err := parseDurationMs(val)
+			if err != nil {
+				return nil, fmt.Errorf("--set %s: %w", key, err)
+			}
+			ops = append(ops, poolFieldOp{action: "set", key: field, value: ms})
 			continue
 		}
+		ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
+	}
 
-		switch flagName {
-		case "set":
-			if setIdx < len(setValues) {
-				kv := setValues[setIdx]
-				setIdx++
-				key, val, hasVal := strings.Cut(kv, "=")
-				if !hasVal {
-					return nil, fmt.Errorf("invalid --set value %q: must be key=value", kv)
-				}
-				if !isValidFieldName(key) {
-					return nil, fmt.Errorf("unknown field %q", key)
-				}
-				ops = append(ops, poolFieldOp{action: "set", key: key, value: parseSetValue(val)})
-			}
-			// Skip next arg if it was --set value (not --set=value)
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "unset":
-			if unsetIdx < len(unsetValues) {
-				key := unsetValues[unsetIdx]
-				unsetIdx++
-				if !isValidFieldName(key) {
-					return nil, fmt.Errorf("unknown field %q", key)
-				}
-				ops = append(ops, poolFieldOp{action: "unset", key: key})
-			}
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "modules":
-			ops = append(ops, poolFieldOp{action: "set", key: "modules", value: toAnySlice(modulesValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "provides":
-			ops = append(ops, poolFieldOp{action: "set", key: "provides", value: parseProvides(providesValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "accepts":
-			ops = append(ops, poolFieldOp{action: "set", key: "accepts", value: parseProvides(acceptsValues)})
-			if !strings.Contains(arg, "=") {
-				i++
-			}
-		case "no-provides":
-			ops = append(ops, poolFieldOp{action: "unset", key: "provides"})
-		case "no-accepts":
-			ops = append(ops, poolFieldOp{action: "unset", key: "accepts"})
+	unsetValues, _ := cmd.Flags().GetStringArray("unset")
+	for _, key := range unsetValues {
+		if !isValidFieldName(key) {
+			return nil, fmt.Errorf("unknown field %q", key)
 		}
+		if field, ok := durationFields[key]; ok {
+			key = field
+		}
+		ops = append(ops, poolFieldOp{action: "unset", key: key})
+	}
+
+	if boolFlag(cmd, "no-provides") {
+		ops = append(ops, poolFieldOp{action: "unset", key: "provides"})
+	}
+
+	if boolFlag(cmd, "no-accepts") {
+		ops = append(ops, poolFieldOp{action: "unset", key: "accepts"})
 	}
 
 	return ops, nil
+}
+
+// boolFlag reads a bool flag that a given command may not define.
+func boolFlag(cmd *cobra.Command, name string) bool {
+	value, err := cmd.Flags().GetBool(name)
+	return err == nil && value
 }
 
 // toAnySlice converts []string to []any for JSON serialization.
@@ -980,8 +1062,11 @@ var poolsExportOnly []string
 var poolsExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export pool configuration",
-	Long:  `Export all pool configurations for the workspace as TOML. Writes to stdout by default.`,
-	RunE:  runPoolsExport,
+	Long: `Export all pool configurations for the workspace as TOML. Writes to stdout by default.
+
+Pools refer to secrets by name, so an export never contains a secret's value.
+Importing it elsewhere needs the same secrets to exist there.`,
+	RunE: runPoolsExport,
 }
 
 func init() {
@@ -1119,7 +1204,11 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("invalid pool configuration for '%s'", name)
 		}
-		desiredPools[name] = tomlPoolToAPI(pool)
+		converted, err := tomlPoolToAPI(pool)
+		if err != nil {
+			return fmt.Errorf("invalid pool configuration for '%s': %w", name, err)
+		}
+		desiredPools[name] = converted
 	}
 
 	// Connect and get current state
@@ -1138,6 +1227,8 @@ func runPoolsImport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Out-of-scope pools are merged into the update below, so this needs
+	// the full current configuration.
 	result, err := client.GetPoolConfigs(cmd.Context(), workspaceID)
 	if err != nil {
 		return err
@@ -1372,6 +1463,7 @@ func encodeInlineValue(buf *bytes.Buffer, v any) error {
 // camelCase to snake_case mapping for launcher fields
 var camelToSnake = map[string]string{
 	"dockerHost":            "docker_host",
+	"networkMode":           "network_mode",
 	"serverHost":            "server_host",
 	"serverSecure":          "server_secure",
 	"serviceAccount":        "service_account",
@@ -1383,6 +1475,18 @@ var camelToSnake = map[string]string{
 	"caCert":                "ca_cert",
 	"activeDeadlineSeconds": "active_deadline_seconds",
 	"volumeMounts":          "volume_mounts",
+	"taskDefinition":        "task_definition",
+	"containerName":         "container_name",
+	"launchType":            "launch_type",
+	"capacityProvider":      "capacity_provider",
+	"securityGroups":        "security_groups",
+	"assignPublicIp":        "assign_public_ip",
+	"platformVersion":       "platform_version",
+	"tokenSecret":           "token_secret",
+	"credentialsSecret":     "credentials_secret",
+	"roleArn":               "role_arn",
+	"roleExternalId":        "role_external_id",
+	"envSecrets":            "env_secrets",
 }
 
 var snakeToCamel map[string]string
@@ -1414,6 +1518,11 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 			result["accepts"] = accepts
 		}
 	}
+	if idleTimeout, ok := pool["idleTimeoutMs"]; ok {
+		if ms, ok := tomlNumber(idleTimeout).(int64); ok {
+			result["idle_timeout"] = formatDurationMs(ms)
+		}
+	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
 	}
@@ -1427,18 +1536,28 @@ func apiLauncherToTOML(launcher map[string]any) map[string]any {
 		if snakeKey, ok := camelToSnake[k]; ok {
 			key = snakeKey
 		}
-		if key == "env" {
+		if key == "env" || key == "env_secrets" {
 			if m, ok := v.(map[string]any); ok {
 				result[key] = inlineMap{m}
 				continue
 			}
 		}
-		result[key] = v
+		result[key] = tomlNumber(v)
 	}
 	return result
 }
 
-func tomlPoolToAPI(pool map[string]any) map[string]any {
+// tomlNumber keeps a whole number whole in TOML. JSON numbers arrive as
+// float64, and every numeric pool field is an integer, so without this
+// a concurrency of 8 would be exported as 8.0.
+func tomlNumber(v any) any {
+	if f, ok := v.(float64); ok && f == float64(int64(f)) {
+		return int64(f)
+	}
+	return v
+}
+
+func tomlPoolToAPI(pool map[string]any) (map[string]any, error) {
 	result := make(map[string]any)
 
 	if modules, ok := pool["modules"]; ok {
@@ -1450,10 +1569,21 @@ func tomlPoolToAPI(pool map[string]any) map[string]any {
 	if accepts, ok := pool["accepts"]; ok {
 		result["accepts"] = toStringSliceMap(accepts)
 	}
+	if idleTimeout, ok := pool["idle_timeout"]; ok {
+		text, ok := idleTimeout.(string)
+		if !ok {
+			return nil, fmt.Errorf("idle_timeout must be a duration string (e.g. \"5m\")")
+		}
+		ms, err := parseDurationMs(text)
+		if err != nil {
+			return nil, fmt.Errorf("idle_timeout: %w", err)
+		}
+		result["idleTimeoutMs"] = ms
+	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = tomlLauncherToAPI(launcher)
 	}
-	return result
+	return result, nil
 }
 
 func tomlLauncherToAPI(launcher map[string]any) map[string]any {

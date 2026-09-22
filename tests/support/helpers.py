@@ -99,7 +99,8 @@ def managed_worker(
     Yields an Executor. The caller is responsible for interacting
     with the executor and polling for results.
     """
-    modules = modules or ["test"]
+    if modules is None:
+        modules = ["test"]
     worker_dir.mkdir(exist_ok=True)
     socket_path = str(worker_dir / "executor.sock")
     manifest_path = str(worker_dir / "manifest.json")

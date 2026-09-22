@@ -169,7 +169,7 @@ defmodule Coflux.Events.StepCreated do
     :group_limit,
     :retries,
     :recurrent,
-    :timeout,
+    :timeout_ms,
     :created_at,
     :requires
   ]
@@ -316,6 +316,19 @@ defmodule Coflux.Events.TokenRevoked do
   defstruct [:token]
 end
 
+defmodule Coflux.Events.SecretSet do
+  @moduledoc """
+  Row: `secrets` (admin store), created or replaced. Its value is not an
+  event: nothing that carries this ever sees it.
+  """
+  defstruct [:workspaces, :name, :version, :created_at, :updated_at, :updated_by]
+end
+
+defmodule Coflux.Events.SecretDeleted do
+  @moduledoc "Row: `secrets` (admin store), gone."
+  defstruct [:workspaces, :name]
+end
+
 defmodule Coflux.Events.WorkspaceCreated do
   @moduledoc "Row: `workspaces`. `base` is the base workspace's external id, or nil."
   defstruct [:workspace, :name, :base, :state]
@@ -395,13 +408,20 @@ defmodule Coflux.Events.WorkerLaunchResult do
 end
 
 defmodule Coflux.Events.WorkerStopping do
-  @moduledoc "Row: `worker_stops`."
+  @moduledoc """
+  Row: `worker_stops`. One attempt to stop the worker - over its own
+  connection, or through its launcher. A worker can have several.
+  """
   defstruct [:workspace, :pool, :worker, :stopping_at]
 end
 
 defmodule Coflux.Events.WorkerStopResult do
-  @moduledoc "Row: `worker_stop_results`."
-  defstruct [:workspace, :pool, :worker, :stopped_at, :error]
+  @moduledoc """
+  Row: `worker_stop_results`. How the attempt went: an error if the
+  launcher refused, nil if the request was made. Neither means the worker
+  has gone - `WorkerDeactivated` says that.
+  """
+  defstruct [:workspace, :pool, :worker, :completed_at, :error]
 end
 
 defmodule Coflux.Events.WorkerDeactivated do

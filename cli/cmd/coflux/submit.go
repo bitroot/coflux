@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -15,7 +16,7 @@ var submitRequires []string
 var submitNoRequires bool
 var submitMemo bool
 var submitNoMemo bool
-var submitDelay float64
+var submitDelay time.Duration
 var submitRetries int
 
 var submitCmd = &cobra.Command{
@@ -55,7 +56,7 @@ func init() {
 	submitCmd.Flags().BoolVar(&submitNoRequires, "no-requires", false, "Override the workflow's requires with an empty set")
 	submitCmd.Flags().BoolVar(&submitMemo, "memo", false, "Override the workflow to enable memoisation")
 	submitCmd.Flags().BoolVar(&submitNoMemo, "no-memo", false, "Override the workflow to disable memoisation")
-	submitCmd.Flags().Float64Var(&submitDelay, "delay", 0, "Override the workflow's delay (seconds)")
+	submitCmd.Flags().DurationVar(&submitDelay, "delay", 0, "Override the workflow's delay (e.g. 30s, 5m)")
 	submitCmd.Flags().IntVar(&submitRetries, "retries", 0, "Override the workflow's retry limit (0 = no retries)")
 	submitCmd.MarkFlagsMutuallyExclusive("requires", "no-requires")
 	submitCmd.MarkFlagsMutuallyExclusive("memo", "no-memo")
@@ -139,8 +140,8 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if defer_, ok := workflow["defer"]; ok {
 		options["defer"] = defer_
 	}
-	if delay, ok := workflow["delay"].(float64); ok && delay > 0 {
-		options["delay"] = int64(delay)
+	if delay, ok := workflow["delayMs"].(float64); ok && delay > 0 {
+		options["delayMs"] = int64(delay)
 	}
 	if retries, ok := workflow["retries"]; ok {
 		options["retries"] = retries
@@ -154,8 +155,8 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	if memo, ok := workflow["memo"]; ok {
 		options["memo"] = memo
 	}
-	if timeout, ok := workflow["timeout"].(float64); ok && timeout > 0 {
-		options["timeout"] = int64(timeout)
+	if timeout, ok := workflow["timeoutMs"].(float64); ok && timeout > 0 {
+		options["timeoutMs"] = int64(timeout)
 	}
 	if streams, ok := workflow["streams"].(map[string]any); ok && streams != nil {
 		options["streams"] = streams
@@ -176,16 +177,16 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 		options["memo"] = false
 	}
 	if cmd.Flags().Changed("delay") {
-		options["delay"] = int64(submitDelay * 1000)
+		options["delayMs"] = submitDelay.Milliseconds()
 	}
 	if cmd.Flags().Changed("retries") {
 		if submitRetries <= 0 {
 			options["retries"] = nil
 		} else {
 			options["retries"] = map[string]any{
-				"limit":      submitRetries,
-				"backoffMin": 0,
-				"backoffMax": 0,
+				"limit":        submitRetries,
+				"backoffMinMs": 0,
+				"backoffMaxMs": 0,
 			}
 		}
 	}

@@ -44,12 +44,14 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     ResultRecorded,
     RunCreated,
     RunOutcome,
+    SessionConnected,
     SessionExecutions,
     StepArguments,
     StepCreated,
     StreamClosed,
     StreamItemAppended,
     StreamRegistered,
+    SecretSet,
     TokenCreated,
     WorkerCreated,
     WorkerDeactivated,
@@ -206,9 +208,25 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     end
   end
 
+  def load(state, :secrets, _opts) do
+    {:ok, secrets} = Coflux.Admin.Secrets.list(state.admin_db)
+
+    {:ok,
+     Enum.map(secrets, fn secret ->
+       %SecretSet{
+         workspaces: secret.workspaces,
+         name: secret.name,
+         version: secret.version,
+         created_at: secret.created_at,
+         updated_at: secret.updated_at,
+         updated_by: secret.updated_by
+       }
+     end)}
+  end
+
   # Revoked tokens are absent: created-then-revoked folds to absence.
   def load(state, :tokens, _opts) do
-    {:ok, tokens} = Principals.list_tokens(state.db)
+    {:ok, tokens} = Coflux.Admin.Tokens.list_tokens(state.admin_db)
 
     events =
       tokens
@@ -410,9 +428,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
          workspace_external_id,
          limit
        ) do
-    path = Epochs.archive_path(state.epochs, epoch_id)
-
-    case Exqlite.Sqlite3.open(path) do
+    case Epochs.open_archive(state.epochs, epoch_id) do
       {:ok, db} ->
         try do
           query_archive_target_runs(db, module, target, workspace_external_id, limit)
@@ -507,7 +523,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
     with {:ok, workspace_id} <-
            Permissions.resolve_workspace_external_id(state, workspace_external_id) do
       pool = state.pools |> Map.get(workspace_id, %{}) |> Map.get(pool_name)
-      {:ok, pool_workers} = Workers.get_pool_workers(state.db, pool_name)
+      {:ok, pool_workers} = Workers.get_pool_workers(state.db, workspace_id, pool_name)
 
       if is_nil(pool) and pool_workers == [] do
         {:error, :not_found}
@@ -521,18 +537,22 @@ defmodule Coflux.Orchestration.Server.Snapshots do
 
         workers =
           Enum.flat_map(pool_workers, fn {worker_id, worker_external_id, starting_at, started_at,
-                                          start_error, stopping_at, stopped_at, stop_error,
+                                          start_error, stopping_at, stop_completed_at, stop_error,
                                           deactivated_at, error, logs, total_executions} ->
             worker = Map.get(state.workers, worker_id)
 
-            session_external_id =
+            session =
               if worker && worker.session_id do
                 case Map.fetch(state.sessions, worker.session_id) do
-                  {:ok, session} -> session.external_id
+                  {:ok, session} -> session
                   :error -> nil
                 end
               end
 
+            session_external_id = session && session.external_id
+
+            # So a subscriber joining now sees the same connection state
+            # a subscriber watching all along would have.
             [
               %WorkerCreated{
                 workspace: workspace_external_id,
@@ -565,13 +585,13 @@ defmodule Coflux.Orchestration.Server.Snapshots do
                 ],
                 else: []
               ) ++
-              if(stopped_at || stop_error,
+              if(stop_completed_at || stop_error,
                 do: [
                   %WorkerStopResult{
                     workspace: workspace_external_id,
                     pool: pool_name,
                     worker: worker_external_id,
-                    stopped_at: stopped_at,
+                    completed_at: stop_completed_at,
                     error: stop_error
                   }
                 ],
@@ -604,7 +624,17 @@ defmodule Coflux.Orchestration.Server.Snapshots do
                   pool: pool_name,
                   executions: total_executions
                 }
-              ]
+              ] ++
+              if(session,
+                do: [
+                  %SessionConnected{
+                    workspace: workspace_external_id,
+                    session: session.external_id,
+                    connected: !is_nil(session.connection)
+                  }
+                ],
+                else: []
+              )
           end)
 
         {:ok, definition ++ workers}
@@ -870,7 +900,7 @@ defmodule Coflux.Orchestration.Server.Snapshots do
           group_limit: step.group_limit,
           retries: Scheduling.step_retries(step),
           recurrent: step.recurrent == 1 or step.recurrent == true,
-          timeout: step.timeout,
+          timeout_ms: step.timeout_ms,
           created_at: step.created_at,
           requires: Resolve.tag_set(db, step.requires_tag_set_id)
         }

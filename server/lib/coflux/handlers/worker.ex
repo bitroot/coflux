@@ -162,14 +162,14 @@ defmodule Coflux.Handlers.Worker do
           cache,
           defer,
           memo,
-          delay,
+          delay_ms,
           retries,
           recurrent,
           requires
           | rest
         ] = message["params"]
 
-        timeout = Enum.at(rest, 0) || 0
+        timeout_ms = Enum.at(rest, 0) || 0
         streams = parse_streams(Enum.at(rest, 1))
         concurrency = parse_concurrency(Enum.at(rest, 2))
 
@@ -186,11 +186,11 @@ defmodule Coflux.Handlers.Worker do
                  cache: parse_cache(cache),
                  defer: parse_defer(defer),
                  memo: memo,
-                 delay: delay || 0,
+                 delay_ms: delay_ms || 0,
                  retries: parse_retries(retries),
                  recurrent: recurrent == true,
                  requires: requires,
-                 timeout: timeout,
+                 timeout_ms: timeout_ms,
                  streams: streams,
                  concurrency: concurrency
                ) do
@@ -848,7 +848,7 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(
         {:execute, execution_external_id, module, target, arguments, run_id,
-         workspace_external_id, timeout, streams, checkpoints},
+         workspace_external_id, timeout_ms, streams, checkpoints},
         state
       ) do
     arguments = Enum.map(arguments, &compose_value/1)
@@ -867,7 +867,7 @@ defmodule Coflux.Handlers.Worker do
          arguments,
          run_id,
          workspace_external_id,
-         timeout,
+         timeout_ms,
          compose_streams(streams),
          checkpoints
        ])
@@ -927,6 +927,12 @@ defmodule Coflux.Handlers.Worker do
 
   def websocket_info(:stop, state) do
     {[{:close, 4000, "workspace_not_found"}], state}
+  end
+
+  # The server asking the worker to exit. The worker drains and leaves;
+  # nothing comes back over this connection but its close.
+  def websocket_info(:stop_worker, state) do
+    {[command_message("stop", [])], state}
   end
 
   defp is_recognised_execution?(execution_id, state) do
@@ -1084,7 +1090,7 @@ defmodule Coflux.Handlers.Worker do
       # TODO: validate
       %{
         params: Map.fetch!(value, "params"),
-        max_age: Map.fetch!(value, "max_age"),
+        max_age_ms: Map.fetch!(value, "max_age_ms"),
         namespace: Map.fetch!(value, "namespace"),
         version: Map.fetch!(value, "version")
       }
@@ -1113,8 +1119,8 @@ defmodule Coflux.Handlers.Worker do
     if value do
       %{
         limit: Map.get(value, "limit"),
-        backoff_min: Map.get(value, "backoff_min"),
-        backoff_max: Map.get(value, "backoff_max")
+        backoff_min_ms: Map.get(value, "backoff_min_ms"),
+        backoff_max_ms: Map.get(value, "backoff_max_ms")
       }
     end
   end

@@ -714,11 +714,13 @@ class Target(t.Generic[P, T]):
             cache=cache_dict,
             defer=defer_dict,
             memo=memo_val,
-            delay=_to_ms(self._definition.delay) if self._definition.delay else None,
+            delay_ms=_to_ms(self._definition.delay) if self._definition.delay else None,
             retries=retries_dict,
             recurrent=self._definition.recurrent,
             requires=self._definition.requires,
-            timeout=_to_ms(self._definition.timeout) if self._definition.timeout else 0,
+            timeout_ms=_to_ms(self._definition.timeout)
+            if self._definition.timeout
+            else 0,
             streams=streams_dict,
             concurrency=concurrency_dict,
         )

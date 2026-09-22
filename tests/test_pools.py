@@ -5,10 +5,13 @@ worker processes when executions are submitted for matching modules.
 """
 
 import json
+import os
 import subprocess
+import time
 
 import pytest
 from support import cli
+from support.ecs import FakeEcs
 from support.executor import Executor
 from support.helpers import ADAPTER_SCRIPT, poll_result
 from support.manifest import manifest, task, workflow
@@ -49,6 +52,18 @@ def pool_env(server, project_id, tmp_path):
         executor.close()
 
 
+def _adapter(pool_env):
+    """The test adapter command, serving pool_env's manifest and socket."""
+    return [
+        "python3",
+        ADAPTER_SCRIPT,
+        "--manifest",
+        pool_env["manifest_path"],
+        "--socket",
+        pool_env["socket_path"],
+    ]
+
+
 def _setup_pool(
     pool_env, targets, modules=None, pool_name="test-pool", provides=None, **kwargs
 ):
@@ -58,22 +73,15 @@ def _setup_pool(
     starts a ``coflux worker`` process pointing at the test adapter.
     Extra keyword arguments are forwarded to ``cli.pools_create``.
     """
-    modules = modules or ["test"]
+    if modules is None:
+        modules = ["test"]
     manifest_path = pool_env["manifest_path"]
-    socket_path = pool_env["socket_path"]
     host = pool_env["host"]
 
     with open(manifest_path, "w") as f:
         json.dump(manifest(targets), f)
 
-    adapter = [
-        "python3",
-        ADAPTER_SCRIPT,
-        "--manifest",
-        manifest_path,
-        "--socket",
-        socket_path,
-    ]
+    adapter = _adapter(pool_env)
 
     cli.pools_create(
         pool_name,
@@ -293,6 +301,91 @@ class TestCommonLauncherFields:
         assert pool["launcher"]["env"]["MY_VAR"] == "hello"
         assert pool["launcher"]["env"]["OTHER_VAR"] == "world"
 
+    def test_idle_timeout_is_a_pool_field(self, pool_env, tmp_path):
+        """An idle timeout is set, exported, unset and imported at the pool
+        level, and zero is a value rather than an absence."""
+        host = pool_env["host"]
+        targets = [workflow("test", "my_workflow")]
+        _setup_pool(pool_env, targets, pool_name="idle-pool", idle_timeout="5m")
+
+        pool = cli.pools_get("idle-pool", host=host)
+        assert pool["idleTimeoutMs"] == 300_000
+        assert "idleTimeoutMs" not in pool["launcher"]
+
+        exported = cli.pools_export(host=host)
+        assert 'idle_timeout = "5m"\n' in exported
+
+        cli.pools_update("idle-pool", idle_timeout="0s", host=host)
+        assert cli.pools_get("idle-pool", host=host)["idleTimeoutMs"] == 0
+
+        cli._coflux(
+            "pools",
+            "update",
+            "idle-pool",
+            "--unset",
+            "idleTimeout",
+            host=host,
+            output=None,
+        )
+        assert "idleTimeoutMs" not in cli.pools_get("idle-pool", host=host)
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+        assert cli.pools_get("idle-pool", host=host)["idleTimeoutMs"] == 300_000
+
+    def test_idle_timeout_keeps_worker_warm(self, pool_env):
+        """A worker with an idle timeout outlives the gap between runs, so
+        the second run reuses it rather than paying for another launch."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_pool(pool_env, targets, pool_name="warm-pool", idle_timeout="60s")
+
+        resp = cli.submit("test/greet", '"one"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="one")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        # Longer than the default idle timeout and the sweep that enforces it.
+        time.sleep(12)
+        workers = cli.pools_launches("warm-pool", host=host)
+        assert len(workers) == 1
+        assert all(w["stoppingAt"] is None for w in workers.values())
+
+        resp = cli.submit("test/greet", '"two"', host=host)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="two")
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "two"
+
+        # Same worker, same connection: nothing else was launched.
+        executor.wait_connections(1, timeout=1)
+        assert len(cli.pools_launches("warm-pool", host=host)) == 1
+
+    def test_idle_timeout_stops_worker(self, pool_env):
+        """A worker past its pool's idle timeout is stopped. The timeout is
+        milliseconds all the way through: a value misread as seconds would
+        keep this worker for the best part of an hour."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_pool(pool_env, targets, pool_name="brief-pool", idle_timeout="2s")
+
+        resp = cli.submit("test/greet", '"one"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="one")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        # The timeout plus the sweep that enforces it, with room to spare.
+        worker = _wait_for_worker(
+            host, "brief-pool", lambda w: w["stoppedAt"] is not None, timeout=20
+        )
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+
     def test_update_common_fields(self, pool_env):
         """Common launcher fields can be updated on an existing pool."""
         host = pool_env["host"]
@@ -408,3 +501,734 @@ class TestCommonLauncherFields:
 
         result_b = poll_result(resp_b["runId"], host, timeout=_RESULT_TIMEOUT)
         assert result_b["value"]["data"] == "from_b"
+
+
+class TestWorkerReadiness:
+    def test_slow_starting_worker_is_not_drained(self, pool_env):
+        """A worker slower to start than the idle timeout still gets work.
+
+        The server creates the session when it launches the worker, but the
+        worker can't accept anything until it has connected and declared
+        its targets. Anything that measures idleness from before that point
+        drains the worker while it is still starting, and it is stopped
+        having never run a thing.
+        """
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        manifest_path = pool_env["manifest_path"]
+        socket_path = pool_env["socket_path"]
+
+        with open(manifest_path, "w") as f:
+            json.dump(manifest([workflow("test", "my_workflow")]), f)
+
+        base_adapter = [
+            "python3",
+            ADAPTER_SCRIPT,
+            "--manifest",
+            manifest_path,
+            "--socket",
+            socket_path,
+        ]
+
+        # Comfortably longer than the server's 5s idle timeout.
+        slow_adapter = base_adapter + ["--discover-delay", "8"]
+
+        cli.pools_create(
+            "test-pool",
+            type="process",
+            modules=["test"],
+            process_dir=str(pool_env["worker_dir"]),
+            adapter=slow_adapter,
+            host=host,
+        )
+
+        # Registered with the prompt adapter: only the launched worker
+        # should be slow.
+        cli.manifests_register("test", adapter=",".join(base_adapter), host=host)
+
+        resp = cli.submit("test/my_workflow", host=host)
+
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="ok")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "ok"
+
+
+class TestPoolState:
+    def test_enable_unknown_pool_is_rejected(self, pool_env):
+        """Enabling a pool that doesn't exist fails, and changes nothing.
+
+        The name is not a pool, so there is nothing to enable. Recording
+        the state anyway would leave behind an entry that looks like a pool
+        but has no launcher and no modules, which the scheduler then trips
+        over on its next pass.
+        """
+        host = pool_env["host"]
+        targets = [workflow("test", "my_workflow")]
+        _setup_pool(pool_env, targets)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_enable("no-such-pool", host=host)
+        assert "not_found" in exc_info.value.stderr
+
+        assert "no-such-pool" not in cli.pools_list(host=host)
+
+        # The next pass still runs: a phantom pool would crash it.
+        executor = pool_env["executor"]
+        resp = cli.submit("test/my_workflow", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="ok")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+    def test_disable_unknown_pool_is_rejected(self, pool_env):
+        """Disabling a pool that doesn't exist fails, and changes nothing."""
+        host = pool_env["host"]
+        _setup_pool(pool_env, [workflow("test", "my_workflow")])
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_disable("no-such-pool", host=host)
+        assert "not_found" in exc_info.value.stderr
+
+        assert "no-such-pool" not in cli.pools_list(host=host)
+
+    def test_disable_and_enable_round_trip(self, pool_env):
+        """A real pool can be disabled and enabled again."""
+        host = pool_env["host"]
+        _setup_pool(pool_env, [workflow("test", "my_workflow")])
+
+        cli.pools_disable("test-pool", host=host)
+        assert cli.pools_get("test-pool", host=host)["state"] == "disabled"
+
+        cli.pools_enable("test-pool", host=host)
+        assert cli.pools_get("test-pool", host=host)["state"] == "active"
+
+
+class TestPoolModules:
+    """A pool's modules are what its workers are started with, so they
+    mean what they mean to discovery: a name covers its submodules, and
+    no modules at all is everything."""
+
+    def test_no_modules_hosts_everything(self, pool_env):
+        """A pool created without modules is chosen for any module, and its
+        workers are started with --all-modules so they host it all."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [
+            workflow("module_a", "job_a"),
+            workflow("module_b", "job_b"),
+        ]
+        _setup_pool(pool_env, targets, modules=[])
+
+        assert cli.pools_get("test-pool", host=host)["modules"] == []
+
+        resp_a = cli.submit("module_a/job_a", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex_a = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex_a.target == "job_a"
+        ex_a.conn.complete(ex_a.execution_id, value="from_a")
+
+        result_a = poll_result(resp_a["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result_a["value"]["data"] == "from_a"
+
+        resp_b = cli.submit("module_b/job_b", host=host)
+        ex_b = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex_b.target == "job_b"
+        ex_b.conn.complete(ex_b.execution_id, value="from_b")
+
+        result_b = poll_result(resp_b["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result_b["value"]["data"] == "from_b"
+
+        launches = cli.pools_launches("test-pool", host=host)
+        assert len(launches) == 1
+
+    def test_a_package_covers_its_submodules(self, pool_env):
+        """A pool for 'myapp' launches for an execution in 'myapp.workflows',
+        since that's what a worker started with 'myapp' imports - but not
+        for 'myapp2', which only shares a prefix."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        targets = [
+            workflow("myapp.workflows", "job"),
+            workflow("myapp2", "other"),
+        ]
+        _setup_pool(pool_env, targets, modules=["myapp"])
+        # Registered so it can be submitted; nothing is configured to host it.
+        cli.manifests_register(
+            "myapp2",
+            adapter=",".join(_adapter(pool_env)),
+            host=host,
+        )
+
+        resp = cli.submit("myapp.workflows/job", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex.target == "job"
+        ex.conn.complete(ex.execution_id, value="done")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "done"
+
+        # Nothing hosts myapp2: the worker didn't declare it, and no pool
+        # covers it, so the run stays unassigned and nothing new launches.
+        cli.submit("myapp2/other", host=host)
+        time.sleep(3)
+        assert len(cli.pools_launches("test-pool", host=host)) == 1
+
+    def test_patterns_are_rejected(self, pool_env):
+        """There is no pattern syntax: a name already covers its submodules."""
+        host = pool_env["host"]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli.pools_create(
+                "pattern-pool",
+                type="process",
+                modules=["myapp.*"],
+                process_dir=str(pool_env["worker_dir"]),
+                host=host,
+            )
+        assert "bad_request" in exc_info.value.stderr
+
+        assert "pattern-pool" not in cli.pools_list(host=host)
+
+
+class TestPoolSecrets:
+    """Pools name secrets; launchers get their values, and nothing else does."""
+
+    def _kubernetes_pool(
+        self, host, name="k8s-pool", token_secret="k8s-token", **kwargs
+    ):
+        cli._coflux(
+            "pools",
+            "create",
+            name,
+            "--type",
+            "kubernetes",
+            "--set",
+            "image=myorg/worker:latest",
+            "--set",
+            f"tokenSecret={token_secret}",
+            "--set",
+            "apiServer=https://k8s.example.com",
+            "--modules",
+            "test",
+            host=host,
+            output=None,
+            **kwargs,
+        )
+
+    def test_secret_env_reaches_worker(self, pool_env):
+        """A secret named in envSecrets is in the worker's environment, and
+        its value shows up nowhere a pool is described."""
+        host = pool_env["host"]
+        worker_dir = pool_env["worker_dir"]
+        executor = pool_env["executor"]
+        marker = str(worker_dir / "secret_marker.txt")
+        wrapper_script = str(worker_dir / "secret_wrapper.py")
+        manifest_path = pool_env["manifest_path"]
+        socket_path = pool_env["socket_path"]
+
+        with open(wrapper_script, "w") as f:
+            f.write(
+                "import os, sys, subprocess\n"
+                f"with open({marker!r}, 'w') as f:\n"
+                "    f.write(os.environ.get('TEST_SECRET', ''))\n"
+                "result = subprocess.run(\n"
+                f"    ['python3', {ADAPTER_SCRIPT!r}] + sys.argv[1:],\n"
+                "    stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr\n"
+                ")\n"
+                "sys.exit(result.returncode)\n"
+            )
+
+        with open(manifest_path, "w") as f:
+            json.dump(manifest([workflow("test", "check_env")]), f)
+
+        adapter = [
+            "python3",
+            wrapper_script,
+            "--manifest",
+            manifest_path,
+            "--socket",
+            socket_path,
+        ]
+
+        # Set for the current workspace, which is where the pool is.
+        cli.secrets_set("api-key", "s3cr3t-value", workspaces="default", host=host)
+
+        cli.pools_create(
+            "secret-pool",
+            type="process",
+            modules=["test"],
+            process_dir=str(worker_dir),
+            adapter=adapter,
+            host=host,
+        )
+        cli._coflux(
+            "pools",
+            "update",
+            "secret-pool",
+            "--set",
+            "envSecrets.TEST_SECRET=api-key",
+            host=host,
+            output=None,
+        )
+        cli.manifests_register("test", adapter=",".join(adapter), host=host)
+
+        cli.submit("test/check_env", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        with open(marker) as f:
+            assert f.read() == "s3cr3t-value"
+
+        pool = cli.pools_get("secret-pool", host=host)
+        assert pool["launcher"]["envSecrets"] == {"TEST_SECRET": "api-key"}
+        assert "s3cr3t-value" not in json.dumps(pool)
+        assert "s3cr3t-value" not in cli.pools_export(host=host)
+
+    def test_missing_secret_is_refused(self, pool_env):
+        """A pool naming a secret that doesn't exist for its workspace is
+        refused when it's created or updated, naming the secret."""
+        host = pool_env["host"]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            self._kubernetes_pool(host, token_secret="nope")
+        assert "secrets_not_found" in exc_info.value.stderr
+        assert "nope" in exc_info.value.stderr
+
+        cli.secrets_set("k8s-token", "bearer", workspaces="default", host=host)
+        self._kubernetes_pool(host)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli._coflux(
+                "pools",
+                "update",
+                "k8s-pool",
+                "--set",
+                "envSecrets.X=missing",
+                host=host,
+                output=None,
+            )
+        assert "secrets_not_found" in exc_info.value.stderr
+
+    def test_a_patch_is_checked_against_the_pool_it_would_leave(self, pool_env):
+        """A patch naming no secret can still leave the pool referring to
+        one that has gone, so the check is against the merged definition,
+        not the patch."""
+        host = pool_env["host"]
+        cli.secrets_set("k8s-token", "bearer", workspaces="default", host=host)
+        self._kubernetes_pool(host)
+
+        cli.secrets_delete("k8s-token", workspaces="default", host=host)
+
+        # Touching an unrelated field would leave `tokenSecret` dangling.
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            cli._coflux(
+                "pools",
+                "update",
+                "k8s-pool",
+                "--set",
+                "namespace=other",
+                host=host,
+                output=None,
+            )
+        assert "secrets_not_found" in exc_info.value.stderr
+        assert "k8s-token" in exc_info.value.stderr
+
+        # Removing the dangling reference in the same patch is allowed.
+        cli._coflux(
+            "pools",
+            "update",
+            "k8s-pool",
+            "--set",
+            "namespace=other",
+            "--unset",
+            "tokenSecret",
+            host=host,
+            output=None,
+        )
+
+    def test_scope_follows_workspace_names(self, pool_env):
+        """A secret for 'development/*' serves 'development/joe' and not
+        'production', whatever the workspaces inherit from."""
+        host = pool_env["host"]
+        cli.secrets_set("k8s-token", "bearer", workspaces="development/*", host=host)
+
+        self._kubernetes_pool(host, workspace="development/joe")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            self._kubernetes_pool(host, workspace="production")
+        assert "secrets_not_found" in exc_info.value.stderr
+
+    def test_export_names_secrets(self, pool_env, tmp_path):
+        """An export carries the names, never the values, and imports back
+        as long as the secrets exist."""
+        host = pool_env["host"]
+        cli.secrets_set(
+            "k8s-token", "super-secret-token", workspaces="default", host=host
+        )
+        self._kubernetes_pool(host)
+        cli._coflux(
+            "pools",
+            "update",
+            "k8s-pool",
+            "--set",
+            "envSecrets.API_KEY=k8s-token",
+            host=host,
+            output=None,
+        )
+
+        exported = cli.pools_export(host=host)
+        assert 'token_secret = "k8s-token"' in exported
+        assert "env_secrets = {" in exported
+        assert 'API_KEY = "k8s-token"' in exported
+        assert "super-secret-token" not in exported
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+
+        launcher = cli.pools_get("k8s-pool", host=host)["launcher"]
+        assert launcher["tokenSecret"] == "k8s-token"
+        assert launcher["envSecrets"] == {"API_KEY": "k8s-token"}
+
+
+# ---------------------------------------------------------------------------
+# ECS launcher
+
+
+@pytest.fixture
+def ecs_env(pool_env):
+    """A pool environment with a stand-in for the ECS API (see support.ecs)."""
+    cli_path = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
+    fake = FakeEcs(cli_path, cwd=str(pool_env["worker_dir"]))
+    fake.start()
+    try:
+        yield {**pool_env, "ecs": fake}
+    finally:
+        fake.close()
+
+
+def _setup_ecs_pool(ecs_env, targets, modules=None, pool_name="ecs-pool", sets=()):
+    """Write the manifest and create an ECS pool pointed at the fake API.
+
+    ``sets`` are extra ``--set`` fields; a later one overrides a default.
+    """
+    modules = modules or ["test"]
+    host = ecs_env["host"]
+    fake = ecs_env["ecs"]
+
+    with open(ecs_env["manifest_path"], "w") as f:
+        json.dump(manifest(targets), f)
+
+    adapter = [
+        "python3",
+        ADAPTER_SCRIPT,
+        "--manifest",
+        ecs_env["manifest_path"],
+        "--socket",
+        ecs_env["socket_path"],
+    ]
+
+    fields = [
+        f"cluster={fake.cluster}",
+        "taskDefinition=worker-task",
+        "region=us-east-1",
+        f"endpoint={fake.endpoint}",
+        "credentialsSecret=aws-test",
+        'subnets=["subnet-1", "subnet-2"]',
+        "securityGroups=sg-1",
+        "assignPublicIp=true",
+        f"adapter={json.dumps(adapter)}",
+        *sets,
+    ]
+    # In the shape `aws configure export-credentials` produces.
+    cli.secrets_set(
+        "aws-test",
+        json.dumps({"AccessKeyId": "AKIATEST", "SecretAccessKey": "test-secret-key"}),
+        workspaces="*",
+        host=host,
+    )
+
+    args = ["pools", "create", pool_name, "--type", "ecs"]
+    for field in fields:
+        args.extend(["--set", field])
+    args.extend(["--modules", ",".join(modules)])
+    cli._coflux(*args, host=host, output=None)
+
+    cli.manifests_register(*modules, adapter=",".join(adapter), host=host)
+
+
+def _wait_for_worker(host, pool_name, predicate, timeout=30):
+    """Poll the pool's launches until a worker satisfies the predicate."""
+    deadline = time.time() + timeout
+    workers = {}
+    while time.time() < deadline:
+        workers = cli.pools_launches(pool_name, host=host)
+        for worker in workers.values():
+            if predicate(worker):
+                return worker
+        time.sleep(0.5)
+    raise TimeoutError(f"no worker matched within {timeout}s: {workers}")
+
+
+class TestEcsLauncher:
+    def test_runs_worker_as_task(self, ecs_env):
+        """A worker is a task run from the pool's task definition, with the
+        modules as its command and the connection details as its environment,
+        in a signed request."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_ecs_pool(ecs_env, targets)
+
+        resp = cli.submit("test/greet", '"world"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex.target == "greet"
+        assert ex.arguments[0]["value"] == "world"
+        ex.conn.complete(ex.execution_id, value="hello world")
+
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["type"] == "value"
+        assert result["value"]["data"] == "hello world"
+
+        # Without a container named, the task definition says which to override.
+        assert len(fake.requests_for("DescribeTaskDefinition")) == 1
+
+        [(run_task, headers)] = fake.requests_for("RunTask")
+        assert run_task["cluster"] == fake.cluster
+        assert run_task["taskDefinition"] == "worker-task"
+        assert run_task["count"] == 1
+        assert run_task["launchType"] == "FARGATE"
+        assert run_task["startedBy"] == "coflux:ecs-pool"
+        assert run_task["networkConfiguration"] == {
+            "awsvpcConfiguration": {
+                "subnets": ["subnet-1", "subnet-2"],
+                "securityGroups": ["sg-1"],
+                "assignPublicIp": "ENABLED",
+            }
+        }
+        [override] = run_task["overrides"]["containerOverrides"]
+        assert override["name"] == fake.container_name
+        assert override["command"] == ["test"]
+        env = {e["name"]: e["value"] for e in override["environment"]}
+        assert env["COFLUX_HOST"] == host
+        assert env["COFLUX_WORKSPACE"] == "default"
+        assert env["COFLUX_SESSION"]
+
+        assert headers["content-type"] == "application/x-amz-json-1.1"
+        authorization = headers["authorization"]
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=AKIATEST/")
+        assert "/us-east-1/ecs/aws4_request" in authorization
+        assert "x-amz-date" in headers
+
+    def test_idle_worker_leaves_when_asked(self, ecs_env):
+        """An idle worker is asked to exit over its own connection and does,
+        so its task ends without ECS being asked to stop it - which is what
+        keeps an idle worker from running on when the launcher's
+        credentials have lapsed. It is recorded as stopped only once the
+        task is seen to have gone, and as a clean stop rather than a
+        failure."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["stoppingAt"] is not None
+        )
+        # Asked, but not yet gone: not stopped.
+        if worker["deactivatedAt"] is None:
+            assert worker["stoppedAt"] is None
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["stoppedAt"] == worker["deactivatedAt"]
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+        assert fake.requests_for("StopTask") == []
+
+    def test_unresponsive_worker_is_stopped_by_launcher(self, ecs_env):
+        """A worker that doesn't act on the stop it was sent is stopped
+        through ECS once it has had its grace, and a task stopped that way
+        isn't reported as having failed."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        # Frozen, the worker keeps its connection but never reads the stop.
+        [arn] = fake.task_arns()
+        fake.pause(arn)
+
+        # The idle timeout, then the grace the signalled worker is given.
+        [(stop_task, _)] = fake.wait_for("StopTask", timeout=60)
+        assert stop_task["task"] == arn
+        worker = _wait_for_worker(host, "ecs-pool", lambda w: w["stoppingAt"])
+        assert worker["deactivatedAt"] is None
+        assert worker["stoppedAt"] is None
+
+        fake.resume(arn)
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["stoppedAt"] == worker["deactivatedAt"]
+        assert worker["stopError"] is None
+        assert worker["error"] is None
+
+    def test_oom_killed_task_is_reported(self, ecs_env):
+        """A task that ECS stops for exceeding its memory is reported as
+        such, with ECS's account of the stop in place of a log tail."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        # Mid-execution, so the worker isn't idle and stopped first.
+        executor.next_execute(timeout=_EXEC_TIMEOUT)
+
+        [arn] = fake.task_arns()
+        fake.kill_with_oom(arn)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["deactivatedAt"] is not None, timeout=45
+        )
+        assert worker["error"] == "oom_killed"
+        assert worker["logs"] == (
+            "Essential container in task exited"
+            " - OutOfMemoryError: Container killed due to memory usage"
+            " - exit code 137"
+        )
+
+    def test_refused_launch_is_reported(self, ecs_env):
+        """A RunTask the API refuses fails the worker, with the API's own
+        message kept as the worker's logs."""
+        host = ecs_env["host"]
+        fake = ecs_env["ecs"]
+        fake.run_task_error = ("ClusterNotFoundException", "Cluster not found.")
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_cluster_not_found"
+        assert worker["logs"] == "Cluster not found."
+
+    def test_missing_task_definition_is_reported(self, ecs_env):
+        """The API doesn't say a task definition wasn't found, only that it
+        couldn't be described; the worker says which it means."""
+        host = ecs_env["host"]
+        fake = ecs_env["ecs"]
+        fake.task_definition_error = (
+            "ClientException",
+            "Unable to describe task definition.",
+        )
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+
+        worker = _wait_for_worker(
+            host, "ecs-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_task_definition_not_found"
+        assert worker["logs"] == "Unable to describe task definition."
+
+    def test_capacity_provider_replaces_launch_type(self, ecs_env):
+        """A capacity provider is a strategy rather than a launch type, and a
+        named container isn't looked up."""
+        host = ecs_env["host"]
+        executor = ecs_env["executor"]
+        fake = ecs_env["ecs"]
+        _setup_ecs_pool(
+            ecs_env,
+            [workflow("test", "greet")],
+            sets=["capacityProvider=FARGATE_SPOT", "containerName=app"],
+        )
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value="done")
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        assert fake.requests_for("DescribeTaskDefinition") == []
+        [(run_task, _)] = fake.requests_for("RunTask")
+        assert "launchType" not in run_task
+        assert run_task["capacityProviderStrategy"] == [
+            {"capacityProvider": "FARGATE_SPOT", "weight": 1}
+        ]
+        assert run_task["overrides"]["containerOverrides"][0]["name"] == "app"
+
+    def test_launch_type_and_capacity_provider_are_exclusive(self, ecs_env):
+        with pytest.raises(subprocess.CalledProcessError):
+            _setup_ecs_pool(
+                ecs_env,
+                [workflow("test", "greet")],
+                sets=["launchType=EC2", "capacityProvider=FARGATE_SPOT"],
+            )
+
+    def test_single_ids_are_accepted_for_lists(self, ecs_env):
+        """A lone subnet or security group ID needn't be written as JSON."""
+        host = ecs_env["host"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")], sets=["subnets=subnet-9"])
+
+        launcher = cli.pools_get("ecs-pool", host=host)["launcher"]
+        assert launcher["type"] == "ecs"
+        assert launcher["subnets"] == ["subnet-9"]
+        assert launcher["securityGroups"] == ["sg-1"]
+        assert launcher["assignPublicIp"] is True
+        assert launcher["credentialsSecret"] == "aws-test"
+
+        cli._coflux(
+            "pools",
+            "update",
+            "ecs-pool",
+            "--set",
+            "subnets=subnet-10",
+            host=host,
+            output=None,
+        )
+        assert cli.pools_get("ecs-pool", host=host)["launcher"]["subnets"] == [
+            "subnet-10"
+        ]
+
+    def test_export_names_the_credentials_secret(self, ecs_env, tmp_path):
+        """An export carries the secret's name, never its value, and
+        imports back while the secret exists."""
+        host = ecs_env["host"]
+        _setup_ecs_pool(ecs_env, [workflow("test", "greet")])
+
+        exported = cli.pools_export(host=host)
+        assert 'credentials_secret = "aws-test"' in exported
+        assert 'task_definition = "worker-task"' in exported
+        assert "test-secret-key" not in exported
+        assert "AKIATEST" not in exported
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+        launcher = cli.pools_get("ecs-pool", host=host)["launcher"]
+        assert launcher["credentialsSecret"] == "aws-test"

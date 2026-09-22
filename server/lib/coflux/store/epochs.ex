@@ -55,6 +55,7 @@ defmodule Coflux.Store.Epochs do
 
         if File.exists?(path) do
           {:ok, db} = Sqlite3.open(path)
+          :ok = Migrations.run(db, name)
           [{epoch_id, db}]
         else
           []
@@ -69,6 +70,20 @@ defmodule Coflux.Store.Epochs do
        unindexed: unindexed,
        archived_ids: archived_epoch_ids
      }}
+  end
+
+  @doc """
+  Opens an archived epoch's database, bringing its schema up to date first.
+
+  Archives are read with the same queries as the active database, so they
+  have to have the same shape: a migration that adds a column is as
+  necessary here as there. The caller closes the handle.
+  """
+  def open_archive(%__MODULE__{} = epochs, epoch_id) do
+    with {:ok, db} <- Sqlite3.open(archive_path(epochs, epoch_id)) do
+      :ok = Migrations.run(db, epochs.name)
+      {:ok, db}
+    end
   end
 
   @doc """

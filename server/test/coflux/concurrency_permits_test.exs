@@ -137,7 +137,7 @@ defmodule Coflux.ConcurrencyPermitsTest do
       Sqlite3.execute(db, """
       INSERT INTO steps (
         id, number, run_id, module, target, type, priority, wait_for,
-        retry_limit, retry_backoff_min, retry_backoff_max,
+        retry_limit, retry_backoff_min_ms, retry_backoff_max_ms,
         concurrency_key, concurrency_limit, group_key, group_limit, created_at
       )
       VALUES (

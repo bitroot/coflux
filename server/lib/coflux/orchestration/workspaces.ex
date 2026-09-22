@@ -466,23 +466,48 @@ defmodule Coflux.Orchestration.Workspaces do
   # unchanged. When pool is nil, the pool is deleted.
   # Returns {:error, :not_found} if the pool doesn't exist.
   # Returns {:error, :type_change} if the patch tries to change the launcher type.
+  @doc """
+  The definition a patch would produce, without writing it, so a caller can
+  check the result rather than the patch - a patch naming no secrets can
+  still leave a pool referring to one. `nil` when the patch would delete
+  the pool.
+  """
+  def resolve_pool_patch(db, workspace_id, pool_name, pool_patch) do
+    with {:ok, {_pool_id, _definition_id, existing}} <-
+           load_pool_for_patch(db, workspace_id, pool_name),
+         :ok <- check_launcher_type_change(existing, pool_patch) do
+      {:ok, pool_patch && apply_pool_patch(existing, pool_patch)}
+    end
+  end
+
+  # The pool's current definition, with the ids needed to replace it.
+  defp load_pool_for_patch(db, workspace_id, pool_name) do
+    case get_latest_pool(db, workspace_id, pool_name) do
+      {:ok, nil} ->
+        {:error, :not_found}
+
+      {:ok, {pool_id, definition_id}} ->
+        existing =
+          if definition_id do
+            {:ok, definition} = get_pool_definition(db, definition_id)
+            definition
+          else
+            %{modules: [], provides: %{}, accepts: %{}, launcher: nil}
+          end
+
+        {:ok, {pool_id, definition_id, existing}}
+    end
+  end
+
   def update_pool(db, workspace_id, pool_name, pool_patch, created_by \\ nil) do
     with_transaction(db, fn ->
       now = current_timestamp()
 
-      case get_latest_pool(db, workspace_id, pool_name) do
-        {:ok, nil} ->
+      case load_pool_for_patch(db, workspace_id, pool_name) do
+        {:error, :not_found} ->
           {:error, :not_found}
 
-        {:ok, {existing_pool_id, existing_pool_definition_id}} ->
-          existing =
-            if existing_pool_definition_id do
-              {:ok, def} = get_pool_definition(db, existing_pool_definition_id)
-              def
-            else
-              %{modules: [], provides: %{}, accepts: %{}, launcher: nil}
-            end
-
+        {:ok, {existing_pool_id, existing_pool_definition_id, existing}} ->
           # Check for type change in launcher patch
           with :ok <- check_launcher_type_change(existing, pool_patch) do
             pool =
@@ -496,17 +521,24 @@ defmodule Coflux.Orchestration.Workspaces do
                 pool_definition_id
               end
 
+            # Definitions are content-addressed, so a patch that re-states
+            # what is already there resolves to the same definition and
+            # writes no row. Say so: the caller drains the pool's workers
+            # on a change, and re-applying the current configuration
+            # should not restart anything.
             if pool_definition_id != existing_pool_definition_id do
-              insert_workspace_pool(
-                db,
-                workspace_id,
-                pool_name,
-                pool_definition_id,
-                now,
-                created_by
-              )
+              case insert_workspace_pool(
+                     db,
+                     workspace_id,
+                     pool_name,
+                     pool_definition_id,
+                     now,
+                     created_by
+                   ) do
+                {:ok, pool_id} -> {:ok, pool_id, :updated}
+              end
             else
-              {:ok, existing_pool_id}
+              {:ok, existing_pool_id, :unchanged}
             end
           end
       end
@@ -540,6 +572,7 @@ defmodule Coflux.Orchestration.Workspaces do
     |> apply_patch_field(patch, :modules)
     |> apply_patch_field(patch, :provides)
     |> apply_patch_field(patch, :accepts)
+    |> apply_patch_field(patch, :idle_timeout_ms)
     |> apply_launcher_patch(patch)
   end
 
@@ -562,14 +595,15 @@ defmodule Coflux.Orchestration.Workspaces do
       {:ok, launcher_patch} ->
         existing_launcher = pool[:launcher] || %{}
 
-        # Apply each field from the patch, with special handling for :env merging
+        # Apply each field from the patch. The environment maps merge by
+        # key, so a patch can set or unset one variable.
         new_launcher =
           Enum.reduce(launcher_patch, existing_launcher, fn
-            {:env, :unset}, acc ->
-              Map.delete(acc, :env)
+            {key, :unset}, acc when key in [:env, :env_secrets] ->
+              Map.delete(acc, key)
 
-            {:env, env_patch}, acc when is_map(env_patch) ->
-              existing_env = Map.get(acc, :env, %{})
+            {key, env_patch}, acc when key in [:env, :env_secrets] and is_map(env_patch) ->
+              existing_env = Map.get(acc, key, %{})
 
               merged_env =
                 Enum.reduce(env_patch, existing_env, fn
@@ -578,9 +612,9 @@ defmodule Coflux.Orchestration.Workspaces do
                 end)
 
               if merged_env == %{} do
-                Map.delete(acc, :env)
+                Map.delete(acc, key)
               else
-                Map.put(acc, :env, merged_env)
+                Map.put(acc, key, merged_env)
               end
 
             {key, :unset}, acc ->
@@ -692,7 +726,14 @@ defmodule Coflux.Orchestration.Workspaces do
     end
   end
 
-  defp hash_pool_definition(db, launcher_id, provides_tag_set_id, accepts_tag_set_id, modules) do
+  defp hash_pool_definition(
+         db,
+         launcher_id,
+         provides_tag_set_id,
+         accepts_tag_set_id,
+         modules,
+         idle_timeout_ms
+       ) do
     launcher_hash =
       if launcher_id do
         {:ok, {hash}} =
@@ -723,6 +764,10 @@ defmodule Coflux.Orchestration.Workspaces do
         <<0>>
       end
 
+    # Only part of the hash when set, so a definition without one keeps
+    # the hash it had before the field existed.
+    idle_timeout_part = if idle_timeout_ms, do: [Integer.to_string(idle_timeout_ms)], else: []
+
     data =
       Enum.intersperse(
         [
@@ -730,7 +775,7 @@ defmodule Coflux.Orchestration.Workspaces do
           tag_set_hash,
           accepts_tag_set_hash,
           Enum.join(Enum.sort(modules), "\n")
-        ],
+        ] ++ idle_timeout_part,
         0
       )
 
@@ -742,6 +787,7 @@ defmodule Coflux.Orchestration.Workspaces do
     provides = Map.get(pool, :provides, %{})
     accepts = Map.get(pool, :accepts, %{})
     launcher = Map.get(pool, :launcher)
+    idle_timeout_ms = Map.get(pool, :idle_timeout_ms)
 
     launcher_id =
       if launcher do
@@ -764,7 +810,15 @@ defmodule Coflux.Orchestration.Workspaces do
         end
       end
 
-    hash = hash_pool_definition(db, launcher_id, provides_tag_set_id, accepts_tag_set_id, modules)
+    hash =
+      hash_pool_definition(
+        db,
+        launcher_id,
+        provides_tag_set_id,
+        accepts_tag_set_id,
+        modules,
+        idle_timeout_ms
+      )
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
       {:ok, {id}} ->
@@ -776,7 +830,8 @@ defmodule Coflux.Orchestration.Workspaces do
             hash: {:blob, hash},
             provides_tag_set_id: provides_tag_set_id,
             accepts_tag_set_id: accepts_tag_set_id,
-            launcher_id: launcher_id
+            launcher_id: launcher_id,
+            idle_timeout_ms: idle_timeout_ms
           })
 
         {:ok, _} =
@@ -809,13 +864,15 @@ defmodule Coflux.Orchestration.Workspaces do
     # them back so that ProcessLauncher / build_launcher_env can use them
     # directly with String.to_charlist/1.
     config =
-      case Map.get(config, :env) do
-        env when is_map(env) and map_size(env) > 0 ->
-          Map.put(config, :env, Map.new(env, fn {k, v} -> {to_string(k), v} end))
+      Enum.reduce([:env, :env_secrets], config, fn key, config ->
+        case Map.get(config, key) do
+          map when is_map(map) and map_size(map) > 0 ->
+            Map.put(config, key, Map.new(map, fn {k, v} -> {to_string(k), v} end))
 
-        _ ->
-          config
-      end
+          _ ->
+            config
+        end
+      end)
 
     Map.put(config, :type, type)
   end
@@ -857,10 +914,10 @@ defmodule Coflux.Orchestration.Workspaces do
   defp get_pool_definition(db, pool_definition_id) do
     case query_one(
            db,
-           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id FROM pool_definitions WHERE id = ?1",
+           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms FROM pool_definitions WHERE id = ?1",
            {pool_definition_id}
          ) do
-      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id}} ->
+      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms}} ->
         provides =
           if provides_tag_set_id do
             case TagSets.get_tag_set(db, provides_tag_set_id) do
@@ -901,7 +958,8 @@ defmodule Coflux.Orchestration.Workspaces do
            provides: provides,
            accepts: accepts,
            modules: modules,
-           launcher: launcher
+           launcher: launcher,
+           idle_timeout_ms: idle_timeout_ms
          }}
 
       {:ok, nil} ->
@@ -991,6 +1049,7 @@ defmodule Coflux.Orchestration.Workspaces do
       :process -> 0
       :docker -> 1
       :kubernetes -> 2
+      :ecs -> 3
     end
   end
 
@@ -999,6 +1058,7 @@ defmodule Coflux.Orchestration.Workspaces do
       0 -> :process
       1 -> :docker
       2 -> :kubernetes
+      3 -> :ecs
     end
   end
 

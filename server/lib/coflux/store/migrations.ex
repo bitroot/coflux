@@ -3,7 +3,13 @@ defmodule Coflux.Store.Migrations do
 
   @otp_app Mix.Project.config()[:app]
 
-  def run(db, name) do
+  @doc """
+  Brings a database up to date with the migrations for `name`.
+
+  Options:
+  - `:up_to` - stop after this version (for tests that need an older shape)
+  """
+  def run(db, name, opts \\ []) do
     migrations_dir =
       @otp_app
       |> Application.app_dir("priv/migrations")
@@ -11,8 +17,15 @@ defmodule Coflux.Store.Migrations do
 
     setup_migrations_table(db)
 
-    migrations_dir
-    |> get_available_versions()
+    available = get_available_versions(migrations_dir)
+
+    available =
+      case Keyword.get(opts, :up_to) do
+        nil -> available
+        up_to -> MapSet.filter(available, &(&1 <= up_to))
+      end
+
+    available
     |> MapSet.difference(get_migrated_versions(db))
     |> Enum.sort()
     |> Enum.each(&run_migration(db, migrations_dir, &1))
@@ -53,10 +66,18 @@ defmodule Coflux.Store.Migrations do
       |> Path.join("#{version}.sql")
       |> File.read!()
 
-    :ok = Sqlite3.execute(db, "BEGIN")
-    :ok = Sqlite3.execute(db, sql)
-    :ok = insert_schema_migration(db, version)
-    :ok = Sqlite3.execute(db, "COMMIT")
+    # Take the write lock before looking again: two handles on one file -
+    # an archive opened for a query while its index is being built, say -
+    # can both find the same migration pending, and only one may apply it.
+    :ok = Sqlite3.execute(db, "BEGIN IMMEDIATE")
+
+    if MapSet.member?(get_migrated_versions(db), version) do
+      :ok = Sqlite3.execute(db, "COMMIT")
+    else
+      :ok = Sqlite3.execute(db, sql)
+      :ok = insert_schema_migration(db, version)
+      :ok = Sqlite3.execute(db, "COMMIT")
+    end
   end
 
   defp insert_schema_migration(db, version) do

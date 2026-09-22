@@ -26,8 +26,11 @@ def main() -> int:
     )
     discover_parser.add_argument(
         "modules",
-        nargs="+",
-        help="Python modules to scan for targets",
+        nargs="*",
+        help=(
+            "Python modules to scan for targets; packages are scanned recursively. "
+            "With none, every module in the working directory is scanned."
+        ),
     )
 
     # execute command

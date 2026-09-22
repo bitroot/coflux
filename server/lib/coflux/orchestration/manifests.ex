@@ -24,10 +24,10 @@ defmodule Coflux.Orchestration.Manifests do
                       db,
                       :workflows,
                       {:manifest_id, :name, :instruction_id, :parameter_set_id, :wait_for,
-                       :cache_config_id, :defer_params, :delay, :retry_limit, :retry_backoff_min,
-                       :retry_backoff_max, :recurrent, :timeout, :requires_tag_set_id, :memo,
-                       :streams_buffer, :streams_timeout_ms, :concurrency_limit,
-                       :concurrency_params, :concurrency_namespace},
+                       :cache_config_id, :defer_params, :delay_ms, :retry_limit,
+                       :retry_backoff_min_ms, :retry_backoff_max_ms, :recurrent, :timeout_ms,
+                       :requires_tag_set_id, :memo, :streams_buffer, :streams_timeout_ms,
+                       :concurrency_limit, :concurrency_params, :concurrency_namespace},
                       Enum.map(workflows, fn {name, workflow} ->
                         {:ok, instruction_id} =
                           if workflow.instruction do
@@ -71,12 +71,12 @@ defmodule Coflux.Orchestration.Manifests do
                           if(workflow.defer,
                             do: Utils.encode_params_list(workflow.defer.params)
                           ),
-                          workflow.delay,
+                          workflow.delay_ms,
                           if(workflow.retries, do: workflow.retries.limit || -1, else: 0),
-                          if(workflow.retries, do: workflow.retries.backoff_min, else: 0),
-                          if(workflow.retries, do: workflow.retries.backoff_max, else: 0),
+                          if(workflow.retries, do: workflow.retries.backoff_min_ms, else: 0),
+                          if(workflow.retries, do: workflow.retries.backoff_max_ms, else: 0),
                           if(workflow.recurrent, do: 1, else: 0),
-                          workflow[:timeout] || 0,
+                          workflow[:timeout_ms] || 0,
                           requires_tag_set_id,
                           if(workflow[:memo], do: 1),
                           streams_buffer,
@@ -203,7 +203,7 @@ defmodule Coflux.Orchestration.Manifests do
     case query_one(
            db,
            """
-           SELECT w.parameter_set_id, w.instruction_id, w.wait_for, w.cache_config_id, w.defer_params, w.delay, w.retry_limit, w.retry_backoff_min, w.retry_backoff_max, w.recurrent, w.timeout, w.requires_tag_set_id, w.memo, w.streams_buffer, w.streams_timeout_ms, w.concurrency_limit, w.concurrency_params, w.concurrency_namespace
+           SELECT w.parameter_set_id, w.instruction_id, w.wait_for, w.cache_config_id, w.defer_params, w.delay_ms, w.retry_limit, w.retry_backoff_min_ms, w.retry_backoff_max_ms, w.recurrent, w.timeout_ms, w.requires_tag_set_id, w.memo, w.streams_buffer, w.streams_timeout_ms, w.concurrency_limit, w.concurrency_params, w.concurrency_namespace
            FROM workspace_manifests AS wm
            LEFT JOIN workflows AS w ON w.manifest_id = wm.manifest_id
            WHERE wm.workspace_id = ?1 AND wm.module = ?2 AND w.name = ?3
@@ -216,8 +216,8 @@ defmodule Coflux.Orchestration.Manifests do
         {:ok, nil}
 
       {:ok,
-       {parameter_set_id, instruction_id, wait_for, cache_config_id, defer_params, delay,
-        retry_limit, retry_backoff_min, retry_backoff_max, recurrent, timeout,
+       {parameter_set_id, instruction_id, wait_for, cache_config_id, defer_params, delay_ms,
+        retry_limit, retry_backoff_min_ms, retry_backoff_max_ms, recurrent, timeout_ms,
         requires_tag_set_id, memo, streams_buffer, streams_timeout_ms, concurrency_limit,
         concurrency_params, concurrency_namespace}} ->
         build_workflow(
@@ -227,12 +227,12 @@ defmodule Coflux.Orchestration.Manifests do
           wait_for,
           cache_config_id,
           defer_params,
-          delay,
+          delay_ms,
           retry_limit,
-          retry_backoff_min,
-          retry_backoff_max,
+          retry_backoff_min_ms,
+          retry_backoff_max_ms,
           recurrent,
-          timeout,
+          timeout_ms,
           requires_tag_set_id,
           memo,
           streams_buffer,
@@ -248,7 +248,7 @@ defmodule Coflux.Orchestration.Manifests do
     case query(
            db,
            """
-           SELECT name, instruction_id, parameter_set_id, wait_for, cache_config_id, defer_params, delay, retry_limit, retry_backoff_min, retry_backoff_max, recurrent, timeout, requires_tag_set_id, memo, streams_buffer, streams_timeout_ms, concurrency_limit, concurrency_params, concurrency_namespace
+           SELECT name, instruction_id, parameter_set_id, wait_for, cache_config_id, defer_params, delay_ms, retry_limit, retry_backoff_min_ms, retry_backoff_max_ms, recurrent, timeout_ms, requires_tag_set_id, memo, streams_buffer, streams_timeout_ms, concurrency_limit, concurrency_params, concurrency_namespace
            FROM workflows
            WHERE manifest_id = ?1
            """,
@@ -257,9 +257,9 @@ defmodule Coflux.Orchestration.Manifests do
       {:ok, rows} ->
         workflows =
           Map.new(rows, fn {name, instruction_id, parameter_set_id, wait_for, cache_config_id,
-                            defer_params, delay, retry_limit, retry_backoff_min,
-                            retry_backoff_max, recurrent, timeout, requires_tag_set_id, memo,
-                            streams_buffer, streams_timeout_ms, concurrency_limit,
+                            defer_params, delay_ms, retry_limit, retry_backoff_min_ms,
+                            retry_backoff_max_ms, recurrent, timeout_ms, requires_tag_set_id,
+                            memo, streams_buffer, streams_timeout_ms, concurrency_limit,
                             concurrency_params, concurrency_namespace} ->
             {:ok, workflow} =
               build_workflow(
@@ -269,12 +269,12 @@ defmodule Coflux.Orchestration.Manifests do
                 wait_for,
                 cache_config_id,
                 defer_params,
-                delay,
+                delay_ms,
                 retry_limit,
-                retry_backoff_min,
-                retry_backoff_max,
+                retry_backoff_min_ms,
+                retry_backoff_max_ms,
                 recurrent,
-                timeout,
+                timeout_ms,
                 requires_tag_set_id,
                 memo,
                 streams_buffer,
@@ -299,11 +299,14 @@ defmodule Coflux.Orchestration.Manifests do
           hash_parameter_set(workflow.parameters),
           Integer.to_string(Utils.encode_params_set(workflow.wait_for)),
           if(workflow.cache, do: Utils.encode_params_list(workflow.cache.params) || "", else: "-"),
-          if(workflow.cache[:max_age], do: Integer.to_string(workflow.cache.max_age), else: ""),
+          if(workflow.cache[:max_age_ms],
+            do: Integer.to_string(workflow.cache.max_age_ms),
+            else: ""
+          ),
           if(workflow.cache[:namespace], do: workflow.cache.namespace, else: ""),
           if(workflow.cache[:version], do: workflow.cache.version, else: ""),
           if(workflow.defer, do: Utils.encode_params_list(workflow.defer.params) || "", else: "-"),
-          Integer.to_string(workflow.delay),
+          Integer.to_string(workflow.delay_ms),
           if(workflow.retries,
             do:
               if(workflow.retries.limit,
@@ -312,16 +315,16 @@ defmodule Coflux.Orchestration.Manifests do
               ),
             else: ""
           ),
-          if(workflow.retries[:backoff_min],
-            do: Integer.to_string(workflow.retries.backoff_min),
+          if(workflow.retries[:backoff_min_ms],
+            do: Integer.to_string(workflow.retries.backoff_min_ms),
             else: ""
           ),
-          if(workflow.retries[:backoff_max],
-            do: Integer.to_string(workflow.retries.backoff_max),
+          if(workflow.retries[:backoff_max_ms],
+            do: Integer.to_string(workflow.retries.backoff_max_ms),
             else: ""
           ),
           if(workflow.recurrent, do: "1", else: "0"),
-          Integer.to_string(workflow[:timeout] || 0),
+          Integer.to_string(workflow[:timeout_ms] || 0),
           hash_requires(workflow.requires),
           if(workflow[:memo], do: "1", else: "0"),
           workflow.instruction || "",
@@ -340,12 +343,12 @@ defmodule Coflux.Orchestration.Manifests do
          wait_for,
          cache_config_id,
          defer_params,
-         delay,
+         delay_ms,
          retry_limit,
-         retry_backoff_min,
-         retry_backoff_max,
+         retry_backoff_min_ms,
+         retry_backoff_max_ms,
          recurrent,
-         timeout,
+         timeout_ms,
          requires_tag_set_id,
          memo,
          streams_buffer,
@@ -387,16 +390,16 @@ defmodule Coflux.Orchestration.Manifests do
         retry_limit == -1 ->
           %{
             limit: nil,
-            backoff_min: retry_backoff_min,
-            backoff_max: retry_backoff_max
+            backoff_min_ms: retry_backoff_min_ms,
+            backoff_max_ms: retry_backoff_max_ms
           }
 
         # positive = that many retries
         true ->
           %{
             limit: retry_limit,
-            backoff_min: retry_backoff_min,
-            backoff_max: retry_backoff_max
+            backoff_min_ms: retry_backoff_min_ms,
+            backoff_max_ms: retry_backoff_max_ms
           }
       end
 
@@ -426,10 +429,10 @@ defmodule Coflux.Orchestration.Manifests do
        wait_for: Utils.decode_params_set(wait_for),
        cache: cache,
        defer: defer,
-       delay: delay,
+       delay_ms: delay_ms,
        retries: retries,
        recurrent: recurrent == 1,
-       timeout: timeout,
+       timeout_ms: timeout_ms,
        requires: requires,
        memo: memo == 1,
        streams: streams,

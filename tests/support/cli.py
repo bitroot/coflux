@@ -19,7 +19,13 @@ def _build_env(env_vars=None):
 
 
 def _coflux(
-    *args, host=None, workspace="default", output="json", env_vars=None, timeout=30
+    *args,
+    host=None,
+    workspace="default",
+    output="json",
+    env_vars=None,
+    timeout=30,
+    input=None,
 ):
     cmd = [_COFLUX_BIN]
     if host:
@@ -36,6 +42,7 @@ def _coflux(
         env=_build_env(env_vars),
         check=True,
         timeout=timeout,
+        input=input,
     )
 
 
@@ -262,6 +269,7 @@ def _pools_set_args(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
 ):
     """Build --set/--modules/--provides/--accepts args for pool create/update."""
@@ -282,6 +290,8 @@ def _pools_set_args(
         args.extend(["--set", f"adapter={json.dumps(adapter)}"])
     if concurrency:
         args.extend(["--set", f"concurrency={concurrency}"])
+    if idle_timeout is not None:
+        args.extend(["--set", f"idleTimeout={idle_timeout}"])
     if env:
         for k, v in env.items():
             args.extend(["--set", f"env.{k}={v}"])
@@ -298,6 +308,7 @@ def pools_create(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
     host=None,
     workspace="default",
@@ -312,6 +323,7 @@ def pools_create(
             docker_image=docker_image,
             adapter=adapter,
             concurrency=concurrency,
+            idle_timeout=idle_timeout,
             env=env,
         )
     )
@@ -327,6 +339,7 @@ def pools_update(
     docker_image=None,
     adapter=None,
     concurrency=None,
+    idle_timeout=None,
     env=None,
     host=None,
     workspace="default",
@@ -341,6 +354,7 @@ def pools_update(
             docker_image=docker_image,
             adapter=adapter,
             concurrency=concurrency,
+            idle_timeout=idle_timeout,
             env=env,
         )
     )
@@ -364,6 +378,47 @@ def pools_delete(name, host=None, workspace="default"):
 def pools_launches(name, host=None, workspace="default"):
     result = _coflux("pools", "launches", name, host=host, workspace=workspace)
     return json.loads(result.stdout)
+
+
+def pools_enable(name, host=None, workspace="default"):
+    _coflux("pools", "enable", name, host=host, workspace=workspace, output=None)
+
+
+def pools_disable(name, host=None, workspace="default"):
+    _coflux("pools", "disable", name, host=host, workspace=workspace, output=None)
+
+
+def pools_export(host=None, workspace="default"):
+    result = _coflux("pools", "export", host=host, workspace=workspace, output=None)
+    return result.stdout
+
+
+def secrets_set(name, value, workspaces, host=None, workspace="default"):
+    """Set a secret, with the value on stdin as a user would give it."""
+    args = ["secrets", "set", name, "--workspaces", workspaces]
+    _coflux(*args, host=host, workspace=workspace, output=None, input=value)
+
+
+def secrets_list(host=None, workspace="default"):
+    result = _coflux("secrets", "list", host=host, workspace=workspace)
+    return json.loads(result.stdout)
+
+
+def secrets_delete(name, workspaces, host=None, workspace="default"):
+    args = ["secrets", "delete", name, "--workspaces", workspaces]
+    _coflux(*args, host=host, workspace=workspace, output=None)
+
+
+def pools_import(path, host=None, workspace="default"):
+    _coflux(
+        "pools",
+        "import",
+        str(path),
+        "--yes",
+        host=host,
+        workspace=workspace,
+        output=None,
+    )
 
 
 def worker(

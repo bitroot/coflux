@@ -47,7 +47,7 @@ defmodule Coflux.RunView.Format do
   def cache_config(cache_config) do
     %{
       params: cache_config.params,
-      maxAge: cache_config.max_age,
+      maxAgeMs: cache_config.max_age_ms,
       namespace: cache_config.namespace,
       version: cache_config.version
     }
@@ -69,8 +69,8 @@ defmodule Coflux.RunView.Format do
 
   def retries(nil), do: nil
 
-  def retries(%{limit: limit, backoff_min: backoff_min, backoff_max: backoff_max}) do
-    %{limit: limit, backoffMin: backoff_min, backoffMax: backoff_max}
+  def retries(%{limit: limit, backoff_min_ms: backoff_min_ms, backoff_max_ms: backoff_max_ms}) do
+    %{limit: limit, backoffMinMs: backoff_min_ms, backoffMaxMs: backoff_max_ms}
   end
 
   def key(key, length \\ 10)

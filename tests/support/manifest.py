@@ -32,7 +32,7 @@ def _target(
     if memo is not None:
         target["memo"] = memo
     if delay is not None:
-        target["delay"] = delay
+        target["delay_ms"] = delay
     if recurrent:
         target["recurrent"] = True
     if wait_for is not None:
@@ -40,7 +40,7 @@ def _target(
     if requires is not None:
         target["requires"] = requires
     if timeout is not None:
-        target["timeout"] = timeout
+        target["timeout_ms"] = timeout
     if streams is not None:
         target["streams"] = streams
     if concurrency is not None:

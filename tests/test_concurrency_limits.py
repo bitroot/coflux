@@ -546,7 +546,7 @@ def test_cache_hit_takes_no_permit(worker):
         resp = ctx.submit("test", "main")
         ex0 = ctx.executor.next_execute()
 
-        cache = {"params": True, "max_age": None, "namespace": None, "version": None}
+        cache = {"params": True, "max_age_ms": None, "namespace": None, "version": None}
         config = {"limit": 1}
 
         # Populate the cache, and let the execution go.

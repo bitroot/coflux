@@ -43,7 +43,7 @@ The decorators are designed to be unimposing — decorated functions can be call
 
 ## Modules
 
-Targets are defined in _modules_. Typically these correspond to Python modules (i.e., `.py` files).
+Targets are defined in _modules_. Typically these correspond to Python modules (i.e., `.py` files). A package is scanned recursively, so naming `myapp` covers `myapp.workflows` and `myapp.tasks`.
 
 Modules are specified when starting a worker:
 
@@ -57,6 +57,8 @@ Or in `coflux.toml`:
 [worker]
 modules = ["myapp.workflows", "myapp.tasks"]
 ```
+
+With neither, the worker hosts every module and package in the directory it's started in (leaving out `_`-prefixed names, and `setup`, `conftest` and `tests`), so in a project that holds nothing else, `coflux worker --dev` is enough. `--all-modules` asks for that explicitly when `coflux.toml` sets a list.
 
 Each module's targets (workflows and tasks) are declared by the worker when it connects to the server so that the server knows what targets the worker is able to handle. The workflows can also be registered with the server so they appear in Studio and can be submitted.
 

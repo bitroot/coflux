@@ -6,8 +6,8 @@ defmodule Coflux.Orchestration.Sessions do
   def create_session(db, workspace_id, worker_id, opts \\ []) do
     provides = Keyword.get(opts, :provides)
     accepts = Keyword.get(opts, :accepts)
-    activation_timeout = Keyword.get(opts, :activation_timeout)
-    reconnection_timeout = Keyword.get(opts, :reconnection_timeout)
+    activation_timeout_ms = Keyword.get(opts, :activation_timeout_ms)
+    reconnection_timeout_ms = Keyword.get(opts, :reconnection_timeout_ms)
     created_by = Keyword.get(opts, :created_by)
 
     with_transaction(db, fn ->
@@ -41,8 +41,8 @@ defmodule Coflux.Orchestration.Sessions do
                  worker_id: worker_id,
                  provides_tag_set_id: provides_tag_set_id,
                  accepts_tag_set_id: accepts_tag_set_id,
-                 activation_timeout: activation_timeout,
-                 reconnection_timeout: reconnection_timeout,
+                 activation_timeout_ms: activation_timeout_ms,
+                 reconnection_timeout_ms: reconnection_timeout_ms,
                  secret_hash: {:blob, secret_hash},
                  created_at: now,
                  created_by: created_by
@@ -110,8 +110,8 @@ defmodule Coflux.Orchestration.Sessions do
         s.worker_id,
         s.provides_tag_set_id,
         s.accepts_tag_set_id,
-        s.activation_timeout,
-        s.reconnection_timeout,
+        s.activation_timeout_ms,
+        s.reconnection_timeout_ms,
         s.secret_hash,
         s.created_at,
         sa.created_at AS activated_at

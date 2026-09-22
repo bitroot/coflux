@@ -18,6 +18,8 @@ defmodule Coflux.Orchestration.Server do
     StepArguments,
     StepCreated,
     StreamDependencyRecorded,
+    SecretDeleted,
+    SecretSet,
     TokenCreated,
     TokenRevoked,
     WorkspaceCreated,
@@ -25,6 +27,7 @@ defmodule Coflux.Orchestration.Server do
     WorkspaceUpdated
   }
 
+  alias Coflux.Scopes
   alias Coflux.Store.{Epochs, Index}
 
   alias Coflux.Orchestration.{
@@ -98,9 +101,14 @@ defmodule Coflux.Orchestration.Server do
       {:ok, epochs} ->
         db = Epochs.active_db(epochs)
 
+        # The admin store isn't an epoch: it holds what outlives them.
+        {:ok, admin_db} = Coflux.Store.open(project_id, "admin")
+        :ok = Coflux.Admin.Tokens.import_legacy(db, admin_db)
+
         state = %State{
           project_id: project_id,
           db: db,
+          admin_db: admin_db,
           epochs: epochs,
           epoch_index: epoch_index,
           index_queue: unindexed_epoch_ids
@@ -143,7 +151,12 @@ defmodule Coflux.Orchestration.Server do
             data: data,
             session_id: nil,
             stop_id: nil,
-            last_poll_at: nil
+            stop_retry_at: nil,
+            stop_signalled_at: nil,
+            last_poll_at: nil,
+            polling: false,
+            poll_failures: 0,
+            first_poll_failure_at: nil
           })
         end
       )
@@ -249,17 +262,30 @@ defmodule Coflux.Orchestration.Server do
   # Token management
 
   defp dispatch_call({:check_token, token_hash}, state) do
-    case Principals.check_token(state.db, token_hash) do
-      {:ok, %{principal_id: principal_id, workspaces: workspaces}} ->
-        {:reply, {:ok, %{workspaces: workspaces, principal_id: principal_id}}, state}
-
+    with {:ok, %{external_id: external_id, workspaces: workspaces}} <-
+           Coflux.Admin.Tokens.check_token(state.admin_db, token_hash),
+         {:ok, principal_id} <- Principals.ensure_token(state.db, external_id) do
+      {:reply, {:ok, %{workspaces: workspaces, principal_id: principal_id}}, state}
+    else
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
     end
   end
 
   defp dispatch_call({:create_token, name, principal_id, opts}, state) do
-    {:ok, result} = Principals.create_token(state.db, state.project_id, name, principal_id, opts)
+    created_by =
+      case Principals.get_principal(state.db, principal_id) do
+        {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+        {:ok, nil} -> nil
+      end
+
+    {:ok, result} =
+      Coflux.Admin.Tokens.create_token(state.admin_db, state.project_id, name, created_by, opts)
+
+    # The token can act straight away, so give it its principal now rather
+    # than on first use.
+    {:ok, token_principal_id} = Principals.ensure_token(state.db, result.external_id)
+    result = Map.put(result, :principal_id, token_principal_id)
 
     state =
       state
@@ -277,12 +303,12 @@ defmodule Coflux.Orchestration.Server do
   end
 
   defp dispatch_call(:list_tokens, state) do
-    {:ok, tokens} = Principals.list_tokens(state.db)
+    {:ok, tokens} = Coflux.Admin.Tokens.list_tokens(state.admin_db)
     {:reply, {:ok, tokens}, state}
   end
 
   defp dispatch_call({:revoke_token, token_id}, state) do
-    case Principals.revoke_token(state.db, token_id) do
+    case Coflux.Admin.Tokens.revoke_token(state.admin_db, token_id) do
       {:ok, external_id} ->
         state = Effects.emit(state, %TokenRevoked{token: external_id})
         {:reply, {:ok, external_id}, state}
@@ -292,9 +318,86 @@ defmodule Coflux.Orchestration.Server do
     end
   end
 
+  # Secrets
+
+  # A secret is set for one or more scopes, each stored on its own. Access
+  # to every scope is checked before any is written, so a request that
+  # isn't wholly allowed changes nothing.
+  defp dispatch_call({:set_secret, scopes, name, value, access}, state) do
+    with :ok <- check_secret_scope_access(access, scopes) do
+      identity = principal_identity(state, access)
+
+      Enum.reduce_while(scopes, {:reply, {:ok, []}, state}, fn scope,
+                                                               {:reply, {:ok, secrets}, state} ->
+        case Coflux.Admin.Secrets.set(
+               state.admin_db,
+               state.project_id,
+               scope,
+               name,
+               value,
+               identity
+             ) do
+          {:ok, secret} ->
+            state =
+              Effects.emit(state, %SecretSet{
+                workspaces: secret.workspaces,
+                name: secret.name,
+                version: secret.version,
+                created_at: secret.created_at,
+                updated_at: secret.updated_at,
+                updated_by: secret.updated_by
+              })
+
+            {:cont, {:reply, {:ok, secrets ++ [secret]}, state}}
+
+          {:error, reason} ->
+            {:halt, {:reply, {:error, reason}, state}}
+        end
+      end)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Deleting is done scope by scope: it is not an error for a secret to be
+  # absent from some of them, only from all of them.
+  defp dispatch_call({:delete_secret, scopes, name, access}, state) do
+    with :ok <- check_secret_scope_access(access, scopes) do
+      {state, deleted} =
+        Enum.reduce(scopes, {state, []}, fn scope, {state, deleted} ->
+          case Coflux.Admin.Secrets.delete(state.admin_db, scope, name) do
+            :ok ->
+              {Effects.emit(state, %SecretDeleted{workspaces: scope, name: name}),
+               deleted ++ [scope]}
+
+            {:error, :not_found} ->
+              {state, deleted}
+          end
+        end)
+
+      if deleted == [] do
+        {:reply, {:error, :not_found}, state}
+      else
+        {:reply, {:ok, deleted}, state}
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   defp dispatch_call({:get_token, external_id}, state) do
-    result = Principals.get_token_by_external_id(state.db, external_id)
-    {:reply, result, state}
+    case Coflux.Admin.Tokens.get_token_by_external_id(state.admin_db, external_id) do
+      {:ok, nil} ->
+        {:reply, {:ok, nil}, state}
+
+      {:ok, token} ->
+        # Whether the caller may revoke it is decided by principal id, and
+        # a principal is local to this epoch, so the creator's identity is
+        # given one here if it hasn't one yet.
+        {:ok, created_by_principal_id} = Principals.ensure_identity(state.db, token.created_by)
+        token = Map.put(token, :created_by_principal_id, created_by_principal_id)
+        {:reply, {:ok, token}, state}
+    end
   end
 
   # Workspace management
@@ -515,7 +618,14 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <-
+           Enum.reduce_while(desired_pools, :ok, fn {_name, pool}, :ok ->
+             case check_secret_references(state, workspace_id, pool[:launcher]) do
+               :ok -> {:cont, :ok}
+               error -> {:halt, error}
+             end
+           end) do
       case Workspaces.update_pools(
              state.db,
              workspace_id,
@@ -528,7 +638,10 @@ defmodule Coflux.Orchestration.Server do
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
-              if worker.state == :active &&
+              # Pool names are per workspace: a pool of the same name in
+              # another workspace is a different pool, and its workers are
+              # not ours to drain.
+              if worker.state == :active && worker.workspace_id == workspace_id &&
                    MapSet.member?(changed_pool_names, worker.pool_name) do
                 Fleet.update_worker_state(
                   state,
@@ -575,7 +688,8 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- check_secret_references(state, workspace_id, pool[:launcher]) do
       case Workspaces.create_pool(
              state.db,
              workspace_id,
@@ -611,7 +725,10 @@ defmodule Coflux.Orchestration.Server do
          state
        ) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         {:ok, merged} <-
+           Workspaces.resolve_pool_patch(state.db, workspace_id, pool_name, pool_patch),
+         :ok <- check_secret_references(state, workspace_id, merged[:launcher]) do
       case Workspaces.update_pool(
              state.db,
              workspace_id,
@@ -619,11 +736,12 @@ defmodule Coflux.Orchestration.Server do
              pool_patch,
              access[:principal_id]
            ) do
-        {:ok, _pool_id} ->
+        {:ok, _pool_id, :updated} ->
           state =
             state.workers
             |> Enum.reduce(state, fn {worker_id, worker}, state ->
-              if worker.state == :active && worker.pool_name == pool_name do
+              if worker.state == :active && worker.workspace_id == workspace_id &&
+                   worker.pool_name == pool_name do
                 Fleet.update_worker_state(state, worker_id, :draining, workspace_id, pool_name)
               else
                 state
@@ -644,6 +762,9 @@ defmodule Coflux.Orchestration.Server do
 
           {:reply, :ok, state}
 
+        {:ok, _pool_id, :unchanged} ->
+          {:reply, :ok, state}
+
         {:error, :not_found} ->
           {:reply, {:error, :not_found}, state}
 
@@ -658,13 +779,14 @@ defmodule Coflux.Orchestration.Server do
 
   defp dispatch_call({:disable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- require_pool(state, workspace_id, pool_name) do
       :ok = Workspaces.disable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
         state
         |> put_in(
-          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          [Access.key(:pools), Access.key!(workspace_id), Access.key!(pool_name), :state],
           :disabled
         )
         |> Effects.emit(%PoolStateChanged{
@@ -684,13 +806,14 @@ defmodule Coflux.Orchestration.Server do
 
   defp dispatch_call({:enable_pool, workspace_external_id, pool_name, access}, state) do
     with {:ok, workspace_id, _} <-
-           Permissions.require_workspace(state, workspace_external_id, access) do
+           Permissions.require_workspace(state, workspace_external_id, access),
+         :ok <- require_pool(state, workspace_id, pool_name) do
       :ok = Workspaces.enable_pool(state.db, workspace_id, pool_name, access[:principal_id])
 
       state =
         state
         |> put_in(
-          [Access.key(:pools), Access.key(workspace_id, %{}), Access.key(pool_name, %{}), :state],
+          [Access.key(:pools), Access.key!(workspace_id), Access.key!(pool_name), :state],
           :active
         )
         |> Effects.emit(%PoolStateChanged{
@@ -841,18 +964,20 @@ defmodule Coflux.Orchestration.Server do
   defp dispatch_call({:create_session, workspace_external_id, access, opts}, state) do
     provides = Keyword.get(opts, :provides, %{})
     accepts = Keyword.get(opts, :accepts, %{})
-    activation_timeout = Keyword.get(opts, :activation_timeout, @default_activation_timeout_ms)
 
-    reconnection_timeout =
-      Keyword.get(opts, :reconnection_timeout, @default_reconnection_timeout_ms)
+    activation_timeout_ms =
+      Keyword.get(opts, :activation_timeout_ms, @default_activation_timeout_ms)
+
+    reconnection_timeout_ms =
+      Keyword.get(opts, :reconnection_timeout_ms, @default_reconnection_timeout_ms)
 
     with {:ok, workspace_id, _} <-
            Permissions.require_workspace(state, workspace_external_id, access) do
       db_opts = [
         provides: provides,
         accepts: accepts,
-        activation_timeout: activation_timeout,
-        reconnection_timeout: reconnection_timeout,
+        activation_timeout_ms: activation_timeout_ms,
+        reconnection_timeout_ms: reconnection_timeout_ms,
         created_by: access[:principal_id]
       ]
 
@@ -874,8 +999,10 @@ defmodule Coflux.Orchestration.Server do
             worker_id: nil,
             last_idle_at: now,
             activated_at: nil,
-            activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout,
+            declared_at: nil,
+            ready_deadline_at: nil,
+            activation_timeout_ms: activation_timeout_ms,
+            reconnection_timeout_ms: reconnection_timeout_ms,
             total_executions: 0
           }
 
@@ -883,7 +1010,7 @@ defmodule Coflux.Orchestration.Server do
             state
             |> put_in([Access.key(:sessions), session_id], session)
             |> put_in([Access.key(:session_ids), external_session_id], session_id)
-            |> Fleet.schedule_session_expiry(session_id, activation_timeout)
+            |> Fleet.schedule_session_expiry(session_id, activation_timeout_ms)
             |> Listeners.maybe_schedule_idle_shutdown()
 
           {:reply, {:ok, token}, state}
@@ -940,12 +1067,26 @@ defmodule Coflux.Orchestration.Server do
       |> Enum.reverse()
       |> Enum.each(&send(pid, &1))
 
+      # A worker that has connected but not yet said what it can run is
+      # given until this deadline to do so, after which it is treated as
+      # broken rather than idle (see `Scheduler`). Each connection gets a
+      # fresh one; a session that has already declared keeps none.
+      ready_deadline_at =
+        if is_nil(session.declared_at) do
+          System.os_time(:millisecond) + session.activation_timeout_ms
+        end
+
       state =
         state
         |> put_in([Access.key(:connections), ref], {pid, session_id})
         |> update_in(
           [Access.key(:sessions), session_id],
-          &Map.merge(&1, %{connection: ref, queue: [], activated_at: activated_at})
+          &Map.merge(&1, %{
+            connection: ref,
+            queue: [],
+            activated_at: activated_at,
+            ready_deadline_at: ready_deadline_at
+          })
         )
 
       state = Effects.emit(state, Fleet.session_event(state, session))
@@ -992,11 +1133,26 @@ defmodule Coflux.Orchestration.Server do
 
     now = System.os_time(:millisecond)
 
+    previous = Map.fetch!(state.sessions, session_id)
+
     state =
       state
       |> Fleet.assign_targets(targets, session_id)
       |> put_in([Access.key(:sessions), session_id, :concurrency], concurrency)
       |> put_in([Access.key(:sessions), session_id, :last_idle_at], now)
+      # The worker has answered, so it is ready and the deadline for
+      # answering no longer applies - even if it declared nothing, which
+      # is an empty manifest rather than a broken worker.
+      |> put_in([Access.key(:sessions), session_id, :declared_at], previous.declared_at || now)
+      |> put_in([Access.key(:sessions), session_id, :ready_deadline_at], nil)
+
+    # A pool that produces a working worker has no failures to back off
+    # from, whatever its previous launches did.
+    state =
+      case previous.worker_id && Map.fetch(state.workers, previous.worker_id) do
+        {:ok, worker} -> Map.update!(state, :pool_failures, &Map.delete(&1, worker.pool_id))
+        _ -> state
+      end
 
     session = Map.fetch!(state.sessions, session_id)
 
@@ -1148,9 +1304,9 @@ defmodule Coflux.Orchestration.Server do
         concurrency = Keyword.get(opts, :concurrency)
         concurrency_limit = if concurrency, do: concurrency.limit, else: 0
         retries = Keyword.get(opts, :retries)
-        timeout = Keyword.get(opts, :timeout, 0)
-        delay = Keyword.get(opts, :delay, 0)
-        execute_after = if delay > 0, do: created_at + delay
+        timeout_ms = Keyword.get(opts, :timeout_ms, 0)
+        delay_ms = Keyword.get(opts, :delay_ms, 0)
+        execute_after = if delay_ms > 0, do: created_at + delay_ms
         step_requires = Keyword.get(opts, :requires) || %{}
 
         run_requires = Resolve.tag_set(state.db, run.requires_tag_set_id)
@@ -1205,7 +1361,7 @@ defmodule Coflux.Orchestration.Server do
               group_limit: group_limit,
               retries: retries,
               recurrent: recurrent,
-              timeout: timeout,
+              timeout_ms: timeout_ms,
               created_at: created_at,
               requires: step_requires
             })
@@ -2796,7 +2952,7 @@ defmodule Coflux.Orchestration.Server do
                   [Access.key(:sessions), session_id],
                   &Map.put(&1, :connection, nil)
                 )
-                |> Fleet.schedule_session_expiry(session_id, session.reconnection_timeout)
+                |> Fleet.schedule_session_expiry(session_id, session.reconnection_timeout_ms)
                 |> Effects.emit(%SessionConnected{
                   workspace: State.workspace_external_id(state, session.workspace_id),
                   session: session.external_id,
@@ -2847,9 +3003,45 @@ defmodule Coflux.Orchestration.Server do
     if state.epochs do
       Epochs.close(state.epochs)
     end
+
+    if state.admin_db do
+      Coflux.Store.close(state.admin_db)
+    end
   end
 
   # Private helper functions
+
+  # A secret set for a scope is a secret for every workspace that scope
+  # selects, so setting one takes a grant that contains the scope whole.
+  # Holding one workspace inside it isn't enough - that is the difference
+  # between `Scopes.covers?/2` and `Scopes.contains?/2`.
+  defp check_secret_scope_access(nil, _scopes), do: :ok
+
+  defp check_secret_scope_access(access, scopes) do
+    granted = access[:workspaces]
+
+    if Enum.all?(scopes, &Scopes.contains_any?(granted, &1)),
+      do: :ok,
+      else: {:error, :forbidden}
+  end
+
+  defp principal_identity(state, access) do
+    case Principals.get_principal(state.db, access && access[:principal_id]) do
+      {:ok, {type, external_id}} -> %{type: type, external_id: external_id}
+      {:ok, nil} -> nil
+    end
+  end
+
+  # A pool naming a secret its workspace can't see would never launch, so
+  # it is refused now rather than found out then. Checked against the
+  # definition being stored, never against a patch: a patch that names no
+  # secret can still leave the pool referring to one that has since gone.
+  defp check_secret_references(state, workspace_id, launcher) when is_map(launcher) do
+    workspace_name = state.workspaces[workspace_id].name
+    Coflux.Admin.Secrets.check_references(state.admin_db, workspace_name, launcher)
+  end
+
+  defp check_secret_references(_state, _workspace_id, _launcher), do: :ok
 
   defp validate_values_assets(db, values) do
     Enum.reduce_while(values, :ok, fn value, :ok ->
@@ -2885,4 +3077,15 @@ defmodule Coflux.Orchestration.Server do
 
   defp ok_or({:ok, val}, _reason), do: {:ok, val}
   defp ok_or(:error, reason), do: {:error, reason}
+
+  # Enabling or disabling a pool that doesn't exist must not conjure one:
+  # a state-only entry has no launcher and no modules, and every reader of
+  # `state.pools` assumes a pool has both.
+  defp require_pool(state, workspace_id, pool_name) do
+    if state.pools |> Map.get(workspace_id, %{}) |> Map.has_key?(pool_name) do
+      :ok
+    else
+      {:error, :not_found}
+    end
+  end
 end

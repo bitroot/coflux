@@ -26,7 +26,7 @@ defmodule Coflux.Orchestration.Streams do
       recorded. The closure records the execution that closed the stream.
     * Only an execution registered on a stream may append to it.
     * The latest registrant is the stream's producer, and its registration
-      carries the config (buffer, timeout) in force.
+      carries the config (buffer, timeout_ms) in force.
     * Consumer cursors are kept in-memory only; re-run consumers subscribe
       fresh from sequence 0.
 

@@ -46,6 +46,7 @@ defmodule Coflux.Topics.Pool do
       launcher: if(pool.launcher, do: build_launcher(pool.launcher)),
       state: to_string(Map.get(pool, :state, :active))
     }
+    |> maybe_put(:idleTimeoutMs, Map.get(pool, :idle_timeout_ms))
   end
 
   defp build_launcher(launcher) do
@@ -54,17 +55,46 @@ defmodule Coflux.Topics.Pool do
         :docker ->
           %{type: "docker", image: launcher.image}
           |> maybe_put(:dockerHost, Map.get(launcher, :docker_host))
+          |> maybe_put(:networkMode, Map.get(launcher, :network_mode))
 
         :process ->
           %{type: "process", directory: launcher.directory}
+
+        # Credentials are named, never held, so everything a pool is
+        # configured with belongs here: `pools get` shows exactly what
+        # `pools export` does.
+        :ecs ->
+          %{
+            type: "ecs",
+            cluster: launcher.cluster,
+            taskDefinition: launcher.task_definition,
+            region: launcher.region
+          }
+          |> maybe_put(:containerName, Map.get(launcher, :container_name))
+          |> maybe_put(:launchType, Map.get(launcher, :launch_type))
+          |> maybe_put(:capacityProvider, Map.get(launcher, :capacity_provider))
+          |> maybe_put(:subnets, Map.get(launcher, :subnets))
+          |> maybe_put(:securityGroups, Map.get(launcher, :security_groups))
+          |> maybe_put(:assignPublicIp, Map.get(launcher, :assign_public_ip))
+          |> maybe_put(:platformVersion, Map.get(launcher, :platform_version))
+          |> maybe_put(:credentialsSecret, Map.get(launcher, :credentials_secret))
+          |> maybe_put(:roleArn, Map.get(launcher, :role_arn))
+          |> maybe_put(:roleExternalId, Map.get(launcher, :role_external_id))
+          |> maybe_put(:endpoint, Map.get(launcher, :endpoint))
 
         :kubernetes ->
           %{type: "kubernetes", image: launcher.image}
           |> maybe_put(:namespace, Map.get(launcher, :namespace))
           |> maybe_put(:apiServer, Map.get(launcher, :api_server))
           |> maybe_put(:serviceAccount, Map.get(launcher, :service_account))
+          |> maybe_put(:tokenSecret, Map.get(launcher, :token_secret))
+          |> maybe_put(:caCert, Map.get(launcher, :ca_cert))
           |> maybe_put(:insecure, Map.get(launcher, :insecure))
           |> maybe_put(:imagePullPolicy, Map.get(launcher, :image_pull_policy))
+          |> maybe_put(:nodeSelector, Map.get(launcher, :node_selector))
+          |> maybe_put(:tolerations, Map.get(launcher, :tolerations))
+          |> maybe_put(:imagePullSecrets, Map.get(launcher, :image_pull_secrets))
+          |> maybe_put(:hostAliases, Map.get(launcher, :host_aliases))
           |> maybe_put(:labels, Map.get(launcher, :labels))
           |> maybe_put(:annotations, Map.get(launcher, :annotations))
           |> maybe_put(:activeDeadlineSeconds, Map.get(launcher, :active_deadline_seconds))
@@ -79,6 +109,7 @@ defmodule Coflux.Topics.Pool do
     |> maybe_put(:adapter, Map.get(launcher, :adapter))
     |> maybe_put(:concurrency, Map.get(launcher, :concurrency))
     |> maybe_put(:env, Map.get(launcher, :env))
+    |> maybe_put(:envSecrets, Map.get(launcher, :env_secrets))
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -93,7 +124,9 @@ defmodule Coflux.Topics.Pool.Model do
   alias Coflux.Events.{
     PoolStateChanged,
     PoolUpdated,
+    SessionConnected,
     SessionExecutions,
+    SessionUpdated,
     WorkerCreated,
     WorkerDeactivated,
     WorkerLaunchResult,
@@ -128,6 +161,7 @@ defmodule Coflux.Topics.Pool.Model do
       logs: nil,
       state: :active,
       session: e.session,
+      connected: false,
       executions: 0
     }
 
@@ -137,19 +171,28 @@ defmodule Coflux.Topics.Pool.Model do
   def apply(model, %WorkerLaunchResult{} = e),
     do: update(model, e.worker, &%{&1 | started_at: e.started_at, start_error: e.error})
 
+  # A worker may be asked to stop more than once (over its connection,
+  # then through its launcher): `stopping_at` is the first time it was
+  # asked, `stop_error` is how the latest attempt went, and `stopped_at`
+  # is set only once the worker is confirmed gone, cleanly, having been
+  # asked - a stop that was requested is not a worker that has stopped.
   def apply(model, %WorkerStopping{} = e),
-    do: update(model, e.worker, &%{&1 | stopping_at: e.stopping_at})
+    do: update(model, e.worker, &%{&1 | stopping_at: &1.stopping_at || e.stopping_at})
 
   def apply(model, %WorkerStopResult{} = e),
-    do: update(model, e.worker, &%{&1 | stopped_at: e.stopped_at, stop_error: e.error})
+    do: update(model, e.worker, &%{&1 | stop_error: e.error})
 
   def apply(model, %WorkerDeactivated{} = e),
     do:
-      update(
-        model,
-        e.worker,
-        &%{&1 | deactivated_at: e.deactivated_at, error: e.error, logs: e.logs}
-      )
+      update(model, e.worker, fn worker ->
+        %{
+          worker
+          | deactivated_at: e.deactivated_at,
+            error: e.error,
+            logs: e.logs,
+            stopped_at: if(worker.stopping_at && is_nil(e.error), do: e.deactivated_at)
+        }
+      end)
 
   def apply(model, %WorkerStateChanged{} = e),
     do: update(model, e.worker, &%{&1 | state: e.state})
@@ -159,10 +202,26 @@ defmodule Coflux.Topics.Pool.Model do
   def apply(model, %SessionExecutions{} = e),
     do: update(model, e.worker, &%{&1 | executions: e.executions})
 
+  # Session events name a session, not a worker, so they land on whichever
+  # worker was launched with it - and on none, for a session that isn't a
+  # pool worker's.
+  def apply(model, %SessionUpdated{} = e),
+    do: update_by_session(model, e.session, &%{&1 | connected: e.connected})
+
+  def apply(model, %SessionConnected{} = e),
+    do: update_by_session(model, e.session, &%{&1 | connected: e.connected})
+
   defp update(model, worker, fun) do
     case Map.fetch(model.workers, worker) do
       {:ok, entry} -> %{model | workers: Map.put(model.workers, worker, fun.(entry))}
       :error -> model
+    end
+  end
+
+  defp update_by_session(model, session, fun) do
+    case Enum.find(model.workers, fn {_id, worker} -> worker.session == session end) do
+      {worker_id, _} -> update(model, worker_id, fun)
+      nil -> model
     end
   end
 
@@ -184,6 +243,7 @@ defmodule Coflux.Topics.Pool.Model do
              logs: worker.logs,
              state: worker.state,
              sessionId: worker.session,
+             connected: worker.connected,
              executions: worker.executions
            }}
         end)

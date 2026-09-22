@@ -10,9 +10,84 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/bitroot/coflux/cli/internal/version"
 )
+
+// reasonText renders the server's validation vocabulary. Anything not
+// listed is printed as-is, so a new reason degrades to its own name
+// rather than disappearing.
+var reasonText = map[string]string{
+	"required":      "required",
+	"invalid":       "invalid",
+	"invalid_name":  "not a valid name",
+	"malformed":     "malformed",
+	"too_long":      "too long",
+	"too_many":      "too many",
+	"out_of_range":  "out of range",
+	"unknown_value": "not one of the accepted values",
+	"exclusive":     "cannot be combined with the other field given",
+	"reserved":      "uses a reserved name",
+}
+
+// flattenDetails turns the server's nested `details` into one line per
+// field: {"pools": {"mypool": {"launcher": {"region": "required"}}}}
+// becomes "pools.mypool.launcher.region: required".
+func flattenDetails(prefix string, details map[string]any) []string {
+	var lines []string
+	for key, value := range details {
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+		switch v := value.(type) {
+		case map[string]any:
+			lines = append(lines, flattenDetails(path, v)...)
+		case string:
+			text, ok := reasonText[v]
+			if !ok {
+				text = v
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", path, text))
+		default:
+			lines = append(lines, fmt.Sprintf("%s: %v", path, v))
+		}
+	}
+	return lines
+}
+
+// apiError renders an error response. The server names the field it
+// rejected and why, so print that rather than the raw JSON: a bad region
+// in a pool's launcher reads as
+//
+//	bad request
+//	  pools.mypool.launcher.region: required
+func apiError(statusCode int, body []byte) error {
+	var parsed struct {
+		Error   string         `json:"error"`
+		Message string         `json:"message"`
+		Details map[string]any `json:"details"`
+	}
+	if json.Unmarshal(body, &parsed) != nil || parsed.Error == "" {
+		return fmt.Errorf("HTTP %d: %s", statusCode, string(body))
+	}
+
+	// The error code is left as-is: it is a stable identifier that scripts
+	// and tests match on, and the detail lines below carry the prose.
+	headline := parsed.Error
+	if parsed.Message != "" {
+		headline += ": " + parsed.Message
+	}
+
+	lines := flattenDetails("", parsed.Details)
+	if len(lines) == 0 {
+		return errors.New(headline)
+	}
+	sort.Strings(lines)
+	return fmt.Errorf("%s\n  %s", headline, strings.Join(lines, "\n  "))
+}
 
 // Client provides HTTP API access to the Coflux server
 type Client struct {
@@ -309,7 +384,7 @@ func (c *Client) UpdatePools(ctx context.Context, workspaceID string, pools map[
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return err
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return apiError(resp.StatusCode, respBody)
 	}
 
 	return nil
@@ -365,6 +440,57 @@ func (c *Client) RevokeToken(ctx context.Context, externalID string) error {
 	}
 	_, err := c.post(ctx, "/api/revoke_token", body, nil)
 	return err
+}
+
+// Secrets API
+
+// SetSecretResult is what the server says about the secrets it has set -
+// one entry per workspace pattern the value was stored for.
+type SetSecretResult struct {
+	Name    string `json:"name"`
+	Secrets []struct {
+		Workspaces string `json:"workspaces"`
+		Version    int    `json:"version"`
+	} `json:"secrets"`
+}
+
+// SetSecret sets a secret's value for each of the given workspace patterns.
+func (c *Client) SetSecret(ctx context.Context, workspaces []string, name, value string) (*SetSecretResult, error) {
+	body := map[string]any{"name": name, "value": value, "workspaces": workspaces}
+	var result SetSecretResult
+	if _, err := c.post(ctx, "/api/set_secret", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DeleteSecretResult is the workspace patterns a secret was deleted from -
+// those of the requested ones it was actually set for.
+type DeleteSecretResult struct {
+	Workspaces []string `json:"workspaces"`
+}
+
+// DeleteSecret deletes a secret from each of the given workspace patterns.
+func (c *Client) DeleteSecret(ctx context.Context, workspaces []string, name string) (*DeleteSecretResult, error) {
+	body := map[string]any{"name": name, "workspaces": workspaces}
+	var result DeleteSecretResult
+	if _, err := c.post(ctx, "/api/delete_secret", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ListSecrets lists the project's secrets: names, scopes and versions.
+func (c *Client) ListSecrets(ctx context.Context) ([]map[string]any, error) {
+	var result map[string]map[string]any
+	if err := c.get(ctx, "/topics/secrets", nil, &result); err != nil {
+		return nil, err
+	}
+	secrets := make([]map[string]any, 0, len(result))
+	for _, secret := range result {
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
 }
 
 // RerunStepResult contains the IDs returned from re-running a step
@@ -544,19 +670,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, result
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return err
 		}
-		var errResp struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-			Details any    `json:"details"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			if errResp.Details != nil {
-				detailsJSON, _ := json.Marshal(errResp.Details)
-				return fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
-			}
-			return fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
-		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return apiError(resp.StatusCode, respBody)
 	}
 
 	if result != nil && len(respBody) > 0 {
@@ -597,19 +711,7 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) (h
 		if err := checkVersionMismatch(resp.StatusCode, respBody); err != nil {
 			return nil, err
 		}
-		var errResp struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-			Details any    `json:"details"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			if errResp.Details != nil {
-				detailsJSON, _ := json.Marshal(errResp.Details)
-				return nil, fmt.Errorf("%s: %s (details: %s)", errResp.Error, errResp.Message, string(detailsJSON))
-			}
-			return nil, fmt.Errorf("%s: %s", errResp.Error, errResp.Message)
-		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, apiError(resp.StatusCode, respBody)
 	}
 
 	if result != nil && len(respBody) > 0 {

@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Config represents the coflux.toml configuration file.
 // Defaults are set via viper.SetDefault() in cmd/coflux/main.go.
@@ -81,20 +84,20 @@ type BlobStoreConfig struct {
 
 // LogsConfig holds log storage configuration
 type LogsConfig struct {
-	Type          string  `mapstructure:"type"`
-	Token         *string `mapstructure:"token"`
-	URL           string  `mapstructure:"url"`
-	BatchSize     int     `mapstructure:"batch_size"`
-	FlushInterval float64 `mapstructure:"flush_interval"`
+	Type          string        `mapstructure:"type"`
+	Token         *string       `mapstructure:"token"`
+	URL           string        `mapstructure:"url"`
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
 }
 
 // MetricsConfig holds metric storage configuration
 type MetricsConfig struct {
-	Type          string  `mapstructure:"type"`
-	Token         *string `mapstructure:"token"`
-	URL           string  `mapstructure:"url"`
-	BatchSize     int     `mapstructure:"batch_size"`
-	FlushInterval float64 `mapstructure:"flush_interval"`
+	Type          string        `mapstructure:"type"`
+	Token         *string       `mapstructure:"token"`
+	URL           string        `mapstructure:"url"`
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
 }
 
 // IsSecure determines if the connection should use TLS

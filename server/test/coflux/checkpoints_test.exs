@@ -306,7 +306,7 @@ defmodule Coflux.CheckpointsTest do
       Sqlite3.execute(db, """
       INSERT INTO steps (
         id, number, run_id, module, target, type, priority, wait_for,
-        retry_limit, retry_backoff_min, retry_backoff_max, created_at
+        retry_limit, retry_backoff_min_ms, retry_backoff_max_ms, created_at
       )
       VALUES (#{id}, #{number}, #{run_id}, 'module', 'target', 0, 0, 0, 0, 0, 0, 0)
       """)

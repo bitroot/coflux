@@ -378,10 +378,9 @@ defmodule Coflux.Orchestration.Results do
         db,
         """
         SELECT c.kind, c.successor_id, c.successor_ref_id, c.created_at,
-               p.user_external_id, t.external_id
+               p.user_external_id, p.token_external_id
         FROM completions AS c
         LEFT JOIN principals AS p ON c.created_by = p.id
-        LEFT JOIN tokens AS t ON p.token_id = t.id
         WHERE c.execution_id = ?1
         """,
         {execution_id}
@@ -483,10 +482,9 @@ defmodule Coflux.Orchestration.Results do
            db,
            """
            SELECT c.kind, c.successor_id, c.successor_ref_id, c.created_at,
-                  p.user_external_id, t.external_id
+                  p.user_external_id, p.token_external_id
            FROM completions AS c
            LEFT JOIN principals AS p ON c.created_by = p.id
-           LEFT JOIN tokens AS t ON p.token_id = t.id
            WHERE c.execution_id = ?1
            """,
            {execution_id}

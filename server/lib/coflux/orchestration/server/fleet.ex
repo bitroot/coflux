@@ -7,8 +7,10 @@ defmodule Coflux.Orchestration.Server.Fleet do
   its connection - a worker that drops reconnects into the same session
   and picks up where it left off - which is why a session expires on a
   timer rather than on disconnect. Two timers apply: a worker that never
-  connects expires on its activation timeout, one that connected and went
-  away on its reconnection timeout.
+  connects expires on its activation timeout_ms, one that connected and went
+  away on its reconnection timeout_ms. A third case is neither, and is
+  handled by `Scheduler`: a worker that connects but never declares any
+  targets is deactivated once its readiness deadline passes.
 
   A *pool* is a declaration that workers of some shape should exist, and
   the launcher is what makes them. Launching is asynchronous: the task is
@@ -190,6 +192,21 @@ defmodule Coflux.Orchestration.Server.Fleet do
     end)
   end
 
+  @doc """
+  Whether a session has ever been in a position to take work: it
+  connected, and it said what it can run.
+
+  Until both have happened the session has never been able to accept an
+  execution, so the fact that it isn't running one says nothing about it
+  being surplus - which is why the idle timeout_ms only applies from here.
+  Declaring an *empty* set of targets still counts: the worker answered,
+  it just has nothing to offer, and it should be allowed to drain like
+  any other rather than pinning its pool open forever.
+  """
+  def session_ready?(session) do
+    !is_nil(session.activated_at) && !is_nil(session.declared_at)
+  end
+
   def session_at_capacity?(session) do
     if session.concurrency != 0 do
       load = MapSet.size(session.starting) + MapSet.size(session.executing)
@@ -314,13 +331,36 @@ defmodule Coflux.Orchestration.Server.Fleet do
       |> Map.get(execution.workspace_id, %{})
       |> Map.filter(fn {_, pool} ->
         Map.get(pool, :state, :active) != :disabled &&
-          pool.launcher && execution.module in pool.modules &&
+          pool.launcher && pool_hosts_module?(pool.modules, execution.module) &&
           has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
           satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
       end)
 
     if Enum.any?(pools) do
       pools |> Map.values() |> Enum.map(& &1.id) |> Enum.random()
+    end
+  end
+
+  # A pool's modules are what its workers are started with, so they mean
+  # what they mean to discovery: a name covers that module and, if it's a
+  # package, everything under it. No modules is no restriction.
+  def pool_hosts_module?([], _module), do: true
+
+  def pool_hosts_module?(modules, module) do
+    Enum.any?(modules, fn name ->
+      name == module || String.starts_with?(module, name <> ".")
+    end)
+  end
+
+  # The arguments a launched worker is started with. A pool with no
+  # modules hosts everything, and the worker has to be told so rather
+  # than left to default: it would otherwise take `worker.modules` from
+  # whatever coflux.toml its working directory holds, and host less than
+  # the server routes to it.
+  def worker_args(pool) do
+    case pool.modules do
+      [] -> ["--all-modules"]
+      modules -> modules
     end
   end
 
@@ -373,6 +413,7 @@ defmodule Coflux.Orchestration.Server.Fleet do
         :docker -> Coflux.DockerLauncher
         :process -> Coflux.ProcessLauncher
         :kubernetes -> Coflux.KubernetesLauncher
+        :ecs -> Coflux.EcsLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)
@@ -405,7 +446,20 @@ defmodule Coflux.Orchestration.Server.Fleet do
     })
   end
 
-  def deactivate_worker(state, worker_id, error, logs \\ nil) do
+  @doc """
+  Retires a worker: no more work, no more polling, and its session gone.
+
+  Deactivation can be reached twice for the same worker - two launcher
+  tasks landing on it, or a poll racing a stop - so a worker that has
+  already gone is not an error, just nothing left to do.
+  """
+  def deactivate_worker(state, worker_id, error, logs \\ nil)
+
+  def deactivate_worker(%{workers: workers} = state, worker_id, _error, _logs)
+      when not is_map_key(workers, worker_id),
+      do: state
+
+  def deactivate_worker(state, worker_id, error, logs) do
     {:ok, deactivated_at} = Workers.create_worker_deactivation(state.db, worker_id, error, logs)
 
     {worker, state} = pop_in(state, [Access.key(:workers), worker_id])
@@ -478,14 +532,14 @@ defmodule Coflux.Orchestration.Server.Fleet do
         active_sessions,
         state,
         fn {session_id, external_id, workspace_id, worker_id, provides_tag_set_id,
-            accepts_tag_set_id, activation_timeout, reconnection_timeout, secret_hash, created_at,
-            activated_at},
+            accepts_tag_set_id, activation_timeout_ms, reconnection_timeout_ms, secret_hash,
+            created_at, activated_at},
            state ->
           provides = Resolve.tag_set(state.db, provides_tag_set_id)
           accepts = Resolve.tag_set(state.db, accepts_tag_set_id)
 
-          activation_timeout = activation_timeout || @default_activation_timeout_ms
-          reconnection_timeout = reconnection_timeout || @default_reconnection_timeout_ms
+          activation_timeout_ms = activation_timeout_ms || @default_activation_timeout_ms
+          reconnection_timeout_ms = reconnection_timeout_ms || @default_reconnection_timeout_ms
 
           session = %{
             external_id: external_id,
@@ -503,8 +557,15 @@ defmodule Coflux.Orchestration.Server.Fleet do
             worker_id: worker_id,
             last_idle_at: activated_at || created_at,
             activated_at: activated_at,
-            activation_timeout: activation_timeout,
-            reconnection_timeout: reconnection_timeout,
+            # Targets live only in memory, so a session that reconnects
+            # after a restart has to declare them again - it is not ready
+            # until it does, and the deadline for doing so is armed by
+            # that reconnection rather than by the activation it did
+            # before the restart.
+            declared_at: nil,
+            ready_deadline_at: nil,
+            activation_timeout_ms: activation_timeout_ms,
+            reconnection_timeout_ms: reconnection_timeout_ms,
             total_executions: Map.get(assignment_counts_by_session, session_id, 0)
           }
 
@@ -516,9 +577,9 @@ defmodule Coflux.Orchestration.Server.Fleet do
           # Schedule expiry - either activation (if never connected) or reconnection (if was connected)
           state =
             if activated_at do
-              schedule_session_expiry(state, session_id, reconnection_timeout)
+              schedule_session_expiry(state, session_id, reconnection_timeout_ms)
             else
-              schedule_session_expiry(state, session_id, activation_timeout)
+              schedule_session_expiry(state, session_id, activation_timeout_ms)
             end
 
           # Link session to worker if applicable

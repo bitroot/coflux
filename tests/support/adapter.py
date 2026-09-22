@@ -1,19 +1,38 @@
 """Test adapter shim: proxies the CLI adapter protocol over a Unix socket.
 
-discover: prints the manifest from the file specified by --manifest.
+discover: prints the manifest from the file specified by --manifest, cut
+          down to the modules asked for the way the real adapter would be:
+          a name covers its submodules, and no names means everything.
 execute:  bidirectional proxy between stdin/stdout and a Unix socket (--socket).
 """
 
 import argparse
+import json
 import os
 import socket
 import sys
 import threading
+import time
+
+
+def _hosted(module, names):
+    return any(module == n or module.startswith(n + ".") for n in names)
 
 
 def discover(args):
+    # --discover-delay stands in for a worker that is slow to start: a big
+    # import, or an image still being pulled. The worker has a session
+    # from the moment the server launches it, but can't say what it runs
+    # until this returns.
+    if args.discover_delay:
+        time.sleep(args.discover_delay)
     with open(args.manifest) as f:
-        print(f.read(), end="")
+        manifest = json.load(f)
+    if args.modules:
+        manifest["targets"] = [
+            t for t in manifest["targets"] if _hosted(t["module"], args.modules)
+        ]
+    print(json.dumps(manifest), end="")
 
 
 def execute(args):
@@ -67,6 +86,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--socket")
+    parser.add_argument("--discover-delay", type=float, default=0)
     parser.add_argument("command", choices=["discover", "execute"])
     parser.add_argument("modules", nargs="*")
     args = parser.parse_args()

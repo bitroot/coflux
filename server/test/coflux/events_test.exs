@@ -27,10 +27,10 @@ defmodule Coflux.EventsTest do
     wait_for: [],
     cache: nil,
     defer: nil,
-    delay: 0,
+    delay_ms: 0,
     retries: nil,
     recurrent: false,
-    timeout: 0,
+    timeout_ms: 0,
     requires: %{},
     memo: false,
     streams: nil,
@@ -198,12 +198,12 @@ defmodule Coflux.EventsTest do
 
     :ok =
       Orchestration.register_manifests(project, ws, %{
-        "test" => %{"main" => %{@workflow | delay: 5}, "other" => @workflow}
+        "test" => %{"main" => %{@workflow | delay_ms: 5}, "other" => @workflow}
       })
 
     {subs, models} = check(project, subs)
     assert map_size(models[{:workflow, "test", "main", ws}].runs) == 2
-    assert models[{:workflow, "test", "main", ws}].workflow.delay == 5
+    assert models[{:workflow, "test", "main", ws}].workflow.delay_ms == 5
     assert models[{:targets, ws}]["test"]["other"] == {:workflow, nil}
 
     :ok = Orchestration.archive_module(project, ws, "test")

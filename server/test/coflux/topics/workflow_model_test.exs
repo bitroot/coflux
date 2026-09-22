@@ -19,10 +19,10 @@ defmodule Coflux.Topics.WorkflowModelTest do
     wait_for: [],
     cache: nil,
     defer: nil,
-    delay: 5,
-    retries: %{limit: 2, backoff_min: 0, backoff_max: 0},
+    delay_ms: 5,
+    retries: %{limit: 2, backoff_min_ms: 0, backoff_max_ms: 0},
     recurrent: false,
-    timeout: 0,
+    timeout_ms: 0,
     requires: %{},
     memo: false,
     streams: nil,
@@ -105,8 +105,8 @@ defmodule Coflux.Topics.WorkflowModelTest do
     value = Model.project(fold([registered()]))
     assert value.parameters == [%{name: "x", default: nil, annotation: nil}]
     assert value.instruction == "Do it"
-    assert value.configuration.delay == 5
-    assert value.configuration.retries == %{limit: 2, backoffMin: 0, backoffMax: 0}
+    assert value.configuration.delayMs == 5
+    assert value.configuration.retries == %{limit: 2, backoffMinMs: 0, backoffMaxMs: 0}
     assert value.configuration.requires == %{}
   end
 

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/bitroot/coflux/cli/internal/config"
 	"github.com/bitroot/coflux/cli/internal/version"
@@ -49,9 +51,9 @@ func init() {
 	viper.SetDefault("worker.concurrency", min(runtime.NumCPU()+4, 32))
 	viper.SetDefault("blobs.threshold", 100)
 	viper.SetDefault("logs.batch_size", 100)
-	viper.SetDefault("logs.flush_interval", 0.5)
+	viper.SetDefault("logs.flush_interval", "500ms")
 	viper.SetDefault("metrics.batch_size", 100)
-	viper.SetDefault("metrics.flush_interval", 0.2)
+	viper.SetDefault("metrics.flush_interval", "200ms")
 	viper.SetDefault("log_level", "info")
 
 	// Global flags
@@ -105,7 +107,8 @@ func init() {
 	queueCmd.GroupID = "management"
 	inputsCmd.GroupID = "management"
 	catalogCmd.GroupID = "management"
-	rootCmd.AddCommand(workspacesCmd, manifestsCmd, poolsCmd, tokensCmd, assetsCmd, blobsCmd, logsCmd, sessionsCmd, queueCmd, inputsCmd, catalogCmd)
+	secretsCmd.GroupID = "management"
+	rootCmd.AddCommand(workspacesCmd, manifestsCmd, poolsCmd, tokensCmd, secretsCmd, assetsCmd, blobsCmd, logsCmd, sessionsCmd, queueCmd, inputsCmd, catalogCmd)
 }
 
 func initConfig(cmd *cobra.Command, args []string) error {
@@ -135,11 +138,38 @@ func initConfig(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var durationType = reflect.TypeOf(time.Duration(0))
+
+// stringToDurationHook decodes duration settings from duration strings
+// ("500ms", "2s"). A bare number is rejected rather than truncated to
+// nanoseconds: before 0.13 these were written as a float of seconds, and
+// silently turning `flush_interval = 0.5` into zero would be worse than
+// failing.
+func stringToDurationHook(from reflect.Type, to reflect.Type, data any) (any, error) {
+	if to != durationType || from == durationType {
+		return data, nil
+	}
+	if from.Kind() != reflect.String {
+		return nil, fmt.Errorf("expected a duration string (e.g. \"500ms\"), got %v", data)
+	}
+	value, err := time.ParseDuration(data.(string))
+	if err != nil {
+		return nil, fmt.Errorf("invalid duration %q (expected e.g. \"500ms\")", data)
+	}
+	return value, nil
+}
+
 // loadConfig unmarshals viper config into a Config struct
 func loadConfig() (*config.Config, error) {
 	cfg := &config.Config{}
 	if err := viper.Unmarshal(cfg, func(dc *mapstructure.DecoderConfig) {
 		dc.ErrorUnused = true
+		// Replaces viper's default StringToTimeDurationHookFunc with a
+		// stricter one; the slice hook is viper's default, kept as-is.
+		dc.DecodeHook = mapstructure.ComposeDecodeHookFunc(
+			stringToDurationHook,
+			mapstructure.StringToSliceHookFunc(","),
+		)
 	}); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}

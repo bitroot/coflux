@@ -1,6 +1,8 @@
 ## 0.13.0
 
-No changes.
+Changes:
+
+- The manifest and submission payloads name durations with their unit: `delay` and `timeout` are `delay_ms` and `timeout_ms`, matching `max_age_ms` and `backoff_min_ms`/`backoff_max_ms`, which already did. Decorator arguments are unchanged — `delay`, `timeout` and `cache` still take seconds or a `timedelta`.
 
 ## 0.12.0
 

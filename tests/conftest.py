@@ -1,10 +1,10 @@
 import json
-import tempfile
 import time
 import uuid
 from contextlib import contextmanager
 
 import pytest
+from _pytest.tmpdir import TempPathFactory
 from support import cli
 from support.helpers import (
     ADAPTER_SCRIPT,
@@ -229,10 +229,21 @@ class WorkerContext:
 
 
 def pytest_configure(config):
-    """Start a shared test server (runs on the controller and in non-xdist mode)."""
+    """Start a shared test server (runs on the controller and in non-xdist mode).
+
+    The data directory comes from pytest's temp-dir machinery rather than
+    `tempfile.mkdtemp`, so that something owns it: the last few runs are
+    kept, which leaves a failed run's server data there to inspect, and
+    older ones are collected. A directory made with `mkdtemp` is never
+    anyone's to remove, so it simply accumulates.
+
+    A hook rather than a fixture because `pytest_configure_node` has to
+    hand the port to each xdist worker before any test runs — hence asking
+    `TempPathFactory` for itself instead of taking `tmp_path_factory`.
+    """
     if not hasattr(config, "workerinput"):
-        data_dir = tempfile.mkdtemp(prefix="coflux-test-server-")
-        srv = ManagedServer(data_dir)
+        factory = TempPathFactory.from_config(config, _ispytest=True)
+        srv = ManagedServer(str(factory.mktemp("shared-server")))
         srv.start()
         config._server = srv
 

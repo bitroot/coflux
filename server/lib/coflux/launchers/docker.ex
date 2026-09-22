@@ -3,18 +3,28 @@ defmodule Coflux.DockerLauncher do
   @log_tail_lines 20
   @log_max_bytes 1024
 
-  def launch(env, modules, config, _opts \\ %{}) do
+  # Host networking is the default because it is the one mode in which a
+  # worker can reach a server running on the same machine without knowing
+  # anything about how to address it. It isn't available everywhere -
+  # Docker Desktop runs containers in a VM, where the host network is the
+  # VM's - so it is a default, not a fixture.
+  @default_network_mode "host"
+
+  # `args` are the worker's arguments - its modules, or `--all-modules` -
+  # which the image's entrypoint (`coflux worker ...`) is expected to take.
+  def launch(env, args, config, _opts \\ %{}) do
     docker_conn = parse_docker_host(config[:docker_host])
 
     container_env = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)
+    network_mode = Map.get(config, :network_mode) || @default_network_mode
 
     with {:ok, %{"Id" => container_id}} <-
            create_container(
              docker_conn,
              %{
                "Image" => Map.fetch!(config, :image),
-               "HostConfig" => %{"NetworkMode" => "host"},
-               "Cmd" => modules,
+               "HostConfig" => %{"NetworkMode" => network_mode},
+               "Cmd" => args,
                "Env" => container_env
              }
            ),
@@ -25,7 +35,7 @@ defmodule Coflux.DockerLauncher do
     end
   end
 
-  def stop(%{container: container_id, docker_conn: docker_conn}) do
+  def stop(%{container: container_id, docker_conn: docker_conn}, _config \\ nil) do
     case stop_container(docker_conn, container_id) do
       :ok ->
         case remove_container(docker_conn, container_id) do
@@ -41,7 +51,7 @@ defmodule Coflux.DockerLauncher do
     end
   end
 
-  def poll(%{container: container_id, docker_conn: docker_conn}) do
+  def poll(%{container: container_id, docker_conn: docker_conn}, _config \\ nil) do
     case inspect_container(docker_conn, container_id) do
       {:ok, result} ->
         state = result["State"]
@@ -120,7 +130,7 @@ defmodule Coflux.DockerLauncher do
           400 -> {:error, :bad_parameter}
           404 -> {:error, :no_such_image}
           409 -> {:error, :conflict}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->
@@ -135,7 +145,7 @@ defmodule Coflux.DockerLauncher do
           204 -> :ok
           304 -> {:error, :container_already_started}
           404 -> {:error, :no_such_container}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->
@@ -149,7 +159,7 @@ defmodule Coflux.DockerLauncher do
         case response.status do
           200 -> {:ok, response.body}
           404 -> {:error, :no_such_container}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->
@@ -172,7 +182,7 @@ defmodule Coflux.DockerLauncher do
         case response.status do
           200 -> {:ok, demux_docker_logs(response.body)}
           404 -> {:error, :no_such_container}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->
@@ -189,6 +199,7 @@ defmodule Coflux.DockerLauncher do
   defp normalize_launch_error(:container_already_started), do: "launch_container_exists"
   defp normalize_launch_error(:no_such_container), do: "launch_container_not_found"
   defp normalize_launch_error(:request_failed), do: "launch_request_failed"
+  defp normalize_launch_error({:unexpected_status, status}), do: "launch_status:#{status}"
   defp normalize_launch_error(_), do: "launch_request_failed"
 
   defp demux_docker_logs(data) when is_binary(data) do
@@ -213,7 +224,7 @@ defmodule Coflux.DockerLauncher do
           204 -> :ok
           304 -> :ok
           404 -> {:error, :no_such_container}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->
@@ -229,7 +240,7 @@ defmodule Coflux.DockerLauncher do
           400 -> {:error, :bad_parameter}
           404 -> {:error, :no_such_container}
           409 -> {:error, :conflict}
-          500 -> {:error, :server_error}
+          status -> {:error, {:unexpected_status, status}}
         end
 
       {:error, _} = error ->

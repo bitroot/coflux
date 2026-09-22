@@ -1,10 +1,20 @@
 defmodule Coflux.Handlers.Api do
   import Coflux.Handlers.Utils
 
-  alias Coflux.{Auth, Config, Orchestration, MapUtils, Version}
+  alias Coflux.{Auth, Config, Orchestration, MapUtils, Scopes, Version}
   alias Coflux.Orchestration.Ids
 
   @max_parameters 20
+
+  @ecs_launch_types ["FARGATE", "EC2", "EXTERNAL"]
+  @pull_policies ["Always", "Never", "IfNotPresent"]
+
+  # An IAM role ARN: any partition, a 12-digit account, and a name that
+  # may sit under a path.
+  @iam_role_arn_regex ~r/^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@\/-]+$/
+
+  # STS's own rule for an external ID.
+  @external_id_regex ~r/^[\w+=,.@:\/-]{2,1224}$/
 
   # A directory upload arrives as one entry per file, so this bounds an
   # accidental drop of a very large tree. Unlike the sizes, which the
@@ -71,51 +81,16 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp workspace_matches?(_workspace, "*"), do: true
-  defp workspace_matches?(workspace, workspace), do: true
-
-  defp workspace_matches?(workspace, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      # "staging/*" matches "staging/foo", "staging/foo/bar", etc. (not "staging" itself)
-      String.starts_with?(workspace, String.slice(pattern, 0..-2//1))
-    else
-      false
-    end
-  end
-
-  # Check if all requested workspace patterns are covered by the caller's access.
-  # Returns true if the caller can grant the requested access level.
-  defp workspaces_covered?(:all, _requested), do: true
+  # Whether the caller can grant the requested access: each scope asked for
+  # has to be contained whole by one the caller holds. Holding a workspace
+  # inside a scope is not holding the scope.
   defp workspaces_covered?(_caller, nil), do: true
 
-  defp workspaces_covered?(caller_patterns, requested) do
-    Enum.all?(requested, &pattern_covered_by?(caller_patterns, &1))
+  defp workspaces_covered?(caller_scopes, requested) do
+    Enum.all?(requested, &Scopes.contains_any?(caller_scopes, &1))
   end
 
-  defp pattern_covered_by?(caller_patterns, "*") do
-    # Full access - only covered by explicit "*" pattern
-    Enum.any?(caller_patterns, &(&1 == "*"))
-  end
-
-  defp pattern_covered_by?(caller_patterns, pattern) do
-    if String.ends_with?(pattern, "/*") do
-      # Wildcard pattern "X/*" - caller needs "*", same pattern, or broader wildcard
-      prefix = String.slice(pattern, 0..-2//1)
-
-      Enum.any?(caller_patterns, fn cp ->
-        cp == "*" or cp == pattern or
-          (String.ends_with?(cp, "/*") and
-             String.starts_with?(prefix, String.slice(cp, 0..-2//1)))
-      end)
-    else
-      # Exact pattern - use existing workspace_matches?
-      Enum.any?(caller_patterns, &workspace_matches?(pattern, &1))
-    end
-  end
-
-  defp handle(req, "GET", ["discover"], _project_id, %{workspaces: workspaces}) do
-    patterns = if workspaces == :all, do: ["*"], else: workspaces
-
+  defp handle(req, "GET", ["discover"], _project_id, %{workspaces: patterns}) do
     json_response(req, %{
       "version" => Version.version(),
       "api_version" => Version.api_version(),
@@ -267,6 +242,7 @@ defmodule Coflux.Handlers.Api do
              ) do
           :ok -> :cowboy_req.reply(204, req)
           {:error, :already_exists} -> json_error_response(req, "already_exists", status: 409)
+          {:error, {:secrets_not_found, names}} -> secrets_not_found_response(req, names)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
@@ -293,6 +269,7 @@ defmodule Coflux.Handlers.Api do
           :ok -> :cowboy_req.reply(204, req)
           {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :type_change} -> json_error_response(req, "type_change", status: 409)
+          {:error, {:secrets_not_found, names}} -> secrets_not_found_response(req, names)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
         end
@@ -305,7 +282,7 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "POST", ["disable_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
-           pool_name: "poolName"
+           pool_name: {"poolName", &parse_pool_name/1}
          }) do
       {:ok, arguments, req} ->
         case Orchestration.disable_pool(
@@ -315,6 +292,7 @@ defmodule Coflux.Handlers.Api do
                access
              ) do
           :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
@@ -327,7 +305,7 @@ defmodule Coflux.Handlers.Api do
   defp handle(req, "POST", ["enable_pool"], project_id, access) do
     case read_arguments(req, %{
            workspace_id: "workspaceId",
-           pool_name: "poolName"
+           pool_name: {"poolName", &parse_pool_name/1}
          }) do
       {:ok, arguments, req} ->
         case Orchestration.enable_pool(
@@ -337,6 +315,7 @@ defmodule Coflux.Handlers.Api do
                access
              ) do
           :ok -> :cowboy_req.reply(204, req)
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
           {:error, :workspace_invalid} -> json_error_response(req, "not_found", status: 404)
           {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
         end
@@ -389,6 +368,9 @@ defmodule Coflux.Handlers.Api do
              ) do
           :ok ->
             :cowboy_req.reply(204, req)
+
+          {:error, {:secrets_not_found, names}} ->
+            secrets_not_found_response(req, names)
 
           {:error, :conflict} ->
             json_error_response(req, "conflict",
@@ -511,10 +493,10 @@ defmodule Coflux.Handlers.Api do
              wait_for: {"waitFor", &parse_indexes/1},
              cache: {"cache", &parse_cache/1},
              defer: {"defer", &parse_defer/1},
-             delay: {"delay", &parse_integer(&1, optional: true)},
+             delay_ms: {"delayMs", &parse_integer(&1, optional: true)},
              retries: {"retries", &parse_retries/1},
              recurrent: {"recurrent", &parse_boolean(&1, optional: true)},
-             timeout: {"timeout", &parse_integer(&1, optional: true)},
+             timeout_ms: {"timeoutMs", &parse_integer(&1, optional: true)},
              requires: {"requires", &parse_tag_set/1},
              memo: {"memo", &parse_boolean(&1, optional: true)},
              streams: {"streams", &parse_streams_config/1},
@@ -535,10 +517,10 @@ defmodule Coflux.Handlers.Api do
                wait_for: arguments[:wait_for],
                cache: arguments[:cache],
                defer: arguments[:defer],
-               delay: arguments[:delay] || 0,
+               delay_ms: arguments[:delay_ms] || 0,
                retries: arguments[:retries],
                recurrent: arguments[:recurrent] == true,
-               timeout: arguments[:timeout] || 0,
+               timeout_ms: arguments[:timeout_ms] || 0,
                requires: arguments[:requires],
                memo: arguments[:memo],
                streams: arguments[:streams],
@@ -971,7 +953,7 @@ defmodule Coflux.Handlers.Api do
             # If no workspaces specified, inherit caller's workspaces (unless caller has full access)
             effective_workspaces =
               case {requested_workspaces, access.workspaces} do
-                {nil, :all} -> nil
+                {nil, ["*"]} -> nil
                 {nil, patterns} -> patterns
                 {requested, _} -> requested
               end
@@ -999,6 +981,65 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp handle(req, "POST", ["set_secret"], project_id, access) do
+    case read_arguments(req, %{
+           name: {"name", &parse_secret_name/1},
+           value: {"value", &parse_secret_value/1},
+           workspaces: {"workspaces", &parse_workspaces/1}
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.set_secret(
+               project_id,
+               arguments.workspaces,
+               arguments.name,
+               arguments.value,
+               access
+             ) do
+          {:ok, secrets} ->
+            json_response(req, %{
+              "name" => arguments.name,
+              "secrets" =>
+                Enum.map(secrets, fn secret ->
+                  %{"workspaces" => secret.workspaces, "version" => secret.version}
+                end)
+            })
+
+          {:error, :forbidden} ->
+            json_error_response(req, "forbidden", status: 403)
+
+          {:error, :no_secret} ->
+            json_error_response(req, "bad_request",
+              details: %{message: "Secrets require COFLUX_SECRET to be configured"}
+            )
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
+  defp handle(req, "POST", ["delete_secret"], project_id, access) do
+    case read_arguments(req, %{
+           name: {"name", &parse_secret_name/1},
+           workspaces: {"workspaces", &parse_workspaces/1}
+         }) do
+      {:ok, arguments, req} ->
+        case Orchestration.delete_secret(
+               project_id,
+               arguments.workspaces,
+               arguments.name,
+               access
+             ) do
+          {:ok, deleted} -> json_response(req, %{"workspaces" => deleted})
+          {:error, :not_found} -> json_error_response(req, "not_found", status: 404)
+          {:error, :forbidden} -> json_error_response(req, "forbidden", status: 403)
+        end
+
+      {:error, errors, req} ->
+        json_error_response(req, "bad_request", details: errors)
+    end
+  end
+
   defp handle(req, "POST", ["revoke_token"], project_id, access) do
     case read_arguments(req, %{external_id: "externalId"}) do
       {:ok, arguments, req} ->
@@ -1010,7 +1051,7 @@ defmodule Coflux.Handlers.Api do
           {:ok, token} ->
             # Allow revocation if caller has full access OR created this token
             can_revoke =
-              access.workspaces == :all or
+              "*" in access.workspaces or
                 token.created_by_principal_id == access[:principal_id]
 
             if can_revoke do
@@ -1057,8 +1098,8 @@ defmodule Coflux.Handlers.Api do
   # Helper functions for handle/5 clauses
 
   defp parse_workspaces(value) when is_list(value) do
-    if Enum.all?(value, &is_binary/1) do
-      {:ok, value}
+    if value != [] and Enum.all?(value, &Scopes.valid?/1) do
+      {:ok, Enum.uniq(value)}
     else
       {:error, :invalid}
     end
@@ -1086,20 +1127,6 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp is_valid_module_pattern?(pattern) do
-    cond do
-      not is_binary(pattern) ->
-        false
-
-      String.length(pattern) > 100 ->
-        false
-
-      true ->
-        parts = String.split(pattern, ".")
-        Enum.all?(parts, &(&1 == "*" || Regex.match?(~r/^[a-z_][a-z0-9_]*$/i, &1)))
-    end
-  end
-
   defp is_valid_tag_key?(key) do
     is_valid_string?(key, regex: ~r/^[a-z0-9_-]{1,20}$/i)
   end
@@ -1120,10 +1147,14 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # A pool's modules are names, not patterns: the list is handed to the
+  # launcher as the worker's arguments, and a name already covers its
+  # submodules, the way discovery imports it. An empty list is no
+  # restriction - the pool hosts everything its workers find.
   defp parse_modules(value) do
     value = List.wrap(value)
 
-    if Enum.all?(value, &is_valid_module_pattern?/1) do
+    if Enum.all?(value, &is_valid_module_name?/1) do
       {:ok, value}
     else
       {:error, :invalid}
@@ -1161,7 +1192,7 @@ defmodule Coflux.Handlers.Api do
               {:cont, {:ok, Map.put(result, key, value)}}
 
             {:error, error} ->
-              {:halt, {:error, error}}
+              {:halt, {:error, %{key => error}}}
           end
         end)
 
@@ -1170,236 +1201,299 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
-  defp parse_docker_launcher(value) do
-    image = Map.get(value, "image")
-    docker_host = Map.get(value, "dockerHost")
+  # --- Field validation ------------------------------------------------
+  #
+  # Each check returns `:ok`, or `{:error, %{field => reason}}` naming the
+  # field it rejected. `merge_error/3` folds those into a dotted path, so a
+  # bad region in a pool's launcher reaches the client as
+  # `pools.my-pool.launcher.region` rather than a bare `invalid`, which
+  # says only that something somewhere in the request was wrong.
+  #
+  # Reasons are a small fixed vocabulary, so a client can render them
+  # without parsing prose: `:required`, `:invalid` (wrong type or shape),
+  # `:too_long`, `:too_many`, `:malformed`, `:out_of_range`,
+  # `:unknown_value`, `:exclusive`, `:reserved`.
 
+  defp required(value, field, kind, opts) do
+    case Map.get(value, field) do
+      nil -> {:error, %{field => :required}}
+      field_value -> check_field(field_value, field, kind, opts)
+    end
+  end
+
+  defp optional(value, field, kind, opts \\ []) do
+    case Map.get(value, field) do
+      nil -> :ok
+      field_value -> check_field(field_value, field, kind, opts)
+    end
+  end
+
+  defp check_field(value, field, :string, opts) do
     cond do
-      not is_binary(image) or String.length(image) > 200 ->
-        {:error, :invalid}
+      not is_binary(value) ->
+        {:error, %{field => :invalid}}
 
-      not is_nil(docker_host) and (not is_binary(docker_host) or String.length(docker_host) > 200) ->
-        {:error, :invalid}
+      opts[:non_empty] && value == "" ->
+        {:error, %{field => :required}}
+
+      opts[:max] && String.length(value) > opts[:max] ->
+        {:error, %{field => :too_long}}
+
+      opts[:match] && not Regex.match?(opts[:match], value) ->
+        {:error, %{field => :malformed}}
+
+      opts[:secret_name] && not Coflux.Admin.Secrets.valid_name?(value) ->
+        {:error, %{field => :malformed}}
+
+      opts[:prefixes] && not String.starts_with?(value, opts[:prefixes]) ->
+        {:error, %{field => :malformed}}
 
       true ->
-        launcher = %{type: :docker, image: image}
+        :ok
+    end
+  end
 
-        launcher =
-          if docker_host, do: Map.put(launcher, :docker_host, docker_host), else: launcher
+  defp check_field(value, field, :boolean, _opts) do
+    if is_boolean(value), do: :ok, else: {:error, %{field => :invalid}}
+  end
 
-        {:ok, launcher}
+  defp check_field(value, field, :integer, opts) do
+    cond do
+      not is_integer(value) -> {:error, %{field => :invalid}}
+      opts[:min] && value < opts[:min] -> {:error, %{field => :out_of_range}}
+      true -> :ok
+    end
+  end
+
+  defp check_field(value, field, :enum, opts) do
+    if value in opts[:values], do: :ok, else: {:error, %{field => :unknown_value}}
+  end
+
+  defp check_field(value, field, :list, opts) do
+    cond do
+      not is_list(value) -> {:error, %{field => :invalid}}
+      opts[:max] && length(value) > opts[:max] -> {:error, %{field => :too_many}}
+      true -> :ok
+    end
+  end
+
+  defp check_field(value, field, :string_list, opts) do
+    cond do
+      not is_list(value) -> {:error, %{field => :invalid}}
+      opts[:min] && length(value) < opts[:min] -> {:error, %{field => :required}}
+      opts[:max] && length(value) > opts[:max] -> {:error, %{field => :too_many}}
+      Enum.any?(value, &(not is_binary(&1))) -> {:error, %{field => :invalid}}
+      true -> :ok
+    end
+  end
+
+  # Subnet and security-group IDs: a non-empty list of non-empty strings.
+  defp check_field(value, field, :id_list, opts) do
+    if is_string_list?(value, opts[:max]), do: :ok, else: {:error, %{field => :invalid}}
+  end
+
+  defp check_field(value, field, :string_map, opts) do
+    cond do
+      not is_map(value) ->
+        {:error, %{field => :invalid}}
+
+      Enum.any?(value, fn {k, v} -> not is_binary(k) or not is_binary(v) end) ->
+        {:error, %{field => :invalid}}
+
+      opts[:reserved_prefix] &&
+          Enum.any?(value, fn {k, _} -> String.starts_with?(k, opts[:reserved_prefix]) end) ->
+        {:error, %{field => :reserved}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Environment variables set from named secrets: keys as for `env`, values
+  # naming a secret rather than holding one.
+  defp check_field(value, field, :secret_map, opts) do
+    cond do
+      not is_map(value) ->
+        {:error, %{field => :invalid}}
+
+      Enum.any?(value, fn {k, v} ->
+        not is_binary(k) or not Coflux.Admin.Secrets.valid_name?(v)
+      end) ->
+        {:error, %{field => :invalid}}
+
+      opts[:reserved_prefix] &&
+          Enum.any?(value, fn {k, _} -> String.starts_with?(k, opts[:reserved_prefix]) end) ->
+        {:error, %{field => :reserved}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_field(value, field, :map, _opts) do
+    if is_map(value), do: :ok, else: {:error, %{field => :invalid}}
+  end
+
+  # Two fields that may not be given together. Both are named, since
+  # either one is a candidate for removal and the reader can't tell which
+  # from one half of the pair.
+  defp exclusive(value, field, with_field) do
+    if is_nil(Map.get(value, field)) or is_nil(Map.get(value, with_field)) do
+      :ok
+    else
+      {:error, %{field => :exclusive, with_field => :exclusive}}
+    end
+  end
+
+  # A field that means nothing on its own: giving it makes the other
+  # required, so that is what the error names.
+  defp together(value, field, needs) do
+    if is_nil(Map.get(value, field)) or not is_nil(Map.get(value, needs)) do
+      :ok
+    else
+      {:error, %{needs => :required}}
+    end
+  end
+
+  defp parse_docker_launcher(value) do
+    with :ok <- required(value, "image", :string, max: 200),
+         :ok <- optional(value, "dockerHost", :string, max: 200),
+         :ok <- optional(value, "networkMode", :string, max: 200) do
+      launcher =
+        %{type: :docker, image: Map.get(value, "image")}
+        |> maybe_put_value(:docker_host, Map.get(value, "dockerHost"))
+        |> maybe_put_value(:network_mode, Map.get(value, "networkMode"))
+
+      {:ok, launcher}
     end
   end
 
   defp parse_process_launcher(value) do
-    directory = Map.get(value, "directory")
-
-    cond do
-      not is_binary(directory) or String.length(directory) > 500 ->
-        {:error, :invalid}
-
-      true ->
-        {:ok, %{type: :process, directory: directory}}
+    with :ok <- required(value, "directory", :string, max: 500) do
+      {:ok, %{type: :process, directory: Map.get(value, "directory")}}
     end
   end
 
   defp parse_kubernetes_launcher(value) do
-    image = Map.get(value, "image")
-    namespace = Map.get(value, "namespace")
-    service_account = Map.get(value, "serviceAccount")
-    api_server = Map.get(value, "apiServer")
-    token = Map.get(value, "token")
-    ca_cert = Map.get(value, "caCert")
-    insecure = Map.get(value, "insecure")
-    image_pull_policy = Map.get(value, "imagePullPolicy")
-    node_selector = Map.get(value, "nodeSelector")
-    tolerations = Map.get(value, "tolerations")
-    image_pull_secrets = Map.get(value, "imagePullSecrets")
-    host_aliases = Map.get(value, "hostAliases")
-    resources = Map.get(value, "resources")
-    labels = Map.get(value, "labels")
-    annotations = Map.get(value, "annotations")
-    active_deadline_seconds = Map.get(value, "activeDeadlineSeconds")
-    volumes = Map.get(value, "volumes")
-    volume_mounts = Map.get(value, "volumeMounts")
+    with :ok <- required(value, "image", :string, max: 200),
+         :ok <- optional(value, "namespace", :string, max: 253),
+         :ok <- optional(value, "serviceAccount", :string, max: 253),
+         :ok <- optional(value, "apiServer", :string, max: 500),
+         :ok <- optional(value, "tokenSecret", :string, secret_name: true),
+         :ok <- optional(value, "caCert", :string),
+         :ok <- optional(value, "insecure", :boolean),
+         :ok <- optional(value, "imagePullPolicy", :enum, values: @pull_policies),
+         :ok <- optional(value, "nodeSelector", :map),
+         :ok <- optional(value, "tolerations", :list),
+         :ok <- optional(value, "imagePullSecrets", :string_list),
+         :ok <- optional(value, "hostAliases", :list),
+         :ok <- optional(value, "resources", :map),
+         :ok <- optional(value, "labels", :string_map),
+         :ok <- optional(value, "annotations", :string_map),
+         :ok <- optional(value, "activeDeadlineSeconds", :integer, min: 1),
+         :ok <- optional(value, "volumes", :list),
+         :ok <- optional(value, "volumeMounts", :list) do
+      launcher =
+        %{type: :kubernetes, image: Map.get(value, "image")}
+        |> maybe_put_value(:namespace, Map.get(value, "namespace"))
+        |> maybe_put_value(:service_account, Map.get(value, "serviceAccount"))
+        |> maybe_put_value(:api_server, Map.get(value, "apiServer"))
+        |> maybe_put_value(:token_secret, Map.get(value, "tokenSecret"))
+        |> maybe_put_value(:ca_cert, Map.get(value, "caCert"))
+        |> maybe_put_value(:insecure, if(Map.get(value, "insecure") == true, do: true))
+        |> maybe_put_value(:image_pull_policy, Map.get(value, "imagePullPolicy"))
+        |> maybe_put_value(:node_selector, Map.get(value, "nodeSelector"))
+        |> maybe_put_value(:tolerations, Map.get(value, "tolerations"))
+        |> maybe_put_value(:image_pull_secrets, Map.get(value, "imagePullSecrets"))
+        |> maybe_put_value(:host_aliases, Map.get(value, "hostAliases"))
+        |> maybe_put_value(:resources, Map.get(value, "resources"))
+        |> maybe_put_value(:labels, Map.get(value, "labels"))
+        |> maybe_put_value(:annotations, Map.get(value, "annotations"))
+        |> maybe_put_value(:active_deadline_seconds, Map.get(value, "activeDeadlineSeconds"))
+        |> maybe_put_value(:volumes, Map.get(value, "volumes"))
+        |> maybe_put_value(:volume_mounts, Map.get(value, "volumeMounts"))
 
-    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
-
-    cond do
-      not is_binary(image) or String.length(image) > 200 ->
-        {:error, :invalid}
-
-      not is_nil(namespace) and (not is_binary(namespace) or String.length(namespace) > 253) ->
-        {:error, :invalid}
-
-      not is_nil(service_account) and
-          (not is_binary(service_account) or String.length(service_account) > 253) ->
-        {:error, :invalid}
-
-      not is_nil(api_server) and (not is_binary(api_server) or String.length(api_server) > 500) ->
-        {:error, :invalid}
-
-      not is_nil(token) and not is_binary(token) ->
-        {:error, :invalid}
-
-      not is_nil(ca_cert) and not is_binary(ca_cert) ->
-        {:error, :invalid}
-
-      not is_nil(insecure) and not is_boolean(insecure) ->
-        {:error, :invalid}
-
-      not is_nil(image_pull_policy) and image_pull_policy not in valid_pull_policies ->
-        {:error, :invalid}
-
-      not is_nil(node_selector) and not is_map(node_selector) ->
-        {:error, :invalid}
-
-      not is_nil(tolerations) and not is_list(tolerations) ->
-        {:error, :invalid}
-
-      not is_nil(image_pull_secrets) and
-          (not is_list(image_pull_secrets) or
-             Enum.any?(image_pull_secrets, &(not is_binary(&1)))) ->
-        {:error, :invalid}
-
-      not is_nil(host_aliases) and not is_list(host_aliases) ->
-        {:error, :invalid}
-
-      not is_nil(resources) and not is_map(resources) ->
-        {:error, :invalid}
-
-      not is_nil(labels) and
-          (not is_map(labels) or
-             Enum.any?(labels, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
-        {:error, :invalid}
-
-      not is_nil(annotations) and
-          (not is_map(annotations) or
-             Enum.any?(annotations, fn {k, v} -> not is_binary(k) or not is_binary(v) end)) ->
-        {:error, :invalid}
-
-      not is_nil(active_deadline_seconds) and
-          (not is_integer(active_deadline_seconds) or active_deadline_seconds < 1) ->
-        {:error, :invalid}
-
-      not is_nil(volumes) and not is_list(volumes) ->
-        {:error, :invalid}
-
-      not is_nil(volume_mounts) and not is_list(volume_mounts) ->
-        {:error, :invalid}
-
-      true ->
-        launcher = %{type: :kubernetes, image: image}
-
-        launcher =
-          if namespace, do: Map.put(launcher, :namespace, namespace), else: launcher
-
-        launcher =
-          if service_account,
-            do: Map.put(launcher, :service_account, service_account),
-            else: launcher
-
-        launcher =
-          if api_server, do: Map.put(launcher, :api_server, api_server), else: launcher
-
-        launcher = if token, do: Map.put(launcher, :token, token), else: launcher
-        launcher = if ca_cert, do: Map.put(launcher, :ca_cert, ca_cert), else: launcher
-
-        launcher =
-          if insecure == true, do: Map.put(launcher, :insecure, true), else: launcher
-
-        launcher =
-          if image_pull_policy,
-            do: Map.put(launcher, :image_pull_policy, image_pull_policy),
-            else: launcher
-
-        launcher =
-          if node_selector, do: Map.put(launcher, :node_selector, node_selector), else: launcher
-
-        launcher =
-          if tolerations, do: Map.put(launcher, :tolerations, tolerations), else: launcher
-
-        launcher =
-          if image_pull_secrets,
-            do: Map.put(launcher, :image_pull_secrets, image_pull_secrets),
-            else: launcher
-
-        launcher =
-          if host_aliases,
-            do: Map.put(launcher, :host_aliases, host_aliases),
-            else: launcher
-
-        launcher =
-          if resources, do: Map.put(launcher, :resources, resources), else: launcher
-
-        launcher =
-          if labels, do: Map.put(launcher, :labels, labels), else: launcher
-
-        launcher =
-          if annotations, do: Map.put(launcher, :annotations, annotations), else: launcher
-
-        launcher =
-          if active_deadline_seconds,
-            do: Map.put(launcher, :active_deadline_seconds, active_deadline_seconds),
-            else: launcher
-
-        launcher =
-          if volumes, do: Map.put(launcher, :volumes, volumes), else: launcher
-
-        launcher =
-          if volume_mounts, do: Map.put(launcher, :volume_mounts, volume_mounts), else: launcher
-
-        {:ok, launcher}
+      {:ok, launcher}
     end
   end
 
+  defp parse_ecs_launcher(value) do
+    # A single ID is accepted where a list is expected, so `--set
+    # subnets=subnet-1` works without JSON.
+    value =
+      value
+      |> Map.replace_lazy("subnets", &wrap_list/1)
+      |> Map.replace_lazy("securityGroups", &wrap_list/1)
+
+    with :ok <- required(value, "cluster", :string, non_empty: true, max: 255),
+         :ok <- required(value, "taskDefinition", :string, non_empty: true, max: 500),
+         :ok <- required(value, "region", :string, match: ~r/^[a-z0-9-]{1,30}$/),
+         :ok <- optional(value, "containerName", :string, max: 255),
+         :ok <- optional(value, "launchType", :enum, values: @ecs_launch_types),
+         :ok <- optional(value, "capacityProvider", :string, max: 255),
+         # A capacity provider strategy decides the launch type itself.
+         :ok <- exclusive(value, "capacityProvider", "launchType"),
+         :ok <- optional(value, "subnets", :id_list, max: 16),
+         :ok <- optional(value, "securityGroups", :id_list, max: 5),
+         :ok <- optional(value, "assignPublicIp", :boolean),
+         :ok <- optional(value, "platformVersion", :string, max: 50),
+         :ok <- optional(value, "credentialsSecret", :string, secret_name: true),
+         :ok <- optional(value, "roleArn", :string, max: 2048, match: @iam_role_arn_regex),
+         # An external ID is something to assume a role with, so it needs one.
+         :ok <- together(value, "roleExternalId", "roleArn"),
+         :ok <- optional(value, "roleExternalId", :string, match: @external_id_regex),
+         :ok <- optional(value, "endpoint", :string, max: 500, prefixes: ["http://", "https://"]) do
+      launcher =
+        %{
+          type: :ecs,
+          cluster: Map.get(value, "cluster"),
+          task_definition: Map.get(value, "taskDefinition"),
+          region: Map.get(value, "region")
+        }
+        |> maybe_put_value(:container_name, Map.get(value, "containerName"))
+        |> maybe_put_value(:launch_type, Map.get(value, "launchType"))
+        |> maybe_put_value(:capacity_provider, Map.get(value, "capacityProvider"))
+        |> maybe_put_value(:subnets, Map.get(value, "subnets"))
+        |> maybe_put_value(:security_groups, Map.get(value, "securityGroups"))
+        |> maybe_put_value(
+          :assign_public_ip,
+          if(Map.get(value, "assignPublicIp") == true, do: true)
+        )
+        |> maybe_put_value(:platform_version, Map.get(value, "platformVersion"))
+        |> maybe_put_value(:credentials_secret, Map.get(value, "credentialsSecret"))
+        |> maybe_put_value(:role_arn, Map.get(value, "roleArn"))
+        |> maybe_put_value(:role_external_id, Map.get(value, "roleExternalId"))
+        |> maybe_put_value(:endpoint, Map.get(value, "endpoint"))
+
+      {:ok, launcher}
+    end
+  end
+
+  defp wrap_list(value) when is_binary(value), do: [value]
+  defp wrap_list(value), do: value
+
+  defp is_string_list?(value, max_length) do
+    is_list(value) and value != [] and length(value) <= max_length and
+      Enum.all?(value, &(is_binary(&1) and &1 != ""))
+  end
+
   defp parse_common_launcher_fields(launcher, value) do
-    server_host = Map.get(value, "serverHost")
-    server_secure = Map.get(value, "serverSecure")
-    adapter = Map.get(value, "adapter")
-    concurrency = Map.get(value, "concurrency")
-    env = Map.get(value, "env")
+    with :ok <- optional(value, "serverHost", :string, max: 200),
+         :ok <- optional(value, "serverSecure", :boolean),
+         :ok <- optional(value, "adapter", :string_list, min: 1),
+         :ok <- optional(value, "concurrency", :integer, min: 1),
+         :ok <- optional(value, "env", :string_map, reserved_prefix: "COFLUX_"),
+         :ok <- optional(value, "envSecrets", :secret_map, reserved_prefix: "COFLUX_") do
+      launcher =
+        launcher
+        |> maybe_put_value(:server_host, Map.get(value, "serverHost"))
+        |> maybe_put_value(:server_secure, Map.get(value, "serverSecure"))
+        |> maybe_put_value(:adapter, Map.get(value, "adapter"))
+        |> maybe_put_value(:concurrency, Map.get(value, "concurrency"))
+        |> maybe_put_value(:env, Map.get(value, "env"))
+        |> maybe_put_value(:env_secrets, Map.get(value, "envSecrets"))
 
-    cond do
-      not is_nil(server_host) and (not is_binary(server_host) or String.length(server_host) > 200) ->
-        {:error, :invalid}
-
-      not is_nil(server_secure) and not is_boolean(server_secure) ->
-        {:error, :invalid}
-
-      not is_nil(adapter) and
-          (not is_list(adapter) or adapter == [] or
-             Enum.any?(adapter, &(not is_binary(&1)))) ->
-        {:error, :invalid}
-
-      not is_nil(concurrency) and (not is_integer(concurrency) or concurrency < 1) ->
-        {:error, :invalid}
-
-      not is_nil(env) and not is_map(env) ->
-        {:error, :invalid}
-
-      not is_nil(env) and
-          Enum.any?(env, fn {k, v} ->
-            not is_binary(k) or not is_binary(v) or String.starts_with?(k, "COFLUX_")
-          end) ->
-        {:error, :invalid}
-
-      true ->
-        launcher =
-          if server_host, do: Map.put(launcher, :server_host, server_host), else: launcher
-
-        launcher =
-          if not is_nil(server_secure),
-            do: Map.put(launcher, :server_secure, server_secure),
-            else: launcher
-
-        launcher = if adapter, do: Map.put(launcher, :adapter, adapter), else: launcher
-
-        launcher =
-          if concurrency, do: Map.put(launcher, :concurrency, concurrency), else: launcher
-
-        launcher = if env, do: Map.put(launcher, :env, env), else: launcher
-        {:ok, launcher}
+      {:ok, launcher}
     end
   end
 
@@ -1409,7 +1503,7 @@ defmodule Coflux.Handlers.Api do
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
-          {:ok, type} when type in ["docker", "process", "kubernetes"] ->
+          {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
             type_atom = String.to_existing_atom(type)
 
             if MapSet.member?(allowed, type_atom) do
@@ -1418,6 +1512,7 @@ defmodule Coflux.Handlers.Api do
                         "docker" -> parse_docker_launcher(value)
                         "process" -> parse_process_launcher(value)
                         "kubernetes" -> parse_kubernetes_launcher(value)
+                        "ecs" -> parse_ecs_launcher(value)
                       end) do
                 parse_common_launcher_fields(launcher, value)
               end
@@ -1450,12 +1545,17 @@ defmodule Coflux.Handlers.Api do
                 {:ok, pool} when is_map(pool) ->
                   {:cont, {:ok, Map.put(result, name, pool)}}
 
+                # Keep why, against the pool it came from: "invalid" alone
+                # leaves the caller no idea which pool.
+                {:error, error} ->
+                  {:halt, {:error, %{name => error}}}
+
                 _ ->
-                  {:halt, {:error, :invalid}}
+                  {:halt, {:error, %{name => :invalid}}}
               end
 
             {:error, _} ->
-              {:halt, {:error, :invalid}}
+              {:halt, {:error, %{name => :invalid_name}}}
           end
         end)
 
@@ -1472,6 +1572,7 @@ defmodule Coflux.Handlers.Api do
 
     config = if Enum.any?(provides), do: Map.put(config, "provides", provides), else: config
     config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
+    config = maybe_put_value(config, "idleTimeoutMs", Map.get(pool, :idle_timeout_ms))
 
     if pool.launcher do
       Map.put(config, "launcher", build_launcher_config(pool.launcher))
@@ -1486,16 +1587,36 @@ defmodule Coflux.Handlers.Api do
         :docker ->
           %{"type" => "docker", "image" => launcher.image}
           |> maybe_put_value("dockerHost", Map.get(launcher, :docker_host))
+          |> maybe_put_value("networkMode", Map.get(launcher, :network_mode))
 
         :process ->
           %{"type" => "process", "directory" => launcher.directory}
+
+        :ecs ->
+          %{
+            "type" => "ecs",
+            "cluster" => launcher.cluster,
+            "taskDefinition" => launcher.task_definition,
+            "region" => launcher.region
+          }
+          |> maybe_put_value("containerName", Map.get(launcher, :container_name))
+          |> maybe_put_value("launchType", Map.get(launcher, :launch_type))
+          |> maybe_put_value("capacityProvider", Map.get(launcher, :capacity_provider))
+          |> maybe_put_value("subnets", Map.get(launcher, :subnets))
+          |> maybe_put_value("securityGroups", Map.get(launcher, :security_groups))
+          |> maybe_put_value("assignPublicIp", Map.get(launcher, :assign_public_ip))
+          |> maybe_put_value("platformVersion", Map.get(launcher, :platform_version))
+          |> maybe_put_value("credentialsSecret", Map.get(launcher, :credentials_secret))
+          |> maybe_put_value("roleArn", Map.get(launcher, :role_arn))
+          |> maybe_put_value("roleExternalId", Map.get(launcher, :role_external_id))
+          |> maybe_put_value("endpoint", Map.get(launcher, :endpoint))
 
         :kubernetes ->
           %{"type" => "kubernetes", "image" => launcher.image}
           |> maybe_put_value("namespace", Map.get(launcher, :namespace))
           |> maybe_put_value("apiServer", Map.get(launcher, :api_server))
           |> maybe_put_value("serviceAccount", Map.get(launcher, :service_account))
-          |> maybe_put_value("token", Map.get(launcher, :token))
+          |> maybe_put_value("tokenSecret", Map.get(launcher, :token_secret))
           |> maybe_put_value("caCert", Map.get(launcher, :ca_cert))
           |> maybe_put_value("insecure", Map.get(launcher, :insecure))
           |> maybe_put_value("imagePullPolicy", Map.get(launcher, :image_pull_policy))
@@ -1517,6 +1638,19 @@ defmodule Coflux.Handlers.Api do
     |> maybe_put_value("adapter", Map.get(launcher, :adapter))
     |> maybe_put_value("concurrency", Map.get(launcher, :concurrency))
     |> maybe_put_value("env", Map.get(launcher, :env))
+    |> maybe_put_value("envSecrets", Map.get(launcher, :env_secrets))
+  end
+
+  defp parse_secret_name(value) do
+    if Coflux.Admin.Secrets.valid_name?(value), do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp parse_secret_value(value) do
+    if Coflux.Admin.Secrets.valid_value?(value), do: {:ok, value}, else: {:error, :invalid}
+  end
+
+  defp secrets_not_found_response(req, names) do
+    json_error_response(req, "secrets_not_found", details: %{"secrets" => names})
   end
 
   defp maybe_put_value(map, _key, nil), do: map
@@ -1530,6 +1664,7 @@ defmodule Coflux.Handlers.Api do
             {"modules", &parse_modules/1, :modules, []},
             {"provides", &parse_tag_set/1, :provides, %{}},
             {"accepts", &parse_tag_set/1, :accepts, %{}},
+            {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms, nil},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
           {:ok, %{}},
@@ -1541,7 +1676,7 @@ defmodule Coflux.Handlers.Api do
                     {:cont, {:ok, Map.put(result, target, parsed)}}
 
                   {:error, error} ->
-                    {:halt, {:error, error}}
+                    {:halt, {:error, %{source => error}}}
                 end
 
               :error ->
@@ -1558,6 +1693,10 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  # Milliseconds an idle worker is kept for. Zero means the next sweep.
+  defp parse_idle_timeout_ms(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp parse_idle_timeout_ms(_value), do: {:error, :invalid}
+
   # Parses a partial pool update (PATCH semantics).
   # Only keys present in the JSON are included. A JSON null value means "unset".
   defp parse_pool_patch(value) do
@@ -1567,6 +1706,7 @@ defmodule Coflux.Handlers.Api do
           {"modules", &parse_modules/1, :modules},
           {"provides", &parse_tag_set/1, :provides},
           {"accepts", &parse_tag_set/1, :accepts},
+          {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms},
           {"launcher", &parse_launcher_patch/1, :launcher}
         ]
 
@@ -1579,7 +1719,7 @@ defmodule Coflux.Handlers.Api do
             {:ok, field_value} ->
               case parser.(field_value) do
                 {:ok, parsed} -> {:cont, {:ok, Map.put(result, target, parsed)}}
-                {:error, error} -> {:halt, {:error, error}}
+                {:error, error} -> {:halt, {:error, %{source => error}}}
               end
 
             :error ->
@@ -1603,7 +1743,7 @@ defmodule Coflux.Handlers.Api do
 
     # If "type" is present, validate it; otherwise this is patching an existing launcher
     case Map.fetch(value, "type") do
-      {:ok, type} when type in ["docker", "process", "kubernetes"] ->
+      {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
         type_atom = String.to_existing_atom(type)
 
         if MapSet.member?(allowed, type_atom) do
@@ -1625,25 +1765,38 @@ defmodule Coflux.Handlers.Api do
   defp parse_launcher_patch(_), do: {:error, :invalid}
 
   defp parse_launcher_patch_fields(value, type) do
-    valid_pull_policies = ["Always", "Never", "IfNotPresent"]
-
     # All possible launcher fields with their validators
     field_specs = [
       {"image", &is_binary/1},
       {"dockerHost", &is_binary/1},
+      {"networkMode", &is_binary/1},
       {"directory", &is_binary/1},
       {"namespace", &is_binary/1},
       {"serviceAccount", &is_binary/1},
       {"apiServer", &is_binary/1},
-      {"token", &is_binary/1},
+      {"tokenSecret", &Coflux.Admin.Secrets.valid_name?/1},
       {"caCert", &is_binary/1},
       {"insecure", &is_boolean/1},
-      {"imagePullPolicy", &(&1 in valid_pull_policies)},
+      {"imagePullPolicy", &(&1 in @pull_policies)},
       {"nodeSelector", &is_map/1},
       {"tolerations", &is_list/1},
       {"imagePullSecrets", &is_list/1},
       {"hostAliases", &is_list/1},
       {"resources", &is_map/1},
+      {"cluster", &is_binary/1},
+      {"taskDefinition", &is_binary/1},
+      {"region", &is_binary/1},
+      {"containerName", &is_binary/1},
+      {"launchType", &(&1 in @ecs_launch_types)},
+      {"capacityProvider", &is_binary/1},
+      {"subnets", &(is_binary(&1) or is_string_list?(&1, 16))},
+      {"securityGroups", &(is_binary(&1) or is_string_list?(&1, 5))},
+      {"assignPublicIp", &is_boolean/1},
+      {"platformVersion", &is_binary/1},
+      {"credentialsSecret", &Coflux.Admin.Secrets.valid_name?/1},
+      {"roleArn", &(is_binary(&1) and Regex.match?(@iam_role_arn_regex, &1))},
+      {"roleExternalId", &(is_binary(&1) and Regex.match?(@external_id_regex, &1))},
+      {"endpoint", &is_binary/1},
       {"serverHost", &is_binary/1},
       {"serverSecure", &is_boolean/1},
       {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
@@ -1655,6 +1808,14 @@ defmodule Coflux.Handlers.Api do
              is_binary(k) and (is_binary(val) or is_nil(val)) and
                not String.starts_with?(k, "COFLUX_")
            end)
+       end},
+      {"envSecrets",
+       fn v ->
+         is_map(v) and
+           Enum.all?(v, fn {k, val} ->
+             is_binary(k) and (is_nil(val) or Coflux.Admin.Secrets.valid_name?(val)) and
+               not String.starts_with?(k, "COFLUX_")
+           end)
        end}
     ]
 
@@ -1662,11 +1823,12 @@ defmodule Coflux.Handlers.Api do
     key_map = %{
       "image" => :image,
       "dockerHost" => :docker_host,
+      "networkMode" => :network_mode,
       "directory" => :directory,
       "namespace" => :namespace,
       "serviceAccount" => :service_account,
       "apiServer" => :api_server,
-      "token" => :token,
+      "tokenSecret" => :token_secret,
       "caCert" => :ca_cert,
       "insecure" => :insecure,
       "imagePullPolicy" => :image_pull_policy,
@@ -1675,11 +1837,26 @@ defmodule Coflux.Handlers.Api do
       "imagePullSecrets" => :image_pull_secrets,
       "hostAliases" => :host_aliases,
       "resources" => :resources,
+      "cluster" => :cluster,
+      "taskDefinition" => :task_definition,
+      "region" => :region,
+      "containerName" => :container_name,
+      "launchType" => :launch_type,
+      "capacityProvider" => :capacity_provider,
+      "subnets" => :subnets,
+      "securityGroups" => :security_groups,
+      "assignPublicIp" => :assign_public_ip,
+      "platformVersion" => :platform_version,
+      "credentialsSecret" => :credentials_secret,
+      "roleArn" => :role_arn,
+      "roleExternalId" => :role_external_id,
+      "endpoint" => :endpoint,
       "serverHost" => :server_host,
       "serverSecure" => :server_secure,
       "adapter" => :adapter,
       "concurrency" => :concurrency,
-      "env" => :env
+      "env" => :env,
+      "envSecrets" => :env_secrets
     }
 
     result =
@@ -1694,18 +1871,23 @@ defmodule Coflux.Handlers.Api do
           {:ok, field_value} ->
             if validator.(field_value) do
               processed_value =
-                if json_key == "env" and is_map(field_value) do
-                  Map.new(field_value, fn
-                    {k, nil} -> {k, :unset}
-                    {k, v} -> {k, v}
-                  end)
-                else
-                  field_value
+                cond do
+                  json_key in ["env", "envSecrets"] and is_map(field_value) ->
+                    Map.new(field_value, fn
+                      {k, nil} -> {k, :unset}
+                      {k, v} -> {k, v}
+                    end)
+
+                  json_key in ["subnets", "securityGroups"] ->
+                    wrap_list(field_value)
+
+                  true ->
+                    field_value
                 end
 
               {:cont, {:ok, Map.put(acc, atom_key, processed_value)}}
             else
-              {:halt, {:error, :invalid}}
+              {:halt, {:error, %{json_key => :invalid}}}
             end
 
           :error ->
@@ -1749,10 +1931,12 @@ defmodule Coflux.Handlers.Api do
   defp parse_asset_entries(value) do
     if is_list(value) && value != [] && length(value) <= @max_asset_entries do
       result =
-        Enum.reduce_while(value, {:ok, []}, fn entry, {:ok, entries} ->
+        value
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, []}, fn {entry, index}, {:ok, entries} ->
           case parse_asset_entry(entry) do
             {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-            {:error, error} -> {:halt, {:error, error}}
+            {:error, error} -> {:halt, {:error, %{index => error}}}
           end
         end)
 
@@ -1903,10 +2087,12 @@ defmodule Coflux.Handlers.Api do
 
       is_list(value) && length(value) <= @max_parameters ->
         with {:ok, backwards} <-
-               Enum.reduce_while(value, {:ok, []}, fn item, {:ok, result} ->
+               value
+               |> Enum.with_index()
+               |> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, result} ->
                  case parse_integer(item) do
                    {:ok, value} -> {:cont, {:ok, [value | result]}}
-                   {:error, error} -> {:halt, {:error, error}}
+                   {:error, error} -> {:halt, {:error, %{index => error}}}
                  end
                end) do
           {:ok, Enum.reverse(backwards)}
@@ -1953,7 +2139,7 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         with {:ok, params} <- parse_indexes(Map.get(value, "params"), allow_boolean: true),
-             {:ok, max_age} <- parse_integer(Map.get(value, "maxAge"), optional: true),
+             {:ok, max_age_ms} <- parse_integer(Map.get(value, "maxAgeMs"), optional: true),
              # TODO: regex
              {:ok, namespace} <-
                parse_string(Map.get(value, "namespace"), optional: true, max_length: 200),
@@ -1963,7 +2149,7 @@ defmodule Coflux.Handlers.Api do
           {:ok,
            %{
              params: params,
-             max_age: max_age,
+             max_age_ms: max_age_ms,
              namespace: namespace,
              version: version
            }}
@@ -2023,11 +2209,18 @@ defmodule Coflux.Handlers.Api do
 
       is_map(value) ->
         # limit can be nil (unlimited) or an integer
-        # backoff_min and backoff_max default to 0 if not provided (database requires NOT NULL)
+        # backoff_min_ms and backoff_max_ms default to 0 if not provided (database requires NOT NULL)
         with {:ok, limit} <- parse_integer(Map.get(value, "limit"), optional: true),
-             {:ok, backoff_min} <- parse_integer(Map.get(value, "backoffMin"), optional: true),
-             {:ok, backoff_max} <- parse_integer(Map.get(value, "backoffMax"), optional: true) do
-          {:ok, %{limit: limit, backoff_min: backoff_min || 0, backoff_max: backoff_max || 0}}
+             {:ok, backoff_min_ms} <-
+               parse_integer(Map.get(value, "backoffMinMs"), optional: true),
+             {:ok, backoff_max_ms} <-
+               parse_integer(Map.get(value, "backoffMaxMs"), optional: true) do
+          {:ok,
+           %{
+             limit: limit,
+             backoff_min_ms: backoff_min_ms || 0,
+             backoff_max_ms: backoff_max_ms || 0
+           }}
         end
 
       true ->
@@ -2066,10 +2259,10 @@ defmodule Coflux.Handlers.Api do
            {:ok, wait_for} <- parse_indexes(Map.get(value, "waitFor")),
            {:ok, cache} <- parse_cache(Map.get(value, "cache")),
            {:ok, defer} <- parse_defer(Map.get(value, "defer")),
-           {:ok, delay} <- parse_integer(Map.get(value, "delay")),
+           {:ok, delay_ms} <- parse_integer(Map.get(value, "delayMs")),
            {:ok, retries} <- parse_retries(Map.get(value, "retries")),
            {:ok, recurrent} <- parse_boolean(Map.get(value, "recurrent"), optional: true),
-           {:ok, timeout} <- parse_integer(Map.get(value, "timeout"), optional: true),
+           {:ok, timeout_ms} <- parse_integer(Map.get(value, "timeoutMs"), optional: true),
            {:ok, requires} <- parse_tag_set(Map.get(value, "requires")),
            {:ok, memo} <- parse_boolean(Map.get(value, "memo"), optional: true),
            {:ok, streams} <- parse_manifest_streams(Map.get(value, "streams")),
@@ -2086,10 +2279,10 @@ defmodule Coflux.Handlers.Api do
            wait_for: wait_for,
            cache: cache,
            defer: defer,
-           delay: delay,
+           delay_ms: delay_ms,
            retries: retries,
            recurrent: recurrent == true,
-           timeout: timeout || 0,
+           timeout_ms: timeout_ms || 0,
            requires: requires,
            memo: memo == true,
            streams: streams,
@@ -2140,10 +2333,10 @@ defmodule Coflux.Handlers.Api do
             {:cont, {:ok, Map.put(result, workflow_name, parsed)}}
 
           {:error, error} ->
-            {:halt, {:error, error}}
+            {:halt, {:error, %{workflow_name => error}}}
         end
       else
-        {:halt, {:error, :invalid}}
+        {:halt, {:error, %{workflow_name => :invalid_name}}}
       end
     end)
   end
@@ -2157,10 +2350,10 @@ defmodule Coflux.Handlers.Api do
               {:cont, {:ok, Map.put(result, module, parsed)}}
 
             {:error, error} ->
-              {:halt, {:error, error}}
+              {:halt, {:error, %{module => error}}}
           end
         else
-          {:halt, {:error, :invalid}}
+          {:halt, {:error, %{module => :invalid_name}}}
         end
       end)
     else
