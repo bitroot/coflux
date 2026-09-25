@@ -84,8 +84,9 @@ class ManagedServer:
             "COFLUX_REQUIRE_AUTH": "false",
             # kubernetes is allowed so that its configuration can be
             # exercised; storing a pool config contacts no cluster. ecs
-            # is exercised against a stand-in for the API (support.ecs).
-            "COFLUX_LAUNCHER_TYPES": "process,docker,kubernetes,ecs",
+            # and lambda are exercised against stand-ins for their APIs
+            # (support.ecs, support.lambda_fake).
+            "COFLUX_LAUNCHER_TYPES": "process,docker,kubernetes,ecs,lambda",
             "COFLUX_SUPER_TOKEN_HASH": hashlib.sha256(SUPER_TOKEN.encode()).hexdigest(),
             # Signs service tokens and encrypts secrets.
             "COFLUX_SECRET": "test-secret",

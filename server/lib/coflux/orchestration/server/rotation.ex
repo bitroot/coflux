@@ -186,6 +186,11 @@ defmodule Coflux.Orchestration.Server.Rotation do
       |> Enum.filter(fn {old_id, _} -> Map.has_key?(pool_map, old_id) end)
       |> Map.new(fn {old_id, failures} -> {Map.fetch!(pool_map, old_id), failures} end)
 
+    pool_lifetimes =
+      state.pool_lifetimes
+      |> Enum.filter(fn {old_id, _} -> Map.has_key?(pool_map, old_id) end)
+      |> Map.new(fn {old_id, lifetime_ms} -> {Map.fetch!(pool_map, old_id), lifetime_ms} end)
+
     # Remap workers: rekey map, update pool_id, workspace_id, session_id
     workers =
       Map.new(state.workers, fn {old_id, worker} ->
@@ -270,6 +275,7 @@ defmodule Coflux.Orchestration.Server.Rotation do
         workspace_external_ids: workspace_external_ids,
         pools: pools,
         pool_failures: pool_failures,
+        pool_lifetimes: pool_lifetimes,
         workers: workers,
         worker_external_ids: worker_external_ids,
         sessions: sessions,

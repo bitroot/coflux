@@ -236,6 +236,14 @@ defmodule Coflux.Orchestration.Server.State do
             # worth one free attempt.
             pool_failures: %{},
 
+            # pool_id -> lifetime_ms
+            #
+            # How long a pool's workers live for, where their launcher
+            # says (a Lambda function's timeout), as of the latest launch.
+            # Keyed by pool id for the same reason as `pool_failures`, and
+            # in-memory only: it's learned again on the next launch.
+            pool_lifetimes: %{},
+
             # `Coflux.Store.Index`: the Bloom filter per archived epoch,
             # so a lookup for a row that cannot be in an epoch never opens
             # it. Persisted, unlike everything else here.

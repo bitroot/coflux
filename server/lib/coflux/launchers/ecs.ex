@@ -23,7 +23,7 @@ defmodule Coflux.EcsLauncher do
 
   import Coflux.Launchers.Utils, only: [truncate_bytes: 2]
 
-  alias Coflux.Launchers.AwsCredentials
+  alias Coflux.Launchers.Aws
 
   @api_target_prefix "AmazonEC2ContainerServiceV20141113"
   @logs_target_prefix "Logs_20140328"
@@ -36,18 +36,6 @@ defmodule Coflux.EcsLauncher do
 
   # ECS limits `startedBy` to 36 characters.
   @started_by_max_length 36
-
-  @unauthorized_errors [
-    "UnrecognizedClientException",
-    "InvalidSignatureException",
-    "SignatureDoesNotMatch",
-    "ExpiredTokenException",
-    "ExpiredToken",
-    "InvalidClientTokenId",
-    "InvalidAccessKeyId",
-    "IncompleteSignature",
-    "MissingAuthenticationToken"
-  ]
 
   @invalid_errors [
     "InvalidParameterException",
@@ -461,7 +449,7 @@ defmodule Coflux.EcsLauncher do
         type == "AccessDeniedException" ->
           "launch_forbidden"
 
-        type in @unauthorized_errors ->
+        Aws.unauthorized_error?(type) ->
           "launch_unauthorized"
 
         type in ["ThrottlingException", "TooManyRequestsException"] ->
@@ -498,46 +486,14 @@ defmodule Coflux.EcsLauncher do
 
   # --- Connection ---
 
-  defp build_conn(config) do
-    region = Map.fetch!(config, :region)
-
-    with {:ok, credentials} <-
-           AwsCredentials.resolve(static_credentials(config),
-             region: region,
-             role_arn: config[:role_arn],
-             external_id: config[:role_external_id],
-             req_options: Map.get(config, :req_options, [])
-           ) do
-      {:ok,
-       %{
-         region: region,
-         endpoint: config[:endpoint] || default_endpoint(region),
-         credentials: credentials,
-         # Extra options for `Req.request/1`, so a test can stub the API
-         # without reaching AWS. Never set in normal operation.
-         req_options: Map.get(config, :req_options, [])
-       }}
-    end
-  end
-
-  defp default_endpoint(region), do: "https://ecs.#{region}.amazonaws.com"
-
-  defp static_credentials(
-         %{access_key_id: access_key_id, secret_access_key: secret_access_key} = config
-       )
-       when is_binary(access_key_id) and is_binary(secret_access_key) do
-    %{access_key_id: access_key_id, secret_access_key: secret_access_key}
-    |> maybe_put(:session_token, config[:session_token])
-  end
-
-  defp static_credentials(_config), do: nil
+  defp build_conn(config), do: Aws.build_conn(config, &"https://ecs.#{&1}.amazonaws.com")
 
   # --- ECS API ---
 
   # The ECS API is JSON 1.1 over HTTPS: every call is a POST to the
   # regional endpoint, and the header says which operation.
   defp ecs_request(conn, action, body) do
-    aws_json_request(
+    Aws.json_request(
       conn,
       "ecs",
       conn.region,
@@ -552,7 +508,7 @@ defmodule Coflux.EcsLauncher do
   # An `endpoint` override on the pool names an ECS endpoint, so it is
   # deliberately not reused here.
   defp logs_request(conn, region, action, body) do
-    aws_json_request(
+    Aws.json_request(
       conn,
       "logs",
       region,
@@ -562,71 +518,9 @@ defmodule Coflux.EcsLauncher do
     )
   end
 
-  defp aws_json_request(conn, service, region, endpoint, target, body) do
-    credentials = conn.credentials
-
-    sigv4 =
-      [
-        service: service,
-        region: region,
-        access_key_id: credentials.access_key_id,
-        secret_access_key: credentials.secret_access_key
-      ]
-      |> maybe_put_keyword(:token, credentials[:session_token])
-
-    request =
-      [
-        method: :post,
-        url: endpoint,
-        headers: [
-          {"content-type", "application/x-amz-json-1.1"},
-          {"x-amz-target", target}
-        ],
-        body: Jason.encode!(body),
-        aws_sigv4: sigv4,
-        retry: false,
-        decode_body: false
-      ]
-      |> Keyword.merge(Map.get(conn, :req_options, []))
-
-    case Req.request(request) do
-      {:ok, %{status: status, body: raw}} ->
-        decoded =
-          case Jason.decode(raw) do
-            {:ok, map} when is_map(map) -> map
-            _ -> %{}
-          end
-
-        if status in 200..299 do
-          {:ok, decoded}
-        else
-          {:error, {:api, status, error_type(decoded), decoded["message"] || decoded["Message"]}}
-        end
-
-      {:error, _exception} ->
-        {:error, :request_failed}
-    end
-  end
-
-  # The type comes back as e.g. "ClusterNotFoundException", or namespaced
-  # as "com.amazonaws.ecs#ClusterNotFoundException", or with a suffix as
-  # "ClusterNotFoundException:http://...".
-  defp error_type(%{"__type" => type}) when is_binary(type) do
-    type
-    |> String.split("#")
-    |> List.last()
-    |> String.split(":")
-    |> hd()
-  end
-
-  defp error_type(_body), do: nil
-
   # --- Helpers ---
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp maybe_put_keyword(keyword, _key, nil), do: keyword
-  defp maybe_put_keyword(keyword, key, value), do: Keyword.put(keyword, key, value)
 end

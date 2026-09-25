@@ -162,6 +162,20 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Idle timeout: %s\n", formatDurationMs(int64(idleTimeout)))
 	}
 
+	// Lifecycle
+	if policy := getString(pool, "launchPolicy"); policy != "" {
+		fmt.Printf("Launch policy: %s\n", policy)
+	}
+	if maxWorkers := getFloat64(pool, "maxWorkers"); maxWorkers > 0 {
+		fmt.Printf("Max workers: %d\n", int(maxWorkers))
+	}
+	if maxExecutions := getFloat64(pool, "maxExecutions"); maxExecutions > 0 {
+		fmt.Printf("Max executions: %d\n", int(maxExecutions))
+	}
+	if maxDuration, ok := pool["maxDurationMs"].(float64); ok {
+		fmt.Printf("Max duration: %s\n", formatDurationMs(int64(maxDuration)))
+	}
+
 	// Launcher
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		fmt.Printf("Launcher: %s\n", getString(launcher, "type"))
@@ -195,6 +209,12 @@ func runPoolsGet(cmd *cobra.Command, args []string) error {
 		}
 		if secret := getString(launcher, "tokenSecret"); secret != "" {
 			fmt.Printf("Token secret: %s\n", secret)
+		}
+		if function := getString(launcher, "function"); function != "" {
+			fmt.Printf("Function: %s\n", function)
+		}
+		if qualifier := getString(launcher, "qualifier"); qualifier != "" {
+			fmt.Printf("Qualifier: %s\n", qualifier)
 		}
 		if cluster := getString(launcher, "cluster"); cluster != "" {
 			fmt.Printf("Cluster: %s\n", cluster)
@@ -571,7 +591,8 @@ var poolsCreateCmd = &cobra.Command{
 	Short: "Create a pool",
 	Long: `Create a new pool with the specified launcher type and configuration.
 
-Use --type to specify the launcher type (kubernetes, docker, process, or ecs).
+Use --type to specify the launcher type (kubernetes, docker, process, ecs, or
+lambda).
 Use --set to set field values. Values are parsed as JSON if valid, otherwise
 treated as strings.
 
@@ -579,7 +600,9 @@ Examples:
   coflux pools create my-pool --type kubernetes --set image=foo:latest --set namespace=default
   coflux pools create my-pool --type docker --set image=myapp:v1 --modules mod1,mod2
   coflux pools create my-pool --type process --set directory=/app --set concurrency=5
-  coflux pools create my-pool --type ecs --set cluster=workers --set taskDefinition=myapp --set region=eu-west-2 --set subnets=subnet-1`,
+  coflux pools create my-pool --type ecs --set cluster=workers --set taskDefinition=myapp --set region=eu-west-2 --set subnets=subnet-1
+  coflux pools create my-pool --type lambda --set function=coflux-worker --set region=eu-west-2
+  coflux pools create my-pool --type ecs ... --set launchPolicy=demand --set maxWorkers=20`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPoolsCreate,
 }
@@ -606,7 +629,7 @@ Examples:
 
 func init() {
 	// pools create flags
-	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process, ecs)")
+	poolsCreateCmd.Flags().String("type", "", "Launcher type (kubernetes, docker, process, ecs, lambda)")
 	_ = poolsCreateCmd.MarkFlagRequired("type")
 	poolsCreateCmd.Flags().StringArray("set", nil, "Set a field value (key=value)")
 	poolsCreateCmd.Flags().StringSliceP("modules", "m", nil, "Modules to be hosted (a name covers its submodules; default: all)")
@@ -639,6 +662,10 @@ var poolTopLevelFields = map[string]bool{
 	"provides":      true,
 	"accepts":       true,
 	"idleTimeoutMs": true,
+	"launchPolicy":  true,
+	"maxWorkers":    true,
+	"maxExecutions": true,
+	"maxDurationMs": true,
 }
 
 // durationFields maps the name a duration is written under - on --set,
@@ -648,6 +675,7 @@ var poolTopLevelFields = map[string]bool{
 // API is handed.
 var durationFields = map[string]string{
 	"idleTimeout": "idleTimeoutMs",
+	"maxDuration": "maxDurationMs",
 }
 
 // parseDurationMs parses a duration string into milliseconds. A bare
@@ -695,6 +723,7 @@ var launcherFields = map[string]bool{
 	"subnets": true, "securityGroups": true, "assignPublicIp": true,
 	"platformVersion": true, "credentialsSecret": true, "roleArn": true,
 	"roleExternalId": true, "endpoint": true,
+	"function": true, "qualifier": true,
 	"serverHost": true, "serverSecure": true, "adapter": true,
 	"concurrency": true, "env": true, "envSecrets": true,
 }
@@ -1523,6 +1552,20 @@ func apiPoolToTOML(pool map[string]any) map[string]any {
 			result["idle_timeout"] = formatDurationMs(ms)
 		}
 	}
+	if policy, ok := pool["launchPolicy"]; ok {
+		result["launch_policy"] = policy
+	}
+	if maxWorkers, ok := pool["maxWorkers"]; ok {
+		result["max_workers"] = tomlNumber(maxWorkers)
+	}
+	if maxExecutions, ok := pool["maxExecutions"]; ok {
+		result["max_executions"] = tomlNumber(maxExecutions)
+	}
+	if maxDuration, ok := pool["maxDurationMs"]; ok {
+		if ms, ok := tomlNumber(maxDuration).(int64); ok {
+			result["max_duration"] = formatDurationMs(ms)
+		}
+	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = apiLauncherToTOML(launcher)
 	}
@@ -1579,6 +1622,26 @@ func tomlPoolToAPI(pool map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("idle_timeout: %w", err)
 		}
 		result["idleTimeoutMs"] = ms
+	}
+	if policy, ok := pool["launch_policy"]; ok {
+		result["launchPolicy"] = policy
+	}
+	if maxWorkers, ok := pool["max_workers"]; ok {
+		result["maxWorkers"] = maxWorkers
+	}
+	if maxExecutions, ok := pool["max_executions"]; ok {
+		result["maxExecutions"] = maxExecutions
+	}
+	if maxDuration, ok := pool["max_duration"]; ok {
+		text, ok := maxDuration.(string)
+		if !ok {
+			return nil, fmt.Errorf("max_duration must be a duration string (e.g. \"15m\")")
+		}
+		ms, err := parseDurationMs(text)
+		if err != nil {
+			return nil, fmt.Errorf("max_duration: %w", err)
+		}
+		result["maxDurationMs"] = ms
 	}
 	if launcher, ok := pool["launcher"].(map[string]any); ok {
 		result["launcher"] = tomlLauncherToAPI(launcher)

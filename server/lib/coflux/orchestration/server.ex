@@ -2815,6 +2815,10 @@ defmodule Coflux.Orchestration.Server do
     {:noreply, Scheduler.tick(state)}
   end
 
+  defp dispatch_info({:worker_exited, worker_id}, state) do
+    {:noreply, Scheduler.worker_exited(state, worker_id)}
+  end
+
   defp dispatch_info(:expire_waiters, state) do
     now = System.monotonic_time(:millisecond)
 

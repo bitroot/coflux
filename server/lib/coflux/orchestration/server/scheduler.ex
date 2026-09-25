@@ -76,6 +76,19 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   @pool_backoff_base_ms 5_000
   @pool_backoff_max_ms 300_000
 
+  # How long a pool is held back after its launcher was throttled. A
+  # throttle that persists past the first few holds is a limit rather than
+  # a burst - a function with no concurrency left, say - so after that the
+  # hold doubles, up to the backoff's maximum.
+  @pool_throttle_hold_ms 5_000
+  @pool_throttle_free_holds 2
+
+  # How long before a worker's expiry it stops being given work (see
+  # `Fleet`) is one thing; this is how much of what's left an execution
+  # sent to it may use, so that it times out in the worker, cleanly,
+  # rather than going down with it.
+  @expiry_margin_ms 10_000
+
   # A launcher that cannot answer a poll is not evidence that the worker
   # is gone, and giving up on a worker abandons whatever it is running -
   # so a transient failure has to persist for this many consecutive polls
@@ -281,7 +294,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
                                 enriched_arguments,
                                 execution.run_external_id,
                                 workspace_external_id,
-                                execution.timeout_ms,
+                                capped_timeout_ms(state, session_id, execution.timeout_ms, now),
                                 Scheduling.build_streams_config(
                                   execution.streams_buffer,
                                   execution.streams_timeout_ms
@@ -406,34 +419,13 @@ defmodule Coflux.Orchestration.Server.Scheduler do
 
     {state, next_launch_at} =
       if Enum.any?(unassigned) do
-        # Track the most recent worker creation per pool, and which pools
-        # already have a worker that isn't ready to accept work.  We skip
-        # launching for pools that have a worker still pending activation
-        # or that activated but hasn't declared what it can run (e.g.
-        # due to a misconfigured command or working directory).
-        {latest_pool_launch_at, pools_with_pending_worker} =
-          state.workers
-          |> Map.values()
-          |> Enum.reduce({%{}, MapSet.new()}, fn worker, {latest, pending} ->
-            latest =
-              Map.update(latest, worker.pool_id, worker.created_at, &max(&1, worker.created_at))
-
-            pending =
-              with session_id when not is_nil(session_id) <- worker.session_id,
-                   {:ok, session} <- Map.fetch(state.sessions, session_id),
-                   false <- Fleet.session_ready?(session) do
-                MapSet.put(pending, worker.pool_id)
-              else
-                _ -> pending
-              end
-
-            {latest, pending}
-          end)
+        pool_workers = pool_worker_counts(state)
 
         unassigned
         |> Enum.group_by(& &1.workspace_id)
         |> Enum.reduce({state, nil}, fn {workspace_id, executions}, {state, next_launch_at} ->
-          candidates =
+          # How many waiting executions each pool would take.
+          demand =
             executions
             |> Enum.map(fn execution ->
               requires =
@@ -446,115 +438,41 @@ defmodule Coflux.Orchestration.Server.Scheduler do
               Fleet.choose_pool(state, execution, requires)
             end)
             |> Enum.reject(&is_nil/1)
-            |> Enum.uniq()
-            |> Enum.reject(&MapSet.member?(pools_with_pending_worker, &1))
-            |> Map.new(&{&1, pool_launch_due_at(state, &1, latest_pool_launch_at)})
+            |> Enum.frequencies()
+
+          workspace_pools = Map.get(state.pools, workspace_id, %{})
+
+          plans =
+            Enum.flat_map(demand, fn {pool_id, waiting} ->
+              case Enum.find(workspace_pools, &(elem(&1, 1).id == pool_id)) do
+                {pool_name, pool} ->
+                  counts = Map.get(pool_workers, pool_id, %{active: 0, pending: 0})
+                  count = launch_count(pool, counts, waiting)
+                  due_at = pool_launch_due_at(state, pool, pool_id)
+                  if count > 0, do: [{pool_id, pool_name, pool, count, due_at}], else: []
+
+                nil ->
+                  []
+              end
+            end)
 
           # A pool that wants a worker but can't have one yet is the only
           # reason an otherwise-quiet project still needs waking: nothing
           # else will happen until its throttle or backoff expires.
           next_launch_at =
-            candidates
-            |> Map.values()
+            plans
+            |> Enum.map(&elem(&1, 4))
             |> Enum.filter(&(&1 > now))
             |> Enum.min(fn -> nil end)
             |> earliest(next_launch_at)
 
           state =
-            candidates
-            |> Enum.filter(fn {_pool_id, due_at} -> due_at <= now end)
-            |> Enum.map(&elem(&1, 0))
-            |> Enum.reduce(state, fn pool_id, state ->
-              case Workers.create_worker(state.db, pool_id) do
-                {:ok, worker_id, worker_external_id, created_at} ->
-                  {pool_name, pool} =
-                    Enum.find(
-                      Map.get(state.pools, workspace_id, %{}),
-                      &(elem(&1, 1).id == pool_id)
-                    )
-
-                  # Create a session for the pool-launched worker
-                  activation_timeout_ms =
-                    Map.get(pool, :activation_timeout_ms, @default_activation_timeout_ms)
-
-                  reconnection_timeout_ms =
-                    Map.get(pool, :reconnection_timeout_ms, @default_reconnection_timeout_ms)
-
-                  pool_accepts = Map.get(pool, :accepts, %{})
-
-                  session_opts = [
-                    provides: pool.provides,
-                    accepts: pool_accepts,
-                    activation_timeout_ms: activation_timeout_ms,
-                    reconnection_timeout_ms: reconnection_timeout_ms
-                  ]
-
-                  {:ok, session_id, external_id, token, secret_hash, session_now} =
-                    Sessions.create_session(state.db, workspace_id, worker_id, session_opts)
-
-                  session = %{
-                    external_id: external_id,
-                    secret_hash: secret_hash,
-                    connection: nil,
-                    targets: %{},
-                    queue: [],
-                    starting: MapSet.new(),
-                    executing: MapSet.new(),
-                    concurrency: 0,
-                    draining: false,
-                    workspace_id: workspace_id,
-                    provides: pool.provides,
-                    accepts: pool_accepts,
-                    worker_id: worker_id,
-                    last_idle_at: session_now,
-                    activated_at: nil,
-                    declared_at: nil,
-                    ready_deadline_at: nil,
-                    activation_timeout_ms: activation_timeout_ms,
-                    reconnection_timeout_ms: reconnection_timeout_ms,
-                    total_executions: 0
-                  }
-
-                  state
-                  |> put_in([Access.key(:sessions), session_id], session)
-                  |> put_in([Access.key(:session_ids), external_id], session_id)
-                  |> Fleet.schedule_session_expiry(session_id, activation_timeout_ms)
-                  |> Listeners.maybe_schedule_idle_shutdown()
-                  |> put_in([Access.key(:workers), worker_id], %{
-                    external_id: worker_external_id,
-                    created_at: created_at,
-                    pool_id: pool_id,
-                    pool_name: pool_name,
-                    workspace_id: workspace_id,
-                    state: :active,
-                    data: nil,
-                    session_id: session_id,
-                    stop_id: nil,
-                    stop_retry_at: nil,
-                    stop_signalled_at: nil,
-                    last_poll_at: nil,
-                    polling: false,
-                    poll_failures: 0,
-                    first_poll_failure_at: nil
-                  })
-                  |> put_in([Access.key(:worker_external_ids), worker_external_id], worker_id)
-                  |> Effects.emit(%WorkerCreated{
-                    workspace: State.workspace_external_id(state, workspace_id),
-                    pool: pool_name,
-                    worker: worker_external_id,
-                    created_at: created_at,
-                    session: external_id
-                  })
-                  |> start_launch(
-                    workspace_id,
-                    pool_id,
-                    pool_name,
-                    pool,
-                    worker_id,
-                    worker_external_id,
-                    token
-                  )
-              end
+            plans
+            |> Enum.filter(fn {_, _, _, _, due_at} -> due_at <= now end)
+            |> Enum.reduce(state, fn {pool_id, pool_name, pool, count, _due_at}, state ->
+              Enum.reduce(1..count//1, state, fn _, state ->
+                launch_worker(state, workspace_id, pool_id, pool_name, pool)
+              end)
             end)
 
           {state, next_launch_at}
@@ -584,7 +502,14 @@ defmodule Coflux.Orchestration.Server.Scheduler do
 
                 {:ok, {:ok, false, error, logs}} ->
                   # The launcher knows the worker has gone, and this is the
-                  # only place its exit code and log tail come from.
+                  # only place its exit code and log tail come from. It may
+                  # only now know that the launch itself failed, which counts
+                  # against the pool as it would have at launch.
+                  state =
+                    if launch_error?(error),
+                      do: record_pool_launch_failure(state, worker.pool_id),
+                      else: state
+
                   Fleet.deactivate_worker(state, worker_id, error, logs)
 
                 {:ok, {:error, _reason}} ->
@@ -626,19 +551,36 @@ defmodule Coflux.Orchestration.Server.Scheduler do
         |> Fleet.deactivate_worker(worker_id, "no_targets")
       end)
 
-    # TODO: consider min/max pool size
+    # TODO: consider min pool size
     state =
       state.workers
       |> Enum.filter(fn {_worker_id, worker} ->
         # TODO: better way to check launched than checking existence of data?
         with true <- worker.state == :active && !is_nil(worker.data),
-             {:ok, session} <- worker_session(state, worker),
-             # Only a worker that has been in a position to take work can
-             # be surplus to it. One that is still starting has an idle
-             # time, but it means nothing.
-             true <- Fleet.session_ready?(session) do
-          Enum.empty?(session.starting) && Enum.empty?(session.executing) &&
-            now - session.last_idle_at >= worker_idle_timeout_ms(state, worker)
+             {:ok, session} <- worker_session(state, worker) do
+          idle = Enum.empty?(session.starting) && Enum.empty?(session.executing)
+
+          cond do
+            # A worker about to be ended is drained first, so that it
+            # leaves rather than being cut off. What it's running was
+            # capped to finish before then.
+            expiring?(worker, now) ->
+              true
+
+            # Only a worker that has been in a position to take work can
+            # be surplus to it. One that is still starting has an idle
+            # time, but it means nothing.
+            !Fleet.session_ready?(session) ->
+              false
+
+            # One that has taken all it's allowed goes as soon as it's
+            # done, whatever its idle timeout.
+            idle && Fleet.session_spent?(state, session) ->
+              true
+
+            true ->
+              idle && now - session.last_idle_at >= worker_idle_timeout_ms(state, worker)
+          end
         else
           _ -> false
         end
@@ -716,6 +658,18 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     state
   end
 
+  @doc """
+  A launcher saying that a worker has exited, as one that learns so
+  before it's next asked can. The worker is polled now rather than on its
+  interval, so that it's recorded as gone - and stops counting against
+  its pool - as soon as it is.
+  """
+  def worker_exited(state, worker_id) do
+    state
+    |> update_worker(worker_id, &%{&1 | last_poll_at: nil})
+    |> tick()
+  end
+
   # Applies `fun` to a worker, or does nothing if it has been deactivated
   # since - which a launcher callback landing late always might find.
   defp update_worker(state, worker_id, fun) do
@@ -726,35 +680,287 @@ defmodule Coflux.Orchestration.Server.Scheduler do
     end
   end
 
+  defp expiring?(worker, now) do
+    case Fleet.worker_expires_at(worker) do
+      nil -> false
+      expires_at -> now >= expires_at - @expiry_margin_ms
+    end
+  end
+
+  # The timeout an execution is sent with: its own, but never past what's
+  # left of a worker that will be ended at a known time. An execution
+  # with no timeout (nil or zero) gets that as its timeout.
+  defp capped_timeout_ms(state, session_id, timeout_ms, now) do
+    session = Map.fetch!(state.sessions, session_id)
+    worker = session.worker_id && Map.get(state.workers, session.worker_id)
+
+    case worker && Fleet.worker_expires_at(worker) do
+      nil ->
+        timeout_ms
+
+      expires_at ->
+        remaining_ms = max(1, expires_at - @expiry_margin_ms - now)
+        if timeout_ms in [nil, 0], do: remaining_ms, else: min(timeout_ms, remaining_ms)
+    end
+  end
+
   defp worker_session(state, worker) do
     if worker.session_id, do: Map.fetch(state.sessions, worker.session_id), else: :error
   end
 
-  # When a pool may next launch: never sooner than the launch interval
-  # after its last worker, and not until it has served out any backoff
-  # from launches that failed.
-  defp pool_launch_due_at(state, pool_id, latest_pool_launch_at) do
-    throttled_until = Map.get(latest_pool_launch_at, pool_id, 0) + @pool_launch_interval_ms
+  # Per pool: how many workers it has, and how many of those are still on
+  # their way to taking work (their launch not yet landed, or connected
+  # but not yet said what they can run), with when the latest was created.
+  defp pool_worker_counts(state) do
+    state.workers
+    |> Map.values()
+    |> Enum.reduce(%{}, fn worker, counts ->
+      pending =
+        with session_id when not is_nil(session_id) <- worker.session_id,
+             {:ok, session} <- Map.fetch(state.sessions, session_id),
+             true <- is_nil(worker.data) || !Fleet.session_ready?(session) do
+          1
+        else
+          _ -> 0
+        end
+
+      Map.update(
+        counts,
+        worker.pool_id,
+        %{active: 1, pending: pending, latest_at: worker.created_at},
+        fn c ->
+          %{
+            active: c.active + 1,
+            pending: c.pending + pending,
+            latest_at: max(c.latest_at, worker.created_at)
+          }
+        end
+      )
+    end)
+  end
+
+  # How many workers to launch for a pool that `waiting` executions would
+  # go to.
+  #
+  # A gradual pool launches one at a time: none while a worker is still
+  # starting, since that one may be all that's needed (or may be broken -
+  # a bad command or working directory, typically - and more of it won't
+  # help).
+  #
+  # A demand pool launches enough for everything waiting, less what its
+  # starting workers will take. An unset concurrency counts as one, which
+  # can only launch too many; a surplus worker finds nothing to do and is
+  # let go.
+  #
+  # Either way, never past the pool's `max_workers`.
+  defp launch_count(pool, counts, waiting) do
+    room =
+      case Fleet.pool_setting(pool, :max_workers) do
+        nil -> waiting
+        max_workers -> max(0, max_workers - counts.active)
+      end
+
+    wanted =
+      case Fleet.pool_setting(pool, :launch_policy) do
+        :demand ->
+          per_worker = worker_capacity(pool)
+          max(0, ceil_div(waiting - counts.pending * per_worker, per_worker))
+
+        _ ->
+          if counts.pending > 0, do: 0, else: 1
+      end
+
+    min(wanted, room)
+  end
+
+  defp worker_capacity(pool) do
+    concurrency = (pool.launcher && Fleet.launcher_setting(pool.launcher, :concurrency)) || 1
+
+    case Fleet.pool_setting(pool, :max_executions) do
+      nil -> concurrency
+      max_executions -> min(concurrency, max_executions)
+    end
+  end
+
+  defp ceil_div(a, b) when a <= 0 or b <= 0, do: 0
+  defp ceil_div(a, b), do: div(a + b - 1, b)
+
+  # When a pool may next launch: a gradual pool never sooner than the
+  # launch interval after its last worker; any pool not until it has
+  # served out a backoff from launches that failed, or a hold after its
+  # launcher was throttled.
+  defp pool_launch_due_at(state, pool, pool_id) do
+    interval_until =
+      case Fleet.pool_setting(pool, :launch_policy) do
+        :demand ->
+          0
+
+        _ ->
+          latest_at =
+            state.workers
+            |> Map.values()
+            |> Enum.filter(&(&1.pool_id == pool_id))
+            |> Enum.map(& &1.created_at)
+            |> Enum.max(fn -> nil end)
+
+          if latest_at, do: latest_at + @pool_launch_interval_ms, else: 0
+      end
 
     case Map.get(state.pool_failures, pool_id) do
       nil ->
-        throttled_until
+        interval_until
 
-      %{failures: failures, last_attempt_at: last_attempt_at} ->
-        max(throttled_until, last_attempt_at + pool_backoff_ms(failures))
+      entry ->
+        backoff_until =
+          if entry.failures > 0,
+            do: entry.last_attempt_at + pool_backoff_ms(entry.failures),
+            else: 0
+
+        Enum.max([interval_until, backoff_until, Map.get(entry, :hold_until, 0)])
     end
   end
+
+  # Launcher throttling says nothing is wrong with the pool, only that the
+  # launcher wants fewer requests, so rather than feeding the backoff it
+  # holds the pool back briefly. The launches of one pass are throttled
+  # together, so only the first to land while the pool isn't held counts
+  # towards the hold growing.
+  defp record_pool_throttled(state, pool_id) do
+    now = System.os_time(:millisecond)
+
+    update_in(
+      state,
+      [Access.key(:pool_failures), Access.key(pool_id, %{failures: 0, last_attempt_at: 0})],
+      fn entry ->
+        if now < Map.get(entry, :hold_until, 0) do
+          entry
+        else
+          throttles = Map.get(entry, :throttles, 0) + 1
+
+          entry
+          |> Map.put(:throttles, throttles)
+          |> Map.put(:hold_until, now + pool_throttle_hold_ms(throttles))
+        end
+      end
+    )
+  end
+
+  defp pool_throttle_hold_ms(throttles) do
+    doublings = min(max(0, throttles - @pool_throttle_free_holds), 16)
+    min(@pool_backoff_max_ms, @pool_throttle_hold_ms * Integer.pow(2, doublings))
+  end
+
+  # Creates a worker for a pool, with a session for it to connect to, and
+  # starts its launch.
+  defp launch_worker(state, workspace_id, pool_id, pool_name, pool) do
+    {:ok, worker_id, worker_external_id, created_at} = Workers.create_worker(state.db, pool_id)
+
+    activation_timeout_ms =
+      Map.get(pool, :activation_timeout_ms, @default_activation_timeout_ms)
+
+    reconnection_timeout_ms =
+      Map.get(pool, :reconnection_timeout_ms, @default_reconnection_timeout_ms)
+
+    pool_accepts = Map.get(pool, :accepts, %{})
+
+    session_opts = [
+      provides: pool.provides,
+      accepts: pool_accepts,
+      activation_timeout_ms: activation_timeout_ms,
+      reconnection_timeout_ms: reconnection_timeout_ms
+    ]
+
+    {:ok, session_id, external_id, token, secret_hash, session_now} =
+      Sessions.create_session(state.db, workspace_id, worker_id, session_opts)
+
+    session = %{
+      external_id: external_id,
+      secret_hash: secret_hash,
+      connection: nil,
+      targets: %{},
+      queue: [],
+      starting: MapSet.new(),
+      executing: MapSet.new(),
+      concurrency: 0,
+      draining: false,
+      workspace_id: workspace_id,
+      provides: pool.provides,
+      accepts: pool_accepts,
+      worker_id: worker_id,
+      last_idle_at: session_now,
+      activated_at: nil,
+      declared_at: nil,
+      ready_deadline_at: nil,
+      activation_timeout_ms: activation_timeout_ms,
+      reconnection_timeout_ms: reconnection_timeout_ms,
+      total_executions: 0
+    }
+
+    state
+    |> put_in([Access.key(:sessions), session_id], session)
+    |> put_in([Access.key(:session_ids), external_id], session_id)
+    |> Fleet.schedule_session_expiry(session_id, activation_timeout_ms)
+    |> Listeners.maybe_schedule_idle_shutdown()
+    |> put_in([Access.key(:workers), worker_id], %{
+      external_id: worker_external_id,
+      created_at: created_at,
+      pool_id: pool_id,
+      pool_name: pool_name,
+      workspace_id: workspace_id,
+      state: :active,
+      data: nil,
+      session_id: session_id,
+      stop_id: nil,
+      stop_retry_at: nil,
+      stop_signalled_at: nil,
+      last_poll_at: nil,
+      polling: false,
+      poll_failures: 0,
+      first_poll_failure_at: nil
+    })
+    |> put_in([Access.key(:worker_external_ids), worker_external_id], worker_id)
+    |> Effects.emit(%WorkerCreated{
+      workspace: State.workspace_external_id(state, workspace_id),
+      pool: pool_name,
+      worker: worker_external_id,
+      created_at: created_at,
+      session: external_id
+    })
+    |> start_launch(
+      workspace_id,
+      pool_id,
+      pool_name,
+      pool,
+      worker_id,
+      worker_external_id,
+      token
+    )
+  end
+
+  # A launch failure is one the launcher says is, whenever it learns of it.
+  defp launch_error?("launch_" <> _), do: true
+  defp launch_error?(_error), do: false
 
   defp pool_backoff_ms(failures) do
     min(@pool_backoff_max_ms, @pool_backoff_base_ms * Integer.pow(2, min(failures - 1, 16)))
   end
 
+  # The backoff is for how long a pool has been failing, not how many of
+  # its workers failed at once: the launches of one pass fail together, so
+  # a failure that lands while the pool is already backing off is part of
+  # the one that started it, and doesn't add to it.
   defp record_pool_launch_failure(state, pool_id) do
+    now = System.os_time(:millisecond)
+
     update_in(
       state,
       [Access.key(:pool_failures), Access.key(pool_id, %{failures: 0, last_attempt_at: 0})],
-      fn %{failures: failures} ->
-        %{failures: failures + 1, last_attempt_at: System.os_time(:millisecond)}
+      fn %{failures: failures, last_attempt_at: last_attempt_at} = entry ->
+        if failures > 0 and now < last_attempt_at + pool_backoff_ms(failures) do
+          entry
+        else
+          %{failures: failures + 1, last_attempt_at: now}
+        end
       end
     )
   end
@@ -763,7 +969,9 @@ defmodule Coflux.Orchestration.Server.Scheduler do
   # a worker that takes a while to start is worth keeping warm between
   # runs. One whose pool doesn't say gets the default.
   defp worker_idle_timeout_ms(state, worker) do
-    case get_in(state.pools, [worker.workspace_id, worker.pool_name, :idle_timeout_ms]) do
+    pool = get_in(state.pools, [worker.workspace_id, worker.pool_name])
+
+    case pool && Fleet.pool_setting(pool, :idle_timeout_ms) do
       timeout_ms when is_integer(timeout_ms) and timeout_ms >= 0 -> timeout_ms
       _ -> @default_worker_idle_timeout_ms
     end
@@ -792,7 +1000,7 @@ defmodule Coflux.Orchestration.Server.Scheduler do
             Fleet.build_launcher_env(state, workspace_id, token, launcher),
             Fleet.worker_args(pool),
             launcher,
-            %{pool_name: pool_name}
+            %{pool_name: pool_name, on_exit: exit_notifier(worker_id)}
           ],
           launch_callback(
             workspace_id,
@@ -810,6 +1018,13 @@ defmodule Coflux.Orchestration.Server.Scheduler do
 
         callback.(state, {:ok, {:error, error, detail}})
     end
+  end
+
+  # For a launcher that learns a worker has exited without being asked
+  # (see `worker_exited/2`). Harmless if this process has gone by then.
+  defp exit_notifier(worker_id) do
+    server = self()
+    fn -> send(server, {:worker_exited, worker_id}) end
   end
 
   defp launch_callback(workspace_id, pool_id, pool_name, worker_id, worker_external_id, launcher) do
@@ -838,6 +1053,11 @@ defmodule Coflux.Orchestration.Server.Scheduler do
         })
 
       cond do
+        error == "launch_throttled" ->
+          state
+          |> record_pool_throttled(pool_id)
+          |> Fleet.deactivate_worker(worker_id, error, detail)
+
         error ->
           # Deactivating the worker pops it from state, and
           # with it the only record that this pool was ever
@@ -848,11 +1068,13 @@ defmodule Coflux.Orchestration.Server.Scheduler do
           |> Fleet.deactivate_worker(worker_id, error, detail)
 
         Map.has_key?(state.workers, worker_id) ->
-          put_in(
-            state,
-            [Access.key(:workers), worker_id, Access.key(:data)],
-            data
-          )
+          # The worker may have connected already, and it's only given
+          # work once its launch has landed, so look again.
+          send(self(), :tick)
+
+          state
+          |> put_in([Access.key(:workers), worker_id, Access.key(:data)], data)
+          |> Fleet.record_worker_lifetime(pool_id, data)
 
         true ->
           # The worker was deactivated while its launch was

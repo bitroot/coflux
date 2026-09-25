@@ -573,6 +573,10 @@ defmodule Coflux.Orchestration.Workspaces do
     |> apply_patch_field(patch, :provides)
     |> apply_patch_field(patch, :accepts)
     |> apply_patch_field(patch, :idle_timeout_ms)
+    |> apply_patch_field(patch, :launch_policy)
+    |> apply_patch_field(patch, :max_workers)
+    |> apply_patch_field(patch, :max_executions)
+    |> apply_patch_field(patch, :max_duration_ms)
     |> apply_launcher_patch(patch)
   end
 
@@ -732,7 +736,8 @@ defmodule Coflux.Orchestration.Workspaces do
          provides_tag_set_id,
          accepts_tag_set_id,
          modules,
-         idle_timeout_ms
+         idle_timeout_ms,
+         lifecycle
        ) do
     launcher_hash =
       if launcher_id do
@@ -768,6 +773,13 @@ defmodule Coflux.Orchestration.Workspaces do
     # the hash it had before the field existed.
     idle_timeout_part = if idle_timeout_ms, do: [Integer.to_string(idle_timeout_ms)], else: []
 
+    # Likewise, and named, so that which field a value belongs to is part
+    # of what's hashed.
+    lifecycle_parts =
+      for {key, value} <- lifecycle, !is_nil(value) do
+        "#{key}=#{value}"
+      end
+
     data =
       Enum.intersperse(
         [
@@ -775,7 +787,7 @@ defmodule Coflux.Orchestration.Workspaces do
           tag_set_hash,
           accepts_tag_set_hash,
           Enum.join(Enum.sort(modules), "\n")
-        ] ++ idle_timeout_part,
+        ] ++ idle_timeout_part ++ lifecycle_parts,
         0
       )
 
@@ -788,6 +800,14 @@ defmodule Coflux.Orchestration.Workspaces do
     accepts = Map.get(pool, :accepts, %{})
     launcher = Map.get(pool, :launcher)
     idle_timeout_ms = Map.get(pool, :idle_timeout_ms)
+
+    # In a fixed order, for the hash.
+    lifecycle = [
+      launch_policy: Map.get(pool, :launch_policy),
+      max_workers: Map.get(pool, :max_workers),
+      max_executions: Map.get(pool, :max_executions),
+      max_duration_ms: Map.get(pool, :max_duration_ms)
+    ]
 
     launcher_id =
       if launcher do
@@ -817,7 +837,8 @@ defmodule Coflux.Orchestration.Workspaces do
         provides_tag_set_id,
         accepts_tag_set_id,
         modules,
-        idle_timeout_ms
+        idle_timeout_ms,
+        lifecycle
       )
 
     case query_one(db, "SELECT id FROM pool_definitions WHERE hash = ?1", {{:blob, hash}}) do
@@ -831,7 +852,11 @@ defmodule Coflux.Orchestration.Workspaces do
             provides_tag_set_id: provides_tag_set_id,
             accepts_tag_set_id: accepts_tag_set_id,
             launcher_id: launcher_id,
-            idle_timeout_ms: idle_timeout_ms
+            idle_timeout_ms: idle_timeout_ms,
+            launch_policy: encode_launch_policy(lifecycle[:launch_policy]),
+            max_workers: lifecycle[:max_workers],
+            max_executions: lifecycle[:max_executions],
+            max_duration_ms: lifecycle[:max_duration_ms]
           })
 
         {:ok, _} =
@@ -914,10 +939,17 @@ defmodule Coflux.Orchestration.Workspaces do
   defp get_pool_definition(db, pool_definition_id) do
     case query_one(
            db,
-           "SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms FROM pool_definitions WHERE id = ?1",
+           """
+           SELECT launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms,
+                  launch_policy, max_workers, max_executions, max_duration_ms
+           FROM pool_definitions
+           WHERE id = ?1
+           """,
            {pool_definition_id}
          ) do
-      {:ok, {launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms}} ->
+      {:ok,
+       {launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms, launch_policy,
+        max_workers, max_executions, max_duration_ms}} ->
         provides =
           if provides_tag_set_id do
             case TagSets.get_tag_set(db, provides_tag_set_id) do
@@ -959,7 +991,11 @@ defmodule Coflux.Orchestration.Workspaces do
            accepts: accepts,
            modules: modules,
            launcher: launcher,
-           idle_timeout_ms: idle_timeout_ms
+           idle_timeout_ms: idle_timeout_ms,
+           launch_policy: decode_launch_policy(launch_policy),
+           max_workers: max_workers,
+           max_executions: max_executions,
+           max_duration_ms: max_duration_ms
          }}
 
       {:ok, nil} ->
@@ -1050,6 +1086,7 @@ defmodule Coflux.Orchestration.Workspaces do
       :docker -> 1
       :kubernetes -> 2
       :ecs -> 3
+      :lambda -> 4
     end
   end
 
@@ -1059,8 +1096,17 @@ defmodule Coflux.Orchestration.Workspaces do
       1 -> :docker
       2 -> :kubernetes
       3 -> :ecs
+      4 -> :lambda
     end
   end
+
+  defp encode_launch_policy(nil), do: nil
+  defp encode_launch_policy(:gradual), do: 0
+  defp encode_launch_policy(:demand), do: 1
+
+  defp decode_launch_policy(nil), do: nil
+  defp decode_launch_policy(0), do: :gradual
+  defp decode_launch_policy(1), do: :demand
 
   defp current_timestamp() do
     System.os_time(:millisecond)

@@ -17,6 +17,11 @@ defmodule Coflux.Application do
       # Keyed by OS pid, so a launched worker is found by something that
       # means the same thing after a restart as before one.
       {Registry, keys: :unique, name: Coflux.ProcessLauncher.Registry},
+      # Lambda invocations held open until their functions return, found
+      # by an id of their own.
+      {DynamicSupervisor, name: Coflux.LambdaLauncher.Supervisor, strategy: :one_for_one},
+      {Registry, keys: :unique, name: Coflux.LambdaLauncher.Registry},
+      Coflux.LambdaLauncher.Cache,
       Orchestration.Supervisor,
       {Registry, keys: :unique, name: Coflux.Logs.Registry},
       Logs.Supervisor,

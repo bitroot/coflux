@@ -139,6 +139,19 @@ ALTER TABLE executions ADD COLUMN catalog_sequence INTEGER;
 -- NULL leaves it to the scheduler's default.
 ALTER TABLE pool_definitions ADD COLUMN idle_timeout_ms INTEGER;
 
+-- How a pool launches workers, and how long they last.
+--
+-- launch_policy: NULL leaves it to the launcher type's default; 0 is
+-- gradual (one launch at a time), 1 is demand (as many as there are
+-- executions waiting). max_workers caps the pool's active workers,
+-- max_executions how many executions one worker takes before it drains,
+-- and max_duration_ms keeps executions with a longer timeout off the pool.
+-- NULL leaves each to the launcher type's default.
+ALTER TABLE pool_definitions ADD COLUMN launch_policy INTEGER;
+ALTER TABLE pool_definitions ADD COLUMN max_workers INTEGER;
+ALTER TABLE pool_definitions ADD COLUMN max_executions INTEGER;
+ALTER TABLE pool_definitions ADD COLUMN max_duration_ms INTEGER;
+
 -- Tokens have moved to the admin store, which isn't rotated, so a
 -- principal names its token by external id rather than by a row in this
 -- database - the way it already names a user.
