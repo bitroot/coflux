@@ -14,6 +14,7 @@ from support import cli
 from support.ecs import FakeEcs
 from support.executor import Executor
 from support.helpers import ADAPTER_SCRIPT, poll_result
+from support.lambda_fake import FakeLambda
 from support.manifest import manifest, task, workflow
 from support.protocol import json_args
 
@@ -897,6 +898,175 @@ class TestPoolSecrets:
 
 
 # ---------------------------------------------------------------------------
+# Launch policies and worker lifetimes
+
+
+def _complete_all(executor, count, value="done"):
+    """Receive ``count`` executions and complete each."""
+    for _ in range(count):
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        ex.conn.complete(ex.execution_id, value=value)
+
+
+class TestLaunchPolicies:
+    def test_lifecycle_fields_are_pool_fields(self, pool_env, tmp_path):
+        """The launch policy and worker limits are set, exported, unset and
+        imported at the pool level, with the duration in human units."""
+        host = pool_env["host"]
+        _setup_pool(
+            pool_env,
+            [workflow("test", "greet")],
+            pool_name="limits-pool",
+            sets=[
+                "launchPolicy=demand",
+                "maxWorkers=3",
+                "maxExecutions=1",
+                "maxDuration=15m",
+            ],
+        )
+
+        pool = cli.pools_get("limits-pool", host=host)
+        assert pool["launchPolicy"] == "demand"
+        assert pool["maxWorkers"] == 3
+        assert pool["maxExecutions"] == 1
+        assert pool["maxDurationMs"] == 900_000
+
+        exported = cli.pools_export(host=host)
+        assert 'launch_policy = "demand"\n' in exported
+        assert "max_workers = 3\n" in exported
+        assert "max_executions = 1\n" in exported
+        assert 'max_duration = "15m"\n' in exported
+
+        cli._coflux(
+            "pools",
+            "update",
+            "limits-pool",
+            "--unset",
+            "launchPolicy",
+            "--unset",
+            "maxDuration",
+            host=host,
+            output=None,
+        )
+        pool = cli.pools_get("limits-pool", host=host)
+        assert "launchPolicy" not in pool
+        assert "maxDurationMs" not in pool
+        assert pool["maxWorkers"] == 3
+
+        path = tmp_path / "pools.toml"
+        path.write_text(exported)
+        cli.pools_import(path, host=host)
+        pool = cli.pools_get("limits-pool", host=host)
+        assert pool["launchPolicy"] == "demand"
+        assert pool["maxDurationMs"] == 900_000
+
+    def test_invalid_launch_policy_is_refused(self, pool_env):
+        with pytest.raises(subprocess.CalledProcessError):
+            _setup_pool(
+                pool_env, [workflow("test", "greet")], sets=["launchPolicy=eager"]
+            )
+
+    def test_demand_launches_a_worker_per_execution(self, pool_env):
+        """A demand pool launches for everything waiting at once, and a
+        single-use worker takes one execution and leaves, cleanly."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        _setup_pool(
+            pool_env,
+            [workflow("test", "greet", parameters=["name"])],
+            pool_name="demand-pool",
+            sets=["launchPolicy=demand", "maxExecutions=1", "idleTimeout=0s"],
+        )
+
+        runs = [cli.submit("test/greet", f'"{i}"', host=host) for i in range(3)]
+
+        # All three are launched without waiting for one another.
+        _wait_for_count(host, "demand-pool", 3, timeout=_LAUNCH_TIMEOUT)
+        _complete_all(executor, 3)
+        for resp in runs:
+            assert (
+                poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)["type"]
+                == "value"
+            )
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            workers = cli.pools_launches("demand-pool", host=host)
+            if all(w["deactivatedAt"] for w in workers.values()):
+                break
+            time.sleep(0.5)
+        assert len(workers) == 3
+        for worker in workers.values():
+            assert worker["executions"] == 1
+            assert worker["error"] is None
+            assert worker["stopError"] is None
+
+    def test_max_workers_caps_demand(self, pool_env):
+        """A demand pool never has more workers than its maximum; the rest
+        of the work waits for one to leave."""
+        host = pool_env["host"]
+        executor = pool_env["executor"]
+        _setup_pool(
+            pool_env,
+            [workflow("test", "greet", parameters=["name"])],
+            pool_name="capped-pool",
+            sets=[
+                "launchPolicy=demand",
+                "maxWorkers=2",
+                "maxExecutions=1",
+                "idleTimeout=0s",
+            ],
+        )
+
+        runs = [cli.submit("test/greet", f'"{i}"', host=host) for i in range(3)]
+        _wait_for_count(host, "capped-pool", 2, timeout=_LAUNCH_TIMEOUT)
+        # Receive both (so neither is idle), then check nothing more came.
+        first = [executor.next_execute(timeout=_EXEC_TIMEOUT) for _ in range(2)]
+        time.sleep(3)
+        assert len(cli.pools_launches("capped-pool", host=host)) == 2
+
+        for ex in first:
+            ex.conn.complete(ex.execution_id, value="done")
+        _complete_all(executor, 1)
+        for resp in runs:
+            poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert len(cli.pools_launches("capped-pool", host=host)) == 3
+
+    def test_max_duration_keeps_longer_executions_off_the_pool(self, pool_env):
+        """An execution whose timeout is longer than the pool's maximum
+        duration isn't routed there, so nothing is launched for it."""
+        host = pool_env["host"]
+        _setup_pool(
+            pool_env,
+            [
+                workflow("test", "long", timeout=120_000),
+                workflow("test", "short", timeout=5_000),
+            ],
+            pool_name="short-pool",
+            sets=["maxDuration=1m"],
+        )
+
+        cli.submit("test/long", host=host)
+        time.sleep(3)
+        assert cli.pools_launches("short-pool", host=host) == {}
+
+        cli.submit("test/short", host=host)
+        _wait_for_count(host, "short-pool", 1, timeout=_LAUNCH_TIMEOUT)
+
+
+def _wait_for_count(host, pool_name, count, timeout=30):
+    """Wait until the pool has launched at least ``count`` workers."""
+    deadline = time.time() + timeout
+    workers = {}
+    while time.time() < deadline:
+        workers = cli.pools_launches(pool_name, host=host)
+        if len(workers) >= count:
+            return workers
+        time.sleep(0.2)
+    raise TimeoutError(f"{len(workers)} of {count} workers within {timeout}s")
+
+
+# ---------------------------------------------------------------------------
 # ECS launcher
 
 
@@ -1232,3 +1402,281 @@ class TestEcsLauncher:
         cli.pools_import(path, host=host)
         launcher = cli.pools_get("ecs-pool", host=host)["launcher"]
         assert launcher["credentialsSecret"] == "aws-test"
+
+
+# ---------------------------------------------------------------------------
+# Lambda launcher
+
+
+@pytest.fixture
+def lambda_env(pool_env):
+    """A pool environment with a stand-in for the Lambda API, which runs the
+    reference handler (see support.lambda_fake)."""
+    cli_path = os.path.abspath(os.environ.get("COFLUX_BIN", "coflux"))
+    fake = FakeLambda(cli_path, cwd=str(pool_env["worker_dir"]))
+    fake.start()
+    try:
+        yield {**pool_env, "lambda": fake}
+    finally:
+        fake.close()
+
+
+def _setup_lambda_pool(
+    lambda_env, targets, modules=None, pool_name="lambda-pool", sets=()
+):
+    """Write the manifest and create a Lambda pool pointed at the fake API.
+
+    ``sets`` are extra ``--set`` fields; a later one overrides a default.
+    """
+    modules = modules or ["test"]
+    host = lambda_env["host"]
+    fake = lambda_env["lambda"]
+
+    with open(lambda_env["manifest_path"], "w") as f:
+        json.dump(manifest(targets), f)
+
+    adapter = _adapter(lambda_env)
+    fields = [
+        f"function={fake.function_name}",
+        "region=us-east-1",
+        f"endpoint={fake.endpoint}",
+        "credentialsSecret=aws-test",
+        f"adapter={json.dumps(adapter)}",
+        *sets,
+    ]
+    cli.secrets_set(
+        "aws-test",
+        json.dumps({"AccessKeyId": "AKIATEST", "SecretAccessKey": "test-secret-key"}),
+        workspaces="*",
+        host=host,
+    )
+
+    args = ["pools", "create", pool_name, "--type", "lambda"]
+    for field in fields:
+        args.extend(["--set", field])
+    args.extend(["--modules", ",".join(modules)])
+    cli._coflux(*args, host=host, output=None)
+
+    cli.manifests_register(*modules, adapter=",".join(adapter), host=host)
+
+
+class TestLambdaLauncher:
+    def test_runs_worker_as_invocation(self, lambda_env):
+        """A worker is a synchronous invocation of the pool's function, with
+        the modules and connection details as its payload, in a signed
+        request. It takes one execution and leaves, and the invocation
+        returning is what says it has gone."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        fake = lambda_env["lambda"]
+        targets = [workflow("test", "greet", parameters=["name"])]
+        _setup_lambda_pool(lambda_env, targets)
+
+        resp = cli.submit("test/greet", '"world"', host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        ex = executor.next_execute(timeout=_EXEC_TIMEOUT)
+        assert ex.arguments[0]["value"] == "world"
+        ex.conn.complete(ex.execution_id, value="hello world")
+        result = poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert result["value"]["data"] == "hello world"
+
+        [configuration] = fake.requests_for("configuration")
+        assert configuration["method"] == "GET"
+
+        [invoke] = fake.requests_for("invocations")
+        headers = invoke["headers"]
+        assert headers["x-amz-invocation-type"] == "RequestResponse"
+        assert headers["x-amz-log-type"] == "Tail"
+        authorization = headers["authorization"]
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=AKIATEST/")
+        assert "/us-east-1/lambda/aws4_request" in authorization
+
+        event = invoke["body"]
+        assert event["args"] == ["test"]
+        assert event["env"]["COFLUX_HOST"] == host
+        assert event["env"]["COFLUX_WORKSPACE"] == "default"
+        assert event["env"]["COFLUX_SESSION"]
+        # One execution at a time, unless the pool says otherwise.
+        assert event["env"]["COFLUX_WORKER_CONCURRENCY"] == "1"
+
+        worker = _wait_for_worker(
+            host, "lambda-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["executions"] == 1
+        assert worker["error"] is None
+        assert worker["stopError"] is None
+        assert fake.running() == []
+
+    def test_defaults_are_the_pools_to_override(self, lambda_env):
+        """A Lambda pool launches on demand and uses each worker once by
+        default, but says nothing it wasn't told - and a pool can say
+        otherwise."""
+        host = lambda_env["host"]
+        _setup_lambda_pool(
+            lambda_env,
+            [workflow("test", "greet")],
+            sets=["qualifier=live", "maxExecutions=5"],
+        )
+
+        pool = cli.pools_get("lambda-pool", host=host)
+        assert pool["launcher"]["type"] == "lambda"
+        assert pool["launcher"]["function"] == lambda_env["lambda"].function_name
+        assert pool["launcher"]["qualifier"] == "live"
+        assert pool["maxExecutions"] == 5
+        assert "launchPolicy" not in pool
+
+    def test_burst_is_launched_in_parallel(self, lambda_env):
+        """Waiting executions each get an invocation, all at once."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        fake = lambda_env["lambda"]
+        _setup_lambda_pool(lambda_env, [workflow("test", "greet", parameters=["name"])])
+
+        runs = [cli.submit("test/greet", f'"{i}"', host=host) for i in range(3)]
+        fake.wait_for("invocations", count=3, timeout=_LAUNCH_TIMEOUT)
+        executor.wait_connections(3, timeout=_LAUNCH_TIMEOUT)
+        assert len(fake.running()) == 3
+
+        _complete_all(executor, 3)
+        for resp in runs:
+            poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+        assert len(fake.requests_for("configuration")) >= 1
+
+    def test_execution_is_capped_at_the_functions_timeout(self, lambda_env):
+        """An execution with no timeout of its own is given what's left of
+        its invocation, so it times out cleanly in the worker instead of
+        being lost with it when Lambda ends the function."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        fake = lambda_env["lambda"]
+        # The shortest timeout a pool launches with: the execution gets
+        # what's left of it, less 10s, which is under 50s.
+        fake.timeout = 60
+        _setup_lambda_pool(lambda_env, [workflow("test", "hang")])
+
+        resp = cli.submit("test/hang", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        executor.next_execute(timeout=_EXEC_TIMEOUT)
+
+        started = time.time()
+        result = poll_result(resp["runId"], host, timeout=60)
+        assert result["type"] == "timeout"
+        assert time.time() - started < 52
+
+        worker = _wait_for_worker(
+            host, "lambda-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["error"] is None
+
+    def test_function_error_is_reported(self, lambda_env):
+        """A handler that fails is reported as the worker's error, with the
+        tail of the function's log."""
+        host = lambda_env["host"]
+        fake = lambda_env["lambda"]
+        fake.handler_error = "no worker for you"
+        _setup_lambda_pool(lambda_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+        worker = _wait_for_worker(
+            host, "lambda-pool", lambda w: w["deactivatedAt"] is not None
+        )
+        assert worker["error"] == "function_error"
+        assert "no worker for you" in worker["logs"]
+
+    def test_function_timeout_too_short_is_reported(self, lambda_env):
+        """A worker isn't given work in its last 30 seconds, so a function
+        that doesn't run for long enough to get past that isn't launched."""
+        host = lambda_env["host"]
+        fake = lambda_env["lambda"]
+        fake.timeout = 3
+        _setup_lambda_pool(lambda_env, [workflow("test", "greet")])
+
+        cli.submit("test/greet", host=host)
+        worker = _wait_for_worker(
+            host, "lambda-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_function_timeout_too_short"
+        assert fake.invocations == {}
+
+    def test_execution_longer_than_the_function_is_kept_off_the_pool(self, lambda_env):
+        """Once a launch has said how long the function runs for, an
+        execution whose timeout wouldn't fit isn't sent to the pool, rather
+        than being cut short to fit."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        _setup_lambda_pool(
+            lambda_env,
+            [workflow("test", "greet"), workflow("test", "slow", timeout=600_000)],
+        )
+
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        _complete_all(executor, 1)
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        cli.submit("test/slow", host=host)
+        time.sleep(3)
+        assert len(cli.pools_launches("lambda-pool", host=host)) == 1
+
+    def test_missing_function_is_reported(self, lambda_env):
+        host = lambda_env["host"]
+        _setup_lambda_pool(
+            lambda_env, [workflow("test", "greet")], sets=["function=nonexistent"]
+        )
+
+        cli.submit("test/greet", host=host)
+        worker = _wait_for_worker(
+            host, "lambda-pool", lambda w: w["startError"] is not None
+        )
+        assert worker["startError"] == "launch_function_not_found"
+        assert worker["logs"] == "Function not found: nonexistent"
+
+    def test_failures_launched_together_count_once(self, lambda_env):
+        """Launches that fail in the same pass back the pool off as one
+        failure would, rather than as many."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        fake = lambda_env["lambda"]
+        fake.invoke_errors = [(500, "ServiceException", "Try again")] * 3
+        _setup_lambda_pool(lambda_env, [workflow("test", "greet", parameters=["name"])])
+
+        # Submitted while disabled, so all three are launched together.
+        cli.pools_disable("lambda-pool", host=host)
+        runs = [cli.submit("test/greet", f'"{i}"', host=host) for i in range(3)]
+        started = time.time()
+        cli.pools_enable("lambda-pool", host=host)
+
+        executor.wait_connections(3, timeout=_LAUNCH_TIMEOUT)
+        # One 5s backoff, where counting each would have been 20s.
+        assert time.time() - started < 14
+        _complete_all(executor, 3)
+        for resp in runs:
+            poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        workers = cli.pools_launches("lambda-pool", host=host)
+        errors = sorted(w["startError"] or "" for w in workers.values())
+        assert errors == ["", "", ""] + ["launch_server_error"] * 3
+
+    def test_throttling_holds_the_pool_back_briefly(self, lambda_env):
+        """A throttled invocation isn't counted against the pool the way a
+        broken one is: it's tried again after a short hold."""
+        host = lambda_env["host"]
+        executor = lambda_env["executor"]
+        fake = lambda_env["lambda"]
+        fake.invoke_errors = [
+            (429, "TooManyRequestsException", "Rate exceeded"),
+            (429, "TooManyRequestsException", "Rate exceeded"),
+        ]
+        _setup_lambda_pool(lambda_env, [workflow("test", "greet")])
+
+        started = time.time()
+        resp = cli.submit("test/greet", host=host)
+        executor.wait_connections(1, timeout=_LAUNCH_TIMEOUT)
+        # Two short holds, where backoff would have been 5s then 10s.
+        assert time.time() - started < 14
+        _complete_all(executor, 1)
+        poll_result(resp["runId"], host, timeout=_RESULT_TIMEOUT)
+
+        workers = cli.pools_launches("lambda-pool", host=host)
+        errors = sorted(w["startError"] or "" for w in workers.values())
+        assert errors == ["", "launch_throttled", "launch_throttled"]

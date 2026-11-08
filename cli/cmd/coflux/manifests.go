@@ -498,6 +498,7 @@ func buildManifests(manifest *adapter.DiscoveryManifest) map[string]map[string]a
 			"delayMs":     delay,
 			"retries":     retries,
 			"recurrent":   t.Recurrent,
+			"timeoutMs":   t.TimeoutMs,
 			"requires":    requires,
 			"instruction": instruction,
 			"memo":        t.Memo,

@@ -192,6 +192,73 @@ definition without a log configuration is worth giving one.
 | `roleExternalId` | External ID the role's trust policy expects, if any |
 | `endpoint` | ECS API endpoint override (e.g. a VPC endpoint) |
 
+ECS tasks take a while to start. For bursty work, `launchPolicy=demand`
+launches a task for each waiting execution at once rather than one at a
+time (see [Launch policies](#launch-policies)).
+
+#### Lambda launcher
+
+:::note
+The Lambda launcher is experimental — the API may change based on feedback.
+:::
+
+Launches workers as AWS Lambda invocations:
+
+```bash
+coflux pools create fn --type lambda \
+  --set function=coflux-worker \
+  --set region=eu-west-2 \
+  --set serverHost=coflux.example.com \
+  --modules myapp.workflows
+```
+
+Each worker is one synchronous invocation of the function. The payload
+carries the worker's arguments (the modules to host) and environment (what
+it needs to connect back), as `{"args": [...], "env": {...}}`, and the
+function runs `coflux worker` with them and returns when it exits. Lambda
+has no way to set environment variables per invocation, so the function
+has to do this itself: the [reference
+handler](https://github.com/bitroot/coflux/tree/main/examples/lambda) is a
+few lines of Python, with a Dockerfile for an image built on the AWS
+Python base image. Everything else — image, memory, timeout, execution
+role, networking — belongs to the function.
+
+A Lambda pool defaults to `launchPolicy=demand`, `maxExecutions=1`,
+`idleTimeout=0s`, `maxDuration=15m` and `concurrency=1`: an invocation is
+launched for each waiting execution, takes that one, and leaves as soon as
+it's done. Once a launch has said what the function's timeout is, the
+default `maxDuration` is that, less 30 seconds, if it's shorter. Any of these can be set on the pool instead. `maxWorkers`
+defaults to 10 for a demand pool; Lambda's own concurrency limit is shared
+by everything in the account, so set it with that in mind.
+
+An invocation can't be stopped from outside. A worker is asked to leave
+over its connection like any other, and the function's timeout is the hard
+limit. The server knows when that is, so it doesn't give a worker work in
+its last 30 seconds, and caps what it does give it to finish 10 seconds
+before the end: an execution with no timeout of its own, or a longer one,
+times out cleanly rather than being lost with the invocation. So the
+function's timeout has to be at least 60 seconds, which leaves time to
+start and to do some work; a function with a shorter one isn't launched.
+
+Workers connect out to the server, so the function needs a route to it: a
+function outside a VPC has one; one inside a VPC needs a NAT gateway.
+
+Credentials work as for ECS: `credentialsSecret`, or the server's
+surroundings, then `roleArn` if set. The identity calling Lambda needs
+`lambda:InvokeFunction` and `lambda:GetFunctionConfiguration` on the
+function. A failed invocation carries the tail of the function's log,
+which Lambda returns with the response.
+
+| Field | Description |
+|-------|-------------|
+| `function` | Function name or ARN |
+| `qualifier` | Version or alias to invoke (optional) |
+| `region` | AWS region |
+| `credentialsSecret` | Name of the secret holding AWS credentials as JSON (as for ECS) |
+| `roleArn` | IAM role to assume before calling Lambda |
+| `roleExternalId` | External ID the role's trust policy expects, if any |
+| `endpoint` | Lambda API endpoint override (e.g. a VPC endpoint) |
+
 ### Common fields
 
 These fields apply to all launcher types:
@@ -202,6 +269,10 @@ These fields apply to all launcher types:
 | `--provides` | Features that workers provide (e.g., `gpu:A100`) |
 | `--accepts` | Tags that executions must have to be assigned to this pool |
 | `idleTimeout` | How long the pool keeps an idle worker before stopping it, as a duration (e.g. `30s`, `5m`; default: 5s). Worth raising for launchers with slow starts, such as ECS |
+| `launchPolicy` | `gradual` (default) or `demand` — see [Launch policies](#launch-policies) |
+| `maxWorkers` | The most workers the pool has at once (default: 10 for `demand`, otherwise unlimited) |
+| `maxExecutions` | How many executions a worker takes before it's stopped; `1` makes workers single-use (default: unlimited) |
+| `maxDuration` | Executions whose timeout is longer than this aren't sent to the pool, as a duration (default: none) |
 | `serverHost` | Server host override for launched workers |
 | `serverSecure` | Use TLS for server connection |
 | `adapter` | Adapter command |
@@ -217,6 +288,26 @@ connected, or hasn't gone within 30 seconds; so a worker still leaves
 cleanly when the launcher can't be reached, and the launcher still
 bounds one that doesn't respond. A worker is reported as stopped once
 its launcher confirms it has gone, not once it was asked.
+
+### Launch policies
+
+A pool launches workers when there are executions waiting for it that no
+worker can take. How many it launches depends on its `launchPolicy`:
+
+- `gradual` (the default) launches one worker at a time, at most every 10
+  seconds, and not while another is still starting. Suited to long-lived
+  workers with a high concurrency, where one more worker is usually
+  enough.
+- `demand` launches enough workers for everything waiting, at once, less
+  what workers already starting will take. Suited to workers that start
+  quickly, or to bursts of work.
+
+Either way, the pool never has more than `maxWorkers`.
+
+A worker that has taken `maxExecutions` executions takes no more, and is
+stopped once they finish. With `maxExecutions=1`, each worker runs one
+execution; with `launchPolicy=demand` and `idleTimeout=0s` too, a pool
+launches a worker per execution and nothing lingers.
 
 ### Modules
 

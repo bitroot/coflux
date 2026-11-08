@@ -34,6 +34,30 @@ defmodule Coflux.Orchestration.Server.Fleet do
   @default_activation_timeout_ms 600_000
   @default_reconnection_timeout_ms 30_000
 
+  # What a pool leaves unset, by launcher type. A Lambda invocation starts
+  # quickly, lives at most 15 minutes and can't be stopped from outside,
+  # so by default it's launched for waiting work, used once, and let go as
+  # soon as it has nothing to do.
+  @pool_defaults %{
+    lambda: %{
+      launch_policy: :demand,
+      max_executions: 1,
+      idle_timeout_ms: 0,
+      max_duration_ms: 900_000
+    }
+  }
+
+  @launcher_defaults %{
+    lambda: %{concurrency: 1}
+  }
+
+  # A pool launching on demand is capped unless it says otherwise: without
+  # one, a backlog is a launch per execution.
+  @default_demand_max_workers 10
+
+  # A worker this close to its expiry isn't given anything new.
+  @min_remaining_ms 30_000
+
   def resolve_worker_external_id(state, worker_external_id) do
     case Map.fetch(state.worker_external_ids, worker_external_id) do
       {:ok, worker_id} -> {:ok, worker_id}
@@ -216,10 +240,14 @@ defmodule Coflux.Orchestration.Server.Fleet do
     end
   end
 
+  # A launched worker can connect before its launch result lands - the
+  # launcher may still be waiting on its API - and until it does, what
+  # the launcher knows about the worker (when it will be ended, say) isn't
+  # known here, so it isn't given work.
   def session_active?(session, state) do
     if session.worker_id do
       worker = Map.fetch!(state.workers, session.worker_id)
-      worker.state == :active
+      worker.state == :active && !is_nil(worker.data)
     else
       true
     end
@@ -298,6 +326,131 @@ defmodule Coflux.Orchestration.Server.Fleet do
     }
   end
 
+  @doc """
+  One of a pool's lifecycle settings - `launch_policy`, `max_workers`,
+  `max_executions`, `max_duration_ms` or `idle_timeout_ms` - as the pool
+  has it, or as its launcher type defaults it. Nil where neither says.
+  """
+  def pool_setting(pool, key) do
+    case Map.get(pool, key) do
+      nil -> default_pool_setting(pool, key)
+      value -> value
+    end
+  end
+
+  defp default_pool_setting(pool, key) do
+    type = pool[:launcher] && pool.launcher.type
+
+    case get_in(@pool_defaults, [Access.key(type, %{}), key]) do
+      nil ->
+        case key do
+          :launch_policy ->
+            :gradual
+
+          :max_workers ->
+            if pool_setting(pool, :launch_policy) == :demand, do: @default_demand_max_workers
+
+          _ ->
+            nil
+        end
+
+      value ->
+        value
+    end
+  end
+
+  @doc """
+  A launcher setting as the launcher has it, or as its type defaults it.
+  """
+  def launcher_setting(launcher, key) do
+    case Map.get(launcher, key) do
+      nil -> get_in(@launcher_defaults, [Access.key(launcher.type, %{}), key])
+      value -> value
+    end
+  end
+
+  @doc """
+  When a launched worker will be ended whatever it's doing, if its
+  launcher says - a Lambda invocation's timeout, say. Nil for a worker
+  whose launcher doesn't, or whose launch hasn't landed.
+  """
+  def worker_expires_at(%{data: %{expires_at: expires_at}}) when is_integer(expires_at),
+    do: expires_at
+
+  def worker_expires_at(_worker), do: nil
+
+  @doc """
+  Remembers how long a pool's workers live for, from a launch whose
+  launcher says, so that executions they couldn't finish aren't sent to
+  the pool (see `pool_max_duration_ms/2`).
+  """
+  def record_worker_lifetime(state, pool_id, %{launched_at: launched_at, expires_at: expires_at})
+      when is_integer(launched_at) and is_integer(expires_at),
+      do: put_in(state, [Access.key(:pool_lifetimes), pool_id], expires_at - launched_at)
+
+  def record_worker_lifetime(state, _pool_id, _data), do: state
+
+  @doc """
+  The longest execution timeout a pool takes: what it sets, or else its
+  launcher type's default, but no more than a worker is known to live
+  for, less the end of its life in which it isn't given anything. Nil
+  for no limit.
+  """
+  def pool_max_duration_ms(state, pool) do
+    case Map.get(pool, :max_duration_ms) do
+      nil ->
+        lifetime_limit =
+          case Map.get(state.pool_lifetimes, pool.id) do
+            nil -> nil
+            lifetime_ms -> lifetime_ms - @min_remaining_ms
+          end
+
+        [default_pool_setting(pool, :max_duration_ms), lifetime_limit]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.min(fn -> nil end)
+
+      max_duration_ms ->
+        max_duration_ms
+    end
+  end
+
+  # The pool a session's worker was launched from, as it's configured now.
+  defp session_pool(state, session) do
+    with worker_id when not is_nil(worker_id) <- session.worker_id,
+         {:ok, worker} <- Map.fetch(state.workers, worker_id) do
+      get_in(state.pools, [session.workspace_id, worker.pool_name])
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Whether a session has taken all the executions its pool allows one
+  worker, so it takes no more and is let go once they're done.
+  """
+  def session_spent?(state, session) do
+    case session_pool(state, session) do
+      nil ->
+        false
+
+      pool ->
+        case pool_setting(pool, :max_executions) do
+          nil -> false
+          max -> session.total_executions >= max
+        end
+    end
+  end
+
+  defp session_expiring?(state, session, now) do
+    with worker_id when not is_nil(worker_id) <- session.worker_id,
+         {:ok, worker} <- Map.fetch(state.workers, worker_id),
+         expires_at when not is_nil(expires_at) <- worker_expires_at(worker) do
+      expires_at - now < @min_remaining_ms
+    else
+      _ -> false
+    end
+  end
+
   def choose_session(state, execution, requires) do
     target =
       state.targets
@@ -305,6 +458,8 @@ defmodule Coflux.Orchestration.Server.Fleet do
       |> Map.get(execution.target)
 
     if target && target.type == execution.type do
+      now = System.os_time(:millisecond)
+
       session_ids =
         Enum.filter(target.session_ids, fn session_id ->
           session = Map.fetch!(state.sessions, session_id)
@@ -312,6 +467,9 @@ defmodule Coflux.Orchestration.Server.Fleet do
           session.workspace_id == execution.workspace_id && session.connection &&
             !Map.get(session, :draining, false) &&
             !session_at_capacity?(session) &&
+            !session_spent?(state, session) &&
+            !session_expiring?(state, session, now) &&
+            session_within_max_duration?(state, session, execution) &&
             session_active?(session, state) &&
             !session_pool_disabled?(session, state) &&
             has_requirements?(merge_tag_sets(session.provides, session.accepts), requires) &&
@@ -332,12 +490,34 @@ defmodule Coflux.Orchestration.Server.Fleet do
       |> Map.filter(fn {_, pool} ->
         Map.get(pool, :state, :active) != :disabled &&
           pool.launcher && pool_hosts_module?(pool.modules, execution.module) &&
+          within_max_duration?(state, pool, execution) &&
           has_requirements?(merge_tag_sets(pool.provides, Map.get(pool, :accepts, %{})), requires) &&
           satisfies_accepts?(Map.get(pool, :accepts, %{}), requires)
       end)
 
     if Enum.any?(pools) do
       pools |> Map.values() |> Enum.map(& &1.id) |> Enum.random()
+    end
+  end
+
+  # A pool's workers are kept to what the pool takes, so that a worker
+  # already running doesn't take what a new one wouldn't be launched for.
+  defp session_within_max_duration?(state, session, execution) do
+    case session_pool(state, session) do
+      nil -> true
+      pool -> within_max_duration?(state, pool, execution)
+    end
+  end
+
+  # An execution whose timeout is longer than the pool's workers can run
+  # for is kept off the pool. One with no timeout isn't: it's capped at
+  # what's left of its worker instead (see `Scheduler`).
+  defp within_max_duration?(state, pool, execution) do
+    case {pool_max_duration_ms(state, pool), execution.timeout_ms} do
+      {nil, _} -> true
+      {_, nil} -> true
+      {_, 0} -> true
+      {max_duration_ms, timeout_ms} -> timeout_ms <= max_duration_ms
     end
   end
 
@@ -389,7 +569,7 @@ defmodule Coflux.Orchestration.Server.Fleet do
       end
 
     base =
-      case Map.get(launcher, :concurrency) do
+      case launcher_setting(launcher, :concurrency) do
         nil -> base
         concurrency -> Map.put(base, "COFLUX_WORKER_CONCURRENCY", Integer.to_string(concurrency))
       end
@@ -414,6 +594,7 @@ defmodule Coflux.Orchestration.Server.Fleet do
         :process -> Coflux.ProcessLauncher
         :kubernetes -> Coflux.KubernetesLauncher
         :ecs -> Coflux.EcsLauncher
+        :lambda -> Coflux.LambdaLauncher
       end
 
     task = Task.Supervisor.async_nolink(Coflux.LauncherSupervisor, module, fun, args)

@@ -1929,10 +1929,18 @@ defmodule Coflux.Orchestration.Epoch do
   defp ensure_pool_definition(_source_db, _target_db, nil), do: nil
 
   defp ensure_pool_definition(source_db, target_db, old_id) do
-    {:ok, {hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms}} =
+    {:ok,
+     {hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms, launch_policy,
+      max_workers, max_executions,
+      max_duration_ms}} =
       query_one!(
         source_db,
-        "SELECT hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms FROM pool_definitions WHERE id = ?1",
+        """
+        SELECT hash, launcher_id, provides_tag_set_id, accepts_tag_set_id, idle_timeout_ms,
+               launch_policy, max_workers, max_executions, max_duration_ms
+        FROM pool_definitions
+        WHERE id = ?1
+        """,
         {old_id}
       )
 
@@ -1951,7 +1959,11 @@ defmodule Coflux.Orchestration.Epoch do
             launcher_id: ensure_launcher(source_db, target_db, launcher_id),
             provides_tag_set_id: ensure_tag_set(source_db, target_db, provides_tag_set_id),
             accepts_tag_set_id: ensure_tag_set(source_db, target_db, accepts_tag_set_id),
-            idle_timeout_ms: idle_timeout_ms
+            idle_timeout_ms: idle_timeout_ms,
+            launch_policy: launch_policy,
+            max_workers: max_workers,
+            max_executions: max_executions,
+            max_duration_ms: max_duration_ms
           })
 
         # Copy pool_definition_modules

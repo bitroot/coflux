@@ -47,7 +47,14 @@ defmodule Coflux.Topics.Pool do
       state: to_string(Map.get(pool, :state, :active))
     }
     |> maybe_put(:idleTimeoutMs, Map.get(pool, :idle_timeout_ms))
+    |> maybe_put(:launchPolicy, pool |> Map.get(:launch_policy) |> format_launch_policy())
+    |> maybe_put(:maxWorkers, Map.get(pool, :max_workers))
+    |> maybe_put(:maxExecutions, Map.get(pool, :max_executions))
+    |> maybe_put(:maxDurationMs, Map.get(pool, :max_duration_ms))
   end
+
+  defp format_launch_policy(nil), do: nil
+  defp format_launch_policy(policy), do: Atom.to_string(policy)
 
   defp build_launcher(launcher) do
     base =
@@ -77,6 +84,14 @@ defmodule Coflux.Topics.Pool do
           |> maybe_put(:securityGroups, Map.get(launcher, :security_groups))
           |> maybe_put(:assignPublicIp, Map.get(launcher, :assign_public_ip))
           |> maybe_put(:platformVersion, Map.get(launcher, :platform_version))
+          |> maybe_put(:credentialsSecret, Map.get(launcher, :credentials_secret))
+          |> maybe_put(:roleArn, Map.get(launcher, :role_arn))
+          |> maybe_put(:roleExternalId, Map.get(launcher, :role_external_id))
+          |> maybe_put(:endpoint, Map.get(launcher, :endpoint))
+
+        :lambda ->
+          %{type: "lambda", function: launcher.function, region: launcher.region}
+          |> maybe_put(:qualifier, Map.get(launcher, :qualifier))
           |> maybe_put(:credentialsSecret, Map.get(launcher, :credentials_secret))
           |> maybe_put(:roleArn, Map.get(launcher, :role_arn))
           |> maybe_put(:roleExternalId, Map.get(launcher, :role_external_id))

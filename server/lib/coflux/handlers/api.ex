@@ -16,6 +16,9 @@ defmodule Coflux.Handlers.Api do
   # STS's own rule for an external ID.
   @external_id_regex ~r/^[\w+=,.@:\/-]{2,1224}$/
 
+  # A Lambda version number or alias name.
+  @lambda_qualifier_regex ~r/^(\$LATEST|[0-9]+|[a-zA-Z0-9_-]{1,128})$/
+
   # A directory upload arrives as one entry per file, so this bounds an
   # accidental drop of a very large tree. Unlike the sizes, which the
   # client asserts, the count is something the server can see for itself.
@@ -1469,6 +1472,31 @@ defmodule Coflux.Handlers.Api do
     end
   end
 
+  defp parse_lambda_launcher(value) do
+    with :ok <- required(value, "function", :string, non_empty: true, max: 170),
+         :ok <- required(value, "region", :string, match: ~r/^[a-z0-9-]{1,30}$/),
+         :ok <- optional(value, "qualifier", :string, match: @lambda_qualifier_regex),
+         :ok <- optional(value, "credentialsSecret", :string, secret_name: true),
+         :ok <- optional(value, "roleArn", :string, max: 2048, match: @iam_role_arn_regex),
+         :ok <- together(value, "roleExternalId", "roleArn"),
+         :ok <- optional(value, "roleExternalId", :string, match: @external_id_regex),
+         :ok <- optional(value, "endpoint", :string, max: 500, prefixes: ["http://", "https://"]) do
+      launcher =
+        %{
+          type: :lambda,
+          function: Map.get(value, "function"),
+          region: Map.get(value, "region")
+        }
+        |> maybe_put_value(:qualifier, Map.get(value, "qualifier"))
+        |> maybe_put_value(:credentials_secret, Map.get(value, "credentialsSecret"))
+        |> maybe_put_value(:role_arn, Map.get(value, "roleArn"))
+        |> maybe_put_value(:role_external_id, Map.get(value, "roleExternalId"))
+        |> maybe_put_value(:endpoint, Map.get(value, "endpoint"))
+
+      {:ok, launcher}
+    end
+  end
+
   defp wrap_list(value) when is_binary(value), do: [value]
   defp wrap_list(value), do: value
 
@@ -1503,7 +1531,7 @@ defmodule Coflux.Handlers.Api do
     cond do
       is_map(value) ->
         case Map.fetch(value, "type") do
-          {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
+          {:ok, type} when type in ["docker", "process", "kubernetes", "ecs", "lambda"] ->
             type_atom = String.to_existing_atom(type)
 
             if MapSet.member?(allowed, type_atom) do
@@ -1513,6 +1541,7 @@ defmodule Coflux.Handlers.Api do
                         "process" -> parse_process_launcher(value)
                         "kubernetes" -> parse_kubernetes_launcher(value)
                         "ecs" -> parse_ecs_launcher(value)
+                        "lambda" -> parse_lambda_launcher(value)
                       end) do
                 parse_common_launcher_fields(launcher, value)
               end
@@ -1572,7 +1601,14 @@ defmodule Coflux.Handlers.Api do
 
     config = if Enum.any?(provides), do: Map.put(config, "provides", provides), else: config
     config = if Enum.any?(accepts), do: Map.put(config, "accepts", accepts), else: config
-    config = maybe_put_value(config, "idleTimeoutMs", Map.get(pool, :idle_timeout_ms))
+
+    config =
+      config
+      |> maybe_put_value("idleTimeoutMs", Map.get(pool, :idle_timeout_ms))
+      |> maybe_put_value("launchPolicy", format_launch_policy(Map.get(pool, :launch_policy)))
+      |> maybe_put_value("maxWorkers", Map.get(pool, :max_workers))
+      |> maybe_put_value("maxExecutions", Map.get(pool, :max_executions))
+      |> maybe_put_value("maxDurationMs", Map.get(pool, :max_duration_ms))
 
     if pool.launcher do
       Map.put(config, "launcher", build_launcher_config(pool.launcher))
@@ -1606,6 +1642,18 @@ defmodule Coflux.Handlers.Api do
           |> maybe_put_value("securityGroups", Map.get(launcher, :security_groups))
           |> maybe_put_value("assignPublicIp", Map.get(launcher, :assign_public_ip))
           |> maybe_put_value("platformVersion", Map.get(launcher, :platform_version))
+          |> maybe_put_value("credentialsSecret", Map.get(launcher, :credentials_secret))
+          |> maybe_put_value("roleArn", Map.get(launcher, :role_arn))
+          |> maybe_put_value("roleExternalId", Map.get(launcher, :role_external_id))
+          |> maybe_put_value("endpoint", Map.get(launcher, :endpoint))
+
+        :lambda ->
+          %{
+            "type" => "lambda",
+            "function" => launcher.function,
+            "region" => launcher.region
+          }
+          |> maybe_put_value("qualifier", Map.get(launcher, :qualifier))
           |> maybe_put_value("credentialsSecret", Map.get(launcher, :credentials_secret))
           |> maybe_put_value("roleArn", Map.get(launcher, :role_arn))
           |> maybe_put_value("roleExternalId", Map.get(launcher, :role_external_id))
@@ -1665,6 +1713,10 @@ defmodule Coflux.Handlers.Api do
             {"provides", &parse_tag_set/1, :provides, %{}},
             {"accepts", &parse_tag_set/1, :accepts, %{}},
             {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms, nil},
+            {"launchPolicy", &parse_launch_policy/1, :launch_policy, nil},
+            {"maxWorkers", &parse_positive_integer/1, :max_workers, nil},
+            {"maxExecutions", &parse_positive_integer/1, :max_executions, nil},
+            {"maxDurationMs", &parse_positive_integer/1, :max_duration_ms, nil},
             {"launcher", &parse_launcher/1, :launcher, nil}
           ],
           {:ok, %{}},
@@ -1697,6 +1749,16 @@ defmodule Coflux.Handlers.Api do
   defp parse_idle_timeout_ms(value) when is_integer(value) and value >= 0, do: {:ok, value}
   defp parse_idle_timeout_ms(_value), do: {:error, :invalid}
 
+  defp parse_launch_policy("gradual"), do: {:ok, :gradual}
+  defp parse_launch_policy("demand"), do: {:ok, :demand}
+  defp parse_launch_policy(_value), do: {:error, :invalid}
+
+  defp format_launch_policy(nil), do: nil
+  defp format_launch_policy(policy), do: Atom.to_string(policy)
+
+  defp parse_positive_integer(value) when is_integer(value) and value >= 1, do: {:ok, value}
+  defp parse_positive_integer(_value), do: {:error, :invalid}
+
   # Parses a partial pool update (PATCH semantics).
   # Only keys present in the JSON are included. A JSON null value means "unset".
   defp parse_pool_patch(value) do
@@ -1707,6 +1769,10 @@ defmodule Coflux.Handlers.Api do
           {"provides", &parse_tag_set/1, :provides},
           {"accepts", &parse_tag_set/1, :accepts},
           {"idleTimeoutMs", &parse_idle_timeout_ms/1, :idle_timeout_ms},
+          {"launchPolicy", &parse_launch_policy/1, :launch_policy},
+          {"maxWorkers", &parse_positive_integer/1, :max_workers},
+          {"maxExecutions", &parse_positive_integer/1, :max_executions},
+          {"maxDurationMs", &parse_positive_integer/1, :max_duration_ms},
           {"launcher", &parse_launcher_patch/1, :launcher}
         ]
 
@@ -1743,7 +1809,7 @@ defmodule Coflux.Handlers.Api do
 
     # If "type" is present, validate it; otherwise this is patching an existing launcher
     case Map.fetch(value, "type") do
-      {:ok, type} when type in ["docker", "process", "kubernetes", "ecs"] ->
+      {:ok, type} when type in ["docker", "process", "kubernetes", "ecs", "lambda"] ->
         type_atom = String.to_existing_atom(type)
 
         if MapSet.member?(allowed, type_atom) do
@@ -1797,6 +1863,8 @@ defmodule Coflux.Handlers.Api do
       {"roleArn", &(is_binary(&1) and Regex.match?(@iam_role_arn_regex, &1))},
       {"roleExternalId", &(is_binary(&1) and Regex.match?(@external_id_regex, &1))},
       {"endpoint", &is_binary/1},
+      {"function", &(is_binary(&1) and &1 != "")},
+      {"qualifier", &(is_binary(&1) and Regex.match?(@lambda_qualifier_regex, &1))},
       {"serverHost", &is_binary/1},
       {"serverSecure", &is_boolean/1},
       {"adapter", fn v -> is_list(v) and v != [] and Enum.all?(v, &is_binary/1) end},
@@ -1851,6 +1919,8 @@ defmodule Coflux.Handlers.Api do
       "roleArn" => :role_arn,
       "roleExternalId" => :role_external_id,
       "endpoint" => :endpoint,
+      "function" => :function,
+      "qualifier" => :qualifier,
       "serverHost" => :server_host,
       "serverSecure" => :server_secure,
       "adapter" => :adapter,

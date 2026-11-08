@@ -3,6 +3,8 @@
 Enhancements:
 
 - Adds `--type ecs` support for `pools create` and `pools update`, including the `roleArn` and `roleExternalId` fields for a role to assume before calling ECS.
+- Adds `--type lambda` support for `pools create` and `pools update` (`function`, `qualifier`).
+- Adds the `launchPolicy`, `maxWorkers`, `maxExecutions` and `maxDuration` pool fields (exported as `launch_policy`, `max_workers`, `max_executions` and `max_duration`).
 - Adds the `idleTimeout` pool field, for how long a pool keeps an idle worker before stopping it (`--set idleTimeout=5m`, exported as `idle_timeout = "5m"`).
 - Adds `secrets set`, `secrets list` and `secrets delete`. Pools refer to secrets by name (`tokenSecret`, `credentialsSecret`, `envSecrets`) instead of holding credentials, so `pools export` no longer needs `--include-secrets`. Each secret is set for one or more workspace patterns, given as a required `--workspaces`, in the same language `tokens create --workspaces` uses.
 - The worker exits when the server asks it to (a `stop` command over its connection, sent to a pool worker that has been idle past its pool's timeout), draining in-flight executions first as it does on SIGTERM.
@@ -11,6 +13,10 @@ Changes:
 
 - Durations are written as durations. `submit --delay` takes `30s` or `5m` rather than a bare number of seconds, and no longer accepts one; `logs.flush_interval` and `metrics.flush_interval` in `coflux.toml` are duration strings (`"500ms"`) rather than floats, and a bare number is now an error rather than being read as nanoseconds. Both need editing by hand.
 - Follows the server's rename of duration fields: the manifest and submission payloads carry `delayMs`, `timeoutMs`, `maxAgeMs`, `backoffMinMs` and `backoffMaxMs`, and the worker protocol carries `max_age_ms`, `backoff_min_ms` and `backoff_max_ms`. A CLI of this version needs a server of this version, as before.
+
+Fixes:
+
+- `manifests register` sends each target's timeout, as a worker registering its own manifests already did. Workflows registered this way had been left without one.
 
 ## 0.12.0
 

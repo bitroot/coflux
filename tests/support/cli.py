@@ -310,6 +310,7 @@ def pools_create(
     concurrency=None,
     idle_timeout=None,
     env=None,
+    sets=(),
     host=None,
     workspace="default",
 ):
@@ -327,6 +328,8 @@ def pools_create(
             env=env,
         )
     )
+    for field in sets:
+        args.extend(["--set", field])
     _coflux(*args, host=host, workspace=workspace, output=None)
 
 

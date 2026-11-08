@@ -1,0 +1,27 @@
+# Deploys this example with scripts/deploy-pool.py - see the README.
+
+[image]
+platform = "linux/amd64"
+# The CLI, built for the function's architecture, at the repo's version
+# (the server turns away a worker whose version doesn't match its own).
+before = [
+  "cd ../../cli && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags \"-X github.com/bitroot/coflux/cli/internal/version.Version=$(cat ../VERSION)\" -o ../examples/lambda/.build/coflux ./cmd/coflux",
+]
+contexts = { coflux = "../../adapters/python/coflux", cli = ".build" }
+ecr = "coflux-lambda-demo"
+
+[pools.lambda]
+modules = ["lambda_demo"]
+
+[pools.lambda.launcher]
+type = "lambda"
+function = "coflux-lambda-demo"
+region = "eu-west-2"
+
+# Created on the first deploy, and kept up to date on each one after.
+[pools.lambda.deploy]
+memory = 1024
+timeout = "5m"
+
+[manifests]
+adapter = ["python", "-m", "coflux"]
